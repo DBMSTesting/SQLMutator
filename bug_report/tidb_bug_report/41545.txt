@@ -1,0 +1,76 @@
+ID: 41545
+Title: IndexMerge may got goroutine(IndexMergeExecutor.Close) leak
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Need add failpoint to reproduce. Related code is:
+https://github.com/pingcap/tidb/blob/master/executor/index_merge_reader.go#L866-L872
+
+1. tableScanWorker got oom killed. It send err msg to main goroutine.
+2. main goroutine return from `Next()` and call `Close()`, and will wait for processWorker [here](https://github.com/pingcap/tidb/blob/master/executor/index_merge_reader.go#L795)
+3. processWorker stuck when writing `resultCh`, because `resultCh` is full and main goroutine will not read it anymore.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+query is canceled, also no goroutine stuck in `IndexMergeExecutor.Close`.
+
+### 3. What did you see instead (Required)
+query hang with following goroutine stack:
+
+```
+goroutine 105118318 [chan send, 119 minutes]:
+github.com/pingcap/tidb/executor.(*indexMergeProcessWorker).fetchLoopUnion(0xc0f4ecb340, {0x4fb0c10, 0xc0e0db9d70}, 0xc03d2c2ed8?, 0xc0097a60c0, 0x40?, 0xc0dade9200)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/index_merge_reader.go:872 +0x5ce
+github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeProcessWorker.func1.1()
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/index_merge_reader.go:281 +0x5e
+github.com/pingcap/tidb/util.WithRecovery(0x4fb0c10?, 0xc0e0db9d70?)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/misc.go:96 +0x53
+github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeProcessWorker.func1()
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/index_merge_reader.go:276 +0x170
+created by github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeProcessWorker
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/index_merge_reader.go:274 +0x14a
+
+goroutine 105097538 [semacquire, 119 minutes]:
+sync.runtime_Semacquire(0xc0f3d711c1ed68ef?)
+    /usr/local/go/src/runtime/sema.go:62 +0x25
+sync.(*WaitGroup).Wait(0xc0c6c0e480?)
+    /usr/local/go/src/sync/waitgroup.go:139 +0x52
+github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).Close(0xc0c0055080)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/index_merge_reader.go:795 +0x165
+github.com/pingcap/tidb/executor.(*SortExec).Close(0xc0c6efe9a0)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/sort.go:84 +0x17e
+github.com/pingcap/tidb/executor.(*recordSet).Close(0xc07eee9e50)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:182 +0x2a
+github.com/pingcap/tidb/session.(*execStmtResult).Close(0xc0c6c39470)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:2404 +0x36
+github.com/pingcap/tidb/server.(*tidbResultSet).Close(0x201000482d592?)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/driver_tidb.go:441 +0x3c
+github.com/pingcap/tidb/parser/terror.Call(0xc0e0582c58?)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/parser/terror/terror.go:306 +0x31
+github.com/pingcap/tidb/server.(*clientConn).handleStmt(0xc0697b8780, {0x4fb0b68, 0xc030b3c100}, {0x4fca138, 0xc03ad80480}, {0x76f04e8, 0x0, 0x0}, 0x1)
+    /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:2116 +0x3fe
+github.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc0697b8780, {0x4fb0b68, 0xc030b3c100}, {0xc0a1086
+```
+
+### 4. What is your TiDB version? (Required)
+```
+| tidb_version()                                                                                                                                                                                                                                                                                        |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v6.7.0-alpha-30-geeedac03f2
+Edition: Community
+Git Commit Hash: eeedac03f2982974c5cfb55c1f1ae95e72eb4df9
+Git Branch: master
+UTC Build Time: 2023-02-17 10:18:20
+GoVersion: go1.19.1
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: unistore |
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

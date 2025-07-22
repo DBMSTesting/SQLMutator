@@ -1,0 +1,14 @@
+ID: 14597
+Title: Bloom Filter Support in Parquet Reader/Writer
+Description:
+This PR adds support for [Parquet Bloom Filters](https://github.com/apache/parquet-format/blob/master/BloomFilter.md). Bloom Filters are small set approximation data structures that for a given value can either exclude the presence of the value with certainty or include the presence of a value with some confidence. 
+
+With this PR, DuckDB automatically will create a Bloom Filter for each column chunk in each row group of parquet files as long as *dictionary encoding is used*. Dictionary encoding will be used if there is a considerable amount of value duplication. A new parameter, `dictionary_size_limit` to the `COPY` command with the parquet format controls the maximum size of this dictionary *per row group*. The default value is 1% of the configured `row_group_size`. For column chunks with fewer distinct values than the limit, dictionary encoding will be used *and* a Bloom filter will be created. There is also a new parameter to control the desired false positive ratio, `bloom_filter_false_positive_ratio`, with a default of 0.01 or 1%.  The previously used parameter `dictionary_compression_ratio_threshold` is removed, but still accepted (with no effect).
+
+The presence of a bloom filter can be checked with the `parquet_metadata` function, it gains two new columns, `bloom_filter_offset` and `bloom_filter_length`. To enable pre-fetching, Bloom filters for all row groups are co-located *just in front* of the Parquet metadata footer.
+
+When reading data from a Parquet file with a constant filter, e.g. `SELECT c1 FROM 'my_file.parquet' WHERE c2 = 42`, DuckDB will now first check if a Bloom filter is present for each row group. If present, it will probe the Bloom filter with the constant value provided. If a match can be excluded, the row group is skipped. 
+
+To debug whether a Bloom filter matches or not can now be checked with the new function `parquet_bloom_probe`. This function takes a Parquet file name, a column name and an arbitrary constant. For each row group, the function will return a boolean `bloom_filter_excludes` if the row group was excluded by the Bloom filter with the given constant.
+
+This PR also greatly expands the data types for which dictionary encoding can be used from only strings to most data types. This will lead to a size reduction in many cases, for example, the Parquet file size for the TPC-H `lineitem` table at scale factor 1 is reduced from 261 MB to 210 MB. There is a minor slowdown of around 5% since the additional dictionaries take slightly longer to create.

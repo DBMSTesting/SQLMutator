@@ -1,0 +1,228 @@
+ID: 42916
+Title: Broken compatibility between 22.8.5.29 and 22.8.6.71
+Description:
+Steps to reproduce:
+
+* Setup a DB with 22.8.5.29.
+* Create an argMax state with a string ~~of 32 chars.~~ (any size seems to be affected)
+* Update to 22.8.6.71.
+* Select argMaxMerge of that status.
+* An extra NULL will appear in the result of the HTTP/JSON output.
+
+
+### Initial setup
+
+```
+$ clickhouse client
+ClickHouse client version 22.11.1.1.
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 22.8.5 revision 54460.
+
+ClickHouse server version is older than ClickHouse client. It may indicate that the server is out of date and can be upgraded.
+
+Warnings:
+ * Linux transparent hugepages are set to "always". Check /sys/kernel/mm/transparent_hugepage/enabled
+ * Effective user of the process (raul) does not match the owner of the data (root).
+
+Mordor :) Select version();
+
+SELECT version()
+
+Query id: 57c35415-15b2-4929-b775-ca7e63a40cc2
+
+┌─version()─┐
+│ 22.8.5.29 │
+└───────────┘
+
+1 row in set. Elapsed: 0.001 sec. 
+
+Mordor :) create table check_state Engine=MergeTree() order by number AS Select number, argMaxState('01234567890123456789012', number) as s from numbers(1000) group by number;
+
+CREATE TABLE check_state
+ENGINE = MergeTree
+ORDER BY number AS
+SELECT
+    number,
+    argMaxState('01234567890123456789012', number) AS s
+FROM numbers(1000)
+GROUP BY number
+
+Query id: e9359e80-8a32-42bb-8774-3801604f20db
+
+Ok.
+
+0 rows in set. Elapsed: 0.003 sec. Processed 1.00 thousand rows, 8.00 KB (337.05 thousand rows/s., 2.70 MB/s.)
+```
+
+###  Query via the HTTP endpoint before restart:
+
+```
+$ echo "Select version(), argMaxMerge(s) from check_state format JSON;" | curl 'http://localhost:8123/' --data-binary @-
+{
+        "meta":
+        [
+                {
+                        "name": "version()",
+                        "type": "String"
+                },
+                {
+                        "name": "argMaxMerge(s)",
+                        "type": "String"
+                }
+        ],
+
+        "data":
+        [
+                {
+                        "version()": "22.8.5.29",
+                        "argMaxMerge(s)": "01234567890123456789012"
+                }
+        ],
+
+        "rows": 1,
+
+        "statistics":
+        {
+                "elapsed": 0.000524577,
+                "rows_read": 1000,
+                "bytes_read": 134976
+        }
+}
+```
+
+### Restart with 22.8.6.71
+
+Repeat the query
+
+```
+$ echo "Select version(), argMaxMerge(s) from check_state format JSON;" | curl 'http://localhost:8123/' --data-binary @-
+{
+        "meta":
+        [
+                {
+                        "name": "version()",
+                        "type": "String"
+                },
+                {
+                        "name": "argMaxMerge(s)",
+                        "type": "String"
+                }
+        ],
+
+        "data":
+        [
+                {
+                        "version()": "22.8.6.71",
+                        "argMaxMerge(s)": "01234567890123456789012\u0000"
+                }
+        ],
+
+        "rows": 1,
+
+        "statistics":
+        {
+                "elapsed": 0.000488996,
+                "rows_read": 1000,
+                "bytes_read": 134976
+        }
+}
+```
+
+
+Notice the extra UTF-8 NULL character at the end of the `argMaxMerge(s)`.
+
+### Other tests
+
+* This does not happen if the table / part is created with 22.8.6.71 directly.
+* If you create the part in 22.8.6.71 and go back to 22.8.5.29 then **one character will be missing**:
+
+```
+/tmp $ echo "Select version(), argMaxMerge(s) from check_state2 format JSON;" | curl 'http://localhost:8123/' --data-binary @-
+{
+        "meta":
+        [
+                {
+                        "name": "version()",
+                        "type": "String"
+                },
+                {
+                        "name": "argMaxMerge(s)",
+                        "type": "String"
+                }
+        ],
+
+        "data":
+        [
+                {
+                        "version()": "22.8.6.71",
+                        "argMaxMerge(s)": "01234567890123456789012" <<<<<<<<<<<<<<<<<<<<<<
+                }
+        ],
+
+        "rows": 1,
+
+        "statistics":
+        {
+                "elapsed": 0.000458037,
+                "rows_read": 1000,
+                "bytes_read": 134976
+        }
+}
+/tmp $ echo "Select version(), argMaxMerge(s) from check_state2 format JSON;" | curl 'http://localhost:8123/' --data-binary @-
+{
+        "meta":
+        [
+                {
+                        "name": "version()",
+                        "type": "String"
+                },
+                {
+                        "name": "argMaxMerge(s)",
+                        "type": "String"
+                }
+        ],
+
+        "data":
+        [
+                {
+                        "version()": "22.8.5.29",
+                        "argMaxMerge(s)": "0123456789012345678901" <<<<<<<<<<<<<<<<<<<<<<<<
+                }
+        ],
+
+        "rows": 1,
+
+        "statistics":
+        {
+                "elapsed": 0.000484087,
+                "rows_read": 1000,
+                "bytes_read": 134976
+        }
+}
+```
+
+
+Hashes of the part when created with 22.8.5:
+```
+893125c14d599310f5e6119383005734  check_state/all_1_1_0/checksums.txt
+dd4ed1c4fcbb915e511f0b3f72d1ac3f  check_state/all_1_1_0/columns.txt
+a9b7ba70783b617e9998dc4dd82eb3c5  check_state/all_1_1_0/count.txt
+29702fd20d1d59113cc6d6c916acefcb  check_state/all_1_1_0/data.bin <<<<<<<<<<<<<<<<<<<<<<<
+efd800e25d72f58c5c72147672a74cc4  check_state/all_1_1_0/data.mrk3
+c0904274faa8f3f06f35666cc9c5bd2f  check_state/all_1_1_0/default_compression_codec.txt
+09d8059f463130063433b13bd61e7b97  check_state/all_1_1_0/primary.idx
+```
+
+
+Hashes when created with 22.8.8:
+```
+f17f579b9ec38bada5e4bb2a5e5a57d4  check_state2/all_1_1_0/checksums.txt
+dd4ed1c4fcbb915e511f0b3f72d1ac3f  check_state2/all_1_1_0/columns.txt
+a9b7ba70783b617e9998dc4dd82eb3c5  check_state2/all_1_1_0/count.txt
+8e24d55e2919b0b9ecbe40101c6c7fbc  check_state2/all_1_1_0/data.bin <<<<<<<<<<<<<<<<<<<<<<<
+efd800e25d72f58c5c72147672a74cc4  check_state2/all_1_1_0/data.mrk3
+c0904274faa8f3f06f35666cc9c5bd2f  check_state2/all_1_1_0/default_compression_codec.txt
+09d8059f463130063433b13bd61e7b97  check_state2/all_1_1_0/primary.idx
+```
+
+Either I'm missing something or this is a major breaking bug in a minor release.

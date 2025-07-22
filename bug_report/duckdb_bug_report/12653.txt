@@ -1,0 +1,51 @@
+ID: 12653
+Title: Add `approx_top_k` aggregate based on the (Filtered) Space-Saving algorithm, and use it in histogram
+Description:
+This PR implements the `approx_top_k` function using the [Space-Saving algorithm](https://arxiv.org/pdf/1401.0702), specifically the [Filtered Space-Saving variant](https://www.inesc-id.pt/ficheiros/publicacoes/6364.pdf). This algorithm tries to to find the `k` most frequently occurring values without having to keep all distinct elements in memory (which is required to exactly find the most frequently occurring elements in a data stream).
+
+Generally when the differences between frequently occurring values are large, this algorithm is guaranteed to find the most frequent values (i.e. for skewed data). When they are small (i.e. for uniform data), different values might be returned. The main idea is that finding the most frequently occurring values is only really interesting in skewed data sets anyway. 
+
+Syntax:
+
+```sql
+approx_top_k(column, k)
+```
+
+### Algorithm
+
+It is described in the paper in more detail - but essentially the way the algorithm works is to maintain an exact count of a subset of the values (called the "monitored values"). In our implementation we choose to monitor up to `k * 3` values in the current implementation. The higher the monitor count, the more memory used, but the more accurate the result.
+
+When a new value is seen, there are essentially two paths:
+
+* If the value is monitored, increment the exact count of that value
+* If the value is not monitored, swap the replace the monitored entry with the lowest count with the new value and set the count to `lowest_count + 1`
+
+The idea is that frequent values will bubble up and be monitored, while less frequent values will swap around in the lower slots of the counters.
+
+The filtered variant of the algorithm adds another step - where we keep a list of approximate counts based on the hash of the values. We then avoid swapping in a value if the approximate count for the hash of the value is lower than `lowest_count`. This improves performance because swapping a monitored value involves hash table operations (erasing/inserting a value). 
+
+### Implementation
+
+We currently only provide two implementations: the string implementation and the fallback implementation. As a result, while this works for all values, it is slower than it needs to be for integers/numerics since we don't have special code generated for fixed-width types.
+
+### Histogram
+
+The `approx_top_k` is used to select bins for the `sample` technique of the `histogram` function which is selected by default for non-numeric/non-datetime types. This combined with `histogram_exact` provides more informative histograms for other types, e.g.:
+
+```sql
+D select * from histogram(ontime, uniquecarrier, bin_count := 8);
+┌────────────────┬────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│      bin       │ count  │                                       bar                                        │
+│    varchar     │ uint64 │                                     varchar                                      │
+├────────────────┼────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│ AA             │ 677215 │ ██████████████████████████████████████████████████████▏                          │
+│ AS             │ 139971 │ ███████████▏                                                                     │
+│ B6             │ 225718 │ ██████████████████                                                               │
+│ DL             │ 696931 │ ███████████████████████████████████████████████████████▊                         │
+│ EV             │ 274565 │ █████████████████████▉                                                           │
+│ OO             │ 521956 │ █████████████████████████████████████████▊                                       │
+│ UA             │ 435757 │ ██████████████████████████████████▉                                              │
+│ WN             │ 999114 │ ████████████████████████████████████████████████████████████████████████████████ │
+│ (other values) │ 305230 │ ████████████████████████▍                                                        │
+└────────────────┴────────┴──────────────────────────────────────────────────────────────────────────────────┘
+```

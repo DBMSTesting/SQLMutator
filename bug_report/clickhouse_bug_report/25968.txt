@@ -1,0 +1,410 @@
+ID: 25968
+Title: StackBuffer from libunwind, DwarfParser.hpp contains a bug.
+Description:
+**Describe the bug**
+
+It can introduce deadlock when query profiler is enabled.
+
+```
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ grep -F 'decimal_aggregates.query17.profile5' left-server-log.log         
+2021.07.02 18:52:25.552362 [ 285 ] {decimal_aggregates.query17.profile5} <Debug> executeQuery: (from [::1]:48238, using production parser) SELECT quantilesExact(0.1, 0.9)(d128), quantilesExactWeighted(0.1, 0.9)(d128, 2) FROM (SELECT * FROM t LIMIT 1000000)
+2021.07.02 18:52:25.552669 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> ContextAccess (default): Access granted: SELECT(x, d32, d64, d128) ON default.t
+2021.07.02 18:52:25.552848 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> ContextAccess (default): Access granted: SELECT(x, d32, d64, d128) ON default.t
+2021.07.02 18:52:25.553069 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> ContextAccess (default): Access granted: SELECT(d128) ON default.t
+2021.07.02 18:52:25.553209 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2021.07.02 18:52:25.553244 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2021.07.02 18:52:25.554561 [ 781 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554570 [ 1003 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554582 [ 1006 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554601 [ 993 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554609 [ 995 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554618 [ 993 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554621 [ 995 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554571 [ 1012 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554638 [ 783 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554604 [ 1006 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554655 [ 783 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554588 [ 1003 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554618 [ 760 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554682 [ 766 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554642 [ 1011 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554696 [ 766 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554643 [ 762 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554705 [ 1011 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554712 [ 1012 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554717 [ 762 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554686 [ 760 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554575 [ 781 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.554640 [ 755 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.554770 [ 755 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.563407 [ 766 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.009810161 sec. (6677260.445 rows/sec., 101.89 MiB/sec.)
+2021.07.02 18:52:25.563407 [ 993 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.009786251 sec. (6693574.485 rows/sec., 102.14 MiB/sec.)
+2021.07.02 18:52:25.563407 [ 783 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.009790196 sec. (6690877.282 rows/sec., 102.10 MiB/sec.)
+2021.07.02 18:52:25.563503 [ 755 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.009940036 sec. (6590016.374 rows/sec., 100.56 MiB/sec.)
+2021.07.02 18:52:25.563511 [ 762 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.00992809 sec. (6597945.828 rows/sec., 100.68 MiB/sec.)
+2021.07.02 18:52:25.563543 [ 760 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.009959851 sec. (6576905.618 rows/sec., 100.36 MiB/sec.)
+2021.07.02 18:52:25.564723 [ 1006 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 82930 to 1 rows (from 1.27 MiB) in 0.011108637 sec. (7465362.312 rows/sec., 113.91 MiB/sec.)
+2021.07.02 18:52:25.568200 [ 1012 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.014637129 sec. (4475262.874 rows/sec., 68.29 MiB/sec.)
+2021.07.02 18:52:25.568899 [ 781 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 131010 to 1 rows (from 2.00 MiB) in 0.01534541 sec. (8537406.299 rows/sec., 130.27 MiB/sec.)
+2021.07.02 18:52:25.568950 [ 995 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 131010 to 1 rows (from 2.00 MiB) in 0.015349942 sec. (8534885.669 rows/sec., 130.23 MiB/sec.)
+2021.07.02 18:52:25.569348 [ 1011 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 131010 to 1 rows (from 2.00 MiB) in 0.015780154 sec. (8302200.346 rows/sec., 126.68 MiB/sec.)
+2021.07.02 18:52:25.570933 [ 1003 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.01738582 sec. (3767725.652 rows/sec., 57.49 MiB/sec.)
+2021.07.02 18:52:25.570957 [ 1003 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Merging aggregated data
+2021.07.02 18:52:25.884889 [ 285 ] {decimal_aggregates.query17.profile5} <Information> executeQuery: Read 1113585 rows, 16.99 MiB in 0.332485782 sec., 3349271 rows/sec., 51.11 MiB/sec.
+2021.07.02 18:52:25.884933 [ 285 ] {decimal_aggregates.query17.profile5} <Debug> MemoryTracker: Peak memory usage (for query): 230.71 MiB.
+2021.07.02 18:52:25.885050 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885078 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885082 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885086 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885090 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885094 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885097 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885101 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885105 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885109 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885113 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+2021.07.02 18:52:25.885116 [ 285 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Destroying aggregate states
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ grep -F 'decimal_aggregates.query17.profile6' left-server-log.log 
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ grep -F 'decimal_aggregates.query17.profile5' right-server-log.log
+2021.07.02 18:52:25.885762 [ 293 ] {decimal_aggregates.query17.profile5} <Debug> executeQuery: (from [::1]:52480, using production parser) SELECT quantilesExact(0.1, 0.9)(d128), quantilesExactWeighted(0.1, 0.9)(d128, 2) FROM (SELECT * FROM t LIMIT 1000000)
+2021.07.02 18:52:25.886041 [ 293 ] {decimal_aggregates.query17.profile5} <Trace> ContextAccess (default): Access granted: SELECT(x, d32, d64, d128) ON default.t
+2021.07.02 18:52:25.886150 [ 293 ] {decimal_aggregates.query17.profile5} <Trace> ContextAccess (default): Access granted: SELECT(x, d32, d64, d128) ON default.t
+2021.07.02 18:52:25.886354 [ 293 ] {decimal_aggregates.query17.profile5} <Trace> ContextAccess (default): Access granted: SELECT(d128) ON default.t
+2021.07.02 18:52:25.886492 [ 293 ] {decimal_aggregates.query17.profile5} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2021.07.02 18:52:25.886525 [ 293 ] {decimal_aggregates.query17.profile5} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2021.07.02 18:52:25.887890 [ 1034 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887912 [ 1034 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887912 [ 1016 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887894 [ 1023 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887938 [ 1016 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887917 [ 1031 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887954 [ 594 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887968 [ 772 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887977 [ 773 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887957 [ 1022 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887993 [ 773 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887944 [ 1023 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887973 [ 594 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887981 [ 776 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.888057 [ 776 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887983 [ 772 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887988 [ 1035 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.888102 [ 1035 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.888001 [ 1022 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.887961 [ 768 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887981 [ 1019 ] {decimal_aggregates.query17.profile5} <Trace> AggregatingTransform: Aggregating
+2021.07.02 18:52:25.887959 [ 1031 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.888138 [ 768 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.888155 [ 1019 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Aggregation method: without_key
+2021.07.02 18:52:25.897285 [ 594 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.010463309 sec. (6260447.818 rows/sec., 95.53 MiB/sec.)
+2021.07.02 18:52:25.897299 [ 1019 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.010498106 sec. (6239696.951 rows/sec., 95.21 MiB/sec.)
+2021.07.02 18:52:25.897283 [ 772 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.010447045 sec. (6270194.108 rows/sec., 95.68 MiB/sec.)
+2021.07.02 18:52:25.897290 [ 776 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.010482947 sec. (6248719.945 rows/sec., 95.35 MiB/sec.)
+2021.07.02 18:52:25.897294 [ 773 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.010502964 sec. (6236810.866 rows/sec., 95.17 MiB/sec.)
+2021.07.02 18:52:25.897408 [ 1031 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.01058556 sec. (6188146.872 rows/sec., 94.42 MiB/sec.)
+2021.07.02 18:52:25.897414 [ 1022 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.010578541 sec. (6192252.788 rows/sec., 94.49 MiB/sec.)
+2021.07.02 18:52:25.898428 [ 1023 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 65505 to 1 rows (from 1023.52 KiB) in 0.011642714 sec. (5626265.491 rows/sec., 85.85 MiB/sec.)
+2021.07.02 18:52:25.898568 [ 1035 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 82930 to 1 rows (from 1.27 MiB) in 0.011721587 sec. (7074980.547 rows/sec., 107.96 MiB/sec.)
+2021.07.02 18:52:25.900797 [ 768 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 131010 to 1 rows (from 2.00 MiB) in 0.013955215 sec. (9387888.327 rows/sec., 143.25 MiB/sec.)
+2021.07.02 18:52:25.902403 [ 1034 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 131010 to 1 rows (from 2.00 MiB) in 0.015627285 sec. (8383414.010 rows/sec., 127.92 MiB/sec.)
+2021.07.02 18:52:25.902782 [ 1016 ] {decimal_aggregates.query17.profile5} <Debug> AggregatingTransform: Aggregated. 131010 to 1 rows (from 2.00 MiB) in 0.01598709 sec. (8194737.129 rows/sec., 125.04 MiB/sec.)
+2021.07.02 18:52:25.902801 [ 1016 ] {decimal_aggregates.query17.profile5} <Trace> Aggregator: Merging aggregated data
+2021.07.02 18:57:28.718457 [ 293 ] {decimal_aggregates.query17.profile5} <Information> TCPHandler: Client has dropped the connection, cancel the query.
+2021.07.02 18:57:28.718577 [ 293 ] {decimal_aggregates.query17.profile5} <Information> executeQuery: Read 1113585 rows, 16.99 MiB in 302.832775372 sec., 3677 rows/sec., 57.46 KiB/sec.
+2021.07.02 18:57:28.718596 [ 293 ] {decimal_aggregates.query17.profile5} <Debug> MemoryTracker: Peak memory usage (for query): 232.21 MiB.
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count() FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%'" --input-format TSVWithNamesAndTypes < right-trace-log.tsv
+747
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count() FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%'" --input-format TSVWithNamesAndTypes < left-trace-log.tsv 
+457
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count() FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%'" --input-format TSVWithNamesAndTypes < right-trace-log.tsv
+747
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ wget https://clickhouse-builds.s3.yandex.net/0/48e325502ed8c703fdff21fc68cce8f02736f4c1/clickhouse_build_check/performance/performance.tgz
+--2021-07-04 07:35:27--  https://clickhouse-builds.s3.yandex.net/0/48e325502ed8c703fdff21fc68cce8f02736f4c1/clickhouse_build_check/performance/performance.tgz
+Resolving clickhouse-builds.s3.yandex.net (clickhouse-builds.s3.yandex.net)... 2a02:6b8::2:158, 93.158.134.158
+Connecting to clickhouse-builds.s3.yandex.net (clickhouse-builds.s3.yandex.net)|2a02:6b8::2:158|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 630192996 (601M) [application/octet-stream]
+Saving to: ‘performance.tgz’
+
+performance.tgz                                               100%[===============================================================================================================================================>] 601,00M  23,0MB/s    in 27s     
+
+2021-07-04 07:35:54 (22,4 MB/s) - ‘performance.tgz’ saved [630192996/630192996]
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ tar xvf performance.tgz 
+output/
+...
+output/clickhouse-server
+output/clickhouse-obfuscator
+output/clickhouse-local
+output/clickhouse-keeper-converter
+output/clickhouse-keeper
+output/clickhouse-git-import
+output/clickhouse-format
+output/clickhouse-extract-from-config
+output/clickhouse-copier
+output/clickhouse-compressor
+output/clickhouse-client
+output/clickhouse-benchmark
+output/clickhouse
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), trace FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace ORDER BY trace DESC LIMIT 10" --input-format TSVWithNamesAndTypes < right-trace-log.tsv              
+32      [139691874647993,324373176,276578966,276578327,276553294,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+1       [139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+340     [139691874646737,276513320,276533622,148427871,148442435,139691874621147,139691867399967]
+2       [139691867848301,148495771,155824878,155824183,156005262,264250849,264256904,277838169,277828075,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+4       [354335283,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+111     [354335276,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+2       [354335264,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+181     [354335258,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+4       [354335247,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+1       [156010054,156009733,156009682,156009682,156009682,156009682,156009733,156009682,156009682,156007975,264790765,264320547,277858976,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), trace FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace ORDER BY count() DESC LIMIT 10" --input-format TSVWithNamesAndTypes < right-trace-log.tsv     
+340     [139691874646737,276513320,276533622,148427871,148442435,139691874621147,139691867399967]
+181     [354335258,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+111     [354335276,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+32      [139691874647993,324373176,276578966,276578327,276553294,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+32      [148138033,257731448,276544837,276507182,276505837,276559743,148427871,148442435,139691874621147,139691867399967]
+5       [155824050,156005262,264250849,264256904,277838169,277828075,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+4       [354335283,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+4       [354335247,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+4       [155825842,264374829,277858928,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+2       [155825071,155824183,156005262,264250849,264256904,277838169,277828075,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), trace_type, trace FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace, trace_type ORDER BY count() DESC LIMIT 10" --input-format TSVWithNamesAndTypes < right-trace-log.tsv 
+340     Real    [139691874646737,276513320,276533622,148427871,148442435,139691874621147,139691867399967]
+181     CPU     [354335258,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+111     CPU     [354335276,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+32      Real    [139691874647993,324373176,276578966,276578327,276553294,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+32      Real    [148138033,257731448,276544837,276507182,276505837,276559743,148427871,148442435,139691874621147,139691867399967]
+5       Real    [155824050,156005262,264250849,264256904,277838169,277828075,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+4       CPU     [354335283,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+4       CPU     [354335247,354325934,354324943,148257929,148388140,139691874666880,139691874646737,323924481,276552085,276553407,276554576,276056468,276028970,276102073,323174127,323180922,324438009,324422282,139691874621147,139691867399967]
+4       Real    [155825842,264374829,277858928,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+2       Real    [139691867848301,148495771,155824878,155824183,156005262,264250849,264256904,277838169,277828075,276527933,276514513,276533622,148427871,148442435,139691874621147,139691867399967]
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), trace_type, arrayMap(x -> '0x'||hex(x), trace) FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace, trace_type ORDER BY count() DESC LIMIT 10" --input-format TSVWithNamesAndTypes < right-trace-log.tsv    
+340     Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+181     CPU     ['0x151EBA1A','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+111     CPU     ['0x151EBA2C','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+32      Real    ['0x7F0C8C90FFB9','0x13558AB8','0x107C4296','0x107C4017','0x107BDE4E','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+32      Real    ['0x08D46831','0x0F5CAB78','0x107BBD45','0x107B2A2E','0x107B24ED','0x107BF77F','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+5       Real    ['0x0949AFB2','0x094C738E','0x0FC025E1','0x0FC03D88','0x108F7959','0x108F51EB','0x107B7B3D','0x107B46D1','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+4       CPU     ['0x151EBA33','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+4       CPU     ['0x151EBA0F','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+4       Real    ['0x0949B6B2','0x0FC20A2D','0x108FCA70','0x107B7B3D','0x107B46D1','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+2       Real    ['0x7F0C8C293E6D','0x08D9DD9B','0x0949B2EE','0x0949B037','0x094C738E','0x0FC025E1','0x0FC03D88','0x108F7959','0x108F51EB','0x107B7B3D','0x107B46D1','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ addr2line -afiCe output/clickhouse 0x7F0C8C90FAD1 0x107B4228 0x107B9176 0x08D8D45F 0x08D90D43 0x7F0C8C9096DB 0x7F0C8C22671F
+0x00007f0c8c90fad1
+??
+??:0
+0x00000000107b4228
+std::__1::condition_variable::wait(std::__1::unique_lock<std::__1::mutex>&)
+/build/build_docker/../contrib/libcxx/src/condition_variable.cpp:45
+void std::__1::condition_variable::wait<DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*)::$_2>(std::__1::unique_lock<std::__1::mutex>&, DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*)::$_2)
+/build/build_docker/../contrib/libcxx/include/__mutex_base:406
+DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*)
+/build/build_docker/../src/Processors/Executors/PipelineExecutor.cpp:562
+0x00000000107b9176
+std::__1::shared_ptr<DB::ThreadGroupStatus>::operator bool() const
+/build/build_docker/../contrib/libcxx/include/memory:2851
+operator()
+/build/build_docker/../src/Processors/Executors/PipelineExecutor.cpp:770
+basic_scope_guard<DB::PipelineExecutor::executeImpl(unsigned long)::$_4::operator()() const::{lambda()#1}>::invoke()
+/build/build_docker/../base/common/../common/scope_guard.h:94
+~basic_scope_guard
+/build/build_docker/../base/common/../common/scope_guard.h:44
+operator()
+/build/build_docker/../src/Processors/Executors/PipelineExecutor.cpp:785
+_ZNSt3__118__invoke_constexprIRZN2DB16PipelineExecutor11executeImplEmE3$_4JEEEDTclclsr3std3__1E7forwardIT_Efp_Espclsr3std3__1E7forwardIT0_Efp0_EEEOS5_DpOS6_
+/build/build_docker/../contrib/libcxx/include/type_traits:3682
+decltype(auto) std::__1::__apply_tuple_impl<DB::PipelineExecutor::executeImpl(unsigned long)::$_4&, std::__1::tuple<>&>(DB::PipelineExecutor::executeImpl(unsigned long)::$_4&, std::__1::tuple<>&, std::__1::__tuple_indices<>)
+/build/build_docker/../contrib/libcxx/include/tuple:1415
+decltype(auto) std::__1::apply<DB::PipelineExecutor::executeImpl(unsigned long)::$_4&, std::__1::tuple<>&>(DB::PipelineExecutor::executeImpl(unsigned long)::$_4&, std::__1::tuple<>&)
+/build/build_docker/../contrib/libcxx/include/tuple:1424
+operator()
+/build/build_docker/../src/Common/ThreadPool.h:182
+_ZNSt3__18__invokeIRZN20ThreadFromGlobalPoolC1IZN2DB16PipelineExecutor11executeImplEmE3$_4JEEEOT_DpOT0_EUlvE_JEEEDTclclsr3std3__1E7forwardIS6_Efp_Espclsr3std3__1E7forwardIS8_Efp0_EEES7_SA_
+/build/build_docker/../contrib/libcxx/include/type_traits:3676
+void std::__1::__invoke_void_return_wrapper<void>::__call<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PipelineExecutor::executeImpl(unsigned long)::$_4>(DB::PipelineExecutor::executeImpl(unsigned long)::$_4&&)::{lambda()#1}&>(ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PipelineExecutor::executeImpl(unsigned long)::$_4>(DB::PipelineExecutor::executeImpl(unsigned long)::$_4&&)::{lambda()#1}&)
+/build/build_docker/../contrib/libcxx/include/__functional_base:348
+std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PipelineExecutor::executeImpl(unsigned long)::$_4>(DB::PipelineExecutor::executeImpl(unsigned long)::$_4&&)::{lambda()#1}, void ()>::operator()()
+/build/build_docker/../contrib/libcxx/include/functional:1608
+void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PipelineExecutor::executeImpl(unsigned long)::$_4>(DB::PipelineExecutor::executeImpl(unsigned long)::$_4&&)::{lambda()#1}, void ()> >(std::__1::__function::__policy_storage const*)
+/build/build_docker/../contrib/libcxx/include/functional:2089
+0x0000000008d8d45f
+std::__1::__function::__policy_func<void ()>::operator=(decltype(nullptr))
+/build/build_docker/../contrib/libcxx/include/functional:2210
+std::__1::function<void ()>::operator=(decltype(nullptr))
+/build/build_docker/../contrib/libcxx/include/functional:2533
+ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>)
+/build/build_docker/../src/Common/ThreadPool.cpp:269
+0x0000000008d90d43
+std::__1::unique_ptr<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}>, std::__1::default_delete<ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}> >::reset(ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}*)
+/build/build_docker/../contrib/libcxx/include/memory:1656
+~unique_ptr
+/build/build_docker/../contrib/libcxx/include/memory:1612
+void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}> >(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}>)
+/build/build_docker/../contrib/libcxx/include/thread:293
+0x00007f0c8c9096db
+??
+??:0
+0x00007f0c8c22671f
+??
+??:0
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), trace_type, arrayMap(x -> '0x'||hex(x), trace) FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace, trace_type ORDER BY count() DESC LIMIT 10" --input-format TSVWithNamesAndTypes < right-trace-log.tsv
+340     Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+181     CPU     ['0x151EBA1A','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+111     CPU     ['0x151EBA2C','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+32      Real    ['0x7F0C8C90FFB9','0x13558AB8','0x107C4296','0x107C4017','0x107BDE4E','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+32      Real    ['0x08D46831','0x0F5CAB78','0x107BBD45','0x107B2A2E','0x107B24ED','0x107BF77F','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+5       Real    ['0x0949AFB2','0x094C738E','0x0FC025E1','0x0FC03D88','0x108F7959','0x108F51EB','0x107B7B3D','0x107B46D1','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+4       CPU     ['0x151EBA33','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+4       CPU     ['0x151EBA0F','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+4       Real    ['0x0949B6B2','0x0FC20A2D','0x108FCA70','0x107B7B3D','0x107B46D1','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+2       Real    ['0x7F0C8C293E6D','0x08D9DD9B','0x0949B2EE','0x0949B037','0x094C738E','0x0FC025E1','0x0FC03D88','0x108F7959','0x108F51EB','0x107B7B3D','0x107B46D1','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), trace_type, arrayMap(x -> '0x'||hex(x), trace) FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace, trace_type ORDER BY count() DESC LIMIT 10" --input-format TSVWithNamesAndTypes < left-trace-log.tsv 
+350     Real    ['0x7FC5E54E9AD1','0x107AE108','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+33      Real    ['0x08D407B1','0x0F5C4A58','0x107B5C25','0x107AC90E','0x107AC3CD','0x107B965F','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+33      Real    ['0x7FC5E54E9FB9','0x135528F8','0x107BE176','0x107BDEF7','0x107B7D2E','0x107B8230','0x1073E874','0x10737D0A','0x10749A99','0x1342DD2F','0x1342F7BA','0x13562639','0x1355E8CA','0x7FC5E54E36DB','0x7FC5E4E0071F']
+2       Real    ['0x7FC5E4E6DE6D','0x08D97D1B','0x094951CE','0x094956E7','0x0FC1A90D','0x108F6950','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+2       Real    ['0x0949528F','0x09494F17','0x094C126E','0x0FBFC4C1','0x0FBFDC68','0x108F1839','0x108EF0CB','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+2       Real    ['0x09495592','0x0FC1A90D','0x108F6950','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+2       Real    ['0x09494E97','0x094C126E','0x0FBFC4C1','0x0FBFDC68','0x108F1839','0x108EF0CB','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+2       Real    ['0x7FC5E4E6DE6D','0x08D97D1B','0x094951CE','0x09494F17','0x094C126E','0x0FBFC4C1','0x0FBFDC68','0x108F1839','0x108EF0CB','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+2       Real    ['0x0949528F','0x094956E7','0x0FC1A90D','0x108F6950','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+1       Real    ['0x7FC5E54ED29A','0x7FC5E54E7852','0x08E74198','0x134D7155','0x0F1EA102','0x0F1EBD08','0x0F1EBB52','0x0F1EBA11','0x108F166B','0x108EF0CB','0x107B1A1D','0x107AE5B1','0x107B3056','0x08D873DF','0x08D8ACC3','0x7FC5E54E36DB','0x7FC5E4E0071F']
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ addr2line -afiCe output/clickhouse 0x151EBA1A 0x151E95AE 0x151E91CF 0x08D63C89 0x08D8392C 0x7F0C8C914980 0x7F0C8C90FAD1 0x134EB201 0x107BD995 0x107BDEBF 0x107BE350 0x10744994 0x1073DE2A 0x1074FBB9 0x13433EEF 0x1343597A 0x135687F9 0x13564A8A 0x7F0C8C9096DB 0x7F0C8C22671F
+0x00000000151eba1a
+addr2line: DWARF error: mangled line number section (bad file number)
+addr2line: DWARF error: mangled line number section (bad file number)
+addr2line: DWARF error: mangled line number section (bad file number)
+addr2line: DWARF error: invalid abstract instance DIE ref
+(anonymous namespace)::StackBuffer::atomic_compare_exchange_weak_wrapper(void*&, void*&, void*)
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:99
+(anonymous namespace)::StackBuffer::free((anonymous namespace)::StackBuffer::FreeListEntry*)
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:166
+(anonymous namespace)::StackGuard::pop()
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:190
+~StackGuard
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:196
+libunwind::CFI_Parser<libunwind::LocalAddressSpace>::parseFDEInstructions(libunwind::LocalAddressSpace&, libunwind::CFI_Parser<libunwind::LocalAddressSpace>::FDE_Info const&, libunwind::CFI_Parser<libunwind::LocalAddressSpace>::CIE_Info const&, unsigned long, int, libunwind::PrologInfo*)
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:519
+libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::getInfoFromDwarfSection(unsigned long, libunwind::UnwindInfoSections const&, unsigned int)
+/build/build_docker/../contrib/libunwind/src/UnwindCursor.hpp:1498
+0x00000000151e95ae
+libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::setInfoBasedOnIPRegister(bool)
+/build/build_docker/../contrib/libunwind/src/UnwindCursor.hpp:1891
+0x00000000151e91cf
+libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::step()
+libunwind.cpp:?
+0x0000000008d63c89
+StackTrace::StackTrace(ucontext_t const&)
+/build/build_docker/../contrib/libunwind/src/libunwind.cpp:?
+StackTrace::tryCapture()
+/build/build_docker/../src/Common/StackTrace.cpp:304
+StackTrace
+/build/build_docker/../src/Common/StackTrace.cpp:270
+0x0000000008d8392c
+DB::(anonymous namespace)::writeTraceInfo(DB::TraceType, int, siginfo_t*, void*)
+/build/build_docker/../src/Common/QueryProfiler.cpp:62
+DB::QueryProfilerReal::signalHandler(int, siginfo_t*, void*)
+/build/build_docker/../src/Common/QueryProfiler.cpp:185
+0x00007f0c8c914980
+??
+??:0
+0x00007f0c8c90fad1
+??
+??:0
+0x00000000134eb201
+Poco::EventImpl::waitImpl()
+/build/build_docker/../contrib/poco/Foundation/src/Event_POSIX.cpp:106
+0x00000000107bd995
+_ZNSt3__14swapIPNS_19__shared_weak_countEEENS_9enable_ifIXaasr21is_move_constructibleIT_EE5valuesr18is_move_assignableIS4_EE5valueEvE4typeERS4_S7_
+/build/build_docker/../contrib/libcxx/include/type_traits:3934
+std::__1::shared_ptr<Poco::Event>::swap(std::__1::shared_ptr<Poco::Event>&)
+/build/build_docker/../contrib/libcxx/include/memory:3300
+std::__1::shared_ptr<Poco::Event>::reset()
+/build/build_docker/../contrib/libcxx/include/memory:3308
+ThreadFromGlobalPool::join()
+/build/build_docker/../src/Common/ThreadPool.h:211
+DB::PullingAsyncPipelineExecutor::cancel()
+/build/build_docker/../src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:183
+0x00000000107bdebf
+DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)
+??:?
+0x00000000107be350
+DB::PullingAsyncPipelineExecutor::pull(DB::Block&, unsigned long)
+/build/build_docker/../src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:147
+0x0000000010744994
+DB::TCPHandler::processOrdinaryQueryWithProcessors()
+/build/build_docker/../src/Server/TCPHandler.cpp:675
+0x000000001073de2a
+DB::TCPHandler::runImpl()
+/build/build_docker/../src/Server/TCPHandler.cpp:331
+0x000000001074fbb9
+DB::CurrentThread::getGroup()
+/build/build_docker/../src/Common/CurrentThread.cpp:96
+DB::TCPHandler::run()
+/build/build_docker/../src/Server/TCPHandler.cpp:1624
+0x0000000013433eef
+Poco::Net::TCPServerConnection::start()
+/build/build_docker/../contrib/poco/Net/src/TCPServerConnection.cpp:57
+0x000000001343597a
+Poco::Net::TCPServerDispatcher::run()
+/build/build_docker/../contrib/poco/Net/src/TCPServerDispatcher.cpp:114
+0x00000000135687f9
+ScopedLock
+/build/build_docker/../contrib/poco/Foundation/include/Poco/ScopedLock.h:36
+Poco::PooledThread::run()
+/build/build_docker/../contrib/poco/Foundation/src/ThreadPool.cpp:213
+0x0000000013564a8a
+Poco::SharedPtr<Poco::Runnable, Poco::ReferenceCounter, Poco::ReleasePolicy<Poco::Runnable> >::assign(Poco::Runnable*)
+/build/build_docker/../contrib/poco/Foundation/include/Poco/SharedPtr.h:156
+Poco::SharedPtr<Poco::Runnable, Poco::ReferenceCounter, Poco::ReleasePolicy<Poco::Runnable> >::operator=(Poco::Runnable*)
+/build/build_docker/../contrib/poco/Foundation/include/Poco/SharedPtr.h:208
+Poco::ThreadImpl::runnableEntry(void*)
+/build/build_docker/../contrib/poco/Foundation/src/Thread_POSIX.cpp:360
+0x00007f0c8c9096db
+??
+??:0
+0x00007f0c8c22671f
+??
+??:0
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ ~/work/ClickHouse/programs/server/clickhouse-master local --structure "event_date Date, event_time DateTime, event_time_microseconds DateTime64(6), timestamp_ns UInt64, revision UInt32, trace_type Enum8('Real' = 0, 'CPU' = 1, 'Memory' = 2, 'MemorySample' = 3), thread_id UInt64, query_id String, trace Array(UInt64), size Int64" --query "SELECT count(), thread_id, trace_type, arrayMap(x -> '0x'||hex(x), trace) FROM table WHERE query_id LIKE '%decimal_aggregates.query17.profile5%' GROUP BY trace, trace_type, thread_id ORDER BY count() DESC LIMIT 10" --input-format TSVWithNamesAndTypes < right-trace-log.tsv
+181     293     CPU     ['0x151EBA1A','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+111     293     CPU     ['0x151EBA2C','0x151E95AE','0x151E91CF','0x08D63C89','0x08D8392C','0x7F0C8C914980','0x7F0C8C90FAD1','0x134EB201','0x107BD995','0x107BDEBF','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+32      778     Real    ['0x08D46831','0x0F5CAB78','0x107BBD45','0x107B2A2E','0x107B24ED','0x107BF77F','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+32      293     Real    ['0x7F0C8C90FFB9','0x13558AB8','0x107C4296','0x107C4017','0x107BDE4E','0x107BE350','0x10744994','0x1073DE2A','0x1074FBB9','0x13433EEF','0x1343597A','0x135687F9','0x13564A8A','0x7F0C8C9096DB','0x7F0C8C22671F']
+31      773     Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+31      776     Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+31      1019    Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+31      768     Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+31      1035    Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+31      594     Real    ['0x7F0C8C90FAD1','0x107B4228','0x107B9176','0x08D8D45F','0x08D90D43','0x7F0C8C9096DB','0x7F0C8C22671F']
+
+milovidov@milovidov-desktop:~/Downloads/perf_test2$ addr2line -afiCe output/clickhouse 0x151EBA2C
+0x00000000151eba2c
+addr2line: DWARF error: mangled line number section (bad file number)
+addr2line: DWARF error: mangled line number section (bad file number)
+addr2line: DWARF error: mangled line number section (bad file number)
+addr2line: DWARF error: invalid abstract instance DIE ref
+(anonymous namespace)::StackBuffer::atomic_compare_exchange_weak_wrapper(void*&, void*&, void*)
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:99
+(anonymous namespace)::StackBuffer::free((anonymous namespace)::StackBuffer::FreeListEntry*)
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:166
+(anonymous namespace)::StackGuard::pop()
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:190
+~StackGuard
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:196
+libunwind::CFI_Parser<libunwind::LocalAddressSpace>::parseFDEInstructions(libunwind::LocalAddressSpace&, libunwind::CFI_Parser<libunwind::LocalAddressSpace>::FDE_Info const&, libunwind::CFI_Parser<libunwind::LocalAddressSpace>::CIE_Info const&, unsigned long, int, libunwind::PrologInfo*)
+/build/build_docker/../contrib/libunwind/src/DwarfParser.hpp:519
+libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::getInfoFromDwarfSection(unsigned long, libunwind::UnwindInfoSections const&, unsigned int)
+/build/build_docker/../contrib/libunwind/src/UnwindCursor.hpp:1498
+```

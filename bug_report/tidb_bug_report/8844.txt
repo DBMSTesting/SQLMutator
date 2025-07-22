@@ -1,0 +1,250 @@
+ID: 8844
+Title: Semi Join should be NULL-Aware
+Description:
+## Bug Report
+
+Take this as an example:
+```sql
+drop table if exists t;
+create table t(a bigint, b bigint, c bigint);
+insert into t values(null, 1, 1), (2, 2, 2), (3, null, 3), (4, 4, 3);
+```
+
+## LeftOuterSemiJoin
+
+**The join result should be `OuterRow + NULL`** if:
+
+1. the outer join key is `NULL`(row count from inner is not empty), or:
+2. there is no inner join key has the same value with the outer side, but there is at least a `NULL` value in the inner side join key.
+
+MySQL:
+```sql
+MySQL(root@localhost:test) > select a, b, a in (select b from t) from t;
++------+------+------------------------+
+| a    | b    | a in (select b from t) |
++------+------+------------------------+
+| NULL |    1 |                   NULL | -- satisfies the first condition
+|    2 |    2 |                      1 |
+|    3 | NULL |                   NULL | -- satisfies the second condition
+|    4 |    4 |                      1 |
++------+------+------------------------+
+3 rows in set (0.00 sec)
+```
+
+While in TiDB the result is:
+```sql
+TiDB(root@127.0.0.1:test) > select a, b, a in (select b from t) from t;
++------+------+------------------------+
+| a    | b    | a in (select b from t) |
++------+------+------------------------+
+| NULL |    1 |                      0 | -- incorrect
+|    3 | NULL |                      0 | -- incorrect
+|    2 |    2 |                      1 |
+|    4 |    4 |                      1 |
++------+------+------------------------+
+4 rows in set (0.00 sec)
+```
+
+**The join result should be `OuterRow + 1`** if:
+
+1. the outer join key is not `NULL` and there is at least one inner join key has the same value with the outer side.
+
+MySQL:
+```sql
+MySQL(root@localhost:test) > select a, b, a in (select b from t) from t;
++------+------+------------------------+
+| a    | b    | a in (select b from t) |
++------+------+------------------------+
+| NULL |    1 |                   NULL |
+|    2 |    2 |                      1 | -- satisfies the first condition
+|    3 | NULL |                   NULL |
+|    4 |    4 |                      1 | -- satisfies the first condition
++------+------+------------------------+
+4 rows in set (0.00 sec)
+```
+
+While in TiDB, the result is:
+```sql
+TiDB(root@127.0.0.1:test) > select a, b, a in (select b from t) from t;
++------+------+------------------------+
+| a    | b    | a in (select b from t) |
++------+------+------------------------+
+| NULL |    1 |                      0 | -- incorrect
+|    3 | NULL |                      0 | -- incorrect
+|    4 |    4 |                      1 |
+|    2 |    2 |                      1 |
++------+------+------------------------+
+4 rows in set (0.00 sec)
+```
+
+**The join result should be `OuterRow + 0`** if:
+
+1. the outer join key is not `NULL` and there is no inner join key has the same value with the outer side, and there is no `NULL` value in the inner side join key.
+
+MySQL:
+```sql
+MySQL(root@localhost:test) > select a, c, a in (select c from t) from t;
++------+------+------------------------+
+| a    | c    | a in (select c from t) |
++------+------+------------------------+
+| NULL |    1 |                   NULL |
+|    2 |    2 |                      1 |
+|    3 |    3 |                      1 |
+|    4 |    3 |                      0 | -- satisfies the first condition
++------+------+------------------------+
+4 rows in set (0.00 sec)
+```
+
+While in TiDB, the result is:
+```sql
+TiDB(root@127.0.0.1:test) > select a, c, a in (select c from t) from t;
++------+------+------------------------+
+| a    | c    | a in (select c from t) |
++------+------+------------------------+
+| NULL |    1 |                      0 | -- incorrect
+|    2 |    2 |                      1 |
+|    3 |    3 |                      1 |
+|    4 |    3 |                      0 | -- correct
++------+------+------------------------+
+4 rows in set (0.00 sec)
+```
+
+## Anti LeftOuterSemiJoin
+
+
+**The join result should be `OuterRow + NULL`** if:
+
+1. the outer join key is `NULL`, or:
+2. there is no inner join key has the same value with the outer side, but there is at least a `NULL` value in the inner side join key.
+
+MySQL:
+```sql
+MySQL(root@localhost:test) > select a, b, a not in (select b from t) from t;
++------+------+----------------------------+
+| a    | b    | a not in (select b from t) |
++------+------+----------------------------+
+| NULL |    1 |                       NULL | -- satisfies the first condition
+|    2 |    2 |                          0 |
+|    3 | NULL |                       NULL | -- satisfies the second condition
+|    4 |    4 |                          0 |
++------+------+----------------------------+
+4 rows in set (0.00 sec)
+```
+
+While in TiDB:
+```sql
+TiDB(root@127.0.0.1:test) > select a, b, a not in (select b from t) from t;
++------+------+----------------------------+
+| a    | b    | a not in (select b from t) |
++------+------+----------------------------+
+|    2 |    2 |                          0 |
+| NULL |    1 |                          1 | -- incorrect, should be NULL
+|    3 | NULL |                          1 | -- incorrect, should be NULL
+|    4 |    4 |                          0 |
++------+------+----------------------------+
+4 rows in set (0.00 sec)
+```
+
+**The join result should be `OuterRow + 0`** if:
+
+1. the outer join key is not `NULL` and there is at least one inner join key has the same value with the outer side.
+
+MySQL:
+```sql
+MySQL(root@localhost:test) > select a, b, a not in (select b from t) from t;
++------+------+----------------------------+
+| a    | b    | a not in (select b from t) |
++------+------+----------------------------+
+| NULL |    1 |                       NULL |
+|    2 |    2 |                          0 | -- satisfies the first condition
+|    3 | NULL |                       NULL |
+|    4 |    4 |                          0 | -- satisfies the first condition
++------+------+----------------------------+
+4 rows in set (0.00 sec)
+```
+
+While in TiDB:
+```sql
+TiDB(root@127.0.0.1:test) > select a, b, a not in (select b from t) from t;
++------+------+----------------------------+
+| a    | b    | a not in (select b from t) |
++------+------+----------------------------+
+| NULL |    1 |                          1 |
+|    3 | NULL |                          1 |
+|    4 |    4 |                          0 | -- this part is correct, satisfies the first condition
+|    2 |    2 |                          0 | -- this part is correct, satisfies the first condition
++------+------+----------------------------+
+4 rows in set (0.00 sec)
+```
+
+**The join result should be `OuterRow + 0`** if:
+
+1. the outer join key is not `NULL` and there is no inner join key has the same value with the outer side, and there is no `NULL` value in the inner side join key.
+
+MySQL:
+```sql
+MySQL(root@localhost:test) > select a, c, a not in (select c from t) from t;
++------+------+----------------------------+
+| a    | c    | a not in (select c from t) |
++------+------+----------------------------+
+| NULL |    1 |                       NULL |
+|    2 |    2 |                          0 | -- satisfies the first condition
+|    3 |    3 |                          0 | -- satisfies the first condition
+|    4 |    3 |                          1 |
++------+------+----------------------------+
+4 rows in set (0.01 sec)
+```
+
+While in TiDB:
+```sql
+TiDB(root@127.0.0.1:test) > select a, c, a not in (select c from t) from t;
++------+------+----------------------------+
+| a    | c    | a not in (select c from t) |
++------+------+----------------------------+
+| NULL |    1 |                          1 |
+|    3 |    3 |                          0 | -- this part is correct, satisfies the first condition
+|    4 |    3 |                          1 |
+|    2 |    2 |                          0 | -- this part is correct, satisfies the first condition
++------+------+----------------------------+
+4 rows in set (0.00 sec)
+```
+
+## Summary
+
+For `LeftOuterSemiJoin` and `Anti LeftOuterSemiJoin`, TiDB can not correctly produce the `OuterRow + NULL`.
+
+There is another two semi join types in TiDB:
+- SemiJoin: to make its result correct, it should only returns the OuterRow if the `LeftOuterSemiJoin` result is **OuterRow + 1**, not **OuterRow + 0** and **OuterRow + NULL**
+- Anti SemiJoin:  to make its result correct, it should only returns the OuterRow if the `Anti LeftOuterSemiJoin` result is **OuterRow + 1**, not **OuterRow + 0** and **OuterRow + NULL**
+
+## Suggestions
+
+### In Planner
+
+1. do not infer `NOT NULL` filters on the inner side of the join key if the join type is the four semi joins.
+2. do not use **Merge Join** and **Index Join** for these four semi joins.
+
+If possible, we can remove `SemiJoin` and `Anti SemiJoin`. `LeftOuterSemiJoin` and `Anti LeftOuterSemiJoin` has the whole message of the join result, we only need these two semi joins actually:
+
+1. If the semi join appears in the **where** condition and we need to return the matched outer row, the plan can be generated to:
+```
+LeftOuterSemiJoin -> Filter -> Project
+
+LeftOuterSemiJoin: Do the LeftOuterSemiJoin on t1 and t2, generate result of "OuterRow + result"
+Filter: filters out the result using this expression: IF(ISNULL(result), 0, result)
+Project: remove unused result column, return only the OuterRow
+```
+
+2. If the semi join appears in the **select** list, we should return the join result, the plan can be generated to:
+```
+LeftOuterSemiJoin -> Project
+
+LeftOuterSemiJoin: Do the LeftOuterSemiJoin on t1 and t2, generate result of "OuterRow + result"
+Project: remove unused OuterRow, return only one column contain the result
+```
+
+### In Executor
+
+For Hash Join and NestLoopedApply, we should:
+1. specially handle `NULL` outer join keys for semi joins, return `OuterRow + NULL`
+2. record whether there is a `NULL` value in the inner join key, return `OuterRow + NULL` if the outer row is not NULL and there is no matched inner join key.

@@ -1,0 +1,44 @@
+ID: 44579
+Title: planner: the column type sent by tidb to tiflash is inconsistent with the column type of the table schema
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+ref https://github.com/pingcap/tiflash/issues/6806
+
+### 1. Minimal reproduce step (Required)
+```
+create table if not exists test.t1(a int(11) DEFAULT NULL, id int(11) NOT NULL, PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */);
+alter table test.t1 set tiflash replica 1;
+use test; set tidb_enforce_mpp=on; set tidb_isolation_read_engines='tiflash';
+explain select sum(1) as c from test.t1 having count(*)>1 or count(a)= null;
++--------------------------------+----------+-------------------+---------------+------------------------------------------------------------------+
+| id                             | estRows  | task              | access object | operator info                                                    |
++--------------------------------+----------+-------------------+---------------+------------------------------------------------------------------+
+| Projection_6                   | 0.80     | root              |               | Column#3                                                         |
+| └─Selection_8                  | 0.80     | root              |               | or(gt(Column#4, 1), 0)                                           |
+|   └─StreamAgg_26               | 1.00     | root              |               | funcs:sum(Column#12)->Column#3, funcs:count(Column#13)->Column#4 |
+|     └─TableReader_27           | 1.00     | root              |               | data:StreamAgg_14                                                |
+|       └─StreamAgg_14           | 1.00     | batchCop[tiflash] |               | funcs:sum(1)->Column#12, funcs:count(1)->Column#13               |
+|         └─TableFullScan_25     | 10000.00 | batchCop[tiflash] | table:t1      | keep order:false, stats:pseudo                                   |
++--------------------------------+----------+-------------------+---------------+------------------------------------------------------------------+
+select sum(1) as c from test.t1 having count(*)>1 or count(a)= null;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The col type sent by tidb is `Int64`, but it is `Int32` in the table schema.
+```
+ERROR 1105 (HY000): Check schema[i].type->equals(*storage_schema[i].type) failed, schema[i].name = _tidb_rowid, schema[i].type->getName() = Int64, storage_schema[i].name = id, storage_schema[i].type->getName() = Int32
+```
+
+### 3. What did you see instead (Required)
+The col type sent by tidb is `Int32` and query success.
+
+### 4. What is your TiDB version? (Required)
+ v7.2.0-alpha
+
+<!-- Paste the output of SELECT tidb_version() -->
+

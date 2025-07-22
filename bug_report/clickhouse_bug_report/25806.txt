@@ -1,0 +1,106 @@
+ID: 25806
+Title: Setting use_join_nulls to 1 may throw an exception unexpectedly
+Description:
+**Describe the bug**
+
+A combination of `use_join_nulls=1`, a `Nullable(enum)` column, `OUTER JOIN`, and `toString()` may throw an exception while generating a result.
+
+**Does it reproduce on recent release?**
+
+This happens on 21.6.3 stable.
+
+**How to reproduce**
+
+With the following setup:
+
+```sql
+CREATE TABLE a (
+  key  String
+) ENGINE=MergeTree ORDER BY key;
+
+CREATE TABLE b (
+  key  String,
+  data Nullable(Enum16('a'=1, 'b'=2))
+) ENGINE=MergeTree ORDER BY key;
+
+INSERT INTO a VALUES('x');
+INSERT INTO a VALUES('y');
+
+INSERT INTO b VALUES('x', 'a');
+```
+
+This query appears to work correctly:
+```
+SELECT
+	key, data
+FROM a
+ANY LEFT OUTER JOIN b USING (key)
+FORMAT JSONCompact
+SETTINGS join_use_nulls = 1;
+```
+
+```
+{
+        "meta":
+        [
+                {
+                        "name": "key",
+                        "type": "String"
+                },
+                {
+                        "name": "data",
+                        "type": "Nullable(Enum16('a' = 1, 'b' = 2))"
+                }
+        ],
+        "data":
+        [
+                ["y", null],                                                                                                                                                                                                
+                ["x", "a"]                                                                                                                                                                                                     
+        ],
+        "rows": 2,
+        "statistics":
+        {
+                "elapsed": 0.002955967,
+                "rows_read": 3,
+                "bytes_read": 33
+        }
+}
+```
+
+But it throws an exception when `toString()` is applied to the joined column:
+
+```sql
+SELECT
+	key, toString(data)
+FROM a
+LEFT OUTER JOIN b USING (key)
+FORMAT JSONCompact
+SETTINGS join_use_nulls = 1;
+```
+
+```
+{
+        "meta":
+        [
+                {
+                        "name": "key",
+                        "type": "String"
+                },
+                {
+                        "name": "toString(data)",
+                        "type": "Nullable(String)"
+                }
+        ],
+
+        "data":
+        [
+                ["x", "a"]                                                                                                                                                                                                      Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.)
+1 rows in set. Elapsed: 0.003 sec.
+
+Received exception from server (version 21.6.3):
+Code: 36. DB::Exception: Received from localhost:9000. DB::Exception: Unexpected value 0 in enum: while executing 'FUNCTION toString(data :: 1) -> toString(data) Nullable(String) : 2'.
+```
+
+**Expected behavior**
+
+It produces a string `NULL` without throwing an exception.

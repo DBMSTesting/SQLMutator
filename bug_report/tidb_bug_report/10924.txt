@@ -1,0 +1,65 @@
+ID: 10924
+Title: change generated column expression bug when have index on this generated column
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+https://github.com/pingcap/tidb/pull/10802 : This PR make virtual columns can be indexed. 
+Next reproduce is base on this PR.
+
+```sql
+mysql>create table t1 (a int, b int as (a+1), index idx(b));
+Query OK, 0 rows affected
+Time: 0.071s
+mysql>insert into t1 set a=1
+Query OK, 1 row affected
+Time: 0.008s
+mysql>alter table t1 modify column b int as (a+2)
+Query OK, 0 rows affected
+Time: 0.072s
+mysql>select b from t1 use index(idx);
++---+
+| b |
++---+
+| 2 |
++---+
+1 row in set
+Time: 0.007s
+mysql>select b from t1 ignore index(idx);
++---+
+| b |
++---+
+| 3 |
++---+
+mysql>admin check table t1;
+(8003, u't1 err:[admin:1]index:&admin.RecordData{Handle:1, Values:[]types.Datum{types.Datum{k:0x1, collation:0x0, decimal:0x0, length:0x0, i:2, b:[]uint8(nil), x:interface {}(nil)}}} != record:&admin.RecordData{Handle:1, Values:[]types.Datum{types.Datum{k:0x1, collation:0x0, decimal:0x0, length:0x0, i:3, b:[]uint8(nil), x:interface {}(nil)}}}')
+```
+
+2. How to fix it?
+When modify generated column generated expression and there is a index on the column, TiDB should do at least 1 thing on the below:
+
+* backfill the index data on the generated column again.
+* prohibit modify virtual generated column generated expression and there is a index on the column
+
+Maybe we can simply prohibit this action first.  But this behaviour is not compatible with mysql. 
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```sql
+mysql>select tidb_version();
++--------------------------------------------------------------------------+
+| tidb_version()                                                           |
++--------------------------------------------------------------------------+
+| Release Version: v3.0.0-rc.1-236-g45f437eef                              |
+| Git Commit Hash: 45f437eef076ff7bb6591d05589522eb2cf8d495                |
+| Git Branch: 10802                                                        |
+| UTC Build Time: 2019-06-24 08:44:22                                      |
+| GoVersion: go version go1.12 darwin/amd64                                |
+| Race Enabled: false                                                      |
+| TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e |
+| Check Table Before Drop: false                                           |
++--------------------------------------------------------------------------+
+```
+

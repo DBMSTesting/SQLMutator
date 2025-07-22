@@ -1,0 +1,81 @@
+ID: 50256
+Title: planner: display the exact operator name to cause Parallel Apply to not take effect in warnings
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+In the case below, Parallel Apply cannot take effect due to some operator below the Apply cannot be executed in parallel, but the exact operator name is not shown.
+
+```
+create table t1 (a int, b int, c int);
+create table t2 (a int, b int, c int, key(a));
+create table t3(a int, b int, c int, key(a));
+set tidb_enable_parallel_apply=on;
+
+mysql> explain analyze select (select 1 from t2, t3 where t2.a=t3.a and t2.b > t1.b) from t1;
++--------------------------------------+----------+---------+-----------+----------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+------+
+| id                                   | estRows  | actRows | task      | access object        | execution info                                                                                                                                                                              | operator info                                                                                                   | memory    | disk |
++--------------------------------------+----------+---------+-----------+----------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+------+
+| Projection_14                        | 10000.00 | 0       | root      |                      | time:216.3µs, loops:1, RU:0.475183, Concurrency:5                                                                                                                                           | Column#21                                                                                                       | 5.57 KB   | N/A  |
+| └─Apply_16                           | 10000.00 | 0       | root      |                      | time:197.3µs, loops:1, Concurrency:OFF, cache:ON, cacheHitRatio:0.000%                                                                                                                      | CARTESIAN left outer join                                                                                       | 0 Bytes   | N/A  |
+|   ├─TableReader_18(Build)            | 10000.00 | 0       | root      |                      | time:189.9µs, loops:1, cop_task: {num: 1, max: 180.1µs, proc_keys: 0, rpc_num: 1, rpc_time: 151.9µs, copr_cache_hit_ratio: 0.00, build_task_duration: 12µs, max_distsql_concurrency: 1}     | data:TableFullScan_17                                                                                           | 174 Bytes | N/A  |
+|   │ └─TableFullScan_17               | 10000.00 | 0       | cop[tikv] | table:t1             | tikv_task:{time:126.6µs, loops:0}                                                                                                                                                           | keep order:false, stats:pseudo                                                                                  | N/A       | N/A  |
+|   └─MaxOneRow_19(Probe)              | 10000.00 | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                            |                                                                                                                 | N/A       | N/A  |
+|     └─Projection_20                  | 20000.00 | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                            | 1->Column#21                                                                                                    | N/A       | N/A  |
+|       └─IndexHashJoin_27             | 20000.00 | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                            | inner join, inner:IndexReader_24, outer key:test.t2.a, inner key:test.t3.a, equal cond:eq(test.t2.a, test.t3.a) | N/A       | N/A  |
+|         ├─TableReader_60(Build)      | 16000.00 | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                            | data:Selection_59                                                                                               | N/A       | N/A  |
+|         │ └─Selection_59             | 16000.00 | 0       | cop[tikv] |                      |                                                                                                                                                                                             | gt(test.t2.b, test.t1.b), not(isnull(test.t2.a))                                                                | N/A       | N/A  |
+|         │   └─TableFullScan_58       | 20020.02 | 0       | cop[tikv] | table:t2             |                                                                                                                                                                                             | keep order:false, stats:pseudo                                                                                  | N/A       | N/A  |
+|         └─IndexReader_24(Probe)      | 20000.00 | 0       | root      |                      |                                                                                                                                                                                             | index:Selection_23                                                                                              | N/A       | N/A  |
+|           └─Selection_23             | 20000.00 | 0       | cop[tikv] |                      |                                                                                                                                                                                             | not(isnull(test.t3.a))                                                                                          | N/A       | N/A  |
+|             └─IndexRangeScan_22      | 20020.02 | 0       | cop[tikv] | table:t3, index:a(a) |                                                                                                                                                                                             | range: decided by [eq(test.t3.a, test.t2.a)], keep order:false, stats:pseudo                                    | N/A       | N/A  |
++--------------------------------------+----------+---------+-----------+----------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+------+
+13 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+------------------------------------------------------+
+| Level   | Code | Message                                              |
++---------+------+------------------------------------------------------+
+| Warning | 1105 | Some apply operators can not be executed in parallel |
++---------+------+------------------------------------------------------+
+```
+
+Actually, after turning the `INLJ` to `HJ`, then Parallel Apply can work:
+```
+mysql> explain analyze select (select /*+ hash_join(t2) */ 1 from t2, t3 where t2.a=t3.a and t2.b > t1.b) from t1;
++--------------------------------------+--------------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------+-----------+------+
+| id                                   | estRows      | actRows | task      | access object        | execution info                                                                                                                                                                               | operator info                                    | memory    | disk |
++--------------------------------------+--------------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------+-----------+------+
+| Projection_14                        | 10000.00     | 0       | root      |                      | time:382µs, loops:1, RU:0.475183, Concurrency:5                                                                                                                                              | Column#21                                        | 5.57 KB   | N/A  |
+| └─Apply_16                           | 10000.00     | 0       | root      |                      | time:345.2µs, loops:1, Concurrency:5, cache:ON, cacheHitRatio:0.000%                                                                                                                         | CARTESIAN left outer join                        | 0 Bytes   | N/A  |
+|   ├─TableReader_18(Build)            | 10000.00     | 0       | root      |                      | time:50.3µs, loops:1, cop_task: {num: 1, max: 319.6µs, proc_keys: 0, rpc_num: 1, rpc_time: 279.5µs, copr_cache_hit_ratio: 0.00, build_task_duration: 25.3µs, max_distsql_concurrency: 1}     | data:TableFullScan_17                            | 174 Bytes | N/A  |
+|   │ └─TableFullScan_17               | 10000.00     | 0       | cop[tikv] | table:t1             | tikv_task:{time:235.6µs, loops:0}                                                                                                                                                            | keep order:false, stats:pseudo                   | N/A       | N/A  |
+|   └─MaxOneRow_19(Probe)              | 10000.00     | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                             |                                                  | N/A       | N/A  |
+|     └─Projection_20                  | 20000.00     | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                             | 1->Column#21                                     | N/A       | N/A  |
+|       └─HashJoin_50                  | 20000.00     | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                             | inner join, equal:[eq(test.t2.a, test.t3.a)]     | N/A       | N/A  |
+|         ├─TableReader_62(Build)      | 79920000.00  | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                             | data:Selection_61                                | N/A       | N/A  |
+|         │ └─Selection_61             | 79920000.00  | 0       | cop[tikv] |                      |                                                                                                                                                                                              | gt(test.t2.b, test.t1.b), not(isnull(test.t2.a)) | N/A       | N/A  |
+|         │   └─TableFullScan_60       | 100000000.00 | 0       | cop[tikv] | table:t2             |                                                                                                                                                                                              | keep order:false, stats:pseudo                   | N/A       | N/A  |
+|         └─IndexReader_68(Probe)      | 20000.00     | 0       | root      |                      | time:0s, loops:0                                                                                                                                                                             | index:IndexFullScan_67                           | N/A       | N/A  |
+|           └─IndexFullScan_67         | 20000.00     | 0       | cop[tikv] | table:t3, index:a(a) |                                                                                                                                                                                              | keep order:false, stats:pseudo                   | N/A       | N/A  |
++--------------------------------------+--------------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------+-----------+------+
+```
+
+### 2. What did you expect to see? (Required)
+
+Show the exact operator name to cause Parallel Apply to not take effect.
+
+### 3. What did you see instead (Required)
+
+No exact operator name in warnings.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+Master

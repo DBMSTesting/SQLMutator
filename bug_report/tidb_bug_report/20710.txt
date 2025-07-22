@@ -1,0 +1,64 @@
+ID: 20710
+Title: Optimizer does not consider the cost of other condition in Index Join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+mysql> create table t(a int, b int, index (a));
+Query OK, 0 rows affected (0.01 sec)
+```
+
+SQL is 
+```sql
+select * from t t1 inner join t t2 on t1.a = t2.a and t1.b = t2.b;
+```
+If Index Join is used, currently **_t1.a = t2.a_** is put in the equality condition, and **_t1.b = t2.b_** is put in other conditions. If the selectivity of **_t1.a = t2.a_** is high, there will be quite a lot of rows that need to be filtered with **_t1.b = t2.b_**. This part of the cost will be very large.
+```sql
+mysql> explain select /*+ INL_HASH_JOIN(t1) */ * from t t1 inner join t t2 on t1.a = t2.a and t1.b = t2.b;
++-------------------------------+----------+-----------+----------------------+-------------------------------------------------------------------------------------------------------------+
+| id                            | estRows  | task      | access object        | operator info                                                                                               |
++-------------------------------+----------+-----------+----------------------+-------------------------------------------------------------------------------------------------------------+
+| IndexHashJoin_30              | 12475.01 | root      |                      | inner join, inner:IndexLookUp_27, outer key:test.t.a, inner key:test.t.a, other cond:eq(test.t.b, test.t.b) |
+| ├─TableReader_41(Build)       | 9980.01  | root      |                      | data:Selection_40                                                                                           |
+| │ └─Selection_40              | 9980.01  | cop[tikv] |                      | not(isnull(test.t.a)), not(isnull(test.t.b))                                                                |
+| │   └─TableFullScan_39        | 10000.00 | cop[tikv] | table:t2             | keep order:false, stats:pseudo                                                                              |
+| └─IndexLookUp_27(Probe)       | 1.25     | root      |                      |                                                                                                             |
+|   ├─Selection_25(Build)       | 1.25     | cop[tikv] |                      | not(isnull(test.t.a))                                                                                       |
+|   │ └─IndexRangeScan_23       | 1.25     | cop[tikv] | table:t1, index:a(a) | range: decided by [eq(test.t.a, test.t.a)], keep order:false, stats:pseudo                                  |
+|   └─Selection_26(Probe)       | 1.25     | cop[tikv] |                      | not(isnull(test.t.b))                                                                                       |
+|     └─TableRowIDScan_24       | 1.25     | cop[tikv] | table:t1             | keep order:false, stats:pseudo                                                                              |
++-------------------------------+----------+-----------+----------------------+-------------------------------------------------------------------------------------------------------------+
+9 rows in set (0.01 sec)
+```
+
+If Hash Join is used, **_t1.a = t2.a and t1.b = t2.b_** will be put in equal condition. There is no such problem.
+
+```sql
+mysql> explain select * from t t1 inner join t t2 on t1.a = t2.a and t1.b = t2.b;
++------------------------------+----------+-----------+---------------+-------------------------------------------------------------------+
+| id                           | estRows  | task      | access object | operator info                                                     |
++------------------------------+----------+-----------+---------------+-------------------------------------------------------------------+
+| HashJoin_40                  | 12475.01 | root      |               | inner join, equal:[eq(test.t.a, test.t.a) eq(test.t.b, test.t.b)] |
+| ├─TableReader_61(Build)      | 9980.01  | root      |               | data:Selection_60                                                 |
+| │ └─Selection_60             | 9980.01  | cop[tikv] |               | not(isnull(test.t.a)), not(isnull(test.t.b))                      |
+| │   └─TableFullScan_59       | 10000.00 | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                    |
+| └─TableReader_54(Probe)      | 9980.01  | root      |               | data:Selection_53                                                 |
+|   └─Selection_53             | 9980.01  | cop[tikv] |               | not(isnull(test.t.a)), not(isnull(test.t.b))                      |
+|     └─TableFullScan_52       | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                    |
++------------------------------+----------+-----------+---------------+-------------------------------------------------------------------+
+7 rows in set (0.01 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

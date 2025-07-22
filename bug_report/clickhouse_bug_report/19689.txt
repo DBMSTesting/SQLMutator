@@ -1,0 +1,153 @@
+ID: 19689
+Title: incl-from-zk: nullptr dereference on user config reload in integration test
+Description:
+**Describe the bug**
+ConfigReloader tried to load users.xml and crashed
+```
+2021.01.26 19:34:29.532930 [ 50 ] {} <Debug> ConfigReloader: Loading config '/etc/clickhouse-server/users.xml'
+```
+
+``` xml
+<?xml version="1.0"?>
+<yandex>
+    <!-- Profiles of settings. -->
+    <profiles>
+        <!-- Default settings. -->
+        <default>
+            <!-- Maximum memory usage for processing single query, in bytes. -->
+            <max_memory_usage>10000000000</max_memory_usage>
+
+            <!-- Use cache of uncompressed blocks of data. Meaningful only for processing many of very short queries. -->
+            <use_uncompressed_cache>0</use_uncompressed_cache>
+
+            <!-- How to choose between replicas during distributed query processing.
+                 random - choose random replica from set of replicas with minimum number of errors
+                 nearest_hostname - from set of replicas with minimum number of errors, choose replica
+                  with minimum number of different symbols between replica's hostname and local hostname
+                  (Hamming distance).
+                 in_order - first live replica is chosen in specified order.
+                 first_or_random - if first replica one has higher number of errors, pick a random one from replicas with minimum number of errors.
+            -->
+            <load_balancing>random</load_balancing>
+        </default>
+
+        <!-- Profile that allows only read queries. -->
+        <readonly>
+            <readonly>1</readonly>
+        </readonly>
+    </profiles>
+
+    <!-- Users and ACL. -->
+    <users>
+        <!-- If user name was not specified, 'default' user is used. -->
+        <default>
+            <!-- Password could be specified in plaintext or in SHA256 (in hex format).
+
+                 If you want to specify password in plaintext (not recommended), place it in 'password' element.
+                 Example: <password>qwerty</password>.
+                 Password could be empty.
+
+                 If you want to specify SHA256, place it in 'password_sha256_hex' element.
+                 Example: <password_sha256_hex>65e84be33532fb784c48129675f9eff3a682b27168c0ea744b2cf58ee02337c5</password_sha256_hex>
+                 Restrictions of SHA256: impossibility to connect to ClickHouse using MySQL JS client (as of July 2019).
+
+                 If you want to specify double SHA1, place it in 'password_double_sha1_hex' element.
+                 Example: <password_double_sha1_hex>e395796d6546b1b65db9d665cd43f0e858dd4303</password_double_sha1_hex>
+
+                 If you want to specify a previously defined LDAP server (see 'ldap_servers' in main config) for authentication, place its name in 'server' element inside 'ldap' element.
+                 Example: <ldap><server>my_ldap_server</server></ldap>
+
+                 How to generate decent password:
+                 Execute: PASSWORD=$(base64 < /dev/urandom | head -c8); echo "$PASSWORD"; echo -n "$PASSWORD" | sha256sum | tr -d '-'
+                 In first line will be password and in second - corresponding SHA256.
+
+                 How to generate double SHA1:
+                 Execute: PASSWORD=$(base64 < /dev/urandom | head -c8); echo "$PASSWORD"; echo -n "$PASSWORD" | sha1sum | tr -d '-' | xxd -r -p | sha1sum | tr -d '-'
+                 In first line will be password and in second - corresponding double SHA1.
+            -->
+            <password></password>
+
+            <!-- List of networks with open access.
+
+                 To open access from everywhere, specify:
+                    <ip>::/0</ip>
+
+                 To open access only from localhost, specify:
+                    <ip>::1</ip>
+                    <ip>127.0.0.1</ip>
+
+                 Each element of list has one of the following forms:
+                 <ip> IP-address or network mask. Examples: 213.180.204.3 or 10.0.0.1/8 or 10.0.0.1/255.255.255.0
+                     2a02:6b8::3 or 2a02:6b8::3/64 or 2a02:6b8::3/ffff:ffff:ffff:ffff::.
+                 <host> Hostname. Example: server01.yandex.ru.
+                     To check access, DNS query is performed, and all received addresses compared to peer address.
+                 <host_regexp> Regular expression for host names. Example, ^server\d\d-\d\d-\d\.yandex\.ru$
+                     To check access, DNS PTR query is performed for peer address and then regexp is applied.
+                     Then, for result of PTR query, another DNS query is performed and all received addresses compared to peer address.
+                     Strongly recommended that regexp is ends with $
+                 All results of DNS requests are cached till server restart.
+            -->
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+
+            <!-- Settings profile for user. -->
+            <profile>default</profile>
+
+            <!-- Quota for user. -->
+            <quota>default</quota>
+
+            <!-- User can create other users and grant rights to them. -->
+            <!-- <access_management>1</access_management> -->
+        </default>
+    </users>
+
+    <!-- Quotas. -->
+    <quotas>
+        <!-- Name of quota. -->
+        <default>
+            <!-- Limits for time interval. You could specify many intervals with different limits. -->
+            <interval>
+                <!-- Length of interval. -->
+                <duration>3600</duration>
+
+                <!-- No limits. Just calculate resource usage for time interval. -->
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</yandex>
+```
+**Error message and/or stacktrace**
+integration test_config_substitutions msan local run:
+```
+2021.01.26 19:34:29.538223 [ 54 ] {} <Fatal> BaseDaemon: ########################################
+2021.01.26 19:34:29.538337 [ 54 ] {} <Fatal> BaseDaemon: (version 21.2.1.1, build id: 848D638C25A24123F0A66BCF1C9FC471B1BE106F) (from thread 50) (no query) Received signal Segmentation fault (11)
+2021.01.26 19:34:29.538427 [ 54 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Address not mapped to object.
+2021.01.26 19:34:29.538617 [ 54 ] {} <Fatal> BaseDaemon: Stack trace: 0x2c8ba60f 0x8f0c143 0x314ce5f4 0x314cd74a 0x31349875 0x3133218a 0x3132e08c 0x3132f179 0x3132f179 0x3132f179 0x3133c2ca 0x313423a2 0x31359253 0x3135d18d 0x31360594 0x31360379 0x9005977 0x9013ff8 0x7f4eecba1609 0x7f4eecac8293
+2021.01.26 19:34:29.542451 [ 54 ] {} <Fatal> BaseDaemon: 4. ./obj-x86_64-linux-gnu/../src/Interpreters/Context.cpp:1560: DB::Context::getZooKeeper() const @ 0x2c8ba60f in /usr/bin/clickhouse
+2021.01.26 19:34:29.545071 [ 54 ] {} <Fatal> BaseDaemon: 5. ./obj-x86_64-linux-gnu/../contrib/libcxx/include/functional:2090: std::__1::shared_ptr<zkutil::ZooKeeper> std::__1::__function::__policy_invoker<std::__1::shared_ptr<zkutil::ZooKeeper> ()>::__call_impl<std::__1::__function::__default_alloc_func<DB::Server::main(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&)::$_2, std::__1::shared_ptr<zkutil::ZooKeeper> ()> >(std::__1::__function::__policy_storage const*) @ 0x8f0c143 in /usr/bin/clickhouse
+2021.01.26 19:34:29.547736 [ 54 ] {} <Fatal> BaseDaemon: 6. ./obj-x86_64-linux-gnu/../src/Common/ZooKeeper/ZooKeeperNodeCache.cpp:0: zkutil::ZooKeeperNodeCache::get(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::function<void (Coordination::WatchResponse const&)>) @ 0x314ce5f4 in /usr/bin/clickhouse
+2021.01.26 19:34:29.550517 [ 54 ] {} <Fatal> BaseDaemon: 7. ./obj-x86_64-linux-gnu/../contrib/libcxx/include/functional:2191: zkutil::ZooKeeperNodeCache::get(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<Poco::Event>) @ 0x314cd74a in /usr/bin/clickhouse
+2021.01.26 19:34:29.554788 [ 54 ] {} <Fatal> BaseDaemon: 8. ./obj-x86_64-linux-gnu/../src/Common/Config/ConfigProcessor.cpp:373: Poco::XML::Node const* std::__1::__function::__policy_invoker<Poco::XML::Node const* (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>::__call_impl<std::__1::__function::__default_alloc_func<DB::ConfigProcessor::doIncludesRecursive(Poco::AutoPtr<Poco::XML::Document>, Poco::AutoPtr<Poco::XML::Document>, Poco::XML::Node*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&)::$_2, Poco::XML::Node const* (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> >(std::__1::__function::__policy_storage const*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x31349875 in /usr/bin/clickhouse
+2021.01.26 19:34:29.558804 [ 54 ] {} <Fatal> BaseDaemon: 9. ./obj-x86_64-linux-gnu/../contrib/libcxx/include/functional:2221: DB::ConfigProcessor::doIncludesRecursive(Poco::AutoPtr<Poco::XML::Document>, Poco::AutoPtr<Poco::XML::Document>, Poco::XML::Node*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&)::$_0::operator()(Poco::XML::Node const*, std::__1::function<Poco::XML::Node const* (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> const&, char const*) const @ 0x3133218a in /usr/bin/clickhouse
+2021.01.26 19:34:29.561962 [ 54 ] {} <Fatal> BaseDaemon: 10. ./obj-x86_64-linux-gnu/../src/Common/Config/ConfigProcessor.cpp:0: DB::ConfigProcessor::doIncludesRecursive(Poco::AutoPtr<Poco::XML::Document>, Poco::AutoPtr<Poco::XML::Document>, Poco::XML::Node*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0x3132e08c in /usr/bin/clickhouse
+2021.01.26 19:34:29.565066 [ 54 ] {} <Fatal> BaseDaemon: 11. ./obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:90: DB::ConfigProcessor::doIncludesRecursive(Poco::AutoPtr<Poco::XML::Document>, Poco::AutoPtr<Poco::XML::Document>, Poco::XML::Node*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0x3132f179 in /usr/bin/clickhouse
+2021.01.26 19:34:29.568239 [ 54 ] {} <Fatal> BaseDaemon: 12. ./obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:90: DB::ConfigProcessor::doIncludesRecursive(Poco::AutoPtr<Poco::XML::Document>, Poco::AutoPtr<Poco::XML::Document>, Poco::XML::Node*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0x3132f179 in /usr/bin/clickhouse
+2021.01.26 19:34:29.571707 [ 54 ] {} <Fatal> BaseDaemon: 13. ./obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:90: DB::ConfigProcessor::doIncludesRecursive(Poco::AutoPtr<Poco::XML::Document>, Poco::AutoPtr<Poco::XML::Document>, Poco::XML::Node*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0x3132f179 in /usr/bin/clickhouse
+2021.01.26 19:34:29.575433 [ 54 ] {} <Fatal> BaseDaemon: 14. ./obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:90: DB::ConfigProcessor::processConfig(bool*, zkutil::ZooKeeperNodeCache*, std::__1::shared_ptr<Poco::Event> const&) @ 0x3133c2ca in /usr/bin/clickhouse
+2021.01.26 19:34:29.578976 [ 54 ] {} <Fatal> BaseDaemon: 15. ./obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:118: DB::ConfigProcessor::loadConfigWithZooKeeperIncludes(zkutil::ZooKeeperNodeCache&, std::__1::shared_ptr<Poco::Event> const&, bool) @ 0x313423a2 in /usr/bin/clickhouse
+2021.01.26 19:34:29.581804 [ 54 ] {} <Fatal> BaseDaemon: 16. ./obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:118: DB::ConfigReloader::reloadIfNewer(bool, bool, bool) @ 0x31359253 in /usr/bin/clickhouse
+2021.01.26 19:34:29.584564 [ 54 ] {} <Fatal> BaseDaemon: 17. ./obj-x86_64-linux-gnu/../src/Common/Config/ConfigReloader.cpp:69: DB::ConfigReloader::run() @ 0x3135d18d in /usr/bin/clickhouse
+2021.01.26 19:34:29.587440 [ 54 ] {} <Fatal> BaseDaemon: 18. ./obj-x86_64-linux-gnu/../src/Common/ThreadPool.h:179: ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ConfigReloader::*)(), DB::ConfigReloader*>(void (DB::ConfigReloader::*&&)(), DB::ConfigReloader*&&)::'lambda'()::operator()() @ 0x31360594 in /usr/bin/clickhouse
+2021.01.26 19:34:29.590497 [ 54 ] {} <Fatal> BaseDaemon: 19. ./obj-x86_64-linux-gnu/../contrib/libcxx/include/functional:2090: void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ConfigReloader::*)(), DB::ConfigReloader*>(void (DB::ConfigReloader::*&&)(), DB::ConfigReloader*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x31360379 in /usr/bin/clickhouse
+2021.01.26 19:34:29.590795 [ 54 ] {} <Fatal> BaseDaemon: 20. ./obj-x86_64-linux-gnu/../contrib/libcxx/include/functional:2210: ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x9005977 in /usr/bin/clickhouse
+2021.01.26 19:34:29.591557 [ 54 ] {} <Fatal> BaseDaemon: 21. ./obj-x86_64-linux-gnu/../contrib/libcxx/include/memory:1655: void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()> >(void*) @ 0x9013ff8 in /usr/bin/clickhouse
+2021.01.26 19:34:29.591659 [ 54 ] {} <Fatal> BaseDaemon: 22. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+2021.01.26 19:34:29.591732 [ 54 ] {} <Fatal> BaseDaemon: 23. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+2021.01.26 19:34:31.547215 [ 54 ] {} <Fatal> BaseDaemon: Calculated checksum of the binary: 73A029A06424D4E1E2081E2DE050B193. There is no information about the reference checksum.
+```

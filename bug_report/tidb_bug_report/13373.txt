@@ -1,0 +1,98 @@
+ID: 13373
+Title: query inconsistency after analyzing table 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
++ Start TiDB server alone, no TiKV  `./bin/tidb-server`
++ `git clone https://github.com/siddontang/dbbench.git` and `cd dbbench/sysbench` 
++ Run `PORT=4000 SCALE=1 TABLES=1 ./bench.sh  tidb tpcc prepare` to load TPC-C data into TiDB
++ Run `PORT=4000 SCALE=1 TABLES=1 ./bench.sh  tidb tpcc check`
+
+Then we can find the check 5 failed.
+
+```
+Check 1, warehouse: 1 PASSED
+Check 2, warehouse: 1 PASSED
+Check 3, warehouse: 1 PASSED
+Check 4, warehouse: 1 PASSED
+Check 5, warehouse: 1 FAILED!!!`
+```
+
+2. What did you expect to see?
+
+The check query is ` SELECT count(*) FROM orders1 LEFT JOIN new_orders1 ON (no_w_id=o_w_id AND o_d_id=no_d_id AND o_id=no_o_id) where o_and ((o_carrier_id IS NULL and no_o_id IS  NULL) OR (o_carrier_id IS NOT NULL and no_o_id IS NOT NULL  ));`, we need to see result 0 but got wrong value. 
+
+And to my surprise, after analyzing the table, the result is right.
+
+3. What did you see instead?
+
+```
+SELECT count(*) FROM orders1 LEFT JOIN new_orders1 ON (no_w_id=o_w_id AND o_d_id=no_d_id AND o_id=no_o_id) where o_w_id=1 and ((o_carrier_id IS NULL and no_o_id IS  NULL) OR (o_carrier_id IS NOT NULL and no_o_id IS NOT NULL  )) 
+
+mysql> SELECT count(*) FROM orders1 LEFT JOIN new_orders1 ON (no_w_id=o_w_id AND o_d_id=no_d_id AND o_id=no_o_id) where o_and ((o_carrier_id IS NULL and no_o_id IS  NULL) OR (o_carrier_id IS NOT NULL and no_o_id IS NOT NULL  ));
++----------+
+| count(*) |
++----------+
+|    11702 |
++----------+
+1 row in set (6.02 sec)
+
+mysql> explain SELECT count(*) FROM orders1 LEFT JOIN new_orders1 ON (no_w_id=o_w_id AND o_d_id=no_d_id AND o_id=no_o_id) where o_w_id=1 and ((o_carrier_id IS NULL and no_o_id IS  NULL) OR (o_carrier_id IS NOT NULL and no_o_id IS NOT NULL  ));
++------------------------------+--------+-----------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                           | count  | task      | operator info                                                                                                                                             |
++------------------------------+--------+-----------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| HashAgg_10                   | 1.00   | root      | funcs:count(1)                                                                                                                                            |
+| └─Selection_13               | 240.00 | root      | or(and(isnull(Column#6), isnull(Column#10)), and(not(isnull(Column#6)), not(isnull(Column#10))))                                                          |
+|   └─IndexMergeJoin_22        | 300.00 | root      | left outer join, inner:IndexReader_20, outer key:Column#2, Column#1, inner key:Column#11, Column#10                                                       |
+|     ├─IndexLookUp_52         | 30.00  | root      |                                                                                                                                                           |
+|     │ ├─IndexScan_49         | 30.00  | cop[tikv] | table:orders1, index:o_w_id, o_d_id, o_id, range:[1,1], keep order:false                                                                                  |
+|     │ └─Selection_51         | 30.00  | cop[tikv] | or(isnull(Column#6), not(isnull(Column#6)))                                                                                                               |
+|     │   └─TableScan_50       | 30.00  | cop[tikv] | table:orders1, keep order:false                                                                                                                           |
+|     └─IndexReader_20         | 10.00  | root      | index:IndexScan_19                                                                                                                                        |
+|       └─IndexScan_19         | 10.00  | cop[tikv] | table:new_orders1, index:no_w_id, no_d_id, no_o_id, range: decided by [eq(Column#11, Column#2) eq(Column#10, Column#1) eq(1, Column#12)], keep order:true |
++------------------------------+--------+-----------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+```
+mysql> analyze table orders1;   
+
+
+mysql> SELECT count(*) FROM orders1 LEFT JOIN new_orders1 ON (no_w_id=o_w_id AND o_d_id=no_d_id AND o_id=no_o_id) where o_w_id=1 and ((o_carrier_id IS NULL and no_o_id IS  NULL) OR (o_carrier_id IS NOT NULL and no_o_id IS NOT NULL  ));
++----------+
+| count(*) |
++----------+
+|        0 |
++----------+                                                       
+
+mysql> explain SELECT count(*) FROM orders1 LEFT JOIN new_orders1 ON (no_w_id=o_w_id AND o_d_id=no_d_id AND o_id=no_o_id) where o_w_id=1 and ((o_carrier_id IS NULL and no_o_id IS  NULL) OR (o_carrier_id IS NOT NULL and no_o_id IS NOT NULL  ));
++------------------------------+----------+-----------+--------------------------------------------------------------------------------------------------+
+| id                           | count    | task      | operator info                                                                                    |
++------------------------------+----------+-----------+--------------------------------------------------------------------------------------------------+
+| HashAgg_10                   | 1.00     | root      | funcs:count(1)                                                                                   |
+| └─Selection_13               | 71968.00 | root      | or(and(isnull(Column#6), isnull(Column#10)), and(not(isnull(Column#6)), not(isnull(Column#10)))) |
+|   └─HashLeftJoin_25          | 89960.00 | root      | left outer join, inner:IndexReader_58, equal:[eq(Column#2, Column#11) eq(Column#1, Column#10)]   |
+|     ├─TableReader_48         | 29987.00 | root      | data:Selection_47                                                                                |
+|     │ └─Selection_47         | 29987.00 | cop[tikv] | eq(Column#3, 1), or(isnull(Column#6), not(isnull(Column#6)))                                     |
+|     │   └─TableScan_46       | 30000.00 | cop[tikv] | table:orders1, range:[-inf,+inf], keep order:false                                               |
+|     └─IndexReader_58         | 8996.00  | root      | index:IndexScan_57                                                                               |
+|       └─IndexScan_57         | 8996.00  | cop[tikv] | table:new_orders1, index:no_w_id, no_d_id, no_o_id, range:[1,1], keep order:false                |
++------------------------------+----------+-----------+--------------------------------------------------------------------------------------------------+
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+2019-11-12 10:30:40.111359 I | maxprocs: Leaving GOMAXPROCS=4: CPU quota undefined
+Release Version: v4.0.0-alpha-824-gdffc5152f
+Git Commit Hash: dffc5152f2ada6d860f48b200a26df512a92fdb6
+Git Branch: master
+UTC Build Time: 2019-11-12 02:06:11
+GoVersion: go version go1.13 darwin/amd64
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

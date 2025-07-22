@@ -1,0 +1,100 @@
+ID: 49913
+Title: Unexpected part name: <projection name>
+Description:
+**INPUTS**
+- `ReplicatedMergeTree` table projections (works fine)
+- CH ver `23.1.6.42`
+- system.mutations for `MATERIALIZE projection` has `is_done` equals to `0` for unexists parts
+
+**Unexpected behaviour**
+Hanging MATERIALIZE projection MUTATION in system.mutations for unexists parts
+
+**Expected behavior**
+0 system.mutations. 
+
+**Additional info**
+
+1. create particular table projections
+2. MATERIALIZE them
+3. wait a bit and check system.mutations
+```sql
+select mutation_id, command, is_done, parts_to_do, parts_to_do_names, latest_fail_reason from system.mutations where is_done=0
+┌─mutation_id─┬─command───────────────────────────────────────────┬─is_done─┬─parts_to_do─┬─parts_to_do_names─────────────────────────────────────────────────────────────────────┬─latest_fail_reason─┐
+│ 0000000005  │ MATERIALIZE PROJECTION device_agregation          │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000006  │ MATERIALIZE PROJECTION users_agregation           │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000007  │ MATERIALIZE PROJECTION messages_agregation        │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000008  │ MATERIALIZE PROJECTION overlay_session_agregation │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+└─────────────┴───────────────────────────────────────────────────┴─────────┴─────────────┴───────────────────────────────────────────────────────────────────────────────────────┴────────────────────┘
+```
+4. check CH tasks/processes
+```sql
+SELECT * FROM system.processes WHERE query not like 'SELECT%' LIMIT 10 FORMAT Vertical
+Ok.
+
+0 rows in set. Elapsed: 0.003 sec. 
+```
+5.  get part info for stucked parts
+```sql
+select partition, name, marks, rows, modification_time from system.parts where name IN('b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1')
+Ok.
+
+0 rows in set. Elapsed: 0.010 sec. Processed 3.64 thousand rows, 324.88 KB (357.75 thousand rows/s., 31.97 MB/s.)
+```
+6.  check if there any parts in this partition
+```sql
+select partition, name, marks, rows, modification_time from system.parts where partition_id IN('b0d8617590929340bbb5fb58cf52bce4', 'b9186c325b4cfa4ca55dcba0e78fd4a3')
+┌─partition──┬─name─────────────────────────────────────────────┬─marks─┬───rows─┬───modification_time─┐
+│ 20230410PM │ b0d8617590929340bbb5fb58cf52bce4_0_11_2_75       │    75 │ 592459 │ 2023-05-16 09:50:37 │
+│ 20230410PM │ b0d8617590929340bbb5fb58cf52bce4_12_17_1_75      │    52 │ 409492 │ 2023-05-16 09:50:37 │
+│ 20230410PM │ b0d8617590929340bbb5fb58cf52bce4_18_59_7_75      │    70 │ 561446 │ 2023-05-16 09:50:37 │
+│ 20230410PM │ b0d8617590929340bbb5fb58cf52bce4_60_64_1         │    32 │ 250081 │ 2023-05-11 14:17:26 │
+│ 20230410PM │ b0d8617590929340bbb5fb58cf52bce4_65_65_0         │     2 │    377 │ 2023-05-11 14:17:25 │
+│ 20230410PM │ b0d8617590929340bbb5fb58cf52bce4_66_66_0_75      │     2 │    159 │ 2023-05-16 09:50:37 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_0_0_0           │     2 │   7950 │ 2023-05-12 06:59:15 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_1_1_0           │     2 │      2 │ 2023-05-12 07:19:39 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_2_2_0           │     2 │      3 │ 2023-05-12 07:19:50 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_3_3_0           │     2 │      1 │ 2023-05-12 07:19:50 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_4_4_0           │     2 │      3 │ 2023-05-12 07:20:00 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_5_5_0           │     2 │      2 │ 2023-05-12 07:20:04 │
+│ 20230512AM │ b9186c325b4cfa4ca55dcba0e78fd4a3_6_3855_763_3860 │     2 │   7493 │ 2023-05-16 09:50:40 │
+└────────────┴──────────────────────────────────────────────────┴───────┴────────┴─────────────────────┘
+```
+7. materialize device_agregation projection once again and grab some parts to check whether they are exists or not
+```sql
+ALTER TABLE analytics_local MATERIALIZE projection device_agregation
+select parts_to_do, parts_to_do_names from system.mutations where is_done=0
+
+-- 1864, '1e8ea56ef92907db5039c205765fda33_17_17_0_26','1ebc42839fc25ba80c59f25c930876bd_0_0_0_9','1eeded7867995ae3bf35178ebae6a49a_0_0_0_9',...
+
+select partition, name, marks, rows, modification_time from system.parts where name IN('1e8ea56ef92907db5039c205765fda33_17_17_0_26','1ebc42839fc25ba80c59f25c930876bd_0_0_0_9')
+
+┌─partition──┬─name────────────────────────────────────────┬─marks─┬─rows─┬───modification_time─┐
+│ 20220307AM │ 1e8ea56ef92907db5039c205765fda33_17_17_0_26 │     2 │   10 │ 2023-05-16 09:49:30 │
+│ 20210714AM │ 1ebc42839fc25ba80c59f25c930876bd_0_0_0_9    │     2 │ 1830 │ 2023-05-16 09:49:30 │
+└────────────┴─────────────────────────────────────────────┴───────┴──────┴─────────────────────┘
+```
+8. wait a bit and check `system.mutations`
+```sql
+select mutation_id, command, is_done, parts_to_do, parts_to_do_names, latest_fail_reason from system.mutations where is_done=0
+
+┌─mutation_id─┬─command───────────────────────────────────────────┬─is_done─┬─parts_to_do─┬─parts_to_do_names─────────────────────────────────────────────────────────────────────┬─latest_fail_reason─┐
+│ 0000000005  │ MATERIALIZE PROJECTION device_agregation          │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000006  │ MATERIALIZE PROJECTION users_agregation           │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000007  │ MATERIALIZE PROJECTION messages_agregation        │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000008  │ MATERIALIZE PROJECTION overlay_session_agregation │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+│ 0000000009  │ MATERIALIZE PROJECTION device_agregation          │       0 │           2 │ ['b0d8617590929340bbb5fb58cf52bce4_60_65_2','b9186c325b4cfa4ca55dcba0e78fd4a3_0_5_1'] │                    │
+└─────────────┴───────────────────────────────────────────────────┴─────────┴─────────────┴───────────────────────────────────────────────────────────────────────────────────────┴────────────────────┘
+```
+
+```sql
+SELECT version()
+┌─version()─┐
+│ 23.1.6.42 │
+└───────────┘
+```
+
+** Work Around ** 
+As we dont have any procs/tasks related to particular mutations we can just kill mutations
+```sql
+KILL MUTATION ON CLUSTER '{cluster}' WHERE mutation_id IN(select mutation_id from system.mutations where is_done=0)
+```

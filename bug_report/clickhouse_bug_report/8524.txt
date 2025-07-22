@@ -1,0 +1,82 @@
+ID: 8524
+Title: Concurrent movePartsTask move parts more than expected
+Description:
+**Describe the bug or unexpected behaviour**
+Concurrent movePartsTask move parts more than expected.
+
+**How to reproduce**
+* Which ClickHouse server version to use
+v19.19.1.2035-testing
+* Non-default settings, if any
+/etc/clickhouse-server/config.d/storage.xml:
+```
+<yandex>
+  <storage_configuration>
+    <disks>
+      <!--                                                                                                                                                    
+          default disk is special, it always                                                                                                                  
+          exists even if not explicitly                                                                                                                       
+          configured here, but you can't change                                                                                                               
+          it's path here (you should use <path>                                                                                                               
+          on top level config instead)                                                                                                                        
+      -->
+      <default>
+         <!--                                                                                                                                                 
+             You can reserve some amount of free space                                                                                                        
+             on any disk (including default) by adding                                                                                                        
+             keep_free_space_bytes tag                                                                                                                        
+         -->
+         <keep_free_space_bytes>1024</keep_free_space_bytes>
+      </default>
+
+      <hdd1>
+         <!--                                                                                                                                                 
+         disk path must end with a slash,                                                                                                                     
+         folder should be writable for clickhouse user                                                                                                        
+         -->
+         <path>/data/sdc/clickhouse/</path>
+      </hdd1>
+      <hdd2>
+        <path>/data/sdb/clickhouse/</path>
+      </hdd2>
+    </disks>
+    <policies>
+      <hot_and_cold>
+        <volumes>
+          <hot_volume>
+            <disk>hdd1</disk>
+          </hot_volume>
+          <cold_volume>
+            <disk>hdd2</disk>
+          </cold_volume>
+        </volumes>
+        <move_factor>0.98</move_factor>
+      </hot_and_cold>
+    </policies>
+  </storage_configuration>
+</yandex>
+
+```
+
+**Expected behavior**
+Moving parts as less as possible according to the storage policy.
+
+**Error message and/or stacktrace**
+There are about 50.25GB parts need to be moved from hdd1 to hdd2 according to my manual calculation. However more parts have been moved.
+The following log indicates that the first movePartsTask selected 50.25GB which matches my calculation. However later movePartsTask (invoked by other background threads) selected more parts to move.
+A fix would be preventing accessing disk (from where moving parts) from concurrent movePartsTask.
+```
+2020.01.04 09:58:45.261850 [ 43 ] {} <Trace> MergeTreePartsMover: Selected 890 parts to move according to storage policy rules and 0 parts according to TTL rules, 50.25 GiB total
+2020.01.04 09:58:45.371129 [ 55 ] {} <Trace> MergeTreePartsMover: Selected 768 parts to move according to storage policy rules and 0 parts according to TTL rules, 30.81 GiB total
+2020.01.04 09:59:00.500271 [ 40 ] {} <Trace> MergeTreePartsMover: Selected 2 parts to move according to storage policy rules and 0 parts according to TTL rules, 138.03 MiB total
+2020.01.04 09:59:00.629903 [ 48 ] {} <Trace> MergeTreePartsMover: Selected 1 parts to move according to storage policy rules and 0 parts according to TTL rules, 72.55 MiB total
+2020.01.04 09:59:12.307391 [ 44 ] {} <Trace> MergeTreePartsMover: Selected 2 parts to move according to storage policy rules and 0 parts according to TTL rules, 76.88 MiB total
+2020.01.04 09:59:12.500653 [ 51 ] {} <Trace> MergeTreePartsMover: Selected 5 parts to move according to storage policy rules and 0 parts according to TTL rules, 213.23 MiB total
+2020.01.04 09:59:14.520096 [ 52 ] {} <Trace> MergeTreePartsMover: Selected 1 parts to move according to storage policy rules and 0 parts according to TTL rules, 72.59 MiB total
+2020.01.04 09:59:26.845502 [ 48 ] {} <Trace> MergeTreePartsMover: Selected 2 parts to move according to storage policy rules and 0 parts according to TTL rules, 83.03 MiB total
+2020.01.04 09:59:26.908421 [ 52 ] {} <Trace> MergeTreePartsMover: Selected 3 parts to move according to storage policy rules and 0 parts according to TTL rules, 125.56 MiB total
+2020.01.04 09:59:27.163329 [ 44 ] {} <Trace> MergeTreePartsMover: Selected 6 parts to move according to storage policy rules and 0 parts according to TTL rules, 256.72 MiB total
+2020.01.04 09:59:27.985069 [ 46 ] {} <Trace> MergeTreePartsMover: Selected 1 parts to move according to storage policy rules and 0 parts according to TTL rules, 20.21 MiB total
+2020.01.04 09:59:29.205677 [ 40 ] {} <Trace> MergeTreePartsMover: Selected 1 parts to move according to storage policy rules and 0 parts according to TTL rules, 72.59 MiB total
+
+```

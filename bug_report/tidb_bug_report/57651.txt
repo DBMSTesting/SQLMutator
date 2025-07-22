@@ -1,0 +1,120 @@
+ID: 57651
+Title: max(truncate()) lead to incorrect result
+Description:
+### 1. Minimal reproduce step (Required)
+```sql
+create table t1 (c0 text, c1 double, c2 int);
+
+insert into t1 (c0,c1,c2) values
+(NULL, 1     , -100),
+(NULL, 100.0 , 100 )
+;
+
+SELECT max(truncate(truncate(c1, c2), 309))
+FROM t1 
+GROUP BY c0
+ORDER BY 1 desc
+;
+```
+
+### 2. What did you expect to see? (Required)
+result should be 100:
+```
+mysql> SELECT
+    -> c0,
+    -> c1,
+    -> c2,
+    -> truncate(c1, c2),
+    -> truncate(truncate(c1, c2), 309)
+    -> FROM
+    ->   t1 
+    -> ORDER BY
+    ->   1,2,3,4,5
+    -> ;
++------+------+------+------------------+---------------------------------+
+| c0   | c1   | c2   | truncate(c1, c2) | truncate(truncate(c1, c2), 309) |
++------+------+------+------------------+---------------------------------+
+| NULL |    1 | -100 |                0 |                               0 |
+| NULL |  100 |  100 |              100 |                             100 |
++------+------+------+------------------+---------------------------------+
+2 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> SELECT max(truncate(truncate(c1, c2), 309))
+    -> FROM t1 
+    -> GROUP BY c0
+    -> ORDER BY 1 desc
+    -> ;
++--------------------------------------+
+| max(truncate(truncate(c1, c2), 309)) |
++--------------------------------------+
+|                                    0 |
++--------------------------------------+
+1 row in set (0.01 sec)
+```
+
+```
+mysql> explain analyze SELECT max(truncate(truncate(c1, c2), 309))
+    -> FROM t1 
+    -> GROUP BY c0
+    -> ORDER BY 1 desc
+    -> ;
++------------------------------+---------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------+-----------+---------+
+| id                           | estRows | actRows | task      | access object | execution info                                                                                                                                                                                                                                                                                                                               | operator info                                                             | memory    | disk    |
++------------------------------+---------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------+-----------+---------+
+| Sort_5                       | 1.60    | 1       | root      |               | time:800.8µs, loops:2, RU:0.508659                                                                                                                                                                                                                                                                                                           | Column#5:desc                                                             | 152 Bytes | 0 Bytes |
+| └─HashAgg_8                  | 1.60    | 1       | root      |               | time:731.8µs, loops:2, partial_worker:{wall_time:628.487µs, concurrency:5, task_num:1, tot_wait:3.016705ms, tot_exec:12.71µs, tot_time:3.033884ms, max:613.817µs, p95:613.817µs}, final_worker:{wall_time:657.078µs, concurrency:5, task_num:5, tot_wait:2.48µs, tot_exec:150ns, tot_time:3.146216ms, max:638.407µs, p95:638.407µs}          | group by:Column#7, funcs:max(Column#6)->Column#5                          | 6.37 KB   | 0 Bytes |
+|   └─Projection_16            | 2.00    | 2       | root      |               | time:618.3µs, loops:2, Concurrency:OFF                                                                                                                                                                                                                                                                                                       | truncate(truncate(d4.t1.c1, d4.t1.c2), 309)->Column#6, d4.t1.c0->Column#7 | 1.36 KB   | N/A     |
+|     └─TableReader_12         | 2.00    | 2       | root      |               | time:581.7µs, loops:2, cop_task: {num: 1, max: 572.6µs, proc_keys: 2, tot_proc: 96.6µs, tot_wait: 85.2µs, copr_cache_hit_ratio: 0.00, build_task_duration: 5.09µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:1, total_time:560.8µs}}                                                                                               | data:TableFullScan_11                                                     | 323 Bytes | N/A     |
+|       └─TableFullScan_11     | 2.00    | 2       | cop[tikv] | table:t1      | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 2, total_process_keys_size: 96, total_keys: 3, get_snapshot_time: 20.6µs, rocksdb: {delete_skipped_count: 2, key_skipped_count: 4, block: {cache_hit_count: 2}}}, time_detail: {total_process_time: 96.6µs, total_wait_time: 85.2µs, tikv_wall_time: 312.5µs}                | keep order:false, stats:pseudo                                            | N/A       | N/A     |
++------------------------------+---------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------+-----------+---------+
+5 rows in set, 2 warnings (0.01 sec)
+
+mysql> show warnings
+    -> ;
++---------+------+---------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                             |
++---------+------+---------------------------------------------------------------------------------------------------------------------+
+| Warning | 1105 | Scalar function 'truncate'(signature: TruncateReal, return type: double) is not supported to push down to tikv now. |
+| Warning | 1105 | Aggregation can not be pushed to tikv because arguments of AggFunc `max` contains unsupported exprs                 |
++---------+------+---------------------------------------------------------------------------------------------------------------------+
+2 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+```
+Release Version: v8.5.0-alpha-184-g1c059a1216
+Edition: Community
+Git Commit Hash: 1c059a1216db711e2cb56ea9f3d1ad8c23db6327
+Git Branch: HEAD
+UTC Build Time: 2024-11-21 04:56:22
+GoVersion: go1.23.3
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+```
+
+topology:
+distributed.yaml:
+```
+global:
+  user: "tidb"
+  ssh_port: 22
+  deploy_dir: "/tidb-deploy"
+  data_dir: "/tidb-data"
+
+tidb_servers:
+  - host: 10.0.2.81
+
+pd_servers:
+  - host: 10.0.2.82
+
+tikv_servers:
+  - host: 10.0.2.83
+```
+
+
+### about us
+We are the BASS team from the School of Cyber Science and Technology at Beihang University. Our main focus is on system software security, operating systems, and program analysis research, as well as the development of automated program testing frameworks for detecting software defects. Using our self-developed database vulnerability testing tool, we have identified the above-mentioned vulnerabilities in TiDB that may lead to database logic error.

@@ -1,0 +1,97 @@
+ID: 4695
+Title: CH may hang when it initializes dictionaries after a restart
+Description:
+I created a weird dictionary, which source is another dictionary.
+It works fine in 18.14.19.
+But CH 19.x hangs when it tries to load this weird dictionary (if the source dictionary is unavailable for some reason).
+
+Here is how to reproduce:
+1. Create a dictionary 'table' which source is a CH table.
+2. Create a dictionary 'dict' which source is the 'table' dictionary.
+3. Set dictionaries_lazy_load to false.
+4. Restart CH
+When CH starts, it tries to load the 'dict' dictionary first, but its source (the 'table' dictionary) is not available yet, and CH hangs. It accepts connections, but never processes them.
+Here is the log:
+```
+2019.03.14 15:40:35.329952 [ 1 ] {} <Information> Application: Ready for connections.
+2019.03.14 15:40:35.329983 [ 1 ] {} <Information> EmbeddedDictionaries: Loading dictionaries.
+2019.03.14 15:40:35.330010 [ 1 ] {} <Information> EmbeddedDictionaries: Loaded dictionaries.
+2019.03.14 15:40:35.334478 [ 1 ] {} <Debug> executeQuery: (internal) SELECT `key`, `name` FROM `dict`.`table`;
+2019.03.14 15:40:36.330171 [ 24 ] {} <Information> EmbeddedDictionaries: Loading dictionaries.
+2019.03.14 15:40:37.333560 [ 29 ] {} <Debug> ConfigReloader: Loading config `/etc/clickhouse-server/config.xml'
+2019.03.14 15:40:47.304866 [ 32 ] {} <Trace> TCPHandlerFactory: TCP Request. Address: [::1]:35574
+2019.03.14 15:40:47.316472 [ 32 ] {} <Debug> TCPHandler: Connected ClickHouse client version 19.4.0, revision: 54416, user: defau
+2019.03.14 15:43:14.432836 [ 33 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: GET, Address: [::
+2019.03.14 15:43:34.351720 [ 33 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: GET, Address: [::
+2019.03.14 15:43:36.679392 [ 34 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: GET, Address: [::
+2019.03.14 15:43:55.199621 [ 33 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: GET, Address: [::
+```
+The source table:
+```
+CREATE TABLE test.table 
+(
+  key    Int64,
+  name   String
+)
+ENGINE = ReplacingMergeTree 
+PARTITION BY tuple ()
+ORDER BY key;
+```
+The dictionary on the table:
+```
+    <dictionary>
+        <name>table</name>
+        <source>
+            <clickhouse>
+                <host>localhost</host>
+                <port>9000</port>
+                <user>default</user>
+                <password/>
+                <db>test</db>
+                <table>table</table>
+                <invalidate_query>select max(modification_time) from system.parts where database='test' and table='table'</invalidate_query>
+            </clickhouse>
+        </source>
+        <lifetime>60</lifetime>
+        <layout><flat/></layout>
+        <structure>
+            <id>
+                <name>key</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value/>
+            </attribute>
+        </structure>
+    </dictionary>
+```
+The dictionary on the dictionary:
+```
+    <dictionary>
+        <name>dict</name>
+        <source>
+            <clickhouse>
+                <host>localhost</host>
+                <port>9000</port>
+                <user>default</user>
+                <password/>
+                <db>dict</db>
+                <table>table</table>
+                <invalidate_query>select max(creation_time) from system.dictionaries where name='table'</invalidate_query>
+            </clickhouse>
+        </source>
+        <lifetime>60</lifetime>
+        <layout><flat/></layout>
+        <structure>
+            <id>
+                <name>key</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value/>
+            </attribute>
+        </structure>
+    </dictionary>
+```

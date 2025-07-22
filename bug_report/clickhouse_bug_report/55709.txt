@@ -1,0 +1,85 @@
+ID: 55709
+Title: JSONEachRow format is incorrect when used with select from parameterized view
+Description:
+Select from parameterized view with format JSONEachRow returns incorrect JSON. Numbers sometimes return as strings. Nested objects as arrays.
+
+### Number as string example
+```
+CREATE TABLE users (uid Int16, date Date, age Int16, reg Int16) ENGINE=Memory;
+
+INSERT INTO users VALUES (1111, '2023-10-01', 13, 12);
+INSERT INTO users VALUES (1111, '2023-10-03', 33, 22);
+INSERT INTO users VALUES (2222, '2023-10-01', 14, 14);
+INSERT INTO users VALUES (2222, '2023-10-02', 48, 34);
+INSERT INTO users VALUES (8888, '2023-10-02', 55, 55);
+INSERT INTO users VALUES (8888, '2023-10-03', 50, 23);
+
+create view users_avg_broken (
+  uid Int16,
+  age Int16,
+  reg Int16
+) AS
+select
+  uid,
+  avg(age) as age,
+  sum(reg) as reg
+from users
+  where uid = {uid:Int16}
+group by uid;
+
+select * from users_avg_broken(uid=1111) format JSONEachRow;
+```
+
+In versions begin from 23.8 it returns
+`{"uid":1111,"age":23,"reg":"34"}`
+
+In previous versions it returns
+`{"uid":1111,"age":23,"reg":34}`
+
+Note the "reg":"34"
+
+A link to reproducer in [https://fiddle.clickhouse.com/06688fc2-09da-478c-a29f-45a7b1d8fa63](https://fiddle.clickhouse.com/06688fc2-09da-478c-a29f-45a7b1d8fa63).
+
+### Nested object as array example
+```
+set flatten_nested=0;
+
+CREATE TABLE users (uid Int16, date Date, age Int16, reg Int16, bar Int16) ENGINE=Memory;
+
+INSERT INTO users VALUES (1111, '2023-10-01', 13, 12, 234);
+INSERT INTO users VALUES (1111, '2023-10-03', 33, 22, 543);
+INSERT INTO users VALUES (2222, '2023-10-01', 14, 14, 512);
+INSERT INTO users VALUES (2222, '2023-10-02', 48, 34, 876);
+INSERT INTO users VALUES (8888, '2023-10-02', 55, 55, 632);
+INSERT INTO users VALUES (8888, '2023-10-03', 50, 23, 532);
+
+create view test_view (
+`uid` UInt32,
+`params` Nested(`age` UInt32, `reg` UInt16, bar Int16)
+)
+as
+select uid, groupArray((age, reg, bar)) as params
+  from users
+  where uid = {uid:Int16}
+  group by uid;
+
+select * from test_view(uid=2222) format JSONEachRow;
+```
+
+In versions begin from 23.8 it returns
+`{"uid":2222,"params":[[14,14,512],[48,34,876]]}`
+
+In previous versions it returns
+`{"uid":2222,"params":[{"age":14,"reg":14,"bar":512},{"age":48,"reg":34,"bar":876}]}`
+
+A link to reproducer in [https://fiddle.clickhouse.com/6ab7b2d3-3753-4cb0-8d3b-f348566f68f3](https://fiddle.clickhouse.com/6ab7b2d3-3753-4cb0-8d3b-f348566f68f3).
+
+**Does it reproduce on recent release?**
+
+Yes.
+
+**How to reproduce**
+
+Open provided example code, choose different ClickHouse version as run. To get Nested as JSON object in versions before 23.8 you should set flatten_nested=0 setting.
+
+It reproduces on versions 23.8+.

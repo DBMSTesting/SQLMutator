@@ -1,0 +1,90 @@
+ID: 21414
+Title: Wrong result of correlated aggregates
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+``` mysql
+drop table if exists t;
+create table t (a int, b int);
+insert into t values (1,1),(2,1),(2,2),(3,1),(3,2),(3,3);
+
+select (select count(n.a + a) from t) from t n;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+MySQL 8.0.22
+
+``` mysql
+mysql root@localhost:test> select (select count(n.a + a) from t) from t n;
++--------------------------------+
+| (select count(n.a + a) from t) |
++--------------------------------+
+| 6                              |
+| 6                              |
+| 6                              |
+| 6                              |
+| 6                              |
+| 6                              |
++--------------------------------+
+6 rows in set
+Time: 0.009s
+```
+
+### 3. What did you see instead (Required)
+
+`count(n.a + a)` contains columns from both outer query and subquery, so it should be evaluated inside subquery.
+
+``` mysql
+mysql root@127.0.0.1:test> select (select count(n.a + a) from t) from t n;
++--------------------------------+
+| (select count(n.a + a) from t) |
++--------------------------------+
+| 0                              |
+| 0                              |
+| 0                              |
+| 0                              |
+| 0                              |
+| 0                              |
++--------------------------------+
+6 rows in set
+Time: 0.010s
+
+mysql root@127.0.0.1:test> explain select (select count(n.a + a) from t) from t n;
++----------------------------+----------+-----------+---------------+-------------------------------------------------+
+| id                         | estRows  | task      | access object | operator info                                   |
++----------------------------+----------+-----------+---------------+-------------------------------------------------+
+| Projection_8               | 10000.00 | root      |               | Column#7                                        |
+| └─Apply_10                 | 10000.00 | root      |               | CARTESIAN left outer join                       |
+|   ├─TableReader_12(Build)  | 10000.00 | root      |               | data:TableFullScan_11                           |
+|   │ └─TableFullScan_11     | 10000.00 | cop[tikv] | table:n       | keep order:false, stats:pseudo                  |
+|   └─StreamAgg_24(Probe)    | 1.00     | root      |               | funcs:count(Column#9)->Column#7                 |
+|     └─TableReader_25       | 1.00     | root      |               | data:StreamAgg_16                               |
+|       └─StreamAgg_16       | 1.00     | cop[tikv] |               | funcs:count(plus(test.t.a, test.t.a))->Column#9 |
+|         └─TableFullScan_23 | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                  |
++----------------------------+----------+-----------+---------------+-------------------------------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+``` mysql
+mysql root@127.0.0.1:test> select tidb_version()\G
+***************************[ 1. row ]***************************
+tidb_version() | Release Version: v4.0.0-beta.2-1682-gc94e0df37
+Edition: Community
+Git Commit Hash: c94e0df372ed9077763f1c66927a106d510b0d30
+Git Branch: master
+UTC Build Time: 2020-12-01 08:08:01
+GoVersion: go1.15
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

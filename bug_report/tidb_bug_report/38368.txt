@@ -1,0 +1,76 @@
+ID: 38368
+Title: parser: table option should always restore without quotes
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```go
+package test
+import (
+	_ "github.com/pingcap/tidb/types/parser_driver"
+	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/format"
+	"github.com/pingcap/tidb/parser/model"
+)
+func TestTableOption(t *testing.T) {
+	tests := []struct {
+		new  string
+		want string
+	}{
+		{
+			new:  `CREATE TABLE book(id INT) INSERT_METHOD = FIRST;`,
+			want: "ALTER TABLE `book` INSERT_METHOD = FIRST;\n",
+		},
+	}
+	a := require.New(t)
+	
+	for _, test := range tests {
+		nodes := parser.New().Parse(test.new, "", "")
+		get := deparse(diff, format.DefaultRestoreFlags|format.RestoreStringWithoutCharset)
+		a.Equal(test.want, get)
+	}
+}
+
+func deparse(nodes []ast.Node, flag format.RestoreFlags) (string, error) {
+	var buf bytes.Buffer
+	for _, node := range nodes {
+		if err := node.Restore(format.NewRestoreCtx(flag, &buf)); err != nil {
+			return "", err
+		}
+		if _, err := buf.Write([]byte(";\n")); err != nil {
+			return "", err
+		}
+	}
+	return buf.String(), nil
+}
+```
+We can find that the `get` is:
+```SQL
+ALTER TABLE `book` INSERT_METHOD = 'FIRST';\n
+```
+It's caused by `ctx.WriteString(n.StrValue)` in [here](https://sourcegraph.com/github.com/pingcap/tidb/-/blob/parser/ast/ddl.go?L2301). We will encounter the error if we execute it in MySQL client:
+![image](https://user-images.githubusercontent.com/87714218/194840871-f304149a-c6a7-44ba-aab2-530a14af5545.png)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+Restore should restore INSERT_METHOD without quotes likes:
+```SQL
+CREATE TABLE `tbl`(id INT) INSERT_METHOD = FIRST.
+```
+https://dev.mysql.com/doc/refman/8.0/en/create-table.html
+![CleanShot 2022-10-10 at 17 59 18](https://user-images.githubusercontent.com/87714218/194841463-215a4b13-f8f1-41a0-b014-d824720be521.png)
+
+### 3. What did you see instead (Required)
+```SQL
+CREATE TABLE `tbl`(id INT) INSERT_METHOD = 'FIRST'.
+```
+### 4. What is your TiDB version? (Required)
+Parser at HEAD.
+
+<!-- Paste the output of SELECT tidb_version() -->
+

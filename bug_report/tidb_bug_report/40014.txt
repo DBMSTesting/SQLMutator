@@ -1,0 +1,121 @@
+ID: 40014
+Title: Logical bug: numeric format changed after adding DISTINCT [v5.3.1, v6.4.0]
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+drop table if exists t;
+CREATE TABLE t (c1 BIGINT UNSIGNED);
+INSERT INTO t VALUES (38.1089);
+
+SELECT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql1
+SELECT DISTINCT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql2
+```
+
+### 2. What did you expect to see? (Required)
+
+In theory, the result of sql2(DISTINCT) ⊆ the result of sql1
+
+### 3. What did you see instead (Required)
+
+However, the numeric format changed after adding DISTINCT, seems like a logical bug:
+
+```sql
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v6.4.0 |
++--------------------+
+1 row in set (0.00 sec)
+
+mysql> SELECT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql1
++------+
+| f1   |
++------+
+|    1 |
++------+
+1 row in set (0.00 sec)
+
+mysql> SELECT DISTINCT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql2
++----------------------------------+
+| f1                               |
++----------------------------------+
+| 1.000000000000000000000000000000 |
++----------------------------------+
+1 row in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+Release Version: v6.4.0
+Edition: Community
+Git Commit Hash: cf36a9ce2fe1039db3cf3444d51930b887df18a1
+Git Branch: heads/refs/tags/v6.4.0
+UTC Build Time: 2022-11-13 05:25:30
+GoVersion: go1.19.2
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: unistore
+```
+
+### 5. Hope these can be helpful for your debugging:
+
+1. The bug cannot be reproduced after changing LOG(5) to 1.61
+2. We look for the first version of the bug in all docker images (with format x.x.x) of https://hub.docker.com/r/pingcap/tidb/tags 
+We found that the bug first occurred in pingcap/tidb:v5.3.1, it cannot be reproduced in pingcap/tidb:v5.2.4 (we can't find more intermediate versions in dockerhub):
+
+```sql
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v5.3.1 |
++--------------------+
+1 row in set (0.00 sec)
+
+mysql> SELECT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql1
++------+
+| f1   |
++------+
+|    1 |
++------+
+1 row in set (0.00 sec)
+
+mysql> SELECT DISTINCT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql2
++----------------------------------+
+| f1                               |
++----------------------------------+
+| 1.000000000000000000000000000000 |
++----------------------------------+
+1 row in set (0.01 sec)
+
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v5.2.4 |
++--------------------+
+1 row in set (0.00 sec)
+
+mysql> SELECT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql1
++----+
+| f1 |
++----+
+|  1 |
++----+
+1 row in set (0.01 sec)
+
+mysql> SELECT DISTINCT f1 FROM (SELECT (-SEC_TO_TIME(-1)%~c1) AS f1 FROM t) AS t1 WHERE ((f1>LOG(5)) IS FALSE) OR 1; -- sql2
++----+
+| f1 |
++----+
+|  1 |
++----+
+1 row in set (0.01 sec)
+```
+

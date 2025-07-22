@@ -1,0 +1,174 @@
+ID: 41622
+Title: update with point-get plan maybe panic cause use different infoschema.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+The original failed test link: https://do.pingcap.net/jenkins/blue/organizations/jenkins/pingcap%2Ftidb%2Fghpr_check2/detail/ghpr_check2/14634/pipeline/201/
+
+Then I try to reproduce, and I add following log and sleep in my code for easier reproduction:
+
+```diff
+diff --git a/planner/core/point_get_plan.go b/planner/core/point_get_plan.go
+index e80fd32fc3..4565f4fb48 100644
+--- a/planner/core/point_get_plan.go
++++ b/planner/core/point_get_plan.go
+@@ -19,6 +19,7 @@ import (
+        "sort"
+        "strconv"
+        "strings"
++       "time"
+        "unsafe"
+
+        "github.com/pingcap/errors"
+@@ -1025,6 +1026,9 @@ func tryPointGetPlan(ctx sessionctx.Context, selStmt *ast.SelectStmt, check bool
+        if tbl == nil {
+                return nil
+        }
++       if tbl.Name.L == "t" {
++               logutil.BgLogger().Info("-----tryPointGetPlan", zap.Int("cols", len(tbl.Columns)))
++       }
+        pi := tbl.GetPartitionInfo()
+
+        for _, col := range tbl.Columns {
+@@ -1533,6 +1537,7 @@ func tryUpdatePointPlan(ctx sessionctx.Context, updateStmt *ast.UpdateStmt) Plan
+                if ctx.GetSessionVars().TxnCtx.IsPessimistic {
+                        pointGet.Lock, pointGet.LockWaitTime = getLockWaitTime(ctx, &ast.SelectLockInfo{LockType: ast.SelectLockForUpdate})
+                }
++               time.Sleep(100 * time.Millisecond)
+                return buildPointUpdatePlan(ctx, pointGet, pointGet.dbName, pointGet.TblInfo, updateStmt)
+        }
+        batchPointGet := tryWhereIn2BatchPointGet(ctx, selStmt)
+@@ -1571,6 +1576,9 @@ func buildPointUpdatePlan(ctx sessionctx.Context, pointPlan PhysicalPlan, dbName
+        updatePlan.names = pointPlan.OutputNames()
+        is := ctx.GetInfoSchema().(infoschema.InfoSchema)
+        t, _ := is.TableByID(tbl.ID)
++       if t.Meta().Name.L == "t" {
++               logutil.BgLogger().Info("-----buildPointUpdatePlan", zap.Int("cols", len(tbl.Columns)), zap.Int("t_by_id_cols", len(t.Meta().Columns)))
++       }
+        updatePlan.tblID2Table = map[int64]table.Table{
+                tbl.ID: t,
+        }
+diff --git a/tests/realtikvtest/addindextest/integration_test.go b/tests/realtikvtest/addindextest/integration_test.go
+index f624450360..a222794115 100644
+--- a/tests/realtikvtest/addindextest/integration_test.go
++++ b/tests/realtikvtest/addindextest/integration_test.go
+@@ -20,6 +20,7 @@ import (
+        "sync"
+        "sync/atomic"
+        "testing"
++       "time"
+
+        "github.com/pingcap/failpoint"
+        "github.com/pingcap/tidb/br/pkg/lightning/backend/local"
+@@ -143,6 +144,8 @@ func TestIngestMVIndexOnPartitionTable(t *testing.T) {
+        tk.MustExec("create database addindexlit;")
+        tk.MustExec("use addindexlit;")
+        tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
++       tk.MustExec(`set global foreign_key_checks=0;`)
++       tk.MustExec(`set @@foreign_key_checks=0;`)
+
+        tk.MustExec("create table t (pk int primary key, a json) partition by hash(pk) partitions 4;")
+        var sb strings.Builder
+@@ -183,6 +186,7 @@ func TestIngestMVIndexOnPartitionTable(t *testing.T) {
+                }
+                wg.Done()
+        }()
++       time.Sleep(time.Millisecond * 100)
+        tk.MustExec("alter table t add index idx((cast(a as signed array)));")
+        addIndexDone.Store(true)
+        wg.Wait()
+```
+
+Then run the test:
+
+start a real tikv first:
+```
+tiup playground nightly --tiflash 0 --db 0   
+```
+
+Then run the test, repeat it a few times, it should be easier to reproduce:
+
+```
+cd tests/realtikvtest/addindextest
+go test -run='TestIngestMVIndexOnPartitionTable'  --tags=intest  --with-real-tikv=true
+```
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+When reproduced, you will see the following log:
+
+```log
+[2023/02/21 13:49:05.751 +08:00] [INFO] [point_get_plan.go:1030] [-----tryPointGetPlan] [cols=2]
+[2023/02/21 13:49:05.768 +08:00] [INFO] [domain.go:211] ["diff load InfoSchema success"] [currentSchemaVersion=53] [neededSchemaVersion=54] ["start time"=1.270889ms] [gotSchemaVersion=54] [phyTblIDs="[94,95,96,97,98]"] [actionTypes="[7,7,7,7,7]"]
+[2023/02/21 13:49:05.820 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip , port 4000, id a3d72e25-eaf4-4702-9c99-03bf7ede388c"] ["ddl job id"=100] [ver=54]
+[2023/02/21 13:49:05.841 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip , port 4000, id a3d72e25-eaf4-4702-9c99-03bf7ede388c"] ["ddl job id"=100] [ver=54]
+[2023/02/21 13:49:05.852 +08:00] [INFO] [point_get_plan.go:1580] [-----buildPointUpdatePlan] [cols=2] [t_by_id_cols=3]
+panic: runtime error: index out of range [2] with length 2 [recovered]
+        panic: runtime error: index out of range [2] with length 2
+
+goroutine 16709 [running]:
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec.func1()
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/adapter.go:482 +0x4e6
+panic({0x103041be0, 0xc0096888a0})
+        /usr/local/go/src/runtime/panic.go:884 +0x212
+github.com/pingcap/tidb/planner/core.GetUpdateColumnsInfo(0xa?, {0xc0095548d0, 0x1, 0x0?}, 0x2)
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/planner/core/logical_plan_builder.go:5643 +0x148
+github.com/pingcap/tidb/executor.(*UpdateExec).updateRows(0xc0095f4820, {0x103a26198, 0xc009554d50})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/update.go:251 +0xbd
+github.com/pingcap/tidb/executor.(*UpdateExec).Next(0xc0095f4820, {0x103a26198?, 0xc009554c30?}, 0x1?)
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/update.go:239 +0x195
+github.com/pingcap/tidb/executor.Next({0x103a26198, 0xc009554c30}, {0x103a2bca0, 0xc0095f4820}, 0xc0090ffa90)
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/executor.go:324 +0x2b4
+github.com/pingcap/tidb/executor.(*ExecStmt).next(0xc008f8d860, {0x103a26198, 0xc009554c30}, {0x103a2bca0, 0xc0095f4820}, 0x105fe5180?)
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/adapter.go:1221 +0x78
+github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor(0xc008f8d860, {0x103a26198?, 0xc009554c30?}, {0x103a2bca0?, 0xc0095f4820})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/adapter.go:973 +0x40f
+github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay(0xc008f8d860, {0x103a26198, 0xc009554c30}, {0x103a2bca0?, 0xc0095f4820?}, 0x0)
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/adapter.go:805 +0x245
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec(0xc008f8d860, {0x103a26198, 0xc009554c30})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/executor/adapter.go:600 +0xbe5
+github.com/pingcap/tidb/session.runStmt({0x103a26128?, 0xc00012a008?}, 0xc00847b900, {0x103a38a90, 0xc008f8d860?})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/session/session.go:2372 +0x443
+github.com/pingcap/tidb/session.(*session).ExecuteStmt(0xc00847b900, {0x103a26128?, 0xc00012a008?}, {0x103a41078?, 0xc0095c7550})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/session/session.go:2229 +0x97e
+github.com/pingcap/tidb/testkit.(*TestKit).ExecWithContext(0xc009020a50, {0x103a26128, 0xc00012a008}, {0xc008de10c0, 0x39}, {0x0, 0x0, 0x0})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/testkit/testkit.go:323 +0x71a
+github.com/pingcap/tidb/testkit.(*TestKit).MustExecWithContext(0xc009020a50, {0x103a26128?, 0xc00012a008?}, {0xc008de10c0, 0x39}, {0x0, 0x0, 0x0})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/testkit/testkit.go:132 +0x6b
+github.com/pingcap/tidb/testkit.(*TestKit).MustExec(0x103330663?, {0xc008de10c0?, 0xc009489f90?}, {0x0?, 0x4?, 0x45e24e649?})
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/testkit/testkit.go:127 +0x85
+github.com/pingcap/tidb/tests/realtikvtest/addindextest_test.TestIngestMVIndexOnPartitionTable.func1()
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/tests/realtikvtest/addindextest/integration_test.go:181 +0x2d1
+created by github.com/pingcap/tidb/tests/realtikvtest/addindextest_test.TestIngestMVIndexOnPartitionTable
+        /Users/cs/code/goread/src/github.com/pingcap/tidb/tests/realtikvtest/addindextest/integration_test.go:173 +0x905
+exit status 2
+FAIL    github.com/pingcap/tidb/tests/realtikvtest/addindextest 19.213s
+```
+
+Pay attention to this log: 
+```
+[2023/02/21 13:49:05.852 +08:00] [INFO] [point_get_plan.go:1580] [-----buildPointUpdatePlan] [cols=2] [t_by_id_cols=3]
+```
+
+this log indicates the update with point-get plan use different infoschema, when the update use `tryPointGetPlan` to build point-get, it use infoschema version-1 which can only see 2 columns of table `t`. 
+
+But later the update use `buildPointUpdatePlan` to build point-update, it use infoschema version-2 which can    see 3 columns of the table `t`. This is what causes panic
+
+### 3. How to fix?
+
+make sure update with point-get plan always use the same version of infoschema.
+
+### 4. What is your TiDB version? (Required)
+
+```
+commit df530ad43269a73e43960b2ffe07b19ca59a687d (HEAD -> master, origin/master)
+Date:   Tue Feb 21 12:33:05 2023 +0800
+```
+
+<!-- Paste the output of SELECT tidb_version() -->
+

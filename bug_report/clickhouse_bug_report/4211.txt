@@ -1,0 +1,146 @@
+ID: 4211
+Title: Inconsistent behaviour of Distributed table engine and  `remote` table function when called with cluster and with list of addresses.
+Description:
+Here is the relevant part of the config:
+
+```xml
+    <remote_servers>                                                                                                                                                              
+        <bad>                                                                                                                     
+            <shard>                                                                                                               
+                <replica>                                                                                                         
+                    <host>127.0.0.2</host>                                                                                        
+                    <port>2</port>                                                                                                
+                </replica>                                                                                                        
+            </shard>                                                                                                              
+        </bad> 
+     </remote_servers>   
+```
+(I also turned off listening on `0.0.0.0` and `::`)
+
+So we have the "bad" cluster:
+```sql
+:) SELECT * FROM system.clusters
+
+SELECT *
+FROM system.clusters
+
+
+┌─cluster─┬─shard_num─┬─shard_weight─┬─replica_num─┬─host_name─┬─host_address─┬─port─┬─is_local─┬─user────┬─default_database─┐
+│ bad     │         1 │            1 │           1 │ 127.0.0.2 │ 127.0.0.2    │    2 │        0 │ default │                  │
+└─────────┴───────────┴──────────────┴─────────────┴───────────┴──────────────┴──────┴──────────┴─────────┴──────────────────┘
+
+1 rows in set. Elapsed: 8.030 sec. 
+```
+
+With default settings Clickhouse will try accessing this cluster 3 times:
+```sql
+:) SELECT hostName() FROM remote("bad", default.tmp)
+
+SELECT hostName()
+FROM remote(bad, default.tmp) 
+
+Received exception from server (version 19.1.6):
+Code: 279. DB::Exception: Received from click:9000, 172.19.0.18. DB::NetException. DB::NetException: All connection tries failed. Log: 
+
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+
+. 
+
+0 rows in set. Elapsed: 0.003 sec.
+```
+
+Same thing happens if we will specify address(es) manually:
+```sql
+:) SELECT hostName() FROM remote('127.0.0.2', default.tmp)
+
+SELECT hostName()
+FROM remote('127.0.0.2', default.tmp) 
+
+Received exception from server (version 19.1.6):
+Code: 279. DB::Exception: Received from click:9000, 172.19.0.18. DB::NetException. DB::NetException: All connection tries failed. Log: 
+
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+
+. 
+
+0 rows in set. Elapsed: 0.003 sec.
+```
+
+Let's change this setting:
+```sql
+:) SET connections_with_failover_max_tries = 5
+
+SET connections_with_failover_max_tries = 5
+
+Ok.
+
+0 rows in set. Elapsed: 0.001 sec.
+```
+
+So now, in previous example we will have 5 attempts:
+```sql
+:) SELECT hostName() FROM remote('127.0.0.2', default.tmp)
+
+SELECT hostName()
+FROM remote('127.0.0.2', default.tmp) 
+
+Received exception from server (version 19.1.6):
+Code: 279. DB::Exception: Received from click:9000, 172.19.0.18. DB::NetException. DB::NetException: All connection tries failed. Log: 
+
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:9000), e.what() = DB::NetException
+
+. 
+
+0 rows in set. Elapsed: 0.003 sec.
+```
+(note 5 `Code: 210` lines)
+
+But with cluster these (and some other) settings are ignored:
+```sql
+:) SELECT hostName() FROM remote("bad", default.tmp)
+
+SELECT hostName()
+FROM remote(bad, default.tmp) 
+
+Received exception from server (version 19.1.6):
+Code: 279. DB::Exception: Received from click:9000, 172.19.0.18. DB::NetException. DB::NetException: All connection tries failed. Log: 
+
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+
+. 
+
+0 rows in set. Elapsed: 0.003 sec.
+```
+
+Specifying settings in query doesn't help:
+```sql
+:) SELECT hostName() FROM remote("bad", default.tmp) SETTINGS connections_with_failover_max_tries = 5
+
+SELECT hostName()
+FROM remote(bad, default.tmp) 
+SETTINGS connections_with_failover_max_tries = 5
+
+Received exception from server (version 19.1.6):
+Code: 279. DB::Exception: Received from click:9000, 172.19.0.18. DB::NetException. DB::NetException: All connection tries failed. Log: 
+
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+Code: 210, e.displayText() = DB::NetException: Connection refused (127.0.0.2:2), e.what() = DB::NetException
+
+. 
+
+0 rows in set. Elapsed: 0.003 sec. 
+```
+
+This is reproducible in at least 5 or 6 latest -stable versions, something similar was first noticed in November 2017.
+Consequences of this is that `ENGINE=Distributed` tables do not work and cannot be forced to work across multiple data centers in different parts of the world.

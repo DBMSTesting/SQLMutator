@@ -1,0 +1,87 @@
+ID: 27930
+Title: `show grants for current_user` failed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+drop role if exists r1;
+drop user if exists u1;
+create role r1;
+create user u1;
+grant create user on *.* to r1 with grant option;
+grant r1 to u1;
+// use u1 user login
+set role r1;
+drop role r1;
+show grants for current_user;
+```
+
+### 2. What did you expect to see? (Required)
+
+successful
+
+### 3. What did you see instead (Required)
+```
+ERROR 3530 (HY000): `r1`@`%` is is not granted to u1@%
+```
+
+### 4. What is your TiDB version? (Required)
+
+master
+
+### Reason
+Probably because of the following reasons
+
+```
+func (e *ShowExec) fetchShowGrants() error {
+	vars := e.ctx.GetSessionVars()
+	checker := privilege.GetPrivilegeManager(e.ctx)
+	if checker == nil {
+		return errors.New("miss privilege checker")
+	}
+	if e.User == nil || e.User.CurrentUser {
+		// The input is a "SHOW GRANTS" statement with no users *or* SHOW GRANTS FOR CURRENT_USER()
+		// In these cases we include the active roles for showing privileges.
+		e.User = &auth.UserIdentity{Username: vars.User.AuthUsername, Hostname: vars.User.AuthHostname}
+// after drop role r1,
+// len(e.Roles)=0
+// but vars.ActiveRoles is 'r1'@'%'
+		if len(e.Roles) == 0 {
+			e.Roles = vars.ActiveRoles
+		}
+	} else {
+		userName := vars.User.AuthUsername
+		hostName := vars.User.AuthHostname
+		// Show grant user requires the SELECT privilege on mysql schema.
+		// Ref https://dev.mysql.com/doc/refman/8.0/en/show-grants.html
+		if userName != e.User.Username || hostName != e.User.Hostname {
+			if !checker.RequestVerification(vars.ActiveRoles, mysql.SystemDB, "", "", mysql.SelectPriv) {
+				return ErrDBaccessDenied.GenWithStackByArgs(userName, hostName, mysql.SystemDB)
+			}
+		}
+	}
+	// This is for the syntax SHOW GRANTS FOR x USING role
+	for _, r := range e.Roles {
+		if r.Hostname == "" {
+			r.Hostname = "%"
+		}
+		if !checker.FindEdge(e.ctx, r, e.User) {
+			return ErrRoleNotGranted.GenWithStackByArgs(r.String(), e.User.String())
+		}
+	}
+	gs, err := checker.ShowGrants(e.ctx, e.User, e.Roles)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for _, g := range gs {
+		e.appendRow([]interface{}{g})
+	}
+	return nil
+}
+```
+**after drop role r1,
+len(e.Roles)=0
+but vars.ActiveRoles is 'r1'@'%'**

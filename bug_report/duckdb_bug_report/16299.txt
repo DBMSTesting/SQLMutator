@@ -1,0 +1,116 @@
+ID: 16299
+Title: Multi File Reader Rework: Add `MultiFileReaderFunction` that is used to wrap a single-file reader, and use it for the Parquet reader
+Description:
+This PR reworks the `MultiFileReader` interface. This interface is used to enable reading of multiple files, and enables various options:
+
+* Support for reading multiple files and globbing
+* Hive partitioning support
+* `union_by_name` support
+* The `filename` parameter
+
+The idea behind the `MultiFileReader` is that we can take a reader that enables reading for a single file, and enable reading of multiple files at once.
+
+The current way that this is implemented is that the single file reader uses the `MultiFileReader` interface at various points:
+
+* The bind data has a `MultiFileList` and `MultiFileReader`
+* The global state has a `MultiFileListScanData`, `MultiFileReaderGlobalState` and `MultiFileList`
+* The single file reader has a `MultiFileReaderData` and `vector<MultiFileReaderColumnDefinition>`
+
+Then at several points, calls must be made into the `MultiFileReader` interface.
+
+This is rather tricky and error prone - as these calls must be made in the right places in the right order.
+
+
+### `MultiFileReaderFunction`
+
+This PR inverts the way the multi file reader works. The multi-file reader is now in control by making the top-level function the `MultiFileReaderFunction`. The single-file reader then provides various functions used by the `MultiFileReaderFunction`. This is provided through a template parameter that is used when instantiating the `MultiFileReaderFunction`. 
+
+Here is how the parquet scan is now instantiated - the required callbacks are located in the `ParquetMultiFileInfo` object:
+
+```cpp
+MultiFileReaderFunction<ParquetMultiFileInfo> table_function("parquet_scan");
+table_function.named_parameters["binary_as_string"] = LogicalType::BOOLEAN;
+table_function.named_parameters["file_row_number"] = LogicalType::BOOLEAN;
+table_function.named_parameters["debug_use_openssl"] = LogicalType::BOOLEAN;
+table_function.named_parameters["compression"] = LogicalType::VARCHAR;
+table_function.named_parameters["explicit_cardinality"] = LogicalType::UBIGINT;
+table_function.named_parameters["schema"] = LogicalTypeId::ANY;
+table_function.named_parameters["encryption_config"] = LogicalTypeId::ANY;
+table_function.named_parameters["parquet_version"] = LogicalType::VARCHAR;
+table_function.serialize = ParquetScanSerialize;
+table_function.deserialize = ParquetScanDeserialize;
+
+return MultiFileReader::CreateFunctionSet(static_cast<TableFunction>(table_function));
+```
+
+These are the required callbacks:
+
+```cpp
+struct ParquetMultiFileInfo {
+	static unique_ptr<BaseFileReaderOptions> InitializeOptions(ClientContext &context);
+	static bool ParseCopyOption(ClientContext &context, const string &key, const vector<Value> &values,
+	                            BaseFileReaderOptions &options);
+	static bool ParseOption(ClientContext &context, const string &key, const Value &val,
+	                        MultiFileReaderOptions &file_options, BaseFileReaderOptions &options);
+	static void BindReader(ClientContext &context, vector<LogicalType> &return_types, vector<string> &names,
+	                       MultiFileBindData &bind_data);
+	static unique_ptr<TableFunctionData> InitializeBindData(MultiFileBindData &multi_file_data,
+	                                                        unique_ptr<BaseFileReaderOptions> options);
+	static void FinalizeBindData(MultiFileBindData &multi_file_data);
+	static void GetBindInfo(const TableFunctionData &bind_data, BindInfo &info);
+	static idx_t MaxThreads(const TableFunctionData &bind_data_p);
+	static unique_ptr<GlobalTableFunctionState> InitializeGlobalState();
+	static unique_ptr<LocalTableFunctionState> InitializeLocalState();
+	static shared_ptr<BaseFileReader> CreateReader(ClientContext &context, BaseUnionData &union_data);
+	static shared_ptr<BaseFileReader> CreateReader(ClientContext &context, const string &filename,
+	                                               TableFunctionData &bind_data);
+	static void Scan(ClientContext &context, BaseFileReader &reader, GlobalTableFunctionState &global_state,
+	                 LocalTableFunctionState &local_state, DataChunk &chunk);
+	static bool TryInitializeScan(ClientContext &context, BaseFileReader &reader, GlobalTableFunctionState &gstate,
+	                              LocalTableFunctionState &lstate);
+	static void FinishFile(ClientContext &context, GlobalTableFunctionState &global_state);
+	static unique_ptr<NodeStatistics> GetCardinality(TableFunctionData &bind_data, idx_t file_count);
+	static unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, BaseFileReader &reader, const string &name);
+	static double GetProgressInFile(ClientContext &context, GlobalTableFunctionState &gstate);
+};
+```
+
+In general, these callbacks are a lot simpler than the previous scan code. The multi-file reader handles the iterating over the various files, the combining of schemas, etc. For example, this is the new bind data held by the Parquet reader:
+
+```cpp
+
+struct ParquetReadBindData : public TableFunctionData {
+	// These come from the initial_reader, but need to be stored in case the initial_reader is removed by a filter
+	idx_t initial_file_cardinality;
+	idx_t initial_file_row_groups;
+	idx_t explicit_cardinality = 0; // can be set to inject exterior cardinality knowledge (e.g. from a data lake)
+	ParquetOptions parquet_options;
+};
+```
+
+The `MultiFileBindData` holds this bind data, as well as the bind data that is required to do the multi-file processing (the file list, the reader, the file options, the types/names/virtual columns, etc):
+
+```cpp
+
+struct MultiFileBindData : public TableFunctionData {
+	unique_ptr<TableFunctionData> bind_data; // <- the ParquetReadBindData lives here
+	shared_ptr<MultiFileList> file_list;
+	unique_ptr<MultiFileReader> multi_file_reader;
+	vector<MultiFileReaderColumnDefinition> columns;
+	MultiFileReaderBindData reader_bind;
+	MultiFileReaderOptions file_options;
+	vector<LogicalType> types;
+	vector<string> names;
+	virtual_column_map_t virtual_columns;
+	vector<string> table_columns;
+	shared_ptr<BaseFileReader> initial_reader;
+	vector<unique_ptr<BaseUnionData>> union_readers;
+};
+```
+
+### To Do
+
+This is only the first step in the refactor:
+
+* Only the parquet reader has been moved to this new API. Likely there are Parquet-specific things that need to be moved out of the `MultiFileTableFunction`, and other code that is necessary to generalize this for other readers still.
+* This PR doesn't fundamentally change anything about the `MultiFileReader` - all the APIs remain unchanged. We likely want to do more clean-up around these APIs.

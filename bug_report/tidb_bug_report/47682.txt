@@ -1,0 +1,60 @@
+ID: 47682
+Title: Pessimistic lock should not be blocked more than 1 second when innodb_lock_wait_timeout = 0
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. `create table t2(c1 int primary key, c2 int, c3 int, c4 int, key uk2(c2), key k3(c3)) 
+	partition by list(c1) 
+	(PARTITION p0 VALUES in (1,2), 
+	PARTITION p1 VALUES in (3,4), 
+	PARTITION p2 VALUES in (5,6),
+	PARTITION p3 VALUES in (7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100))`
+
+2. 	db.MustExec("insert into t2 values (1,1,1,1),(2,2,2,2),(3,3,3,3),(4,4,4,4)")
+	Try(db.WithConns(3, func(conns ...*sqlz.Conn) error {
+		s1, s2, s3 := conns[0], conns[1], conns[2]
+		s1.MustExec("set autocommit = 0")
+		s1.MustExec("set innodb_lock_wait_timeout = 0")
+		s1.MustExec("set tidb_txn_mode = pessimistic")
+		s2.MustExec("set autocommit = 0")
+		s2.MustExec("set innodb_lock_wait_timeout = 0")
+		s2.MustExec("set tidb_txn_mode = pessimistic")
+		s3.MustExec("set tidb_txn_mode = optimistic")
+		s3.MustExec("set autocommit = 0")
+
+		// lock conflicts
+		s1.MustExec("select * from t2 where c4 > 2 for update")
+		s2.MustExec("insert into t2 values(5,5,5,5)")
+		f := s2.AsyncExec("update t2 set c4 = c4 + 1 where c3 = 3")
+		ctx.Logger().Info("s2 should wait lock timeout")
+		select {
+		case <-time.After(500 * time.Millisecond):
+			ctx.Logger().Info("s2 is blocked by s1 as expected")
+		case <-f:
+			must.Fail("s2 should be locked at least 1s")
+		}
+		select {
+		case <-time.After(1000 * time.Millisecond):
+			must.Fail("s2 is still locked after 1.5s, should lock wait timeout")
+		case vs := <-f:
+			if e := vs.Error(); e == nil || mysql.MatchError(e, mysql.ErrLockWaitTimeout) != nil {
+				must.Fail("s2 should failed with timeout")
+			} else {
+				ctx.Logger().Info("s2 failed with error as expected", zap.Error(e))
+			}
+		}
+
+### 2. What did you expect to see? (Required)
+s2 should not still locked after 1.5s
+
+### 3. What did you see instead (Required)
+Error:          s2 is still locked after 1.5s, should lock wait timeout
+
+### 4. What is your TiDB version? (Required)
+
+master
+

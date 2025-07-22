@@ -1,0 +1,80 @@
+ID: 24476
+Title: Issues around PREWHERE and row-level security (fixed?)
+Description:
+During the test upgrade to 21.3.8 of the installation using row-level policy (configured via XML file), several issues popped up.
+During the next attempt (this time to 21.3.11) that didn't reproduce - maybe it was already fixed, or some specific conditions disappeared. 
+
+We were not able (yet) to reproduce it in the synthetic tests.
+
+Queries are different, all of them had some PREWHERE condition on time + and group by / or condition on the column used in row-level security.
+
+```
+2021.05.07 14:27:32.288119 [ 74433 ] {} <Fatal> BaseDaemon: ########################################
+2021.05.07 14:27:32.288154 [ 74433 ] {} <Fatal> BaseDaemon: (version 21.3.8.76 (official build), build id: 0C9628B2A5A91E7CCD3AEB215D32DF337F4FB951) (from thread 9315) (no query) Received signal Segmentation fault (11)
+2021.05.07 14:27:32.288170 [ 74433 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+2021.05.07 14:27:32.288185 [ 74433 ] {} <Fatal> BaseDaemon: Stack trace: 0x9f6ba18 0xe91a9d6 0xe91b662 0xf4a6298 0xf4a4234 0xf4a4053 0xf49da23 0xf49e6fd 0xf49cf1b 0xf691425 0xf69101a 0xf84442a 0xf6cb40d 0xf6c8031 0xf6ccc06 0x853426f 0x8537d03 0x7ffff77b014a 0x7ffff74e1f23
+2021.05.07 14:27:32.288240 [ 74433 ] {} <Fatal> BaseDaemon: 1. DB::ExecutableFunctionAdaptor::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x9f6ba18 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288252 [ 74433 ] {} <Fatal> BaseDaemon: 2. DB::ExpressionActions::execute(DB::Block&, unsigned long&, bool) const @ 0xe91a9d6 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288259 [ 74433 ] {} <Fatal> BaseDaemon: 3. DB::ExpressionActions::execute(DB::Block&, bool) const @ 0xe91b662 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288267 [ 74433 ] {} <Fatal> BaseDaemon: 4. DB::MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(DB::MergeTreeRangeReader::ReadResult&) @ 0xf4a6298 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288275 [ 74433 ] {} <Fatal> BaseDaemon: 5. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xf4a4234 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288290 [ 74433 ] {} <Fatal> BaseDaemon: 6. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xf4a4053 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288297 [ 74433 ] {} <Fatal> BaseDaemon: 7. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0xf49da23 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288303 [ 74433 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeBaseSelectProcessor::readFromPart() @ 0xf49e6fd in /usr/bin/clickhouse
+2021.05.07 14:27:32.288309 [ 74433 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeBaseSelectProcessor::generate() @ 0xf49cf1b in /usr/bin/clickhouse
+2021.05.07 14:27:32.288318 [ 74433 ] {} <Fatal> BaseDaemon: 10. DB::ISource::tryGenerate() @ 0xf691425 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288325 [ 74433 ] {} <Fatal> BaseDaemon: 11. DB::ISource::work() @ 0xf69101a in /usr/bin/clickhouse
+2021.05.07 14:27:32.288332 [ 74433 ] {} <Fatal> BaseDaemon: 12. DB::SourceWithProgress::work() @ 0xf84442a in /usr/bin/clickhouse
+2021.05.07 14:27:32.288343 [ 74433 ] {} <Fatal> BaseDaemon: 13. ? @ 0xf6cb40d in /usr/bin/clickhouse
+2021.05.07 14:27:32.288353 [ 74433 ] {} <Fatal> BaseDaemon: 14. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xf6c8031 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288358 [ 74433 ] {} <Fatal> BaseDaemon: 15. ? @ 0xf6ccc06 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288367 [ 74433 ] {} <Fatal> BaseDaemon: 16. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x853426f in /usr/bin/clickhouse
+2021.05.07 14:27:32.288373 [ 74433 ] {} <Fatal> BaseDaemon: 17. ? @ 0x8537d03 in /usr/bin/clickhouse
+2021.05.07 14:27:32.288383 [ 74433 ] {} <Fatal> BaseDaemon: 18. start_thread @ 0x814a in /usr/lib64/libpthread-2.28.so
+2021.05.07 14:27:32.288395 [ 74433 ] {} <Fatal> BaseDaemon: 19. __clone @ 0xfcf23 in /usr/lib64/libc-2.28.so
+```
+
+
+```
+TCPHandler: Code: 49, e.displayText() = DB::Exception: Cannot combine filters because number of bytes in a first filter (0) does not match second filter size (1): While executing MergeTreeThread, Stack trace:
+
+0. DB::Exception::Exception<unsigned long&, unsigned long&>(int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long&, unsigned long&) @ 0xe64f146 in /usr/bin/clickhouse
+1. ? @ 0xf4a767b in /usr/bin/clickhouse
+2. DB::MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(DB::MergeTreeRangeReader::ReadResult&) @ 0xf4a6716 in /usr/bin/clickhouse
+3. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xf4a4234 in /usr/bin/clickhouse
+4. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xf4a4053 in /usr/bin/clickhouse
+5. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0xf49da23 in /usr/bin/clickhouse
+6. DB::MergeTreeBaseSelectProcessor::readFromPart() @ 0xf49e6fd in /usr/bin/clickhouse
+7. DB::MergeTreeBaseSelectProcessor::generate() @ 0xf49cf1b in /usr/bin/clickhouse
+8. DB::ISource::tryGenerate() @ 0xf691425 in /usr/bin/clickhouse
+9. DB::ISource::work() @ 0xf69101a in /usr/bin/clickhouse
+10. DB::SourceWithProgress::work() @ 0xf84442a in /usr/bin/clickhouse
+11. ? @ 0xf6cb40d in /usr/bin/clickhouse
+12. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xf6c8031 in /usr/bin/clickhouse
+13. ? @ 0xf6ccc06 in /usr/bin/clickhouse
+14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x853426f in /usr/bin/clickhouse
+15. ? @ 0x8537d03 in /usr/bin/clickhouse
+16. start_thread @ 0x814a in /usr/lib64/libpthread-2.28.so
+17. __clone @ 0xfcf23 in /usr/lib64/libc-2.28.so
+```
+
+```
+21.05.07 14:26:44.231104 [ 9284 ] {38f35ca2-a71b-4cb4-bfd3-184c1b11d918} <Error> TCPHandler: Code: 10, e.displayText() = DB::Exception: Not found column and(greaterOrEquals(_time, '2020-05-08 00:00:00'), less(_time, '2020-05-09 00:00:00')) in block. There are only columns: and(greaterOrEquals(_time, '2020-05-08 00:00:00'), less(_time, '2020-05-09 00:00:00')), team, Trader: While executing MergeTreeThread, Stack trace:
+
+0. DB::Block::getPositionByName(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xe49ac94 in /usr/bin/clickhouse
+1. DB::MergeTreeRangeReader::executePrewhereActionsAndFilterColumns(DB::MergeTreeRangeReader::ReadResult&) @ 0xf4a62aa in /usr/bin/clickhouse
+2. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xf4a4234 in /usr/bin/clickhouse
+3. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0xf49da23 in /usr/bin/clickhouse
+4. DB::MergeTreeBaseSelectProcessor::readFromPart() @ 0xf49e6fd in /usr/bin/clickhouse
+5. DB::MergeTreeBaseSelectProcessor::generate() @ 0xf49cf1b in /usr/bin/clickhouse
+6. DB::ISource::tryGenerate() @ 0xf691425 in /usr/bin/clickhouse
+7. DB::ISource::work() @ 0xf69101a in /usr/bin/clickhouse
+8. DB::SourceWithProgress::work() @ 0xf84442a in /usr/bin/clickhouse
+9. ? @ 0xf6cb40d in /usr/bin/clickhouse
+10. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xf6c8031 in /usr/bin/clickhouse
+11. ? @ 0xf6ccc06 in /usr/bin/clickhouse
+12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x853426f in /usr/bin/clickhouse
+13. ? @ 0x8537d03 in /usr/bin/clickhouse
+14. start_thread @ 0x814a in /usr/lib64/libpthread-2.28.so
+15. __clone @ 0xfcf23 in /usr/lib64/libc-2.28.so
+```

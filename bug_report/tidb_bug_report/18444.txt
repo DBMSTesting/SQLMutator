@@ -1,0 +1,90 @@
+ID: 18444
+Title: window function causes tidb-server OOM
+Description:
+## Description
+my table has 1 billion records, when I execute a paging query over the full table data by using the window function, it causes the tidb-server OOM (this tidb-server has 96G RAM to use). So I re-wrote the window function to the user variable query, it could get a result set in 18 minutes, with less than 1G RAM usage.
+
+schema:
+```
+CREATE TABLE `account` (
+  `accno` varchar(16) NOT NULL COMMENT '账号',
+  `accstate` char(1) NOT NULL DEFAULT '1' COMMENT '账户状态',
+  `realtimeremain` decimal(18,2) NOT NULL DEFAULT 0 COMMENT '实时余额',
+  `currency` char(3) NOT NULL COMMENT '币种',
+  `rate` decimal(13,5) NOT NULL DEFAULT 1 COMMENT '利率',
+  `accnature` char(1) NOT NULL DEFAULT '1' COMMENT '账号性质',
+  `cuno` varchar(15) NOT NULL COMMENT '客户号',
+  `reserve1` varchar(500) DEFAULT NULL COMMENT '备用字段1',
+  `reserve2` varchar(500) DEFAULT NULL COMMENT '备用字段2',
+  `reserve3` varchar(500) DEFAULT NULL COMMENT '备用字段3',
+  `reserve4` varchar(500) DEFAULT NULL COMMENT '备用字段4',
+  PRIMARY KEY (`accno`),
+  KEY `account_idx1` (`cuno`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin/*!90000 SHARD_ROW_ID_BITS=4 PRE_SPLIT_REGIONS=4 */ 
+```
+
+
+window fucnction:
+```select min(t.cuno) as start_key, max(t.cuno) as end_key, count(*) as page_size from (select *, row_number() over(order by cuno) as row_num from account) t group by floor((t.row_num-1)/10000000) order by start_key;```
+
+user variable:
+```
+set @rownum := -1;
+SELECT MIN(cuno) as START_KEY, MAX(cuno) as END_KEY, COUNT(1) as ROW_COUNT FROM (SELECT cuno, @rownum := @rownum + 1 AS rownum FROM (SELECT cuno FROM account ORDER BY cuno) t1 ) aa GROUP BY FLOOR(aa.rownum / 10000000) ORDER BY START_KEY;
+```
+
+Query plans:
+```
+desc select min(t.cuno) as start_key, max(t.cuno) as end_key, count(*) as page_size from (select *, row_number() over(order by cuno) as row_num from account) t group by floor((t.row_num-1)/10000000) order by start_key;
++--------------------------------+---------------+-----------+-----------------------------------------+----------------------------------------------------------------------------------------------------------------------------+
+| id                             | estRows       | task      | access object                           | operator info                                                                                                              |
++--------------------------------+---------------+-----------+-----------------------------------------+----------------------------------------------------------------------------------------------------------------------------+
+| Sort_9                         | 1000000000.00 | root      |                                         | Column#15:asc                                                                                                              |
+| └─HashAgg_14                   | 1000000000.00 | root      |                                         | group by:Column#20, funcs:min(Column#18)->Column#15, funcs:max(Column#19)->Column#16, funcs:count(1)->Column#17            |
+|   └─Projection_19              | 1000000000.00 | root      |                                         | bjbank.account.cuno, bjbank.account.cuno, floor(div(cast(minus(Column#14, 1), decimal(20,0) BINARY), 10000000))->Column#20 |
+|     └─Window_15                | 1000000000.00 | root      |                                         | row_number()->Column#14 over(order by bjbank.account.cuno asc)                                                             |
+|       └─IndexReader_17         | 1000000000.00 | root      |                                         | index:IndexFullScan_16                                                                                                     |
+|         └─IndexFullScan_16     | 1000000000.00 | cop[tikv] | table:account, index:account_idx1(cuno) | keep order:true                                                                                                            |
++--------------------------------+---------------+-----------+-----------------------------------------+----------------------------------------------------------------------------------------------------------------------------+
+
+desc analyze select min(t.cuno) as start_key, max(t.cuno) as end_key, count(*) as page_size from (select *, row_number() over(order by cuno) as row_num from account limit 1000) t group by floor((t.row_num-1)/100) order by start_key;
+
++----------------------------------+---------------+------------+-----------+-----------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+----------------------+---------+
+| id                               | estRows       | actRows    | task      | access object                           | execution info                                                                                                                                                                | operator info                                                                                                         | memory               | disk    |
++----------------------------------+---------------+------------+-----------+-----------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+----------------------+---------+
+| Sort_12                          | 1000.00       | 10         | root      |                                         | time:3m15.397278796s, loops:2                                                                                                                                                 | Column#15:asc                                                                                                         | 4.07421875 KB        | 0 Bytes |
+| └─HashAgg_17                     | 1000.00       | 10         | root      |                                         | time:3m15.397218963s, loops:4, PartialConcurrency:4, FinalConcurrency:4                                                                                                       | group by:Column#20, funcs:min(Column#18)->Column#15, funcs:max(Column#19)->Column#16, funcs:count(1)->Column#17       | 133.5 KB             | N/A     |
+|   └─Projection_25                | 1000.00       | 1000       | root      |                                         | time:3m15.395358217s, loops:3, Concurrency:OFF                                                                                                                                | bjbank.account.cuno, bjbank.account.cuno, floor(div(cast(minus(Column#14, 1), decimal(20,0) BINARY), 100))->Column#20 | 48.45703125 KB       | N/A     |
+|     └─Limit_20                   | 1000.00       | 1000       | root      |                                         | time:3m15.394528454s, loops:3                                                                                                                                                 | offset:0, count:1000                                                                                                  | N/A                  | N/A     |
+|       └─Window_21                | 1000.00       | 2016       | root      |                                         | time:3m15.394523978s, loops:2                                                                                                                                                 | row_number()->Column#14 over(order by bjbank.account.cuno asc)                                                        | N/A                  | N/A     |
+|         └─IndexReader_23         | 1000000000.00 | 1000000000 | root      |                                         | time:31.596764817s, loops:977088, rpc num: 1047, rpc max:33.007560791s, min:3.693526ms, avg:1.717018318s, p80:899.031845ms, p95:7.16128653s, proc keys max:960000, p95:960000 | index:IndexFullScan_22                                                                                                | 632.3662910461426 MB | N/A     |
+|           └─IndexFullScan_22     | 1000000000.00 | 1000000000 | cop[tikv] | table:account, index:account_idx1(cuno) | proc max:913ms, min:2ms, p80:588ms, p95:644ms, iters:981275, tasks:1047                                                                                                       | keep order:true                                                                                                       | N/A                  | N/A     |
++----------------------------------+---------------+------------+-----------+-----------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+----------------------+---------+
+7 rows in set (3 min 15.66 sec)
+
+
+set @rownum := -1;
+desc analyze SELECT MIN(cuno) as START_KEY, MAX(cuno) as END_KEY, COUNT(1) as ROW_COUNT FROM (SELECT cuno, @rownum := @rownum + 1 AS rownum FROM (SELECT cuno FROM account ORDER BY cuno) t1 ) aa GROUP BY FLOOR(aa.rownum / 10000000) ORDER BY START_KEY;
++--------------------------------+---------------+------------+-----------+-----------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------+----------------------+---------+
+| id                             | estRows       | actRows    | task      | access object                           | execution info                                                                                                                                                              | operator info                                                                                                     | memory               | disk    |
++--------------------------------+---------------+------------+-----------+-----------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------+----------------------+---------+
+| Sort_8                         | 1.00          | 100        | root      |                                         | time:19m41.843802625s, loops:2                                                                                                                                              | Column#14:asc                                                                                                     | 8.109375 KB          | 0 Bytes |
+| └─HashAgg_13                   | 1.00          | 100        | root      |                                         | time:19m41.84371097s, loops:5, PartialConcurrency:4, FinalConcurrency:4                                                                                                     | group by:Column#20, funcs:min(Column#18)->Column#14, funcs:max(Column#19)->Column#15, funcs:count(1)->Column#16   | 393.8212890625 KB    | N/A     |
+|   └─Projection_26              | 1000000000.00 | 1000000000 | root      |                                         | time:19m40.321371226s, loops:977086, Concurrency:4                                                                                                                          | bjbank.account.cuno, bjbank.account.cuno, floor(div(cast(Column#13, double BINARY), 1e+07))->Column#20            | 330.6181640625 KB    | N/A     |
+|     └─Projection_14            | 1000000000.00 | 1000000000 | root      |                                         | time:19m37.727724738s, loops:977086, Concurrency:OFF                                                                                                                        | bjbank.account.cuno, setvar(rownum, cast(plus(cast(getvar(rownum), double BINARY), 1), var_string(5)))->Column#13 | 608.85546875 KB      | N/A     |
+|       └─IndexReader_24         | 1000000000.00 | 1000000000 | root      |                                         | time:1.281933158s, loops:977086, rpc num: 1044, rpc max:1.25452029s, min:3.519209ms, avg:707.731171ms, p80:739.055763ms, p95:820.468834ms, proc keys max:960000, p95:960000 | index:IndexFullScan_23                                                                                            | 632.3662900924683 MB | N/A     |
+|         └─IndexFullScan_23     | 1000000000.00 | 1000000000 | cop[tikv] | table:account, index:account_idx1(cuno) | proc max:809ms, min:1ms, p80:560ms, p95:594ms, iters:981261, tasks:1044                                                                                                     | keep order:true                                                                                                   | N/A                  | N/A     |
++--------------------------------+---------------+------------+-----------+-----------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------+----------------------+---------+
+6 rows in set (19 min 41.87 sec)
+```
+## SIG slack channel
+
+ [#sig-exec](https://slack.tidb.io/invite?team=tidb-community&channel=sig-exec&ref=high-performance)
+
+## Score
+
+- 900
+
+## Mentor
+
+* @lzmhhh123

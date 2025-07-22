@@ -1,0 +1,115 @@
+ID: 40017
+Title: Logical bug: result lost after relaxing comparison condition [v4.0.9, v6.4.0]
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+drop table if exists t;
+CREATE TABLE t (c1 CHAR(20));
+INSERT INTO t VALUES ('well'),('3	');
+
+SELECT 1 FROM (SELECT 1 AS f1 FROM t) AS t1 WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~f1)>=ANY (SELECT c1 FROM t))); -- sql1
+SELECT 1 FROM (SELECT 1 AS f1 FROM t) AS t1 WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~f1)=ANY (SELECT c1 FROM t))); -- sql2
+```
+
+### 2. What did you expect to see? (Required)
+
+In theory, the result of sql1 ⊆ the result of sql2.
+First, the condition `>=ANY` in sql1 is more relaxed than the condition `=ANY` in sql2.
+Then, NOT will reverse this relationship.
+Therefore, the result of sql1 ⊆ the result of sql2.
+
+### 3. What did you see instead (Required)
+
+However, the result lost after changing `NOT ... >=ANY` to `NOT ... =ANY`, seems like a logical bug:
+
+```sql
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v6.4.0 |
++--------------------+
+1 row in set (0.00 sec)
+
+mysql> SELECT 1 FROM (SELECT 1 AS `f5` FROM t) AS `t1` WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~`f5`)>=ANY (SELECT c1 FROM t))); -- sql1
++---+
+| 1 |
++---+
+| 1 |
+| 1 |
++---+
+2 rows in set, 4 warnings (0.00 sec)
+
+mysql> SELECT 1 FROM (SELECT 1 AS `f5` FROM t) AS `t1` WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~`f5`)=ANY (SELECT c1 FROM t))); -- sql2
+Empty set, 6 warnings (0.01 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+Release Version: v6.4.0
+Edition: Community
+Git Commit Hash: cf36a9ce2fe1039db3cf3444d51930b887df18a1
+Git Branch: heads/refs/tags/v6.4.0
+UTC Build Time: 2022-11-13 05:25:30
+GoVersion: go1.19.2
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: unistore
+```
+
+### 5. Hope these can be helpful for your debugging:
+We look for the first version of the bug in all docker images (with format x.x.x) of https://hub.docker.com/r/pingcap/tidb/tags 
+We found that the bug first occurred in pingcap/tidb:v4.0.9, it cannot be reproduced in pingcap/tidb:v4.0.8:
+
+```sql
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v4.0.9 |
++--------------------+
+1 row in set (0.00 sec)
+
+mysql> SELECT 1 FROM (SELECT 1 AS f1 FROM t) AS t1 WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~f1)>=ANY (SELECT c1 FROM t))); -- sql1
++---+
+| 1 |
++---+
+| 1 |
+| 1 |
++---+
+2 rows in set, 8 warnings (0.00 sec)
+
+mysql> SELECT 1 FROM (SELECT 1 AS f1 FROM t) AS t1 WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~f1)=ANY (SELECT c1 FROM t))); -- sql2
+Empty set, 10 warnings (0.00 sec)
+
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v4.0.8 |
++--------------------+
+1 row in set (0.01 sec)
+
+mysql> SELECT 1 FROM (SELECT 1 AS f1 FROM t) AS t1 WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~f1)>=ANY (SELECT c1 FROM t))); -- sql1
++---+
+| 1 |
++---+
+| 1 |
+| 1 |
++---+
+2 rows in set, 3 warnings (0.00 sec)
+
+mysql> SELECT 1 FROM (SELECT 1 AS f1 FROM t) AS t1 WHERE ((DATE_SUB(TO_DAYS('2003-03-25'), INTERVAL 1 DAY)) NOT IN (SELECT c1 FROM t)) OR (NOT ((DAYOFWEEK('2010-12-07')>>1+~f1)=ANY (SELECT c1 FROM t))); -- sql2
++---+
+| 1 |
++---+
+| 1 |
+| 1 |
++---+
+2 rows in set, 5 warnings (0.01 sec)
+```

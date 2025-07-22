@@ -1,0 +1,198 @@
+ID: 956
+Title: [Bug]: The SQL Plan isn't efficient when there is one bit column in the filter condition. 
+Description:
+### Please check the issue list for the same bug
+
+- [X] I have checked issue list and this bug is encountered for the first time.
+
+### Environment
+
+```markdown
+Server version: 5.6.25 OceanBase 3.1.2 (r10000392021123010-d4ace121deae5b81d8f0b40afbc4c02705b7fc1d) (Built Dec 30 2021 02:47:29)
+```
+
+
+### Fast Reproduce Steps(Required)
+
+
+```
+oceanbase表结构1测试bit类型
+CREATE TABLE `_bit_test` (
+  `id` bigint(20) NOT NULL COMMENT '主键',
+  `is_deleted` bit(1) NOT NULL COMMENT '是否删除',
+  `tar_no` smallint(5) unsigned DEFAULT NULL COMMENT '4-6',
+  `cxr_cd` char(3) NOT NULL DEFAULT '' COMMENT '11-13',
+  `fare_class` varchar(8) NOT NULL DEFAULT '' COMMENT '14-21',
+  `type` char(1) NOT NULL DEFAULT '' COMMENT '22',
+  `owrt` tinyint(3) unsigned DEFAULT NULL COMMENT '23',
+  `seq_num` tinyint(3) unsigned DEFAULT NULL COMMENT '24-25',
+  PRIMARY KEY (`id`),
+  KEY `idx_query_new` (`is_deleted`, `cxr_cd`, `tar_no`, `fare_class`, `type`, `owrt`) BLOCK_SIZE 16384 GLOBAL
+) DEFAULT CHARSET = utf8mb4 ROW_FORMAT = COMPACT COMPRESSION = 'zstd_1.3.8' REPLICA_NUM = 3 BLOCK_SIZE = 16384 USE_BLOOM_FILTER = FALSE TABLET_SIZE = 134217728 PCTFREE = 0 COMMENT = ''
+```
+
+```
+oceanbase表结构2替换is_deleted类型为int类型
+CREATE TABLE `_int_test` (
+  `id` bigint(20) NOT NULL COMMENT '主键',
+  `is_deleted` int(1) NOT NULL COMMENT '是否删除',
+  `tar_no` smallint(5) unsigned DEFAULT NULL COMMENT '4-6',
+  `cxr_cd` char(3) NOT NULL DEFAULT '' COMMENT '11-13',
+  `fare_class` varchar(8) NOT NULL DEFAULT '' COMMENT '14-21',
+  `type` char(1) NOT NULL DEFAULT '' COMMENT '22',
+  `owrt` tinyint(3) unsigned DEFAULT NULL COMMENT '23',
+  `seq_num` tinyint(3) unsigned DEFAULT NULL COMMENT '24-25',
+  PRIMARY KEY (`id`),
+  KEY `idx_query_new` (`is_deleted`, `cxr_cd`, `tar_no`, `fare_class`, `type`, `owrt`) BLOCK_SIZE 16384 GLOBAL
+) DEFAULT CHARSET = utf8mb4 ROW_FORMAT = COMPACT COMPRESSION = 'zstd_1.3.8' REPLICA_NUM = 3 BLOCK_SIZE = 16384 USE_BLOOM_FILTER = FALSE TABLET_SIZE = 134217728 PCTFREE = 0 COMMENT = ''
+```
+
+
+### Actual Behavior
+
+执行sql1查询`is_deleted`为bit类型的_bit_test，且过滤条件为`is_deleted`= 0
+```
+desc SELECT * FROM `_bit_test` 
+WHERE `is_deleted`=0 AND `tar_no`=44 AND `cxr_cd`='LX' AND `fare_class`='N*****' AND `type`='N' AND `owrt`=2\G
+```
+结果：
+```
+Query Plan: =========================================================
+|ID|OPERATOR  |NAME                    |EST. ROWS|COST  |
+---------------------------------------------------------
+|0 |TABLE SCAN|_bit_test(idx_query_new)|1        |839369|
+=========================================================
+
+Outputs & filters: 
+-------------------------------------
+  0 - output([_bit_test.id], [_bit_test.is_deleted], [_bit_test.tar_no], [_bit_test.cxr_cd], [_bit_test.fare_class], [_bit_test.type], [_bit_test.owrt], [_bit_test.seq_num]), filter([cast(_bit_test.is_deleted, DECIMAL(1, 0)) = ?], [_bit_test.cxr_cd = 'LX'], [_bit_test.tar_no = 44], [_bit_test.fare_class = 'N*****'], [_bit_test.owrt = 2], [_bit_test.type = 'N']), 
+      access([_bit_test.is_deleted], [_bit_test.tar_no], [_bit_test.cxr_cd], [_bit_test.fare_class], [_bit_test.type], [_bit_test.owrt], [_bit_test.id], [_bit_test.seq_num]), partitions(p0)
+```
+
+执行sql2查询`is_deleted`为bit类型的_bit_test，且过滤条件为`is_deleted`=b'0'
+```
+desc SELECT * FROM `_bit_test` 
+WHERE `is_deleted`=b'0' AND `tar_no`=44 AND `cxr_cd`='LX' AND `fare_class`='N*****' AND `type`='N' AND `owrt`=2;
+```
+
+结果：
+```
+Query Plan: =========================================================
+|ID|OPERATOR  |NAME                    |EST. ROWS|COST  |
+---------------------------------------------------------
+|0 |TABLE SCAN|_bit_test(idx_query_new)|1        |839369|
+=========================================================
+
+Outputs & filters: 
+-------------------------------------
+  0 - output([_bit_test.id], [_bit_test.is_deleted], [_bit_test.tar_no], [_bit_test.cxr_cd], [_bit_test.fare_class], [_bit_test.type], [_bit_test.owrt], [_bit_test.seq_num]), filter([cast(_bit_test.is_deleted, DECIMAL(1, 0)) = ?], [_bit_test.cxr_cd = 'LX'], [_bit_test.tar_no = 44], [_bit_test.fare_class = 'N*****'], [_bit_test.owrt = 2], [_bit_test.type = 'N']), 
+      access([_bit_test.is_deleted], [_bit_test.tar_no], [_bit_test.cxr_cd], [_bit_test.fare_class], [_bit_test.type], [_bit_test.owrt], [_bit_test.id], [_bit_test.seq_num]), partitions(p0)
+```
+
+执行sql3查询`is_deleted`为int类型的_int_test
+```
+desc SELECT * FROM `_int_test` 
+WHERE `is_deleted`=0 AND `tar_no`=44 AND `cxr_cd`='LX' AND `fare_class`='N*****' AND `type`='N' AND `owrt`=2\G
+```
+
+结果：
+```
+Query Plan: =======================================================
+|ID|OPERATOR  |NAME                    |EST. ROWS|COST|
+-------------------------------------------------------
+|0 |TABLE SCAN|_int_test(idx_query_new)|14       |164 |
+=======================================================
+
+Outputs & filters: 
+-------------------------------------
+  0 - output([_int_test.id], [_int_test.is_deleted], [_int_test.tar_no], [_int_test.cxr_cd], [_int_test.fare_class], [_int_test.type], [_int_test.owrt], [_int_test.seq_num]), filter(nil), 
+      access([_int_test.is_deleted], [_int_test.tar_no], [_int_test.cxr_cd], [_int_test.fare_class], [_int_test.type], [_int_test.owrt], [_int_test.id], [_int_test.seq_num]), partitions(p0)
+```
+
+从mysql的角度理解 `idx_query_new` (`is_deleted`, `cxr_cd`, `tar_no`, `fare_class`, `type`, `owrt`) 覆盖了上述三个查询的全部条件，且完全满足左前缀原则，理论上会完全使用该索引上的全部字段。
+
+sql1和sql2查询is_deleted为bit类型的表，无论使用 = 0 还是 = b'0‘ 执行计划中的 filters在回表后均过滤到了全部字段，因此查询的cost非常高
+```
+filter([cast(_bit_test.is_deleted, DECIMAL(1, 0)) = ?], [_bit_test.cxr_cd = 'LX'], [_bit_test.tar_no = 44], [_bit_test.fare_class = 'N*****'], [_bit_test.owrt = 2], [_bit_test.type = 'N'])
+```
+而当我们替换掉is_deleted的类型变为int后执行计划中的 filters 回表后不用过滤任何字段，完全通过索引查询，查询的效率非常高
+```
+filter(nil)
+```
+
+我们关注到filter中存在一组bit类型的转换，而这个转换在mysql中是不存在的，这或许是bug的关键。这个类型转换导致了索引的失效
+```
+cast(_bit_test.is_deleted, DECIMAL(1, 0)) = ?
+```
+
+
+### Expected Behavior
+
+我们希望oceanbase和mysql一样，对于bit类型能正确使用到索引
+
+### other information
+
+基于上述信息，我们对索引进行了修改，并继续做了如下测试
+
+```
+oceanbase表结构3去掉索引idx_query_new最左侧字段`is_deleted`
+CREATE TABLE `_bit_test_2` (
+  `id` bigint(20) NOT NULL COMMENT '主键',
+  `is_deleted` bit(1) NOT NULL COMMENT '是否删除',
+  `tar_no` smallint(5) unsigned DEFAULT NULL COMMENT '4-6',
+  `cxr_cd` char(3) NOT NULL DEFAULT '' COMMENT '11-13',
+  `fare_class` varchar(8) NOT NULL DEFAULT '' COMMENT '14-21',
+  `type` char(1) NOT NULL DEFAULT '' COMMENT '22',
+  `owrt` tinyint(3) unsigned DEFAULT NULL COMMENT '23',
+  `seq_num` tinyint(3) unsigned DEFAULT NULL COMMENT '24-25',
+  PRIMARY KEY (`id`),
+  KEY `idx_test` (`cxr_cd`, `tar_no`, `fare_class`, `type`, `owrt`) BLOCK_SIZE 16384 GLOBAL
+) DEFAULT CHARSET = utf8mb4 ROW_FORMAT = COMPACT COMPRESSION = 'zstd_1.3.8' REPLICA_NUM = 3 BLOCK_SIZE = 16384 USE_BLOOM_FILTER = FALSE TABLET_SIZE = 134217728 PCTFREE = 0 COMMENT = ''
+```
+
+执行计划
+```
+Query Plan: ====================================================
+|ID|OPERATOR  |NAME                 |EST. ROWS|COST|
+----------------------------------------------------
+|0 |TABLE SCAN|_bit_test_2(idx_test)|3        |3259|
+====================================================
+
+Outputs & filters: 
+-------------------------------------
+  0 - output([_bit_test_2.id], [_bit_test_2.is_deleted], [_bit_test_2.tar_no], [_bit_test_2.cxr_cd], [_bit_test_2.fare_class], [_bit_test_2.type], [_bit_test_2.owrt], [_bit_test_2.seq_num]), filter([cast(_bit_test_2.is_deleted, DECIMAL(1, 0)) = ?]), 
+      access([_bit_test_2.is_deleted], [_bit_test_2.tar_no], [_bit_test_2.cxr_cd], [_bit_test_2.fare_class], [_bit_test_2.type], [_bit_test_2.owrt], [_bit_test_2.id], [_bit_test_2.seq_num]), partitions(p0)
+```
+在索引中去掉`is_deleted`后，执行cost大幅下降，执行效率大幅提升，filter部分仅过滤`is_deleted`
+
+
+```
+oceanbase表结构4将索引idx_query_new最左侧字段`is_deleted`放到索引的第三个位置
+CREATE TABLE `_bit_test_3` (
+  `id` bigint(20) NOT NULL COMMENT '主键',
+  `is_deleted` bit(1) NOT NULL COMMENT '是否删除',
+  `tar_no` smallint(5) unsigned DEFAULT NULL COMMENT '4-6',
+  `cxr_cd` char(3) NOT NULL DEFAULT '' COMMENT '11-13',
+  `fare_class` varchar(8) NOT NULL DEFAULT '' COMMENT '14-21',
+  `type` char(1) NOT NULL DEFAULT '' COMMENT '22',
+  `owrt` tinyint(3) unsigned DEFAULT NULL COMMENT '23',
+  `seq_num` tinyint(3) unsigned DEFAULT NULL COMMENT '24-25',
+  PRIMARY KEY (`id`),
+  KEY `idx_test` (`cxr_cd`, `tar_no`, `is_deleted`,`fare_class`, `type`, `owrt`) BLOCK_SIZE 16384 GLOBAL
+) DEFAULT CHARSET = utf8mb4 ROW_FORMAT = COMPACT COMPRESSION = 'zstd_1.3.8' REPLICA_NUM = 3 BLOCK_SIZE = 16384 USE_BLOOM_FILTER = FALSE TABLET_SIZE = 134217728 PCTFREE = 0 COMMENT = ''
+```
+执行计划
+```
+*************************** 1. row ***************************
+Query Plan: =====================================================
+|ID|OPERATOR  |NAME                 |EST. ROWS|COST |
+-----------------------------------------------------
+|0 |TABLE SCAN|_bit_test_3(idx_test)|1        |32739|
+=====================================================
+
+Outputs & filters: 
+-------------------------------------
+  0 - output([_bit_test_3.id], [_bit_test_3.is_deleted], [_bit_test_3.tar_no], [_bit_test_3.cxr_cd], [_bit_test_3.fare_class], [_bit_test_3.type], [_bit_test_3.owrt], [_bit_test_3.seq_num]), filter([cast(_bit_test_3.is_deleted, DECIMAL(1, 0)) = ?], [_bit_test_3.owrt = 2], [_bit_test_3.fare_class = 'N*****'], [_bit_test_3.type = 'N']), 
+      access([_bit_test_3.is_deleted], [_bit_test_3.tar_no], [_bit_test_3.cxr_cd], [_bit_test_3.fare_class], [_bit_test_3.type], [_bit_test_3.owrt], [_bit_test_3.id], [_bit_test_3.seq_num]), partitions(p0)
+```
+在索引中替换`is_deleted`位置后，执行cost下降，执行效率提升，filter部分过滤包含`is_deleted`后的全部字段

@@ -1,0 +1,49 @@
+ID: 13710
+Title: Error while reading AvroConfluent from Kafka where the magic byte or the schema id are missing or malformed
+Description:
+**Describe the bug**
+While using the AvroConfluent format for reading data in a table using the Kafka engine there is a bug when an abnormally small message is sent to the Kafka topic.
+
+If a message with less that 5 bytes of data is sent to a topic ClickHouse will report an error in the logs and the processing of messages from that Kafka table will get locked further on.
+
+I think that the problem resides in the implementation of the function 'readConfluentSchemaId' at line 695 in https://github.com/ClickHouse/ClickHouse/blob/master/src/Processors/Formats/Impl/AvroRowInputFormat.cpp
+
+'readConfluentSchemaId' function is trying to read 5 bytes (one uint8 and one uint32) at the beggining of the mesagge. If the message doesn't contains at least those 5 bytes, 'readBinaryBigEndian' seems to raise an exception that is not been controlled as a possible error in order to skip the messsage.
+
+**How to reproduce**
+* ClickHouse version 20.7.1.4292
+* Write a message with less than 5 bytes of content to any topic that is being read by a Kafka engine table. You can use the next command to produce that kind of 'bad' message: 
+
+`echo 00 | kafkacat -P -b kafka_broker:9092 -t topic_name`
+
+**Expected behavior**
+The message must be skipped as incorrect data in a similar fashion as it currently happens when the magic number is found invalid.
+
+**Error message and/or stacktrace**
+```
+2020.08.14 11:09:35.604059 [ 1432 ] {} <Trace> StorageKafka (category_events_stream_in): Polled batch of 1 messages. Offsets position: [ pimam_shop104_category_events[0:#], pimam_shop104_category_events[1:#], pimam_shop104_category_events[2:1] ]
+2020.08.14 11:09:35.605160 [ 1432 ] {} <Trace> StorageKafka (category_events_stream_in): Re-joining claimed consumer after failure
+2020.08.14 11:09:35.606102 [ 1432 ] {} <Error> void DB::StorageKafka::threadFunc(): Code: 33, e.displayText() = DB::Exception: Cannot read all data. Bytes read: 1. Bytes expected: 4., Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x126a2ac0 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xa3d82bd in /usr/bin/clickhouse
+2. DB::ReadBuffer::readStrict(char*, unsigned long) @ 0xa41bf6f in /usr/bin/clickhouse
+3. DB::AvroConfluentRowInputFormat::readRow(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, DB::RowReadExtension&) @ 0xfeca720 in /usr/bin/clickhouse
+4. DB::IRowInputFormat::generate() @ 0xfee7681 in /usr/bin/clickhouse
+5. DB::ISource::work() @ 0xfe6840b in /usr/bin/clickhouse
+6. ? @ 0xfab049d in /usr/bin/clickhouse
+7. DB::KafkaBlockInputStream::readImpl() @ 0xfab1904 in /usr/bin/clickhouse
+8. DB::IBlockInputStream::read() @ 0xf0a8c5d in /usr/bin/clickhouse
+9. DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::__1::atomic<bool>*) @ 0xf0cb83e in /usr/bin/clickhouse
+10. DB::StorageKafka::streamToViews() @ 0xfa88a97 in /usr/bin/clickhouse
+11. DB::StorageKafka::threadFunc() @ 0xfa89529 in /usr/bin/clickhouse
+12. DB::BackgroundSchedulePoolTaskInfo::execute() @ 0xf245bf9 in /usr/bin/clickhouse
+13. DB::BackgroundSchedulePool::threadFunction() @ 0xf246082 in /usr/bin/clickhouse
+14. ? @ 0xf2461b2 in /usr/bin/clickhouse
+15. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xa4059f7 in /usr/bin/clickhouse
+16. ? @ 0xa404033 in /usr/bin/clickhouse
+17. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+18. /build/glibc-2ORdQG/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97: clone @ 0x121a3f in /usr/lib/debug/lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.7.1.4292 (official build))
+2020.08.14 11:09:35.606272 [ 1432 ] {} <Trace> StorageKafka (category_events_stream_in): Execution took 508 ms.
+```

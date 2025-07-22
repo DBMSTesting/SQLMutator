@@ -1,0 +1,66 @@
+ID: 8154
+Title: Joining LowCardinality column to normal column causes segfault
+Description:
+**Describe the bug or unexpected behaviour**
+`ALL FULL` joining two tables, using a column which has type `LowCardinality(String)` in one table and `String` in the other, causes a segfault and crashes Clickhouse. Both tables are `ReplacingMergeTree()`.
+
+**How to reproduce**
+* Which ClickHouse server version to use
+ 19.17.5 revision 54428
+* Which interface to use, if matters
+ `clickhouse-client`
+*  `CREATE TABLE` statements
+```sql
+CREATE TABLE Alpha (
+	foo String,
+	bar UInt64 )
+ENGINE = ReplacingMergeTree() 
+ORDER BY foo
+
+CREATE TABLE Beta (
+	foo LowCardinality(String),
+	baz UInt64 )
+ENGINE = ReplacingMergeTree()
+ORDER BY foo
+
+INSERT INTO Alpha VALUES ('a', 1)
+INSERT INTO Beta VALUES ('a', 2), ('b', 3)
+```
+* Queries to run that lead to unexpected result
+```sql
+SELECT * FROM Alpha ALL FULL JOIN Beta USING (foo)
+```
+**Expected behavior**
+The query should execute (or not, I'm not sure if there are restrictions on `ALL` like there are on `ANY`). But if it's not possible the server should yield an error message, instead of crashing.
+
+**Error message and/or stacktrace**
+`Exception on client:
+Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000`
+```
+2019.12.11 15:38:20.817823 [ 52 ] {} <Fatal> BaseDaemon: ########################################
+2019.12.11 15:38:20.817895 [ 52 ] {} <Fatal> BaseDaemon: (version 19.17.5.18 (official build)) (from thread 45) Received signal Segmentation fault (11).
+2019.12.11 15:38:20.817930 [ 52 ] {} <Fatal> BaseDaemon: Address: 0x7f16d2600000 Access: read. Address not mapped to object.
+2019.12.11 15:38:20.817965 [ 52 ] {} <Fatal> BaseDaemon: Stack trace: 0x55c25b3cf09b 0x55c259101080 0x55c25906215d 0x55c259063420 0x55c255e7c821 0x55c255e7e2f7 0x55c255e8180e 0x55c255e819fb 0x55c259d826f0 0x55c259d82e0d 0x55c25b458f81 0x55c25b456d2c 0x55c25bbccec0 0x7f16da1ba6db 0x7f16d9ad788f
+2019.12.11 15:38:20.854393 [ 52 ] {} <Fatal> BaseDaemon: 3. 0x55c25b3cf09b memcpy /usr/bin/clickhouse
+2019.12.11 15:38:20.854441 [ 52 ] {} <Fatal> BaseDaemon: 4. 0x55c259101080 DB::DataTypeString::serializeBinaryBulk(DB::IColumn const&, DB::WriteBuffer&, unsigned long, unsigned long) const /usr/bin/clickhouse
+2019.12.11 15:38:20.854458 [ 52 ] {} <Fatal> BaseDaemon: 5. 0x55c25906215d DB::NativeBlockOutputStream::writeData(DB::IDataType const&, COW<DB::IColumn>::immutable_ptr<DB::IColumn> const&, DB::WriteBuffer&, unsigned long, unsigned long) /usr/bin/clickhouse
+2019.12.11 15:38:20.854469 [ 52 ] {} <Fatal> BaseDaemon: 6. 0x55c259063420 DB::NativeBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+2019.12.11 15:38:20.854481 [ 52 ] {} <Fatal> BaseDaemon: 7. 0x55c255e7c821 DB::TCPHandler::sendData(DB::Block const&) /usr/bin/clickhouse
+2019.12.11 15:38:20.854491 [ 52 ] {} <Fatal> BaseDaemon: 8. 0x55c255e7e2f7 DB::TCPHandler::processOrdinaryQuery() /usr/bin/clickhouse
+2019.12.11 15:38:20.854501 [ 52 ] {} <Fatal> BaseDaemon: 9. 0x55c255e8180e DB::TCPHandler::runImpl() /usr/bin/clickhouse
+2019.12.11 15:38:20.854520 [ 52 ] {} <Fatal> BaseDaemon: 10. 0x55c255e819fb DB::TCPHandler::run() /usr/bin/clickhouse
+2019.12.11 15:38:20.854534 [ 52 ] {} <Fatal> BaseDaemon: 11. 0x55c259d826f0 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+2019.12.11 15:38:20.854544 [ 52 ] {} <Fatal> BaseDaemon: 12. 0x55c259d82e0d Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+2019.12.11 15:38:20.854560 [ 52 ] {} <Fatal> BaseDaemon: 13. 0x55c25b458f81 Poco::PooledThread::run() /usr/bin/clickhouse
+2019.12.11 15:38:20.854569 [ 52 ] {} <Fatal> BaseDaemon: 14. 0x55c25b456d2c Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+2019.12.11 15:38:20.854579 [ 52 ] {} <Fatal> BaseDaemon: 15. 0x55c25bbccec0 ? /usr/bin/clickhouse
+2019.12.11 15:38:20.854591 [ 52 ] {} <Fatal> BaseDaemon: 16. 0x7f16da1ba6db start_thread /lib/x86_64-linux-gnu/libpthread-2.27.so
+2019.12.11 15:38:20.854655 [ 52 ] {} <Fatal> BaseDaemon: 17. 0x7f16d9ad788f clone /build/glibc-OTsEL5/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97
+```
+
+**Additional context**
+`INNER JOIN` seems OK. So I suspect it's the presence of `'b'` in the LowCardinality column, and not in the normal column. `ALL FULL` join is also OK when neither column is LowCardinality. Instead of crashing, something else happened a few times on an attempt to reproduce the bug:
+
+`Memory limit (for query) exceeded: would use 128.00 TiB (attempt to allocate chunk of 140737488360488 bytes), maximum: 9.31 GiB.`
+
+I'm not sure if you want to handle that as a separate bug. Otherwise I have traces for that, too.

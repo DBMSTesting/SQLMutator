@@ -1,0 +1,70 @@
+ID: 835
+Title: Bug with Strings containing Zero-Byte Characters in Primary Key on ReplacingMergeTree Engine
+Description:
+There seems to be a bug when merging buckets, when the Primary Key contains a String which can have a zero-byte character. It seems th PK constraint doesnt consider the values behind the zero byte character anymore, even so the string itself ist stored correctly.
+
+Example:
+
+```
+CREATE TABLE replacing_key_test
+(
+    evDate Date,
+    evId String,
+    evData String
+) ENGINE = ReplacingMergeTree(evDate, (evDate, evId), 8192);
+
+insert into replacing_key_test values ('2017-05-31', '0001', 'a');
+insert into replacing_key_test values ('2017-05-31', '0002', 'b');
+insert into replacing_key_test values ('2017-05-31', '0002', 'bb');
+insert into replacing_key_test values ('2017-05-31', unhex('0001'), 'A');
+insert into replacing_key_test values ('2017-05-31', unhex('0002'), 'B');
+ 
+SELECT evDate, hex(evId), evData FROM replacing_key_test FINAL; 
++-----evDate---hex(evId)---evData-+
+¦ 2017-05-31 ¦ 0002      ¦ B      ¦
+¦ 2017-05-31 ¦ 30303031  ¦ a      ¦
+¦ 2017-05-31 ¦ 30303032  ¦ bb     ¦
++---------------------------------+
+```
+
+
+The expected behaviour would have been:
+
+```
++-----evDate---hex(evId)---evData-+
+¦ 2017-05-31 ¦ 0001      ¦ A      ¦
+¦ 2017-05-31 ¦ 0002      ¦ B      ¦
+¦ 2017-05-31 ¦ 30303031  ¦ a      ¦
+¦ 2017-05-31 ¦ 30303032  ¦ bb     ¦
++---------------------------------+
+```
+
+
+When using FixedString instead of String (not possible in our case) the behaviour is correct:
+
+```
+CREATE TABLE replacing_key_test_fixed
+(
+    evDate Date,
+    evId FixedString(4),
+    evData String
+) ENGINE = ReplacingMergeTree(evDate, (evDate, evId), 8192);
+
+insert into replacing_key_test_fixed values ('2017-05-31', '0001', 'a');
+insert into replacing_key_test_fixed values ('2017-05-31', '0002', 'b');
+insert into replacing_key_test_fixed values ('2017-05-31', '0002', 'bb');
+insert into replacing_key_test_fixed values ('2017-05-31', unhex('0001'), 'A');
+insert into replacing_key_test_fixed values ('2017-05-31', unhex('0002'), 'B');
+
+SELECT evDate, hex(evId), evData FROM replacing_key_test_fixed FINAL; 
+
++-----evDate---hex(evId)---evData-+
+¦ 2017-05-31 ¦ 00010000  ¦ A      ¦
+¦ 2017-05-31 ¦ 00020000  ¦ B      ¦
+¦ 2017-05-31 ¦ 30303031  ¦ a      ¦
+¦ 2017-05-31 ¦ 30303032  ¦ bb     ¦
++---------------------------------+
+
+```
+
+

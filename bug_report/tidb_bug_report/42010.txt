@@ -1,0 +1,63 @@
+ID: 42010
+Title: `IndexReader` with hash partition table get wrong result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Run test code below
+```
+func TestForTest(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("create database test_orderby_limit")
+	tk.MustExec("use test_orderby_limit")
+	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
+
+	tk.MustExec("create table tregular(a int, b int, index idx_a(a))")
+	tk.MustExec("create table thash(a int, b int, index idx_a(a), index idx_b(b)) partition by hash(a) partitions 4;")
+
+	// generate some random data to be inserted
+	vals := make([]string, 0, 2000)
+	for i := 0; i < 2000; i++ {
+		vals = append(vals, fmt.Sprintf("(%v, %v)", rand.Intn(1100), rand.Intn(2000)))
+	}
+
+	valInserted := strings.Join(vals, ",")
+
+	tk.MustExec("insert into thash values " + valInserted)
+	tk.MustExec("insert into tregular values " + valInserted)
+
+	tk.MustExec("analyze table thash")
+	tk.MustExec("analyze table tregular")
+
+	// test indexReader with order property pushed down.
+	for i := 0; i < 100; i++ {
+		// explain select a from t where a > {y}  use index(idx_a) order by a limit {x}; // check if IndexLookUp is used
+		// select a from t where a > {y} use index(idx_a) order by a limit {x}; // it can return the correct result
+		x := rand.Intn(1099)
+		y := 1
+		queryHashPartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from thash use index(idx_a) where a > %v order by a limit %v;", x, y)
+		queryRegular := fmt.Sprintf("select a from tregular use index(idx_a) where a > %v order by a limit %v;", x, y)
+		regularResult := tk.MustQuery(queryRegular).Rows()
+		tk.MustQuery(queryHashPartition).Check(regularResult)
+	}
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+pass
+
+### 3. What did you see instead (Required)
+
+hashPartition always get wrong result.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+5ff5b346912924d10af609d081933aaad46536ae
+

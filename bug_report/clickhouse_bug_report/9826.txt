@@ -1,0 +1,109 @@
+ID: 9826
+Title: Different results are returned at every execution by executing same query which contains several UNIONs and JOINs in version 20.3.3.
+Description:
+#### Overview
+Different results are returned as result of executing the same query which commands joining several tables and union each tables. 
+
+Sometimes results of executing the query lacking some joined tables.
+
+When I execute it several times, joined tables which are heavier and/or in latter position of query are lacked in more trial.
+
+It seems that a bug occurs on executing parallel processing, and it maybe union executing before fetching all intermediate tables.
+
+This occurs on clickhouse version20.3.3.
+
+#### How to Reproduce
+
+I execute below query.
+This query is **expected returning 8 tableNames**, but it returns **different number of tableNames at every execution**.
+
+#### Executing Query
+```
+SELECT
+    tableName
+FROM
+    (
+    queryNotJoin('T1_notJoin1')    
+    union ALL
+    queryFilteredAfterJoin('T2_filteredAfterJoin1', '2020-01-01')
+    union ALL
+    queryFilteredAfterJoin('T3_filteredAfterJoin2', '2020-01-02')
+    union ALL
+    queryFilteredBeforeJoin('T4_filteredBeforeJoin1', '2020-01-01')
+    union ALL
+    queryFilteredBeforeJoin('T5_filteredBeforeJoin2', '2020-01-02')
+    union all
+    queryFilteredAfterJoin('T6_filteredAfterJoin3', '2020-01-03')
+    union all
+    queryNotJoin('T7_notJoin2')
+    union ALL
+    queryFilteredBeforeJoin('T8_filteredBeforeJoin3', '2020-01-03')
+    ) as a
+group BY 
+    tableName
+order BY
+    tableName
+
+In above query, using below function-like table aliases to make it easier to read.
+
+queryNotJoin(name)
+ select
+     col1, 
+     '{name}' as tableName,
+     count(*) as c
+ from
+     tableA
+
+queryFilteringAfterJoin(name, date)
+ select
+     a.col1,
+     '{name}' as tableName,
+     count(*) as c
+ from
+     tableB as b
+     inner JOIN
+     tableA as a
+     on a.id = b.Aid
+ where
+     a.colDate = '{date}'
+ group by
+     a.col1
+   
+queryFilteringBeforeJoin(name, date)
+ select
+     a.col1,
+     '{name}' as tableName,
+     count(*) as c
+ from
+     tableB as b
+     inner JOIN
+     (select col1, id from tableA WHERE colDate = '{date}') as a
+     on a.id = b.Aid
+ group by
+     a.col1
+
+tableA has  9.6G columns.
+tableB has 59.9K columns.
+```
+
+#### Testing and consideration
+
+I executed the query 100 times and counted values in tableName rows.
+
+```
+'T1_notJoin1'           : 100
+'T2_filteredAfterJoin1' :  59
+'T3_filteredAfterJoin2' :  47
+'T4_filteredBeforeJoin1': 100
+'T5_filteredBeforeJoin2':  95
+'T6_filteredAfterJoin3' :  11
+'T7_notJoin2'           : 100
+'T8_filteredBeforeJoin3' : 54
+```
+*When executing alone, queryNotJoin, queryFilteredBeforeJoin and queryFilteredAfterJoin are spent less time in this order. 
+
+* Comparing same joined table query, result of in latter position of query result is more lacked.
+
+*  Comparing different joined table query, result of slower query is more lacked.
+
+I guess that this problem is  caused by that the UNION is executed without  waiting to done processes of fetching joined table.   

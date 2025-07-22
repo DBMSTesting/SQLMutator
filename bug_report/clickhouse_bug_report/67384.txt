@@ -1,0 +1,60 @@
+ID: 67384
+Title: `ALTER` queries are not handled properly with `AsynchronousInsertQueue`
+Description:
+**Describe what's wrong**
+
+If the schema of the table changes while data is buffered for async inserts, the insertion can fail.
+
+**Does it reproduce on the most recent release?**
+
+Yes.
+
+**How to reproduce**
+```
+SET wait_for_async_insert = 0;
+SET async_insert_busy_timeout_max_ms = 2000;
+SET async_insert_use_adaptive_busy_timeout = 0;
+
+DROP TABLE IF EXISTS test;
+CREATE TABLE test
+(
+    `id` Int64,
+    `value` SimpleAggregateFunction(anyLast, Nullable(Int64)),
+)
+ENGINE = ReplicatedAggregatingMergeTree('/clickhouse/tables/test', 'replica')
+ORDER BY id
+SETTINGS async_insert = 1;
+
+
+
+INSERT INTO test VALUES (42, 24);
+ALTER TABLE test ADD COLUMN IF NOT EXISTS value2 SimpleAggregateFunction(anyLast, Nullable(Int64));
+```
+
+Then check the logs and there will be an error:
+```
+2024.07.29 13:28:44.457115 [ 1401918 ] {} <Error> AsynchronousInsertQueue: Failed insertion for query 'INSERT INTO default.test FORMAT Native': Code: 49. DB::Exception: Invalid number of rows in Chunk column Nullable(Int64) position 2: expected 1, got 0. (LOGICAL_ERROR), Stack trace (when copying this message, always include the lines below):
+
+0. ./contrib/llvm-project/libcxx/include/exception:141: Poco::Exception::Exception(String const&, int) @ 0x000000001467ee92
+1. ./build/./src/Common/Exception.cpp:111: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000bad66d9
+2. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x0000000006792a8c
+3. DB::Exception::Exception<String, String, String>(int, FormatStringHelperImpl<std::type_identity<String>::type, std::type_identity<String>::type, std::type_identity<String>::type>, String&&, String&&, String&&) @ 0x000000000683f0ab
+4. ./build/./src/Processors/Chunk.cpp:0: DB::Chunk::checkNumRowsIsConsistent() @ 0x0000000011af9bf3
+5. ./build/./src/Processors/Chunk.cpp:36: DB::Chunk::Chunk(std::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn>>>, unsigned long) @ 0x0000000011af9e6b
+6. ./contrib/llvm-project/libcxx/include/vector:438: DB::AsynchronousInsertQueue::processData(DB::AsynchronousInsertQueue::InsertQuery, std::unique_ptr<DB::AsynchronousInsertQueue::InsertData, std::default_delete<DB::AsynchronousInsertQueue::InsertData>>, std::shared_ptr<DB::Context const>, DB::AsynchronousInsertQueue::QueueShardFlushTimeHistory&) @ 0x000000000fedbc3c
+7. ./build/./src/Interpreters/AsynchronousInsertQueue.cpp:0: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::AsynchronousInsertQueue::scheduleDataProcessingJob(DB::AsynchronousInsertQueue::InsertQuery const&, std::unique_ptr<DB::AsynchronousInsertQueue::InsertData, std::default_delete<DB::AsynchronousInsertQueue::InsertData>>, std::shared_ptr<DB::Context const>, unsigned long)::$_0, void ()>>(std::__function::__policy_storage const*) @ 0x000000000fede422
+8. ./base/base/../base/wide_integer_impl.h:817: ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false, true>, void*>) @ 0x000000000bb8beb6
+9. ./build/./src/Common/ThreadPool.cpp:0: ThreadFromGlobalPoolImpl<false, true>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'()::operator()() @ 0x000000000bb8ee11
+10. ./base/base/../base/wide_integer_impl.h:817: ThreadPoolImpl<std::thread>::worker(std::__list_iterator<std::thread, void*>) @ 0x000000000bb89601
+11. ./contrib/llvm-project/libcxx/include/__memory/unique_ptr.h:302: void* std::__thread_proxy[abi:v15007]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000bb8d9ce
+12. ? @ 0x000075a6ccc94ac3
+13. ? @ 0x000075a6ccd26850
+ (version 24.8.1.1)
+```
+**Expected behavior**
+
+Most importantly don't get a `LOGICAL_ERROR`. Maybe throw a different error code, or somehow make the insert succeed (I am not sure if it is possible).
+
+**Error message and/or stacktrace**
+
+See above.

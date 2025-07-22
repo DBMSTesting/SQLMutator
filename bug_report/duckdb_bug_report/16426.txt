@@ -1,0 +1,177 @@
+ID: 16426
+Title: INTERNAL Error: Failed to bind column reference ""
+Description:
+### What happens?
+
+The query below results in the following error:
+
+```
+INTERNAL Error:
+Failed to bind column reference "" [76.0] (bindings: {#[0.0], #[0.1], #[141.0], #[144.0], #[138.0], #[135.0], #[132.0], #[129.0], #[30.0], #[30.1], #[30.2]})
+```
+
+Interestingly, the issue disappears when I do one of the following:
+- Remove the `WHERE` clause from the final query (i.e. `WHERE termid IN (SELECT termid FROM termids)`)
+- Remove one or more of the `WHEN` clauses from the `CASE` expression
+
+Here is the full stack trace when running the query in the latest nightly build (`v1.3.0-dev756` d608a31e13):
+
+```
+INTERNAL Error:
+Failed to bind column reference "" [76.0] (bindings: {#[0.0], #[0.1], #[141.0], #[144.0], #[138.0], #[135.0], #[132.0], #[129.0], #[30.0], #[30.1], #[30.2]})
+
+Stack Trace:
+
+./duckdb() [0x91b5c3]
+./duckdb() [0x91b5f6]
+./duckdb() [0x91dc01]
+./duckdb() [0xaf0f24]
+./duckdb() [0x491d60]
+./duckdb() [0xe4d521]
+./duckdb() [0xadad01]
+./duckdb() [0xadad75]
+./duckdb() [0xe5a7a2]
+./duckdb() [0xadac2b]
+./duckdb() [0xe5a7a2]
+./duckdb() [0xadac2b]
+./duckdb() [0xe5a7a2]
+./duckdb() [0xadac2b]
+./duckdb() [0xe5a7a2]
+./duckdb() [0xadac2b]
+./duckdb() [0xadb72c]
+./duckdb() [0xb72937]
+./duckdb() [0xb72f4d]
+./duckdb() [0xb7f7b6]
+./duckdb() [0xb86857]
+./duckdb() [0xb8792b]
+./duckdb() [0xb86aa6]
+./duckdb() [0xb8ba3e]
+./duckdb() [0xb8bb3e]
+./duckdb() [0xb8bde2]
+./duckdb() [0x74a6fc]
+./duckdb() [0x72c4e7]
+./duckdb() [0x72d14c]
+./duckdb() [0x72d7c7]
+./duckdb() [0x71f8e3]
+/lib/x86_64-linux-gnu/libc.so.6(+0x29d90) [0x7d53bfe29d90]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80) [0x7d53bfe29e40]
+./duckdb() [0x723237]
+
+This error signals an assertion failure within DuckDB. This usually occurs due to unexpected conditions or errors in the program's logic.
+For more information, see https://duckdb.org/docs/dev/internal_errors
+```
+
+I found some other issues with the "Failed to bind column reference" error (#15586 and #15640), but the queries seem to be quite different so I'm not sure if they are related.
+
+Note: I'm running information retrieval experiments in a similar way to how the FTS extension works, but the issue seems unrelated to the FTS extension itself. I'm using the FTS extension to simplify the reproducible example below, but in practice I am creating the tables manually and writing my own queries.
+
+### To Reproduce
+
+To create the tables (using some random sample data):
+```
+CREATE TABLE sample_docs AS
+    SELECT o_orderkey::VARCHAR AS name, o_comment AS content
+    FROM 'https://shell.duckdb.org/data/tpch/0_01/parquet/orders.parquet';
+
+PRAGMA create_fts_index(sample_docs, name, content);
+
+USE fts_main_sample_docs;
+CREATE TABLE postings AS
+    SELECT docid, termid, COUNT(*) AS tf
+    FROM fts_main_sample_docs.terms
+    GROUP BY ALL;
+```
+Then, to reproduce the internal error:
+```
+WITH termids AS (
+    WITH tokens AS (
+        SELECT unnest(tokenize('this is a sample test query')) AS t
+    ),
+    stemmed AS (
+        SELECT stem(t, 'porter') AS t
+        FROM tokens
+        WHERE tokens.t NOT IN (FROM stopwords)
+    ),
+    qtfs AS (
+        SELECT t, COUNT(*) AS qtf
+        FROM stemmed
+        GROUP BY t
+    )
+    SELECT termid, df, qtf
+    FROM qtfs
+    JOIN dict ON dict.term = qtfs.t
+)
+SELECT
+    docid,
+    first(name) AS name,
+    CASE LOWER('bm25')
+        WHEN 'bm25' THEN
+            SUM(
+                qtf * 
+                log(
+                    ((SELECT num_docs FROM stats) - df + 0.5) / (df + 0.5)
+                ) * (tf * (0.9 + 1)) / (
+                    tf + 0.9 * (1 - 0.4 + 0.4 * len / (SELECT avgdl FROM stats))
+                )
+            )
+        WHEN 'lm' THEN
+            log(FIRST(len)) + SUM(
+                qtf *
+                log(
+                    1 + (0.7 * tf * (SELECT SUM(df) FROM dict)) / ((1-0.7) * df * len)
+                )
+            )
+        WHEN 'inquery' THEN
+            SUM(
+                qtf * 
+                (
+                    0.4 + (1 - 0.4) * (tf / (tf + 50 + 150 * len / (SELECT avgdl FROM stats))) * log(((SELECT num_docs FROM stats) + 0.5) / df) / log((SELECT num_docs FROM stats) + 1.0)
+                )
+            )
+    END AS score
+FROM postings
+JOIN docs USING (docid)
+JOIN termids USING (termid)
+WHERE termid IN (SELECT termid FROM termids)
+GROUP BY docid;
+```
+
+### OS:
+
+Linux 6.9.3-76060903-generic x86_64
+
+### DuckDB Version:
+
+v1.3.0-dev756 d608a31e13
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Gijs Hendriksen
+
+### Affiliation:
+
+Radboud University
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

@@ -1,0 +1,123 @@
+ID: 859
+Title: Wrong query optimisation throws out required columns from subqueries.
+Description:
+Query below works fine.
+
+```sql
+SELECT *
+FROM
+(
+    SELECT
+        learnerHash,
+        passed - eventTime AS diff
+    FROM statements
+    GLOBAL ANY INNER JOIN
+    (
+        SELECT
+            learnerHash,
+            argMax(eventTime, resultScoreRaw) AS passed
+        FROM
+        (
+            SELECT
+                learnerHash,
+                eventTime,
+                resultScoreRaw
+            FROM statements
+            PREWHERE (courseId = 1) AND (onCourse = 0)
+            WHERE (verb = 'http://adlnet.gov/expapi/verbs/passed') AND (objectId = 'https://crmm.ru/xapi/courses/spp/1/1/0-1')
+            ORDER BY eventTime ASC
+        )
+        GROUP BY learnerHash
+    ) USING (learnerHash)
+    PREWHERE (courseId = 1) AND (onCourse = 0)
+    WHERE (verb = 'http://adlnet.gov/expapi/verbs/interacted') AND (eventTime <= passed) AND (diff > 0)
+    ORDER BY eventTime DESC
+    LIMIT 1 BY learnerHash
+)
+ORDER BY diff DESC
+LIMIT 7, 126
+```
+
+But if you wrap this query in query like below, Clickhouse will throw error: Not found column learnerHash in block. There are only columns: diff
+
+```sql
+SELECT avg(diff)
+FROM
+(
+    SELECT *
+    FROM
+    (
+        SELECT
+            learnerHash,
+            passed - eventTime AS diff
+        FROM statements
+        GLOBAL ANY INNER JOIN
+        (
+            SELECT
+                learnerHash,
+                argMax(eventTime, resultScoreRaw) AS passed
+            FROM
+            (
+                SELECT
+                    learnerHash,
+                    eventTime,
+                    resultScoreRaw
+                FROM statements
+                PREWHERE (courseId = 1) AND (onCourse = 0)
+                WHERE (verb = 'http://adlnet.gov/expapi/verbs/passed') AND (objectId = 'https://crmm.ru/xapi/courses/spp/1/1/0-1')
+                ORDER BY eventTime ASC
+            )
+            GROUP BY learnerHash
+        ) USING (learnerHash)
+        PREWHERE (courseId = 1) AND (onCourse = 0)
+        WHERE (verb = 'http://adlnet.gov/expapi/verbs/interacted') AND (eventTime <= passed) AND (diff > 0)
+        ORDER BY eventTime DESC
+        LIMIT 1 BY learnerHash
+    )
+    ORDER BY diff DESC
+    LIMIT 7, 126
+)
+```
+
+But, if you add `count(learnerHash)` to query, then it works fine.
+
+```sql
+SELECT avg(diff), count(learnerHash)
+FROM
+(
+    SELECT *
+    FROM
+    (
+        SELECT
+            learnerHash,
+            passed - eventTime AS diff
+        FROM statements
+        GLOBAL ANY INNER JOIN
+        (
+            SELECT
+                learnerHash,
+                argMax(eventTime, resultScoreRaw) AS passed
+            FROM
+            (
+                SELECT
+                    learnerHash,
+                    eventTime,
+                    resultScoreRaw
+                FROM statements
+                PREWHERE (courseId = 1) AND (onCourse = 0)
+                WHERE (verb = 'http://adlnet.gov/expapi/verbs/passed') AND (objectId = 'https://crmm.ru/xapi/courses/spp/1/1/0-1')
+                ORDER BY eventTime ASC
+            )
+            GROUP BY learnerHash
+        ) USING (learnerHash)
+        PREWHERE (courseId = 1) AND (onCourse = 0)
+        WHERE (verb = 'http://adlnet.gov/expapi/verbs/interacted') AND (eventTime <= passed) AND (diff > 0)
+        ORDER BY eventTime DESC
+        LIMIT 1 BY learnerHash
+    )
+    ORDER BY diff DESC
+    LIMIT 7, 126
+)
+```
+
+In [discussion](https://groups.google.com/d/msg/clickhouse/tzLZG-FWbvE/-y_fJ6d3BAAJ) on Google Groups forum, Nikolai Kochetov answered that, cases like that probably, result of wrong query optimisation in Clickhouse.

@@ -1,0 +1,32 @@
+ID: 15275
+Title: Do not exclude nulls when multiple mark join conditions
+Description:
+fixes https://github.com/duckdblabs/duckdb-internal/issues/3717
+
+Below is some background information on why this change is needed. 
+1. This query involves a correlated mark join. This is therefore a mark join with two conditions. 
+2. `NULL IN ()` evaluates to `false`, while `NULL IN (1)` evaluates to `NULL`.  
+3. DuckDB has an optimization for MARK joins where if a hash table only has NULLS, then all entries in the hash table ar set to invalid. 
+
+
+Now we are ready to understand the problem. The query is the following.
+```SQL
+SELECT
+    t0,
+    t0 IN (
+        SELECT
+            u0
+        FROM u
+        WHERE
+            t0 = 4 and t0 = t0
+    )
+FROM t;
+```
+
+There are two conditions in the mark join if you run `explain analyze`. One is `IS DISTINCT FROM` and the other is a pure `=` condition. The `IS DISTINCT FROM` condition is used for decorrelating the subquery, and this condition is fine. The other condition `t0 = #0` causes a problem. Table `u` is full of `NULL` values, and because of the optimization, these rows are not added to the hash table, neither the value needed for the `IS DISTINCT FROM` condition, or the value needed for the `=` condition. 
+
+So now we have the problem, the correlated mark join has two keys it wants to match, `4` and `NULL`. Let's try to compute the solution manually. When `4` is the outer t0 value, the subquery is `4 IN (NULL, NULL)` which is `NULL`. When `NULL` is the outer t0 value, the correlated subquery evaluates to `NULL IN ()`, which is `false`. Now, because of the optimization, the hash table is empty, because rows with `NULL`s in the `=` condition are removed. This sets ALL values for all rows are removed. It also means the subquery expressions are simplified to `4 IN NULL` and `NULL IN NULL`. This is fine for `4 IN NULL`, but `NULL IN NULL` now has an incorrect result. 
+
+The only solution @lnkuiper  and I could think of was to check if a column type is correlated and the join is a mark join, if these properties are true, then then you cannot filter `NULL` values. You need these NULL values to differentiate between `IN ()` and `IN (NULL)`. `IN ()` means there was no match between the correlated inner and outer query, and therefore `X IN ()` should be false.,`IN (NULL)` means there was a match, and the list contains a `NULL`, in this case the result can be `true`, `false`, or `NULL` depending on other values in the list.
+
+It is also important to note that if there is **just one** non NULL value in the hash table, this bug does not occur. It is truly the edgiest of edge cases. 

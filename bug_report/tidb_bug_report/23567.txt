@@ -1,0 +1,90 @@
+ID: 23567
+Title: non-zero feedback-probability causes panic
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+- Change feedback-probability to 0.05:
+```bash
+$ diff tidb.toml.dist tidb.toml
+13c13
+< store = "unistore"
+---
+> store = "tikv"
+16c16
+< path = "/tmp/tidb"
+---
+> path = "127.0.0.1:2379"
+160a161
+> 
+252c253
+< feedback-probability = 0.0
+---
+> feedback-probability = 0.05
+```
+- Run a simple sysbench test (using 1.0.20 which ships with Ubuntu)
+
+```bash
+#!/bin/bash
+
+PORT=4000
+USER="root"
+TABLES=10
+TABLESIZE=1000000
+TIME=300
+
+mysql -u$USER -P $PORT -e 'drop database if exists sbtest;create database sbtest;SET GLOBAL tidb_ddl_reorg_batch_size = 10240;SET GLOBAL tidb_ddl_reorg_worker_cnt = 32;'
+sleep 1
+sysbench /usr/share/sysbench/oltp_read_only.lua --threads=16 --mysql-host=127.0.0.1 --mysql-port=$PORT --mysql-user=$USER --tables=$TABLES --table-size=$TABLESIZE prepare
+for THREADS in {8,16}; do 
+ sysbench /usr/share/sysbench/oltp_read_only.lua --threads=$THREADS --mysql-host=127.0.0.1 --mysql-port=$PORT --mysql-user=$USER --events=0  --time=$TIME --tables=$TABLES --table-size=$TABLESIZE --report-interval=1 run
+done;
+```
+
+### 2. What did you expect to see? (Required)
+
+It should just run sysbench
+
+### 3. What did you see instead (Required)
+
+```sql
+Initializing worker threads...
+
+Threads started!
+
+FATAL: mysql_stmt_execute() returned error 1105 (runtime error: index out of range [0] with length 0) for query 'SELECT c FROM sbtest3 WHERE id BETWEEN ? AND ? ORDER BY c'
+FATAL: `thread_run' function failed: /usr/share/sysbench/oltp_common.lua:432: SQL error, errno = 1105, state = 'HY000': runtime error: index out of range [0] with length 0
+FATAL: mysql_stmt_execute() returned error 1105 (runtime error: index out of range [0] with length 0) for query 'SELECT DISTINCT c FROM sbtest9 WHERE id BETWEEN ? AND ? ORDER BY c'
+FATAL: `thread_run' function failed: /usr/share/sysbench/oltp_common.lua:432: SQL error, errno = 1105, state = 'HY000': runtime error: index out of range [0] with length 0
+```
+
+In the TIDB server log:
+```
+[2021/03/25 19:22:52.990 -06:00] [ERROR] [distsql.go:691] ["indexWorker in IndexLookupExecutor panicked"] [conn=45] [stack="goroutine 305384 [running]:\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles.func1(0x3ffd3a0, 0xc001236140, 0xc008800230, 0xc0000a1e68)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:689 +0xb8\npanic(0x3794800, 0xc003dfc500)\n\t/usr/local/go/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/statistics.(*QueryFeedback).Update(0xc0011bd310, 0xc0022ebea0, 0x1c, 0x1c, 0xc0021b8820, 0x1, 0x1, 0x0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/statistics/feedback.go:314 +0x35c\ngithub.com/pingcap/tidb/distsql.(*selectResult).fetchResp(0xc0001cd7a0, 0x3ffd3a0, 0xc001236140, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:185 +0x4dd\ngithub.com/pingcap/tidb/distsql.(*selectResult).Next(0xc0001cd7a0, 0x3ffd3a0, 0xc001236140, 0xc001f910e0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:208 +0x64\ngithub.com/pingcap/tidb/executor.(*indexWorker).extractTaskHandles(0xc008800230, 0x3ffd3a0, 0xc001236140, 0xc001f910e0, 0x3ffd960, 0xc0001cd7a0, 0x0, 0x1, 0x3580d60, 0x5d70ec0, ...)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:774 +0x5e1\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles(0xc008800230, 0x3ffd3a0, 0xc001236140, 0x3ffd960, 0xc0001cd7a0, 0x0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:713 +0x22a\ngithub.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker.func1(0x3ffd460, 0xc00172e6f0, 0xc008800230, 0x3ffd960, 0xc0001cd7a0, 0xc001a521e0, 0xc003a2ea20)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:502 +0x103\ncreated by github.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:499 +0x570\n"]
+[2021/03/25 19:22:52.990 -06:00] [INFO] [conn.go:812] ["command dispatched failed"] [conn=45] [connInfo="id:45, addr:127.0.0.1:53538 status:11, collation:utf8mb4_0900_ai_ci, user:root"] [command=Execute] [status="inTxn:1, autocommit:1"] [sql="SELECT DISTINCT c FROM sbtest9 WHERE id BETWEEN ? AND ? ORDER BY c [arguments: (499581, 499680)]"] [txn_mode=PESSIMISTIC] [err="runtime error: index out of range [0] with length 0\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles.func1\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:692\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:679\nruntime.goPanicIndex\n\t/usr/local/go/src/runtime/panic.go:75\ngithub.com/pingcap/tidb/statistics.(*QueryFeedback).Update\n\t/home/morgo/go/src/github.com/morgo/tidb/statistics/feedback.go:314\ngithub.com/pingcap/tidb/distsql.(*selectResult).fetchResp\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:185\ngithub.com/pingcap/tidb/distsql.(*selectResult).Next\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:208\ngithub.com/pingcap/tidb/executor.(*indexWorker).extractTaskHandles\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:774\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:713\ngithub.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker.func1\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:502\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1357\nSELECT DISTINCT c FROM sbtest9 WHERE id BETWEEN ? AND ? ORDER BY c [arguments: (499581, 499680)]"]
+[2021/03/25 19:22:53.087 -06:00] [ERROR] [distsql.go:691] ["indexWorker in IndexLookupExecutor panicked"] [conn=83] [stack="goroutine 308766 [running]:\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles.func1(0x3ffd3a0, 0xc004444580, 0xc003470fa0, 0xc00009ae68)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:689 +0xb8\npanic(0x3794800, 0xc0000551a0)\n\t/usr/local/go/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/statistics.(*QueryFeedback).Update(0xc003470b90, 0xc001323e40, 0x1c, 0x1c, 0xc0080e6c70, 0x1, 0x1, 0x0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/statistics/feedback.go:314 +0x35c\ngithub.com/pingcap/tidb/distsql.(*selectResult).fetchResp(0xc00131e8c0, 0x3ffd3a0, 0xc004444580, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:185 +0x4dd\ngithub.com/pingcap/tidb/distsql.(*selectResult).Next(0xc00131e8c0, 0x3ffd3a0, 0xc004444580, 0xc003471310, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:208 +0x64\ngithub.com/pingcap/tidb/executor.(*indexWorker).extractTaskHandles(0xc003470fa0, 0x3ffd3a0, 0xc004444580, 0xc003471310, 0x3ffd960, 0xc00131e8c0, 0x0, 0x0, 0xc00185dc98, 0xc00185dc88, ...)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:774 +0x5e1\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles(0xc003470fa0, 0x3ffd3a0, 0xc004444580, 0x3ffd960, 0xc00131e8c0, 0x0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:713 +0x22a\ngithub.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker.func1(0x3ffd460, 0xc003398180, 0xc003470fa0, 0x3ffd960, 0xc00131e8c0, 0xc0025845a0, 0xc0029a4b40)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:502 +0x103\ncreated by github.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:499 +0x570\n"]
+[2021/03/25 19:22:53.087 -06:00] [INFO] [conn.go:812] ["command dispatched failed"] [conn=83] [connInfo="id:83, addr:127.0.0.1:53590 status:11, collation:utf8mb4_0900_ai_ci, user:root"] [command=Execute] [status="inTxn:1, autocommit:1"] [sql="SELECT c FROM sbtest3 WHERE id BETWEEN ? AND ? ORDER BY c [arguments: (501558, 501657)]"] [txn_mode=PESSIMISTIC] [err="runtime error: index out of range [0] with length 0\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles.func1\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:692\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:679\nruntime.goPanicIndex\n\t/usr/local/go/src/runtime/panic.go:75\ngithub.com/pingcap/tidb/statistics.(*QueryFeedback).Update\n\t/home/morgo/go/src/github.com/morgo/tidb/statistics/feedback.go:314\ngithub.com/pingcap/tidb/distsql.(*selectResult).fetchResp\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:185\ngithub.com/pingcap/tidb/distsql.(*selectResult).Next\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:208\ngithub.com/pingcap/tidb/executor.(*indexWorker).extractTaskHandles\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:774\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:713\ngithub.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker.func1\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:502\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1357\nSELECT c FROM sbtest3 WHERE id BETWEEN ? AND ? ORDER BY c [arguments: (501558, 501657)]"]
+[2021/03/25 19:22:53.087 -06:00] [ERROR] [distsql.go:691] ["indexWorker in IndexLookupExecutor panicked"] [conn=85] [stack="goroutine 308981 [running]:\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles.func1(0x3ffd3a0, 0xc0000b6c00, 0xc001a3ab90, 0xc000c81e68)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:689 +0xb8\npanic(0x3794800, 0xc0011a38a0)\n\t/usr/local/go/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/statistics.(*QueryFeedback).Update(0xc002391bd0, 0xc003b5a440, 0x1c, 0x1c, 0xc00d01cb68, 0x1, 0x1, 0x0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/statistics/feedback.go:314 +0x35c\ngithub.com/pingcap/tidb/distsql.(*selectResult).fetchResp(0xc00257c380, 0x3ffd3a0, 0xc0000b6c00, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:185 +0x4dd\ngithub.com/pingcap/tidb/distsql.(*selectResult).Next(0xc00257c380, 0x3ffd3a0, 0xc0000b6c00, 0xc00263c9b0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:208 +0x64\ngithub.com/pingcap/tidb/executor.(*indexWorker).extractTaskHandles(0xc001a3ab90, 0x3ffd3a0, 0xc0000b6c00, 0xc00263c9b0, 0x3ffd960, 0xc00257c380, 0x0, 0x0, 0xc0017ce480, 0x0, ...)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:774 +0x5e1\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles(0xc001a3ab90, 0x3ffd3a0, 0xc0000b6c00, 0x3ffd960, 0xc00257c380, 0x0, 0x0, 0x0)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:713 +0x22a\ngithub.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker.func1(0x3ffd460, 0xc002a13b30, 0xc001a3ab90, 0x3ffd960, 0xc00257c380, 0xc0017ba780, 0xc0023ca4e0)\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:502 +0x103\ncreated by github.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:499 +0x570\n"]
+[2021/03/25 19:22:53.088 -06:00] [INFO] [conn.go:812] ["command dispatched failed"] [conn=85] [connInfo="id:85, addr:127.0.0.1:53592 status:11, collation:utf8mb4_0900_ai_ci, user:root"] [command=Execute] [status="inTxn:1, autocommit:1"] [sql="SELECT DISTINCT c FROM sbtest9 WHERE id BETWEEN ? AND ? ORDER BY c [arguments: (496758, 496857)]"] [txn_mode=PESSIMISTIC] [err="runtime error: index out of range [0] with length 0\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles.func1\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:692\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:679\nruntime.goPanicIndex\n\t/usr/local/go/src/runtime/panic.go:75\ngithub.com/pingcap/tidb/statistics.(*QueryFeedback).Update\n\t/home/morgo/go/src/github.com/morgo/tidb/statistics/feedback.go:314\ngithub.com/pingcap/tidb/distsql.(*selectResult).fetchResp\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:185\ngithub.com/pingcap/tidb/distsql.(*selectResult).Next\n\t/home/morgo/go/src/github.com/morgo/tidb/distsql/select_result.go:208\ngithub.com/pingcap/tidb/executor.(*indexWorker).extractTaskHandles\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:774\ngithub.com/pingcap/tidb/executor.(*indexWorker).fetchHandles\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:713\ngithub.com/pingcap/tidb/executor.(*IndexLookUpExecutor).startIndexWorker.func1\n\t/home/morgo/go/src/github.com/morgo/tidb/executor/distsql.go:502\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1357\nSELECT DISTINCT c FROM sbtest9 WHERE id BETWEEN ? AND ? ORDER BY c [arguments: (496758, 496857)]"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-beta.2-2460-g40b92181d-dirty
+Edition: Community
+Git Commit Hash: 40b92181d092437996760f1f092ddf5b1da24d1b
+Git Branch: master
+UTC Build Time: 2021-03-25 23:33:10
+GoVersion: go1.13.15
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+
+```

@@ -1,0 +1,94 @@
+ID: 58985
+Title: `arrayZip(untuple(...))` doesn't work correctly on every Engine
+Description:
+**Describe what's wrong**
+
+As we needed something similar, we found the function `arrayZip(untuple(sumMap(number_keys, replicate(1, number_keys))))` in one issue question (https://github.com/ClickHouse/ClickHouse/issues/54534#issuecomment-1715389785).
+
+When we tried out this function, it was failing with the error message:
+
+```
+Code: 42. DB::Exception: Received from localhost:9000. DB::Exception: Function arrayZip needs at least one argument; passed 0.: While processing SELECT app, arrayZip(untuple(sumMap(k.keys, replicate(1, k.keys)))) FROM test WHERE c > 0 GROUP BY app. (NUMBER_OF_ARGUMENTS_DOESNT_MATCH)
+```
+
+Trying to replicate, it appears to be an issue related to the Engine (on Engine=MEMORY it works, on a ReplicatedMergeTree it doesn't) but also on whether a `WHERE` clause is being used??
+
+This fiddle works (because Engine=MEMORY): https://fiddle.clickhouse.com/71fa06d1-dcc9-4fe2-a528-0876aa807a16
+
+If we run the exact same locally, but a `ReplicatedMergeTree`:
+
+```
+c66cb0b011a9 :) CREATE TABLE test (app String, c UInt64, k Map(String, String)) ENGINE=ReplicatedMergeTree ORDER BY tuple();
+
+CREATE TABLE test
+(
+    `app` String,
+    `c` UInt64,
+    `k` Map(String, String)
+)
+ENGINE = ReplicatedMergeTree
+ORDER BY tuple()
+
+Query id: fc2031c1-e2ab-4949-90f3-ed56bfb7ad48
+
+┌─shard─┬─replica─┬─status─┬─num_hosts_remaining─┬─num_hosts_active─┐
+│ 01    │ 01      │ OK     │                   0 │                0 │
+└───────┴─────────┴────────┴─────────────────────┴──────────────────┘
+
+1 row in set. Elapsed: 0.015 sec. 
+
+c66cb0b011a9 :) select app, arrayZip(untuple(sumMap(k.keys, replicate(1, k.keys)))) from test WHERE c > 0 group by app;
+
+SELECT
+    app,
+    arrayZip(untuple(sumMap(k.keys, replicate(1, k.keys))))
+FROM test
+WHERE c > 0
+GROUP BY app
+
+Query id: 962ff2ab-1088-475a-9fef-7d53c99d1459
+
+
+Elapsed: 0.003 sec. 
+
+Received exception from server (version 23.11.2):
+Code: 42. DB::Exception: Received from localhost:9000. DB::Exception: Function arrayZip needs at least one argument; passed 0.: While processing SELECT app, arrayZip(untuple(sumMap(k.keys, replicate(1, k.keys)))) FROM test WHERE c > 0 GROUP BY app. (NUMBER_OF_ARGUMENTS_DOESNT_MATCH)
+```
+
+Funnily enough, if we remove the entire `WHERE` clause, it also works on the `ReplicatedMergeTree` (while the `WHERE` clause didn't actually limit the results to 0 or so):
+
+```
+c66cb0b011a9 :) select app, arrayZip(untuple(sumMap(mapKeys(k), replicate(1, mapKeys(k))))) from test group by app;
+
+SELECT
+    app,
+    arrayZip(untuple(sumMap(mapKeys(k), replicate(1, mapKeys(k)))))
+FROM test
+GROUP BY app
+
+Query id: 2d3ef7a6-bf01-4f2e-98de-4df0e34ffe07
+
+┌─app─┬─arrayZip(tupleElement(sumMap(mapKeys(k), replicate(1, mapKeys(k))), 1), tupleElement(sumMap(mapKeys(k), replicate(1, mapKeys(k))), 2))─┐
+│ x1  │ [('k1',3),('k11',1)]                                                                                                                   │
+└─────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+1 row in set. Elapsed: 0.006 sec. 
+```
+
+**Does it reproduce on recent release?**
+
+At least on 23.11.2 as you can see in output above. 
+
+**How to reproduce**
+
+See the fiddle + commands above. Create the table on a (Replicated)MergeTree.
+
+**Expected behavior**
+
+`arrayZip(untuple(...))` to work as expected (which it mostly does)
+
+**Error message and/or stacktrace**
+
+```
+Code: 42. DB::Exception: Received from localhost:9000. DB::Exception: Function arrayZip needs at least one argument; passed 0.: While processing SELECT app, arrayZip(untuple(sumMap(k.keys, replicate(1, k.keys)))) FROM test WHERE c > 0 GROUP BY app. (NUMBER_OF_ARGUMENTS_DOESNT_MATCH)
+```

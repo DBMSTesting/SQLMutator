@@ -1,0 +1,138 @@
+ID: 14774
+Title: Bug: wrong results can be produced by simple chaining in absence of random(): f(_,...).f(...)
+Description:
+### What happens?
+
+The function s() defined below works nicely when called at the top-level,
+but when chained together (as in s().s().s() ) performs with exponentially
+worse performance (both run-time and memory consumption), and,
+even worse, the results are incorrect in certain cases when chaining is involved.
+
+Specifically, each additional link in the chain seems to increase execution time by
+very roughly 10 times; and the erroneous result is evident in a call of the form s().s().
+
+Please note that the call to array_agg() includes an `ORDER BY` clause,
+and that I've verified it's not the chaining notation that's an issue
+(i.e. I've run s(s(s(s(...)...)...)...) as well).
+
+I have also rewritten s() to avoid all references to array_agg().
+
+[EDIT: The correctness problem is also easily demonstrated with a variant that does not involve CTEs.]
+
+```
+# Output for Part 1
+┌────────────────────────────────────────────────┐
+│ s(main.list_value('a', 'a', 'a'), 'a', 2, 'X') │
+│                   varchar[]                    │
+├────────────────────────────────────────────────┤
+│ [a, X, a]                                      │
+└────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│ s(main.list_value('a', 'X', 'a'), 'a', 2, 'Y') │
+│                   varchar[]                    │
+├────────────────────────────────────────────────┤
+│ [a, X, Y]                                      │
+└────────────────────────────────────────────────┘
+but ...
+┌───────────┐
+│   wrong   │
+│ varchar[] │
+├───────────┤
+│ [a, Y, a] │
+└───────────┘
+```
+
+
+
+### To Reproduce
+
+```
+# Return a list, indicator[], such that indicator[i] is the count of
+# occurrences of item at indices <= i.
+create or replace function indicator(lst0, item) as (
+  with recursive cte as (
+    select 0 as ix, 0 as counter
+    union all
+    select ix+1,
+           counter + if( lst0[ix+1] = item, 1, 0 ) as counter
+    from cte
+    where ix < length(lst0)
+  )
+  select array_agg(counter order by ix)[2:]
+  from cte
+);
+
+# Helper function: see s()
+create or replace function s_(lst, item, nth, replacement, p) as (
+  select if( p=0, lst,
+         if( nth=1, lst[1:p-1] || [replacement] || lst[p+1:],
+         -- scan for the nth-item
+         (with ix_t as (select list_position(indicator(lst, item), nth) as ix)
+          select if(ix, lst[1:ix-1] || [replacement] || lst[ix+1:], lst)
+          from ix_t)
+          ) )
+);
+
+# Substitute the nth-occurrence of item in lst with the replacement,
+# using IO=1 throughout
+create or replace function s(lst, item, nth, replacement) as (
+  s_(lst, item, nth, replacement, coalesce(list_position(lst,item), 0))
+);
+
+.print Part 1
+select s(['a','a','a'], 'a', 2, 'X');
+select s(['a','X','a'], 'a', 2, 'Y');
+.print but ...
+select s(['a','a','a'], 'a', 2, 'X')
+                     .s('a', 2, 'Y') as wrong;
+
+.print Part1 : performance 
+with lst_t as (select regexp_extract_all('aaaaaaaaaaa','.') as lst)
+  select
+         s(lst, 'a', 1, 'A')    -- #1  0.05s
+             .s('a', 1, 'B')    -- #2  0.22s
+             .s('a', 1, 'C')    -- #3  2.54s
+             .s('a', 1, 'D')    -- #4 45s
+  from lst_t
+;
+```
+
+### OS:
+
+MacOS
+
+### DuckDB Version:
+
+v1.1.4-dev1693 fd5de0607d and others
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Peter Koppstein
+
+### Affiliation:
+
+Princeton University
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

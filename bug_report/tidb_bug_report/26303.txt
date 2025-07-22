@@ -1,0 +1,15 @@
+ID: 26303
+Title: query from `information_schema.tikv_region_status` will fail if specific pd-server node down
+Description:
+When a query tries to fetch data from the `information_schema.tikv_region_status`, tidb-server will try to get the address of a pd-server node, and request from this node using http api.
+
+https://github.com/pingcap/tidb/blob/d193cb2c36c4dab6b91ce07a3c3b31f56ccd1845/executor/infoschema_reader.go#L1383-L1392
+https://github.com/pingcap/tidb/blob/d193cb2c36c4dab6b91ce07a3c3b31f56ccd1845/store/helper/helper.go#L753-L757
+
+https://github.com/pingcap/tidb/blob/d193cb2c36c4dab6b91ce07a3c3b31f56ccd1845/store/helper/helper.go#L767-L780
+
+The pd-server node is chosen is always the `pdHosts[0]`. When a pd-server node is marked down but not removed from the cluster, the address of this node will still be returned from the `pdClient`. This will cause the problem that tidb-server still tries to request from the pd-server node even if it is marked as down. Thus query may fail:
+``` sql
+> select region_id, group_concat(store_id order by store_id), group_concat(right(label ->> '$[0].value',1) order by label) from tikv_region_status join tikv_region_peers using (region_id) join tikv_store_status using (store_id) where db_name='test' and index_name='PRIMARY' group by region_id order by region_id;
+ERROR 1105 (HY000): Get "http://127.0.0.1:2382/pd/api/v1/regions": dial tcp 127.0.0.1:2382: connect: connection refused
+```

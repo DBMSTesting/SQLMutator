@@ -1,0 +1,34 @@
+ID: 15751
+Title: Switch logging to macros
+Description:
+@hannes ran into an issue where `logger.hpp` would not compile on gcc4.8 due to the variadic template params in the lambda here:
+```C++
+//! Logger::Log with StringUtil::Format
+template <class T, typename... ARGS>
+static void Log(const char *log_type, T &log_context_source, LogLevel log_level, const char *format_string,
+                ARGS... params) {
+    Logger::Get(log_context_source).Log(log_type, log_level, [&]() {
+        return StringUtil::Format(format_string, params...);
+    });
+}
+```
+
+This triggered me because I realized that the lambdas were causing allocations even when logging was disabled. The solution is to remove the `Log` methods alltogether and use macros to call `ShouldLog` and `WriteLog` directly:
+
+```C++
+//! Logger Macro's are preferred method of calling logger
+#define DUCKDB_LOG(SOURCE, TYPE, LEVEL, ...)                                                                 \
+	{                                                                                                                                          \ 
+		auto &logger = Logger::Get(SOURCE);                                                                            \
+		if (logger.ShouldLog(TYPE, LEVEL)) {                                                                           \
+			logger.WriteLog(TYPE, LEVEL, __VA_ARGS__);                                                                 \
+		}                                                                                                              \
+	}
+```
+This way you can simply pass any expression that returns a string, which will then only get executed if logging is actually enabled, for example:
+```C++
+DUCKDB_LOG_INFO(*this, "duckdb.Extensions.ExtensionLoaded", CallExpensiveStringGenerationFunction());
+```
+No more finnicking with lambdas and the function is only called when we are actually writing to the log
+
+While doing all this I also decided to remove all logging functions without a log type: I think having no log type is bad practice, at the very least every log entry should have either `duckdb` or `<extension_name>`.

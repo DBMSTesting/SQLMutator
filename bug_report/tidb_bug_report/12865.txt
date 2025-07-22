@@ -1,0 +1,44 @@
+ID: 12865
+Title: can't find proper physical plan for tiflash when perform a union on a table with index 
+Description:
+```
+mysql> CREATE TABLE t1 (
+    -> `pseudo` char(35) NOT NULL default '',
+    -> `pseudo1` char(35) NOT NULL default '',
+    -> `same` tinyint(1) unsigned NOT NULL default '1',
+    -> PRIMARY KEY  (`pseudo1`),
+    -> KEY `pseudo` (`pseudo`)
+    -> ) ENGINE=MyISAM;
+ERROR 1046 (3D000): No database selected
+mysql> INSERT INTO t1 (pseudo,pseudo1,same) VALUES ('joce', 'testtt', 1),('joce', 'tsestset', 1),('dekad', 'joce', 1);
+ERROR 1046 (3D000): No database selected
+mysql> use test;
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Database changed
+mysql> CREATE TABLE t1 ( `pseudo` char(35) NOT NULL default '', `pseudo1` char(35) NOT NULL default '', `same` tinyint(1) unsigned NOT NULL default '1', PRIMARY KEY  (`pseudo1`), KEY `pseudo` (`pseudo`) ) ENGINE=MyISAM;
+Query OK, 0 rows affected (0.12 sec)
+
+mysql> INSERT INTO t1 (pseudo,pseudo1,same) VALUES ('joce', 'testtt', 1),('joce', 'tsestset', 1),('dekad', 'joce', 1);                                                       Query OK, 3 rows affected (0.05 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+
+mysql> explain select *from (SELECT pseudo FROM t1 WHERE pseudo1='joce' UNION SELECT pseudo FROM t1 WHERE pseudo='joce') t order by pseudo;
++------------------------------+-------+-----------+--------------------------------------------------------------------------------+
+| id                           | count | task      | operator info                                                                  |
++------------------------------+-------+-----------+--------------------------------------------------------------------------------+
+| Sort_13                      | 2.00  | root      | Column#12:asc                                                                  |
+| └─HashAgg_18                 | 2.00  | root      | group by:Column#11, funcs:firstrow(Column#11)                                  |
+|   └─Union_19                 | 1.00  | root      |                                                                                |
+|     ├─Projection_20          | 1.00  | root      | Column#6                                                                       |
+|     │ └─IndexLookUp_23       | 1.00  | root      |                                                                                |
+|     │   ├─IndexScan_21       | 1.00  | cop[tikv] | table:t1, index:pseudo1, range:["joce","joce"], keep order:false, stats:pseudo |
+|     │   └─TableScan_22       | 1.00  | cop[tikv] | table:t1, keep order:false, stats:pseudo                                       |
+|     └─IndexReader_26         | 0.00  | root      | index:IndexScan_25                                                             |
+|       └─IndexScan_25         | 0.00  | cop[tikv] | table:t1, index:pseudo, range:["joce","joce"], keep order:false, stats:pseudo  |
++------------------------------+-------+-----------+--------------------------------------------------------------------------------+
+9 rows in set (0.04 sec)
+
+mysql> explain select /*+ read_from_storage(tiflash[`t`])*/ * from (select /*+ read_from_storage(tiflash[`t1`])*/ `pseudo` from (`t1`) where `pseudo1`='joce' union select /*+ read_from_storage(tiflash[`t1`])*/ `pseudo` from (`t1`) where `pseudo`='joce') as `t` order by `pseudo`;
+ERROR 1815 (HY000): Internal : Can't find a proper physical plan for this query
+```

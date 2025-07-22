@@ -1,0 +1,32 @@
+ID: 12068
+Title: "Lost connection to MySQL server during query" error for a table with MySQL Engine
+Description:
+When running a following example query
+```
+SELECT count()
+FROM remote_mysql_table1
+WHERE b IN 
+(
+    SELECT a
+    FROM remote_mysql_table2
+);
+```
+where `remote_mysql_table1` and `remote_mysql_table2` are tables with `MySQL` engine, following error can be observed:
+
+```
+Progress: 134.35 million rows, 5.53 GB (1.52 million rows/s., 62.65 MB/s.) Received exception from server (version 20.4.3):                                                                               
+Code: 1000. DB::Exception: Received from localhost:9000. DB::Exception: mysqlxx::Exception: Lost connection to MySQL server during query (mysql_server:3306).                                           
+                                                                                                                                                                                                            
+0 rows in set. Elapsed: 88.425 sec. Processed 134.35 million rows, 5.53 GB (1.52 million rows/s., 62.58 MB/s.)                                                                                                                                                                                                                                                                                                       
+```
+
+The root cause: when running this query, clickhouse establishing two connections to the MySQL server, for a `remote_mysql_table1` and `remote_mysql_table2` tables. Query for `remote_mysql_table2` started to execute, while connection for `remote_mysql_table1` staying in `Writing to net` State, accordingly to MySQL server's processlist. For a connection in this state, `net_write_timeout` parameter comes into play, which is 60s by [default](https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_net_write_timeout). Then, if query for `remote_mysql_table2` takes more than `net_write_timeout`, MySQL server closing the connection, then ClickHouse throws an exception.
+
+As a workaround, it's possible to set a relatively high `net_write_timeout`, but there are no guarantee that it will be always enough for all the queries, also, it may lead for keeping a broken connections for a long time.
+
+Possibly it will be better to not to establish MySQL connection in advance, and do that only when query are ready to be executed.
+
+* Which ClickHouse server version to use
+20.4.3.16 
+
+Thanks!

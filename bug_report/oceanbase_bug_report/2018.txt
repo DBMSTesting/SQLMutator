@@ -1,0 +1,97 @@
+ID: 2018
+Title: [Bug]: Bit shift for BLOB type behaves incosistently with MySQL8
+Description:
+**Describe the bug**
+<!-- A clear and concise description of bug. -->
+
+MySQL's right shift supports two types: bigint and binary [1]. So data in BLOB type evaluates to a binary. But OB applies an implicit cast to bigint and causes inconsistency.
+
+
+[1] https://dev.mysql.com/doc/refman/8.4/en/bit-functions.html#operator_right-shift
+
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+  
+
+**Fast Reproduce Steps(Required)**
+
+```sql
+mysql> select version();
++------------------------------+
+| version()                    |
++------------------------------+
+| 5.7.25-OceanBase_CE-v4.3.0.1 |
++------------------------------+
+1 row in set (0.00 sec)
+```
+
+Steps to reproduce the behavior:
+
+init db
+
+```sql
+create table t2(a blob);
+create table t3(a blob);
+insert into t2 values(0xC2A0);
+insert into t3 values(0xC2);
+select * from t2,t3 where (t2.a >> 4) = t3.a;
+```
+
+
+**Expected behavior**
+<!-- A clear and concise description of what you expected to happen. -->
+MySQL8.0.33 shows empty set for each query.
+```sql
+Empty set (0.01 sec)
+```
+
+**Actual Behavior**
+<!-- What is the result? picture is allowed -->
+```sql
+mysql> select * from t2,t3 where (t2.a >> 4) = t3.a;
++------------+------------+
+| a          | a          |
++------------+------------+
+| 0xC2A0     | 0xC2       |
++------------+------------+
+1 row in set, 2 warnings (0.00 sec)
+
+mysql> show warnings;
++---------+------+-----------------------------------------+
+| Level   | Code | Message                                 |
++---------+------+-----------------------------------------+
+| Warning | 1292 | Truncated incorrect INTEGER value: ' '  |
+| Warning | 1292 | Truncated incorrect INTEGER value: ' '  |
++---------+------+-----------------------------------------+
+```
+
+**Additional context**
+<!-- Add any other context about the problem here. -->
+The query plan shows there is a cast from BLOB to BIGINT.
+```sql
+mysql> explain select * from t2,t3 where (t2.a >> 4) = t3.a;
++-------------------------------------------------------------------------------------------------------------------------------------------------+
+| Query Plan                                                                                                                                      |
++-------------------------------------------------------------------------------------------------------------------------------------------------+
+| =================================================                                                                                               |
+| |ID|OPERATOR         |NAME|EST.ROWS|EST.TIME(us)|                                                                                               |
+| -------------------------------------------------                                                                                               |
+| |0 |HASH JOIN        |    |1       |5           |                                                                                               |
+| |1 |├─TABLE FULL SCAN|t2  |1       |3           |                                                                                               |
+| |2 |└─TABLE FULL SCAN|t3  |1       |3           |                                                                                               |
+| =================================================                                                                                               |
+| Outputs & filters:                                                                                                                              |
+| -------------------------------------                                                                                                           |
+|   0 - output([t2.a], [t3.a]), filter(nil), rowset=16                                                                                            |
+|       equal_conds([cast((T_OP_BIT_RIGHT_SHIFT, cast(t2.a, BIGINT(-1, 0)), 4), DECIMAL(20, 0)) = cast(t3.a, DECIMAL(-1, -1))]), other_conds(nil) |
+|   1 - output([t2.a]), filter(nil), rowset=16                                                                                                    |
+|       access([t2.a]), partitions(p0)                                                                                                            |
+|       is_index_back=false, is_global_index=false,                                                                                               |
+|       range_key([t2.__pk_increment]), range(MIN ; MAX)always true                                                                               |
+|   2 - output([t3.a]), filter(nil), rowset=16                                                                                                    |
+|       access([t3.a]), partitions(p0)                                                                                                            |
+|       is_index_back=false, is_global_index=false,                                                                                               |
+|       range_key([t3.__pk_increment]), range(MIN ; MAX)always true                                                                               |
++-------------------------------------------------------------------------------------------------------------------------------------------------+
+19 rows in set (0.01 sec)
+
+```

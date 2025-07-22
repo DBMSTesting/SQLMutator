@@ -1,0 +1,95 @@
+ID: 31600
+Title: TiDB returns wrong results with COALESCE() and a parsing error for Time data type
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step 
+```sql
+SET timestamp=UNIX_TIMESTAMP('2011-11-01 17:48:00');
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+  pk time(6) NOT NULL DEFAULT '00:00:00.000000',
+  col_date_not_null date NOT NULL,
+  PRIMARY KEY (pk)
+);
+INSERT INTO t1 VALUES ('00:00:00.000000','2001-09-10');
+INSERT INTO t1 VALUES ('12:07:41.148239','2000-05-23');
+SELECT COALESCE (NULL, pk) FROM  t1;
+SELECT COALESCE (pk, col_date_not_null) FROM  t1;
+SELECT GREATEST('2004-04-07', COALESCE (pk, col_date_not_null)) FROM  t1 ORDER BY 1;
+DROP TABLE t1;
+SET timestamp=DEFAULT; 
+```
+
+### 2. What did you expect to see? 
+```sql
+mysql> SELECT COALESCE (NULL, pk) FROM  t1;
++---------------------+
+| COALESCE (NULL, pk) |
++---------------------+
+| 00:00:00.000000     |
+| 12:07:41.148239     |
++---------------------+
+2 rows in set (0.00 sec)
+
+mysql> SELECT COALESCE (pk, col_date_not_null) FROM  t1;
++----------------------------------+
+| COALESCE (pk, col_date_not_null) |
++----------------------------------+
+| 2011-11-01 00:00:00.000000       |
+| 2011-11-01 12:07:41.148239       |
++----------------------------------+
+2 rows in set (0.00 sec)
+
+mysql> SELECT GREATEST('2004-04-07', COALESCE (pk, col_date_not_null)) FROM  t1 ORDER BY 1;
++----------------------------------------------------------+
+| GREATEST('2004-04-07', COALESCE (pk, col_date_not_null)) |
++----------------------------------------------------------+
+| 2011-11-01 00:00:00.000000                               |
+| 2011-11-01 12:07:41.148239                               |
++----------------------------------------------------------+
+2 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead
+TiDB returns a wrong type (fractional seconds are lost).
+```sql
+mysql> SELECT COALESCE (NULL, pk) FROM  t1;
++---------------------+
+| COALESCE (NULL, pk) |
++---------------------+
+| 00:00:00            |
+| 12:07:41            |
++---------------------+
+2 rows in set (0.01 sec)
+```
+TiDB returns a wrong date. The date portion from MySQL is based on TIMESTAMP but in TiDB it is based on current time. 
+```sql
+mysql> SELECT COALESCE (pk, col_date_not_null) FROM  t1;
++----------------------------------+
+| COALESCE (pk, col_date_not_null) |
++----------------------------------+
+| 2022-01-11 00:00:00.000000       |
+| 2022-01-11 12:07:41.148239       |
++----------------------------------+
+2 rows in set (0.00 sec)
+```
+TiDB throws a parsing error.
+```sql
+mysql> SELECT GREATEST('2004-04-07', COALESCE (pk, col_date_not_null)) FROM  t1 ORDER BY 1;
+ERROR 1105 (HY000): strconv.Atoi: parsing "00:": invalid syntax
+```
+### 4. What is your TiDB version? 
+```sql
+tidb_version(): Release Version: v5.5.0-alpha-34-g9cc1b169f
+Edition: Community
+Git Commit Hash: 9cc1b169f9080b34eda8468d7a974d2a387673dd
+Git Branch: master
+UTC Build Time: 2022-01-05 19:21:07
+GoVersion: go1.17.2
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+
+

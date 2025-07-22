@@ -1,0 +1,27 @@
+ID: 14300
+Title: Or filter pushdown into zone maps
+Description:
+This PR will create a zone map table filter when a OR/IN filter on an integer column is present above a table scan.
+
+When are OR/IN filters are pushed down?
+If the column is an integer type column. Based on some benchmarks, the overhead of checking the min max for integer columns when the values are unordered or distinct values are sparse is very little compared to the benefit you get when they are ordered and/order the distinct values are dense.
+
+See the following results. 25% of the `l_orderkey` values are distinct (i.e each value is repeated potentially 4 times). 
+
+I select just two values around the minimum + ~(rowgroup size) and the maximum - ~(row group size). I query on lineitem in sf1, sf10, sf100 where lineitem is ordered, and I query on the same scale factors with a shuffled lineitem. Notice that pushing down the OR filter on an unordered version of lineitem is only ~0.1 second slower than not pushing down. This comes from the min max checks. Inspecting the explain analyze by hand, the zone map filter lets in every row group on the higher scale factors
+
+Execution times to find 2 values in the `l_orderkey` column. This benchmark is included in the PR and was performed on a c6id.8xlarge (32 cores, 64 GB memory).
+|        | pushdown ordered  | pushdown random | no pushdown ordered |  no pushdown random |
+|--------  |-----------------------------|-------------------------------|---------------------|-----------------------|
+| sf=1       | 0.008176                       | 0.027871                         | 0.026316               | 0.026233                 |
+| sf=10     | 0.008149                       | 0.217365                         | 0.201166               | 0.201670                 |
+| sf=100  | 0.009608                       | 2.041269                         | 1.935285               | 1.931140                 |
+
+Keep in mind that this isn't even for primary key data. Will update with query on primary key data soon.
+
+Future work:
+- Investigate a better way to pushdown OR/IN varcher filters into table scans.
+- When Bloom filters are available, evaluate the OR filter on the bloom filter first
+
+
+TODO: Add more elaborate tests

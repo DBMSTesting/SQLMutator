@@ -1,0 +1,71 @@
+ID: 12032
+Title: 20.4 table function mysql(), pass alias wrong to MySQL server
+Description:
+**Describe the bug**
+When we have one field in Clickhouse SQL query like `SELECT field AS value, field AS display WHERE field NOT IN ('') AND display LIKE '%test%'`, query wrong rewrite on the mysql protocol side
+
+**How to reproduce**
+* Which ClickHouse server version to use
+20.4.5.36
+
+* `CREATE TABLE` statements for all tables involved
+
+MySQL Table
+```
+CREATE DATABASE prod;
+USE prod;
+CREATE TABLE `ips` (
+  `start_ip` varchar(15) NOT NULL,
+  `end_ip` varchar(15) NOT NULL,
+  `ope_telecom` varchar(55) NOT NULL DEFAULT '',
+  `pays` varchar(55) NOT NULL,
+  `ip_range` linestring NOT NULL,
+  `date` date DEFAULT NULL,
+  `start_ip_aton` bigint(20) NOT NULL,
+  PRIMARY KEY (`start_ip`,`end_ip`,`ope_telecom`,`pays`),
+  KEY `ope_telecom` (`ope_telecom`),
+  KEY `pays` (`pays`),
+  SPATIAL KEY `ip_range_index` (`ip_range`),
+  KEY `start_ip_aton` (`start_ip_aton`)
+) ENGINE=MyISAM DEFAULT CHARSET=latin1
+```
+
+ClickHouse table AS mysql() table function:
+```
+CREATE TABLE IF NOT EXISTS prod.mysql_ips AS mysql('127.0.0.1:3306','prod','ips','mysql_user','mysql_passwd');
+``` 
+
+* Queries to run that lead to an unexpected result
+ClickHouse SQL query
+```
+SELECT DISTINCT ope_telecom AS value, ope_telecom AS display FROM prod.mysql_ips WHERE ope_telecom NOT IN ('')
+ AND display LIKE '%BE%'
+ORDER BY display LIMIT 300;
+```
+Passed AS MySQL Query:
+```
+SELECT `ope_telecom` FROM `prod`.`ips` WHERE (`ope_telecom` NOT IN ('')) AND ((`ope_telecom` AS `display`) LIKE '%BE%')
+```
+![image](https://user-images.githubusercontent.com/105560/86004006-1319b280-ba2c-11ea-8a7b-5d80e6b51083.png)
+
+**Expected behavior**
+Query right resolve aliases and used ope_telecom LIKE operator
+
+**Error message and/or stacktrace**
+
+[2020-06-29 17:16:03] Poco::Exception. Code: 1000, e.code() = 1064, e.displayText() = mysqlxx::BadQuery: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'AS `display`) LIKE '%BE%')' at line 1 (127.0.0.1:3306) (version 20.4.5.36 (official build))
+
+**Additional context**
+there is one same MySQL field described in ClickHouse query twice
+query worked on 20.1
+workaround
+```
+SELECT DISTINCT ope_telecom AS value, concat(ope_telecom,'') AS display FROM prod.mysql_ips WHERE ope_telecom NOT IN ('')
+ AND display LIKE '%BE%'
+ORDER BY display LIMIT 300;
+```
+passed to MySQL OK but without LIKE 
+```
+SELECT `ope_telecom` FROM `prod`.`ips` WHERE (`ope_telecom` NOT IN (''))
+```
+![image](https://user-images.githubusercontent.com/105560/86004266-7f94b180-ba2c-11ea-8623-ad067817128e.png)

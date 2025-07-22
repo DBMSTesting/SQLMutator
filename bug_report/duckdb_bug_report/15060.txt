@@ -1,0 +1,141 @@
+ID: 15060
+Title: Should implicit conversions in equality comparisons be limited? (For more consistency and PostgreSQL compatibilty)
+Description:
+### What happens?
+
+Follow-up on https://github.com/duckdb/duckdb/issues/13378
+
+The implicit casts that are performed in equality comparisons lead to many questionable and PostgreSQL-incompatible results. 
+
+Since the PostgreSQL compatibility page doesn't mention this, I have hope that this is unintentional / not set in stone.
+
+I have included a number of examples below. Most egregious among them is the first column of the first example: By implicit casting rules, one might expect that  `1`  be converted to `'1'` but that wouldn't compare equal to `'1.1'`. Instead, it seems DuckDB selects `INTEGER` as the joint-parent-type of `INTEGER` and `STRING` for the purpose of this combination cast and then performs a cast of `STRING` to `INTEGER` that is usually only allowed in explicit casts. As a result DuckDB says that `'1.1' = 1` is `true`.  
+
+### To Reproduce
+
+1. 
+
+```sql
+SELECT '1.1' = 1, '1.1' = 1.1, 1 = 1.1
+```
+```
+┌─────────────┬───────────────┬───────────┐
+│ ('1.1' = 1) │ ('1.1' = 1.1) │ (1 = 1.1) │
+│   boolean   │    boolean    │  boolean  │
+├─────────────┼───────────────┼───────────┤
+│ true        │ true          │ false     │
+└─────────────┴───────────────┴───────────┘
+```
+Violates transitivity. PostgreSQL errors on the first column so transitivity isn't violated.
+
+
+2. 
+
+
+```sql
+SELECT true = 'true', true = 1 -- , 'true' = 1
+```
+```
+┌─────────────────────────────────┬────────────────────────────┐
+│ (CAST('t' AS BOOLEAN) = 'true') │ (CAST('t' AS BOOLEAN) = 1) │
+│             boolean             │          boolean           │
+├─────────────────────────────────┼────────────────────────────┤
+│ true                            │ true                       │
+└─────────────────────────────────┴────────────────────────────┘
+```
+
+Transitivity would dictate that `'true' = 1` but that throws an error. PostgreSQL throws on the second and third column, so transitivity isn't violated.
+
+Implicit conversion matrix indicates first and second column should throw, while third should be fine.
+
+
+3.
+
+```sql
+SELECT true = 't', true = 'true', 't' = 'true'
+```
+```
+┌──────────────────────────────┬─────────────────────────────────┬────────────────┐
+│ (CAST('t' AS BOOLEAN) = 't') │ (CAST('t' AS BOOLEAN) = 'true') │ ('t' = 'true') │
+│           boolean            │             boolean             │    boolean     │
+├──────────────────────────────┼─────────────────────────────────┼────────────────┤
+│ true                         │ true                            │ false          │
+└──────────────────────────────┴─────────────────────────────────┴────────────────┘
+```
+
+Same as PostgreSQL but first column returning `true` is terrible for anyone that doesn't care about PostgreSQL compatibility.
+EDIT: First column returns `false` when a string column instead of a string *literal* is used.
+
+4.
+
+```sql
+SELECT 1 = '1.1', 1 = 1.0, '1.1' = 1.0
+```
+```
+┌─────────────┬───────────┬───────────────┐
+│ (1 = '1.1') │ (1 = 1.0) │ ('1.1' = 1.0) │
+│   boolean   │  boolean  │    boolean    │
+├─────────────┼───────────┼───────────────┤
+│ true        │ true      │ false         │
+└─────────────┴───────────┴───────────────┘
+```
+
+PostgreSQL throws on first column, so transitivity isn't violated.
+
+
+5. 
+
+```sql
+SELECT 1.0 = '1.0', 1.0 = '1', '1' = '1.0'
+```
+```
+┌───────────────┬───────────┬───────────────┐
+│ (1.0 = '1.0') │ (1.0 = 1) │ ('1' = '1.0') │
+│    boolean    │  boolean  │    boolean    │
+├───────────────┼───────────┼───────────────┤
+│ true          │ true      │ false         │
+└───────────────┴───────────┴───────────────┘
+```
+
+Maybe I'm a hypocrite, but I think I'm fine with transitivity being broken in this case. Haven't thought this through though. Same in PostgreSQL.
+
+
+### OS:
+
+Linux
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+i5, AMD64
+
+### Full Name:
+
+Soeren Wolfers
+
+### Affiliation:
+
+G-Research
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,120 @@
+ID: 21841
+Title: SPM: drop binding failed when using a special database name
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+package main
+
+import (
+	"context"
+	"database/sql"
+	_ "github.com/go-sql-driver/mysql"
+)
+
+const (
+	dsn = "root@tcp(127.0.0.1:4000)/"
+)
+
+var (
+	name = "TICASE_4525_AAZGPL"
+	sqls = []string{
+		"drop database if exists " + name,
+		"create database " + name,
+		"use " + name,
+		"set tidb_enable_stmt_summary=on;",
+		"set tidb_capture_plan_baselines=on;",
+		"create table t(a int, b int);",
+		"insert into t values(1,1), (2,2);",
+		"show global bindings;",
+		"update t set a = a + 1;",
+		"update t set a = a + 1;",
+		"update t set a = -a where a in (1, 2, 3);",
+		"update t set a = -a where a in (1, 2, 3);",
+		"do sleep(4);",
+		"show global bindings;",
+		"set tidb_capture_plan_baselines=off;",
+		"set session tidb_enable_stmt_summary=off;",
+		"set global tidb_enable_stmt_summary=off;",
+		"do sleep(5);",
+		"drop global binding for update t set a = a + 1;",
+		"drop global binding for update t set a = -a where a in (1,2,3);",
+	}
+)
+func main() {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	c, err := db.Conn(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	defer c.Close()
+	
+	for _, s := range sqls {
+		if _, err := c.ExecContext(context.Background(), s); err != nil {
+			panic(err)
+		}
+	}
+	
+	rows, err := c.QueryContext(context.Background(), "show global bindings")
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+	
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		panic(err)
+	}
+	if n != 0 {
+		panic(n)
+	}
+}
+```
+
+```
+show global bindings
+```
+
+### 2. What did you expect to see? (Required)
+```
+mysql> show global bindings;
+Empty set (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> show global bindings;
++-----------------------------------------+--------------------------------------------------------------------------------------------------+--------------------+--------+-------------------------+-------------------------+---------+--------------------+---------+
+| Original_sql                            | Bind_sql                                                                                         | Default_db         | Status | Create_time             | Update_time             | Charset | Collation          | Source  |
++-----------------------------------------+--------------------------------------------------------------------------------------------------+--------------------+--------+-------------------------+-------------------------+---------+--------------------+---------+
+.......
++-----------------------------------------+--------------------------------------------------------------------------------------------------+--------------------+--------+-------------------------+-------------------------+---------+--------------------+---------+
+2 rows in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+Release Version: v4.0.0-beta.2-1832-g7fac2ba
+Edition: Community
+Git Commit Hash: 7fac2ba027aee70cad4f4a307240ef5b7e6a64f8
+Git Branch: HEAD
+UTC Build Time: 2020-12-16 02:28:03
+GoVersion: go1.13.7
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

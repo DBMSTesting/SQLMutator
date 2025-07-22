@@ -1,0 +1,117 @@
+ID: 8396
+Title: Some events do not reach target table through materialized view on insert to distributed source table.
+Description:
+CH configuration:
+2 shards 2 replicas
+
+Given main shard with host 0-0-0. It has distributed table: `dis_locatable_entity_states` for replicated tables `locatable_entity_states`. Engine - ReplicatedMergeTree.
+
+Given distributed table `dis_entity_agg_count` for replicated tables `entity_agg_count`, which keeps argMax AggregateFunction State.
+
+Given Mat. View `to_entity_agg_count`, which transfers data from `locatable_entity_states` tables to `entity_agg_state` on each replica.
+
+Problem:
+Insert 3 events to `dis_locatable_entity_states` table with 3-4 seconds latency after each event. Source distributed table has all 3 events, Destination distributed table has only 2 or few events.
+
+If increase latency to about 10 seconds, all events will be found in destination distributed table.
+
+3 events insertion logs:
+
+```
+2019.12.25 13:08:37.138515 [ 169 ] {83109c44-40ff-4233-a73a-036c26de05b4} <Debug> executeQuery: (from 10.48.4.253:45378) INSERT INTO dis_locatable_entity_states (                       timestamp,                      location_online_status,                         cur_patient_state,                      cur_patient_timestamp,                        prev_patient_state,                     prev_patient_timestamp,                         loc_room_id,                    loc_ward_id,                    loc_floor_id,                   loc_building_id,                        loc_campus_id,                          loc_campus_org_code,                          loc_timestamp,                          site_id,                        site_type,                      entity_id,                      entity_org_code,                        entity_type,                    entity_sub_type,                        entity_name,         cur_clean_state,                         cur_clean_timestamp,                    prev_clean_state,                       prev_clean_timestamp,                   cur_broken_state,                       cur_broken_timestamp,                   prev_broken_state,                      prev_broken_timestamp,       user,              group,                        event_type,              deleted_at            ) VALUES 
+2019.12.25 13:08:37.149186 [ 169 ] {83109c44-40ff-4233-a73a-036c26de05b4} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2019.12.25 13:08:37.149704 [ 169 ] {83109c44-40ff-4233-a73a-036c26de05b4} <Debug> MemoryTracker: Peak memory usage (total): 0.00 B.
+2019.12.25 13:08:37.149869 [ 169 ] {83109c44-40ff-4233-a73a-036c26de05b4} <Information> TCPHandler: Processed in 0.011 sec.
+2019.12.25 13:08:37.230002 [ 92 ] {} <Trace> dis_locatable_entity_states.Distributed.DirectoryMonitor: Started processing `/var/lib/clickhouse/data/db/dis_locatable_entity_states/default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D0:9000,default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D1:9000/996.bin`
+2019.12.25 13:08:37.289877 [ 92 ] {} <Trace> dis_locatable_entity_states.Distributed.DirectoryMonitor: Finished processing `/var/lib/clickhouse/data/db/dis_locatable_entity_states/default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D0:9000,default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D1:9000/996.bin`
+2019.12.25 13:08:43.456649 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> executeQuery: (from 10.48.4.253:45378)                        SELECT entity_id,                              cur_patient_state, cur_patient_timestamp, prev_patient_state, prev_patient_timestamp,                           cur_clean_state, cur_clean_timestamp, prev_clean_state, prev_clean_timestamp,                         cur_broken_state, cur_broken_timestamp, prev_broken_state, prev_broken_timestamp,                               timestamp                        FROM dis_locatable_entity_states                        WHERE timestamp <= toDateTime(1577279323) AND entity_id = 'f8f1ce8a-ca2c-4a57-b784-21c0edcd7a83' AND event_type in ('update:clean', 'update:broken', 'update:patient')                        ORDER BY timestamp desc                         LIMIT 1                 
+2019.12.25 13:08:43.461887 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "event_type IN ('update:clean', 'update:broken', 'update:patient')" moved to PREWHERE
+2019.12.25 13:08:43.464640 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> db.locatable_entity_states (SelectExecutor): Key condition: (column 1 in (-inf, 1577279323]), (column 2 in ['f8f1ce8a-ca2c-4a57-b784-21c0edcd7a83', 'f8f1ce8a-ca2c-4a57-b784-21c0edcd7a83']), and, unknown, and
+2019.12.25 13:08:43.464754 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> db.locatable_entity_states (SelectExecutor): MinMax index condition: (column 0 in (-inf, 1577279323]), unknown, and, unknown, and
+2019.12.25 13:08:43.465167 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> db.locatable_entity_states (SelectExecutor): Selected 1 parts by date, 1 parts by key, 1 marks to read from 1 ranges
+2019.12.25 13:08:43.465469 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Trace> db.locatable_entity_states (SelectExecutor): Reading approx. 8192 rows with 1 streams
+2019.12.25 13:08:43.465605 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Trace> InterpreterSelectQuery: FetchColumns -> WithMergeableState
+2019.12.25 13:08:43.465996 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Trace> InterpreterSelectQuery: WithMergeableState -> Complete
+2019.12.25 13:08:43.466642 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> executeQuery: Query pipeline:
+Limit
+ Expression
+  MergingSorted
+   Asynchronous
+    Materializing
+     Limit
+      MergeSorting
+       PartialSorting
+        Expression
+         Filter
+          MergeTreeThread
+   Asynchronous
+    Remote
+
+2019.12.25 13:08:43.480218 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> MergingSortedBlockInputStream: Merge sorted 1 blocks, 0 rows in 0.01 sec., 0.00 rows/sec., 0.00 MB/sec.
+2019.12.25 13:08:43.480714 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Information> executeQuery: Read 2025 rows, 6.84 KiB in 0.024 sec., 84590 rows/sec., 285.72 KiB/sec.
+2019.12.25 13:08:43.480778 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> MemoryTracker: Peak memory usage (for query): 880.00 B.
+2019.12.25 13:08:43.481252 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Debug> MemoryTracker: Peak memory usage (total): 3.15 KiB.
+2019.12.25 13:08:43.481299 [ 169 ] {7f885b58-bec6-4a39-8d30-4a811f647e76} <Information> TCPHandler: Processed in 0.025 sec.
+2019.12.25 13:08:44.482152 [ 169 ] {bc972eef-aefd-4a5d-9b21-ff31b7d6e4d5} <Debug> executeQuery: (from 10.48.4.253:45378) INSERT INTO dis_locatable_entity_states (                       timestamp,                      location_online_status,                         cur_patient_state,                      cur_patient_timestamp,                        prev_patient_state,                     prev_patient_timestamp,                         loc_room_id,                    loc_ward_id,                    loc_floor_id,                   loc_building_id,                        loc_campus_id,                          loc_campus_org_code,                          loc_timestamp,                          site_id,                        site_type,                      entity_id,                      entity_org_code,                        entity_type,                    entity_sub_type,                        entity_name,         cur_clean_state,                         cur_clean_timestamp,                    prev_clean_state,                       prev_clean_timestamp,                   cur_broken_state,                       cur_broken_timestamp,                   prev_broken_state,                      prev_broken_timestamp,       user,              group,                        event_type,              deleted_at            ) VALUES 
+2019.12.25 13:08:44.491139 [ 169 ] {bc972eef-aefd-4a5d-9b21-ff31b7d6e4d5} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2019.12.25 13:08:44.491374 [ 169 ] {bc972eef-aefd-4a5d-9b21-ff31b7d6e4d5} <Debug> MemoryTracker: Peak memory usage (total): 0.00 B.
+2019.12.25 13:08:44.491448 [ 169 ] {bc972eef-aefd-4a5d-9b21-ff31b7d6e4d5} <Information> TCPHandler: Processed in 0.010 sec.
+2019.12.25 13:08:44.510978 [ 92 ] {} <Trace> dis_locatable_entity_states.Distributed.DirectoryMonitor: Started processing `/var/lib/clickhouse/data/db/dis_locatable_entity_states/default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D0:9000,default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D1:9000/997.bin`
+2019.12.25 13:08:44.561723 [ 92 ] {} <Trace> dis_locatable_entity_states.Distributed.DirectoryMonitor: Finished processing `/var/lib/clickhouse/data/db/dis_locatable_entity_states/default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D0:9000,default@chi%2Dclickhouse%2Ddb%2Dorg%2Dsim%2Ddefault%2D1%2D1:9000/997.bin`
+2019.12.25 13:08:48.782212 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> executeQuery: (from 10.48.4.253:45378)                        SELECT entity_id,                              cur_patient_state, cur_patient_timestamp, prev_patient_state, prev_patient_timestamp,                           cur_clean_state, cur_clean_timestamp, prev_clean_state, prev_clean_timestamp,                         cur_broken_state, cur_broken_timestamp, prev_broken_state, prev_broken_timestamp,                               timestamp                        FROM dis_locatable_entity_states                        WHERE timestamp <= toDateTime(1577279328) AND entity_id = 'f8f1ce8a-ca2c-4a57-b784-21c0edcd7a83' AND event_type in ('update:clean', 'update:broken', 'update:patient')                        ORDER BY timestamp desc                         LIMIT 1                 
+2019.12.25 13:08:48.785275 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "event_type IN ('update:clean', 'update:broken', 'update:patient')" moved to PREWHERE
+2019.12.25 13:08:48.788286 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> db.locatable_entity_states (SelectExecutor): Key condition: (column 1 in (-inf, 1577279328]), (column 2 in ['f8f1ce8a-ca2c-4a57-b784-21c0edcd7a83', 'f8f1ce8a-ca2c-4a57-b784-21c0edcd7a83']), and, unknown, and
+2019.12.25 13:08:48.788418 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> db.locatable_entity_states (SelectExecutor): MinMax index condition: (column 0 in (-inf, 1577279328]), unknown, and, unknown, and
+2019.12.25 13:08:48.788870 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> db.locatable_entity_states (SelectExecutor): Selected 1 parts by date, 1 parts by key, 1 marks to read from 1 ranges
+2019.12.25 13:08:48.789383 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Trace> db.locatable_entity_states (SelectExecutor): Reading approx. 8192 rows with 1 streams
+2019.12.25 13:08:48.789758 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Trace> InterpreterSelectQuery: FetchColumns -> WithMergeableState
+2019.12.25 13:08:48.790300 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Trace> InterpreterSelectQuery: WithMergeableState -> Complete
+2019.12.25 13:08:48.790735 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> executeQuery: Query pipeline:
+Limit
+ Expression
+  MergingSorted
+   Asynchronous
+    Materializing
+     Limit
+      MergeSorting
+       PartialSorting
+        Expression
+         Filter
+          MergeTreeThread
+   Asynchronous
+    Remote
+
+2019.12.25 13:08:48.802687 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> MergingSortedBlockInputStream: Merge sorted 1 blocks, 1 rows in 0.01 sec., 90.91 rows/sec., 0.01 MB/sec.
+2019.12.25 13:08:48.802786 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Information> executeQuery: Read 2026 rows, 7.01 KiB in 0.020 sec., 98951 rows/sec., 342.51 KiB/sec.
+2019.12.25 13:08:48.802844 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> MemoryTracker: Peak memory usage (for query): 1.07 KiB.
+2019.12.25 13:08:48.803164 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Debug> MemoryTracker: Peak memory usage (total): 13.19 KiB.
+2019.12.25 13:08:48.803211 [ 169 ] {da5341ea-41d8-41ae-b6b3-f7d215e8d28a} <Information> TCPHandler: Processed in 0.021 sec.
+2019.12.25 13:08:49.804298 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Debug> executeQuery: (from 10.48.4.253:45378) INSERT INTO dis_locatable_entity_states (                       timestamp,                      location_online_status,                         cur_patient_state,                      cur_patient_timestamp,                        prev_patient_state,                     prev_patient_timestamp,                         loc_room_id,                    loc_ward_id,                    loc_floor_id,                   loc_building_id,                        loc_campus_id,                          loc_campus_org_code,                          loc_timestamp,                          site_id,                        site_type,                      entity_id,                      entity_org_code,                        entity_type,                    entity_sub_type,                        entity_name,         cur_clean_state,                         cur_clean_timestamp,                    prev_clean_state,                       prev_clean_timestamp,                   cur_broken_state,                       cur_broken_timestamp,                   prev_broken_state,                      prev_broken_timestamp,       user,              group,                        event_type,              deleted_at            ) VALUES 
+2019.12.25 13:08:49.886007 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Debug> db.locatable_entity_states (Replicated OutputStream): Wrote block with ID '201912_17551530080082325877_12060175834144057516', 1 rows
+2019.12.25 13:08:49.892706 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> db.locatable_entity_states: Renaming temporary part tmp_insert_201912_1000_1000_0 to 201912_1009_1009_0.
+2019.12.25 13:08:49.897883 [ 25 ] {} <Debug> db.locatable_entity_states (ReplicatedMergeTreeQueue): Pulling 1 entries to queue: log-0000001276 - log-0000001276
+2019.12.25 13:08:49.899949 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.12.25 13:08:49.900769 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> Aggregator: Aggregating
+2019.12.25 13:08:49.901125 [ 25 ] {} <Debug> db.locatable_entity_states (ReplicatedMergeTreeQueue): Pulled 1 entries to queue.
+2019.12.25 13:08:49.902341 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> Aggregator: Aggregation method: serialized
+2019.12.25 13:08:49.902693 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> Aggregator: Aggregated. 1 to 1 rows (from 0.000 MiB) in 0.002 sec. (605.687 rows/sec., 0.290 MiB/sec.)
+2019.12.25 13:08:49.902945 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> Aggregator: Merging aggregated data
+2019.12.25 13:08:49.904335 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> virtual DB::MergingAndConvertingBlockInputStream::~MergingAndConvertingBlockInputStream(): Waiting for threads to finish
+2019.12.25 13:08:49.905146 [ 109 ] {} <Trace> InterserverIOHTTPHandler-factory: HTTP Request for InterserverIOHTTPHandler-factory. Method: POST, Address: 10.48.1.67:53604, User-Agent: none, Content Type: , Transfer Encoding: identity
+2019.12.25 13:08:49.905275 [ 109 ] {} <Trace> InterserverIOHTTPHandler: Request URI: /?endpoint=DataPartsExchange%3A%2Fclickhouse%2Ftables%2F0%2Fdb%2Flocatable_entity_states%2Freplicas%2Fchi-clickhouse-db-org-sim-default-0-0&part=201912_1009_1009_0&compress=false
+2019.12.25 13:08:49.905326 [ 109 ] {} <Trace> db.locatable_entity_states (Replicated PartsService): Sending part 201912_1009_1009_0
+2019.12.25 13:08:49.909096 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.12.25 13:08:49.913310 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Debug> db.entity_agg_count (Replicated OutputStream): Wrote block with 1 rows
+2019.12.25 13:08:49.914326 [ 109 ] {} <Information> InterserverIOHTTPHandler: Done processing query
+2019.12.25 13:08:49.918092 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Trace> db.entity_agg_count: Renaming temporary part tmp_insert_201912_1000_1000_0 to 201912_1009_1009_0.
+2019.12.25 13:08:49.922285 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Debug> MemoryTracker: Peak memory usage (for query): 92.51 MiB.
+2019.12.25 13:08:49.922558 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Debug> MemoryTracker: Peak memory usage (total): 92.51 MiB.
+2019.12.25 13:08:49.922615 [ 169 ] {74ef3dc6-24e4-40d8-b3bc-ddefc4ae0681} <Information> TCPHandler: Processed in 0.118 sec.
+2019.12.25 13:08:49.923645 [ 26 ] {} <Debug> db.entity_agg_count (ReplicatedMergeTreeQueue): Pulling 1 entries to queue: log-0000001280 - log-0000001280
+2019.12.25 13:08:49.926843 [ 26 ] {} <Debug> db.entity_agg_count (ReplicatedMergeTreeQueue): Pulled 1 entries to queue.
+2019.12.25 13:08:49.929921 [ 107 ] {} <Trace> InterserverIOHTTPHandler-factory: HTTP Request for InterserverIOHTTPHandler-factory. Method: POST, Address: 10.48.1.67:53606, User-Agent: none, Content Type: , Transfer Encoding: identity
+2019.12.25 13:08:49.930056 [ 107 ] {} <Trace> InterserverIOHTTPHandler: Request URI: /?endpoint=DataPartsExchange%3A%2Fclickhouse%2Ftables%2F0%2Fdb%2Fentity_agg_count%2Freplicas%2Fchi-clickhouse-db-org-sim-default-0-0&part=201912_1009_1009_0&compress=false
+2019.12.25 13:08:49.930105 [ 107 ] {} <Trace> db.entity_agg_count (Replicated PartsService): Sending part 201912_1009_1009_0
+2019.12.25 13:08:49.931766 [ 107 ] {} <Information> InterserverIOHTTPHandler: Done processing query
+
+```

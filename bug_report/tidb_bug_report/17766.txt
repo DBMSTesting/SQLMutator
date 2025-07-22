@@ -1,0 +1,68 @@
+ID: 17766
+Title: P1-[4.0 bug hunting]-[SQL Plan Management]-Inf value in FLOAT column causes JDBC driver error
+Description:
+## Description
+Bug Hunter issue tidb-challenge-program/bug-hunting-issue#57
+
+---
+
+Consider the following statements:
+```sql
+CREATE TABLE t0(c0 FLOAT);
+INSERT INTO t0 VALUES (1e100);
+SELECT t0.c0 FROM t0; -- +Inf
+```
+Unexpectedly, the `INSERT` allows the insertion of an infinity value. This is problematic, since the MySQL JDBC driver cannot handle it. Specifically, when using JDBC to get a `java.sql.ResultSet` based on the query, invoking `java.sql.ResultSet.next()` to move the cursor to the first row in the result set, and then using `java.sql.ResultSet.getString(1)` to obtain the floating point value, the JDBC driver throws an exception with the following stacktrace:
+```
+Caused by: java.lang.NumberFormatException: For input string: "+Inf"
+	at java.base/jdk.internal.math.FloatingDecimal.readJavaFormatString(FloatingDecimal.java:2054)
+	at java.base/jdk.internal.math.FloatingDecimal.parseDouble(FloatingDecimal.java:110)
+	at java.base/java.lang.Double.parseDouble(Double.java:543)
+	at com.mysql.cj.protocol.a.MysqlTextValueDecoder.decodeDouble(MysqlTextValueDecoder.java:228)
+	at com.mysql.cj.protocol.a.MysqlTextValueDecoder.decodeFloat(MysqlTextValueDecoder.java:224)
+	at com.mysql.cj.protocol.result.AbstractResultsetRow.decodeAndCreateReturnValue(AbstractResultsetRow.java:124)
+	at com.mysql.cj.protocol.result.AbstractResultsetRow.getValueFromBytes(AbstractResultsetRow.java:250)
+	at com.mysql.cj.protocol.a.result.ByteArrayRow.getValue(ByteArrayRow.java:91)
+	at com.mysql.cj.jdbc.result.ResultSetImpl.getString(ResultSetImpl.java:954)
+```
+
+MySQL 8.0.19 allows the `INSERT` only to succeed, if it is succeeded by an `IGNORE`, in which case it inserts a rounded value:
+```
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 16
+Server version: 8.0.19 MySQL Community Server - GPL
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> CREATE TABLE t0(c0 FLOAT);
+Query OK, 0 rows affected (0.03 sec)
+
+mysql> INSERT IGNORE INTO t0 VALUES (1e100);
+Query OK, 1 row affected, 1 warning (0.01 sec)
+
+mysql> SELECT t0.c0 FROM t0; -- +Inf
++------------+
+| c0         |
++------------+
+| 3.40282e38 |
++------------+
+1 row in set (0.00 sec)
+```
+I found this based on the latest master commit 187f225002b67daa47992816f6ef5ddb76b0f68a, and also checked that this reproduces on the 4.0 RC. Please let me know if this bug report is sufficient, or whether you would like an actual Java driver to reproduce this.
+## SIG slack channel
+
+ [#sig-exec](https://slack.tidb.io/invite?team=tidb-community&channel=sig-exec&ref=high-performance)
+
+## Score
+
+- 900
+
+## Mentor
+
+* @lzmhhh123

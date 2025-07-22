@@ -1,0 +1,60 @@
+ID: 49695
+Title: Projection with max value
+Description:
+Clickhouse 22.8.13.20 (also tested with 22.8.17 and 23.3.2.37)
+
+Table
+```
+CREATE TABLE test.proj
+(
+`date` Date,
+`ID` String,
+`A` Array(UInt16)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(date)
+ORDER BY (length(A), cityHash64(ID), ID)
+SAMPLE BY cityHash64(ID)
+TTL date + toIntervalDay(30)
+```
+today() - in a time of reporting is 2023-05-09
+
+have often such query
+`SELECT max(date) FROM test.proj PREWHERE date != today()`
+It is doing scan and is much heavier than it could be. Wanted to workaround this with projection. So executed 
+```
+ALTER TABLE test.proj
+ADD PROJECTION maxdate
+(
+  SELECT max(date)
+  GROUP BY date
+)
+```
+then materialize and after that my query returns
+```
+SELECT max(date)
+FROM test.proj
+PREWHERE date != today()
+
+Query id: 20b3ed0a-626a-493a-8732-d7f1440ff9b1
+
+┌──max(date)─┐
+│ 1970-01-01 │
+└────────────┘
+```
+Before was
+```
+SELECT max(date)
+FROM test.proj
+PREWHERE date != today()
+
+Query id: e55d55c1-e1af-4063-b751-9ac3956af5fc
+
+┌──max(date)─┐
+│ 2023-05-10 │
+└────────────┘
+```
+Another test so i cleared yesterday partition
+` ALTER TABLE test.proj CLEAR PROJECTION maxdate IN PARTITION '20230508' `
+and it returns `'2023-05-08'` still weird
+Changing partition key to month seems to fixing everything but it is really sneaky that is using projection in query and result is really unexpected.

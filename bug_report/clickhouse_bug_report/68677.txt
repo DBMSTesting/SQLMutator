@@ -1,0 +1,74 @@
+ID: 68677
+Title: JSON WHERE clause 
+Description:
+Version: 24.8.1.2684
+
+https://fiddle.clickhouse.com/d13483a4-be1e-465a-8647-1397fde51b89
+
+I'm testing the new JSON type in a ReplacingMergeTree. I bumped into the following situation:
+
+```sql
+SELECT * FROM test_new_json_type FINAL
+WHERE data.foo2 is not null;
+
+Error: Received exception from server (version 24.8.1):
+Code: 9. DB::Exception: Received from localhost:9000. DB::Exception: Size of permutation (0) is less than required (1). (SIZES_OF_COLUMNS_DOESNT_MATCH)
+```
+
+Specific conditions I've noticed:
+- new (experimental) `JSON` type
+- the JSON data has different properties
+- `FINAL` is used 
+- `WHERE` clause is on a `JSON` property that might not exist
+- happens only after new inserts (there are new unmerged parts at this stage?)
+- `OPTIMIZE TABLE ... FINAL` fixes it (all parts are merged and solves the problem?)
+
+Narrowing it down:
+- does not happen when `FINAL` is not used
+- does not happen when `WHERE` is not used (with or without `FINAL`)
+- does not happen when used JSON property exists in all data
+
+Reproducible this way:
+```sql
+SET allow_experimental_json_type = 1;
+
+CREATE TABLE test_new_json_type(id UInt32, data JSON, version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY id;
+
+INSERT INTO test_new_json_type format JSONEachRow
+{"id":1,"data":{"foo1":"bar"},"version":1}
+{"id":2,"data":{"foo2":"bar"},"version":1}
+{"id":3,"data":{"foo2":"bar"},"version":1}
+;
+
+-- works
+SELECT * FROM test_new_json_type FINAL
+WHERE data.foo2 is not null
+;
+
+-- "replace" row 2
+INSERT INTO test_new_json_type
+SELECT id, '{"foo2":"baz"}' AS _data, version+1 AS _version
+FROM test_new_json_type where id=2;
+
+-- Code: 9. DB::Exception: Size of permutation (0) is less than required (1). (SIZES_OF_COLUMNS_DOESNT_MATCH) (version 24.8.1.2684 (official build))
+SELECT * FROM test_new_json_type FINAL
+WHERE data.foo2 is not null
+;
+
+-- works
+SELECT * FROM test_new_json_type 
+WHERE data.foo2 is not null
+;
+
+-- works
+SELECT * FROM test_new_json_type FINAL
+;
+
+-- fix
+OPTIMIZE TABLE test_new_json_type FINAL;
+
+-- works again
+SELECT * FROM test_new_json_type FINAL
+WHERE data.foo2 is not null
+;
+```

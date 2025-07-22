@@ -1,0 +1,235 @@
+ID: 13907
+Title: HTTP Error 403 when trying to read parquet files stored in S3 from k8s pod with AWS access configured through service accounts
+Description:
+### What happens?
+
+I'm trying to set-up Apache Superset + DuckDB for parquet files analytics stored in S3.
+The Apache Superset is deployed as k8s pod on AWS. DuckDB is included into the same image and is being run in-memory mode.
+
+All the attempts to query the bucket results into `HTTP 403` error.
+
+![image](https://github.com/user-attachments/assets/e62e714d-a17f-43f9-808b-12e40e8b69af)
+
+The thing is that AWS credentials are not being passed directly to the pod and configured via service accounts. I believe https://github.com/duckdb/duckdb/issues/4021 should reference the similar kind of credentials resolution, but it was solved more than a year ago.
+
+### To Reproduce
+
+In order to remove as much intermediate layers as possible, I've connected to the pod directly and compared Python `boto3` and  `duckdb` modules (how do they resolve AWS credentials and whether it's possible to retrieve S3 object). This should also make it easier to reproduce/reason about, since Apache Superset won't be needed for the setup.
+
+#### Dependencies
+
+`Dockerfile`
+```dockerfile
+FROM apache/superset:4.0.2
+
+WORKDIR /app
+COPY ./requirements.txt /app/requirements.txt
+USER root
+RUN pip install -r requirements.txt
+USER superset
+
+# Everything below could be skipped entirely, since we only need Python and its dependencies in the Apache Superset image to reproduce the issue
+# EXPOSE 3000
+# CMD superset run -h 0.0.0.0 -p 3000 --with-threads --reload
+```
+
+`requirements.txt`
+```
+duckdb==1.0.0
+duckdb_engine==0.13.0
+boto3==1.35.14
+```
+
+#### Pod Level Permissions Configuration
+
+These are the permissions that were granted to the pod.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["sns:*", "sqs:*", "secretsmanager:GetSecretValue", "secretsmanager:ListSecrets"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::XXXXXXXXXXXXXXXXXXXX",
+        "arn:aws:s3:::XXXXXXXXXXXXXXXXXXXX/*"
+      ]
+    }
+  ]
+}
+```
+
+#### Pod Session
+
+1. Logging into the pod:
+```sh
+kubectl exec -it stage-use1-XXXXXXXXXXXX -- bash
+```
+
+2. Print current linux version and distribution:
+```sh
+superset@stage-use1-XXXXXXXXXXXX:/app$ cat /etc/*-release
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+VERSION="12 (bookworm)"
+VERSION_CODENAME=bookworm
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
+```
+
+3. Print Python and its dependencies versions:
+```sh
+superset@stage-use1-XXXXXXXXXXXX:/app$ python --version
+Python 3.10.14
+superset@stage-use1-XXXXXXXXXXXX:/app$ cat requirements.txt
+duckdb==1.0.0
+duckdb_engine==0.13.0
+boto3==1.35.14
+```
+
+4. Entering Python shell:
+```sh
+superset@stage-use1-XXXXXXXXXXXX:/app$ python
+Python 3.10.14 (main, Jul 23 2024, 07:20:18) [GCC 12.2.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import boto3
+>>> import duckdb
+```
+
+5. Retrieving the initial credentials
+```sh
+>>> session = boto3.Session()
+>>> initial_credentials = session.get_credentials().get_frozen_credentials()
+>>> bucket = "XXXXXXXXXXXXXXXXXXXX"
+>>> object_key = "data/date=2024-08-19/hour=15/eventType=SQL_QUERY/part-00000-3b73ac81-5bf5-4265-823c-69d0898bc1c1.c000.snappy.parquet"
+```
+
+6. Comparing credentials resolved by `duckdb` to the ones resolved by `boto3`. They might be different, because different sessions were created:
+```sh
+>>> con = duckdb.connect()
+>>> q = con.sql("CALL load_aws_credentials()")
+>>> q.loaded_access_key_id == initial_credentials.access_key
+False
+```
+
+7. Validating that DuckDB has no previous state and that there is no secret to be used:
+```sh
+>>> con.sql(f"FROM which_secret('s3://{bucket}/{object_key}', 's3')").show()
+┌─────────┬────────────┬─────────┐
+│  name   │ persistent │ storage │
+│ varchar │  varchar   │ varchar │
+├─────────┴────────────┴─────────┤
+│             0 rows             │
+└────────────────────────────────┘
+```
+
+8. Trying to read the parquet file and failing with `403 HTTP` error:
+```sh
+>>> con.sql(f"FROM read_parquet('s3://{bucket}/{object_key}')").show()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+duckdb.duckdb.HTTPException: HTTP Error: HTTP GET error on 'https://XXXXXXXXXXXXXXXXXXXX/data/date%3D2024-08-19/hour%3D15/eventType%3DSQL_QUERY/part-00000-3b73ac81-5bf5-4265-823c-69d0898bc1c1.c000.snappy.parquet' (HTTP 403)
+```
+
+
+9. Setting up a secret from `boto3` credentials:
+```sh
+>>> con.sql(f"""
+...     CREATE PERSISTENT SECRET boto3_to_duckdb (
+...             TYPE S3,
+...             KEY_ID '{initial_credentials.access_key}',
+...             SECRET '{initial_credentials.secret_key}',
+...             REGION 'us-east-1'
+...     )
+... """).show()
+┌─────────┐
+│ Success │
+│ boolean │
+├─────────┤
+│ true    │
+└─────────┘
+```
+
+9. Validating that the configured secret will be used for the target S3 object:
+```sh
+>>> con.sql(f"FROM which_secret('s3://{bucket}/{object_key}', 's3')").show()
+┌─────────────────┬────────────┬────────────┐
+│      name       │ persistent │  storage   │
+│     varchar     │  varchar   │  varchar   │
+├─────────────────┼────────────┼────────────┤
+│ boto3_to_duckdb │ PERSISTENT │ local_file │
+└─────────────────┴────────────┴────────────┘
+```
+
+10. Still failing to read with the same `403 HTTP` error:
+```sh
+>>> con.sql(f"FROM read_parquet('s3://{bucket}/{object_key}')").show()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+duckdb.duckdb.HTTPException: HTTP Error: HTTP GET error on 'https://XXXXXXXXXXXXXXXXXXXX/data/date%3D2024-08-19/hour%3D15/eventType%3DSQL_QUERY/part-00000-3b73ac81-5bf5-4265-823c-69d0898bc1c1.c000.snappy.parquet' (HTTP 403)
+```
+
+11. Validating that `boto3` itself is able to read the object with the same credentials:
+```sh
+>>> s3_client = session.client("s3")
+>>> s3_client.get_object(Bucket=bucket, Key=object_key)
+{'ResponseMetadata': {'RequestId': 'XXX', 'HostId': 'XXX', 'HTTPStatusCode': 200, 'HTTPHeaders': {'x-amz-id-2': 'XXX', 'x-amz-request-id': 'XXX', 'date': 'Thu, 12 Sep 2024 14:37:44 GMT', 'last-modified': 'Mon, 19 Aug 2024 15:20:11 GMT', 'x-amz-expiration': 'expiry-date="Thu, 19 Sep 2024 00:00:00 GMT", rule-id="cleanup"', 'etag': '"XXX"', 'x-amz-server-side-encryption': 'AES256', 'accept-ranges': 'bytes', 'content-type': 'binary/octet-stream', 'server': 'AmazonS3', 'content-length': '592778'}, 'RetryAttempts': 0}, 'AcceptRanges': 'bytes', 'Expiration': 'expiry-date="Thu, 19 Sep 2024 00:00:00 GMT", rule-id="cleanup"', 'LastModified': datetime.datetime(2024, 8, 19, 15, 20, 11, tzinfo=tzutc()), 'ContentLength': 592778, 'ETag': '"XXX"', 'ContentType': 'binary/octet-stream', 'ServerSideEncryption': 'AES256', 'Metadata': {}, 'Body': <botocore.response.StreamingBody object at 0x7f37c84e7490>}
+```
+
+12. Confirming that the credentials were not rotated and they stayed the same through the whole session:
+```sh
+>>> session.get_credentials().access_key == initial_credentials.access_key
+True
+>>> session.get_credentials().secret_key == initial_credentials.secret_key
+True
+```
+
+### OS:
+
+Linux, x86_64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Yahor Zhydal
+
+### Affiliation:
+
+Monday.com
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

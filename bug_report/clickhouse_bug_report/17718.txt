@@ -1,0 +1,64 @@
+ID: 17718
+Title: Error in query with join and 'with totals' clause
+Description:
+**Describe the bug**
+Exception happens when running query which joins subquery with `group by with totals` clause and table with Join engine.
+
+**How to reproduce**
+Clickhouse version 20.7.4.11
+
+```
+CREATE TABLE table1 (
+  show_date DateTime,
+  pu_num String,
+  pu_id UInt64,
+  amnt UInt32
+) ENGINE = MergeTree(
+) PARTITION BY toYYYYMM(show_date)
+ORDER BY (show_date);
+
+insert into table1 values('2020-01-01 12:00:00', '1234454', 54234, 5);
+insert into table1 values('2020-01-02 13:00:00', '1234454', 54234, 7);
+insert into table1 values('2020-01-11 15:00:00', '123123', 32434, 4);
+
+CREATE TABLE table2 (
+  pu_id UInt64,
+  pu_num String,
+  name_rus String)
+ ENGINE = Join(ANY, LEFT, pu_id) SETTINGS join_use_nulls = 1;
+
+insert into table2 values(32434, '123123', 'Имя_1');
+insert into table2 values(54234, '1234454', 'Имя_2');
+
+select dd.pu_id, dd.pu_num, dd.s_amnt, k.name_rus
+from (
+    select a.pu_id, a.pu_num, sum(a.amnt) as s_amnt
+    from table1 a
+    group by a.pu_id, a.pu_num with totals
+) dd
+ANY LEFT JOIN table2 k USING(pu_id) SETTINGS join_use_nulls = 1;
+```
+
+**Error message and/or stacktrace**
+```
+2020.12.02 09:04:41.208576 [ 49155 ] {a90f1fff-f15e-4edb-8e94-d11ea6107029} <Error> DynamicQueryHandler: Code: 49, e.displayText() = DB::Exception: Invalid number of columns in chunk pushed to OutputPort. Expected 4, found 5
+Header: pu_id UInt64 UInt64(size = 0), pu_num String String(size = 0), s_amnt UInt64 UInt64(size = 0), name_rus Nullable(String) Nullable(size = 0, String(size = 0), UInt8(size = 0))
+Chunk:  UInt64(size = 1) String(size = 1) UInt64(size = 1) Nullable(size = 1, String(size = 1), UInt8(size = 1)) Nullable(size = 1, String(size = 1), UInt8(size = 1))
+, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x12723a80 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xa3f52bd in /usr/bin/clickhouse
+2. ? @ 0xfee4cf3 in /usr/bin/clickhouse
+3. DB::PipelineExecutor::prepareProcessor(unsigned long, unsigned long, std::__1::queue<DB::ExecutingGraph::Node*, std::__1::deque<DB::ExecutingGraph::Node*, std::__1::allocator<DB::ExecutingGraph::Node*> > >&, std::__1::unique_lock<std::__1::mutex>) @ 0xff19e08 in /usr/bin/clickhouse
+4. ? @ 0xff1bbdb in /usr/bin/clickhouse
+5. ? @ 0xff1c356 in /usr/bin/clickhouse
+6. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xa422ad7 in /usr/bin/clickhouse
+7. ? @ 0xa421023 in /usr/bin/clickhouse
+8. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+9. __clone @ 0x121a3f in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.7.4.11 (official build))
+```
+
+
+**Additional context**
+If column `pu_num` or clause `with totals` are removed from query, it executes without error.

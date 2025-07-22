@@ -1,0 +1,218 @@
+ID: 14426
+Title: Segmentation fault in simple table function that constructs a large data chunk
+Description:
+### What happens?
+
+I registered a simple table function that produces a data chunk with just one column called "file". When I try to return a relatively large number of rows (say 5000), I get a segmentation fault. However, for smaller row counts (say 100) the segmentation fault does not occur.
+
+### To Reproduce
+
+Code:
+
+```
+#include <duckdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+
+// This is a new empty database
+const char *db_path = "/tmp/testtbl.duckdb";
+
+static void bindfn(duckdb_bind_info info)
+{
+    duckdb_logical_type text_type =
+        duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+    duckdb_bind_add_result_column(info, "file", text_type);
+    duckdb_destroy_logical_type(&text_type);
+}
+
+static void initfn(duckdb_init_info info)
+{
+    uint8_t *is_done = calloc(1, sizeof(uint32_t));
+    assert(is_done != NULL);
+    duckdb_init_set_init_data(info, is_done, free);
+}
+
+static void mainfn(
+    duckdb_function_info info, duckdb_data_chunk output)
+{
+    uint8_t *is_done = duckdb_function_get_init_data(info);
+
+    if (*is_done)
+        return;
+
+    uint32_t nrows = 5000;
+    duckdb_data_chunk_set_size(output, nrows);
+
+    duckdb_vector files = duckdb_data_chunk_get_vector(output, 0);
+
+    for (uint32_t i = 0; i < nrows; i++)
+    {
+        duckdb_vector_assign_string_element(files, i, "file");
+    }
+
+    // Mark the function as done
+    *is_done = 1;
+
+    return;
+}
+
+void register_fn(duckdb_connection con)
+{
+    duckdb_table_function tfn = duckdb_create_table_function();
+    char *name = "dummyfn";
+    duckdb_table_function_set_name(tfn, name);
+    duckdb_table_function_supports_projection_pushdown(tfn, false);
+
+    duckdb_table_function_set_function(tfn, mainfn);
+    duckdb_table_function_set_bind(tfn, bindfn);
+    duckdb_table_function_set_init(tfn, initfn);
+
+    // Register table function
+    duckdb_state s = duckdb_register_table_function(con, tfn);
+    assert(s == DuckDBSuccess);
+}
+
+int main()
+{
+
+    // Create a database
+    duckdb_database db;
+    duckdb_connection con;
+
+    // Open a database file
+    duckdb_state s = duckdb_open(db_path, &db);
+    assert(s == DuckDBSuccess);
+
+    // Connect to the database
+    s = duckdb_connect(db, &con);
+    assert(s == DuckDBSuccess);
+
+    // Register the table function
+    register_fn(con);
+
+    // Query the table function
+    duckdb_result res;
+    s = duckdb_query(con, "SELECT * FROM dummyfn()", &res);
+    assert(s == DuckDBSuccess);
+
+    // Destroy the result
+    duckdb_destroy_result(&res);
+
+    // Close the connection
+    duckdb_disconnect(&con);
+
+    // Close the database
+    duckdb_close(&db);
+
+    return 0;
+}
+```
+
+Compile
+```
+gcc -o test test.c -lduckdb
+```
+
+Run
+```
+gdb test
+```
+
+Output
+```
+(gdb) r
+Starting program: /home/prashanth/code/ddbtbltest/test
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) n
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff3c006c0 (LWP 457340)]
+[New Thread 0x7ffff32006c0 (LWP 457341)]
+[New Thread 0x7ffff28006c0 (LWP 457342)]
+[New Thread 0x7ffff1e006c0 (LWP 457343)]
+[New Thread 0x7ffff14006c0 (LWP 457344)]
+[New Thread 0x7ffff0a006c0 (LWP 457345)]
+[New Thread 0x7ffff00006c0 (LWP 457346)]
+[New Thread 0x7fffef6006c0 (LWP 457347)]
+[New Thread 0x7fffeec006c0 (LWP 457348)]
+[New Thread 0x7fffee2006c0 (LWP 457349)]
+[New Thread 0x7fffed8006c0 (LWP 457350)]
+
+Thread 1 "test" received signal SIGSEGV, Segmentation fault.
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:265
+warning: 265    ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+(gdb) bt
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:265
+#1  0x00007ffff6370c36 in duckdb::StringHeap::AddBlob(char const*, unsigned long) () from /usr/local/lib/libduckdb.so
+#2  0x00007ffff6314557 in void duckdb::ColumnDataCopy<duckdb::string_t>(duckdb::ColumnDataMetaData&, duckdb::UnifiedVectorFormat const&, duckd
+b::Vector&, unsigned long, unsigned long) () from /usr/local/lib/libduckdb.so
+#3  0x00007ffff631c26d in duckdb::ColumnDataCollection::Append(duckdb::ColumnDataAppendState&, duckdb::DataChunk&) ()
+   from /usr/local/lib/libduckdb.so
+#4  0x00007ffff672f111 in duckdb::PhysicalMaterializedCollector::Sink(duckdb::ExecutionContext&, duckdb::DataChunk&, duckdb::OperatorSinkInput
+&) const () from /usr/local/lib/libduckdb.so
+#5  0x00007ffff69306bb in duckdb::PipelineExecutor::ExecutePushInternal(duckdb::DataChunk&, unsigned long) ()
+   from /usr/local/lib/libduckdb.so
+#6  0x00007ffff6933bf5 in duckdb::PipelineExecutor::Execute(unsigned long) () from /usr/local/lib/libduckdb.so
+#7  0x00007ffff6933e78 in duckdb::PipelineTask::ExecuteTask(duckdb::TaskExecutionMode) () from /usr/local/lib/libduckdb.so
+#8  0x00007ffff692b9b2 in duckdb::ExecutorTask::Execute(duckdb::TaskExecutionMode) () from /usr/local/lib/libduckdb.so
+#9  0x00007ffff692ff44 in duckdb::Executor::ExecuteTask(bool) () from /usr/local/lib/libduckdb.so
+#10 0x00007ffff68eeb93 in duckdb::ClientContext::ExecuteTaskInternal(duckdb::ClientContextLock&, duckdb::BaseQueryResult&, bool) ()
+   from /usr/local/lib/libduckdb.so
+#11 0x00007ffff68eedf8 in duckdb::PendingQueryResult::ExecuteInternal(duckdb::ClientContextLock&) () from /usr/local/lib/libduckdb.so
+#12 0x00007ffff68eef3d in duckdb::ClientContext::ExecutePendingQueryInternal(duckdb::ClientContextLock&, duckdb::PendingQueryResult&) ()
+   from /usr/local/lib/libduckdb.so
+#13 0x00007ffff68f376d in duckdb::ClientContext::Query(std::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool)
+    () from /usr/local/lib/libduckdb.so
+#14 0x00007ffff68f3e22 in duckdb::Connection::Query(std::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) ()
+   from /usr/local/lib/libduckdb.so
+#15 0x00007ffff682caad in duckdb_query () from /usr/local/lib/libduckdb.so
+#16 0x000055555555573b in main () at test.c:84
+(gdb)
+```
+
+
+### OS:
+
+Ubuntu 24.04.1 LTS x86_64
+
+### DuckDB Version:
+
+v1.1.1
+
+### DuckDB Client:
+
+C
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Prashanth Ellina
+
+### Affiliation:
+
+None
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

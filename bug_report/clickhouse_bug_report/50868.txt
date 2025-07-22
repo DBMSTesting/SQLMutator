@@ -1,0 +1,129 @@
+ID: 50868
+Title: Querying ReplicatedSummingMergeTree table through Distribution table with condition on `DateTime64` column with lesser/greater than subquery result returns results only from single shard
+Description:
+**Describe what's wrong**
+
+When querying a table using `ReplicatedSummingMergeTree` engine through Distributed table with condition on `DateTime64` column with lesser/greater than subquery results ClickHouse returns results only from single shard.
+
+Example query:
+
+`select * from gl_test.test_smt_d tsd where dt64 > (select toDateTime64(0, 3, 'UTC'));`
+
+> Not reproducable in [https://fiddle.clickhouse.com/](https://fiddle.clickhouse.com/) as at least two shard are needed and ability to connect with specific one
+
+**Does it reproduce on recent release?**
+
+Unknown I have only access to version `22.8.17.17` 
+
+**How to reproduce**
+
+ClickHouse installation with at least 2 shards.
+
+```sql
+create database gl_test ON CLUSTER '{cluster}' ENGINE = Atomic();
+
+-- drop table gl_test.test_smt ON CLUSTER '{cluster}' sync
+CREATE TABLE gl_test.test_smt ON CLUSTER '{cluster}' (
+    id String,
+    dt DateTime('UTC'),
+    dt64 DateTime64(3, 'UTC'),
+    val Int32
+    ) ENGINE ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/gl_test/test_smt', '{replica}', (val))
+    PARTITION BY toYYYYMM(dt)
+    ORDER BY (cityHash64(id), toDate(dt), val)
+    PRIMARY KEY (cityHash64(id), toDate(dt));
+
+-- drop table gl_test.test_smt_d ON CLUSTER '{cluster}' sync
+CREATE TABLE gl_test.test_smt_d ON CLUSTER '{cluster}' AS gl_test.test_smt
+    ENGINE = Distributed('{cluster}', 'gl_test', test_smt, cityHash64(id));
+
+-- Insert directly to single shard (Alternatively insert using distributed table but then make sure to switch connection to a shard where row is not present)
+INSERT INTO gl_test.test_smt
+(id, dt, dt64, val)
+VALUES('abc', toDateTime(1686036919, 'UTC'), toDateTime64(1686036919.123, 3, 'UTC'), 1);
+
+-- Verify row was inserted
+select * from gl_test.test_smt;
+-- Expected: 1 row present / Actual: 1 row present
+
+-- Connect to second shard
+
+-- Verify row is not present
+select * from gl_test.test_smt;
+-- Expected: 0 row present / Actual: 0 row present
+
+-- Verify row can be fetched using distributed table
+select * from gl_test.test_smt_d;
+-- Expected: 1 row present / Actual: 1 row present
+
+-- Query with condition
+select * from gl_test.test_smt_d tsd where dt64 > toDateTime64(0, 3, 'UTC');
+-- Expected: 1 row present / Actual: 1 row present
+
+-- Wrap condition in subquery
+select * from gl_test.test_smt_d tsd where dt64 > (select toDateTime64(0, 3, 'UTC'));
+-- [FAIL] Expected: 1 row present / Actual: 0 row present
+```
+
+**Expected behavior**
+
+`select * from gl_test.test_smt_d tsd where dt64 > (select toDateTime64(0, 3, 'UTC'));` will return row from second shard
+
+**Error message and/or stacktrace**
+
+N/A
+
+**Additional context**
+
+I have also tested with different conditional operator and with different column types:
+
+```sql
+-- Query with = DateTime64
+select * from gl_test.test_smt_d tsd where dt64 = (select toDateTime64(1686036919.123, 3, 'UTC'));
+-- [PASS] Expected: 1 row present / Actual: 1 row present
+
+-- Query with DateTime in subquery
+select * from gl_test.test_smt_d tsd where dt64 > (select toDateTime(0, 'UTC'));
+-- [PASS] Expected: 1 row present / Actual: 1 row present
+
+-- Query with Int32 in subquery
+select * from gl_test.test_smt_d tsd where val > (select 0);
+-- [PASS] Expected: 1 row present / Actual: 1 row present
+```
+
+I have also tested with `ReplicatedMergeTree` engine:
+
+```sql
+-- drop table gl_test.test_smt_2 ON CLUSTER '{cluster}' sync
+CREATE TABLE gl_test.test_smt_2 ON CLUSTER '{cluster}' (
+    id String,
+    dt DateTime('UTC'),
+    dt64 DateTime64(3, 'UTC'),
+    val Int32
+    ) ENGINE ReplicatedMergeTree('/clickhouse/tables/{shard}/gl_test/test_smt_2', '{replica}')
+    PARTITION BY toYYYYMM(dt)
+    ORDER BY (cityHash64(id), toDate(dt), val)
+    PRIMARY KEY (cityHash64(id), toDate(dt));
+
+-- drop table gl_test.test_smt_2_d ON CLUSTER '{cluster}' sync
+CREATE TABLE gl_test.test_smt_2_d ON CLUSTER '{cluster}' AS gl_test.test_smt_2
+    ENGINE = Distributed('{cluster}', 'gl_test', test_smt, cityHash64(id));
+
+INSERT INTO gl_test.test_smt_2
+(id, dt, dt64, val)
+VALUES('abc', toDateTime(1686036919, 'UTC'), toDateTime64(1686036919.123, 3, 'UTC'), 1);
+
+-- Connect to second shard
+
+-- Verify row is not present
+select * from gl_test.test_smt_2;
+-- Expected: 0 row present / Actual: 0 row present
+
+-- Verify row can be fetched using distributed table
+select * from gl_test.test_smt_2_d;
+-- Expected: 1 row present / Actual: 1 row present
+
+-- Query with subquery
+select * from gl_test.test_smt_2_d tsd where dt64 > (select toDateTime64(0, 3, 'UTC'));
+-- [PASS] Expected: 1 row present / Actual: 1 row present
+```

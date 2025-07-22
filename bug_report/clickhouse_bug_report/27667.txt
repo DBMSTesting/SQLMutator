@@ -1,0 +1,63 @@
+ID: 27667
+Title: ClickHouse inserted a partial block of data and it broke deduplication
+Description:
+I was trying to implement deduplication of blocks, and as a test I killed clickhouse-client while it was inserting data from a TSV file using the `input` function.
+ClickHouse inserted a partial block of data and it broke deduplication.
+```
+First (failed) attempt
+
+-- The first block of 103425 rows got inserted
+2021.08.13 20:03:19.943839 [ 30177 ] {33b2b70a-7e48-40e3-b431-d3580c5c6735} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_2044325925592136338_224670626381852826', 103425 rows
+2021.08.13 20:03:19.977457 [ 30177 ] {33b2b70a-7e48-40e3-b431-d3580c5c6735} <Trace> db.table: Renaming temporary part tmp_insert_20210813_211_211_0 to 20210813_424_424_0.
+
+-- Client has dropped the connection, CANCEL THE QUERY
+2021.08.13 20:03:20.717922 [ 30177 ] {33b2b70a-7e48-40e3-b431-d3580c5c6735} <Information> TCPHandler: Client has dropped the connection, cancel the query.
+
+-- However another block of 51715 rows got inserted anyway
+2021.08.13 20:03:21.265719 [ 30177 ] {33b2b70a-7e48-40e3-b431-d3580c5c6735} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_12200150366349168987_12358441307174369580', 51715 rows
+2021.08.13 20:03:21.296928 [ 30177 ] {33b2b70a-7e48-40e3-b431-d3580c5c6735} <Trace> db.table: Renaming temporary part tmp_insert_20210813_212_212_0 to 20210813_425_425_0.
+
+-- The total number of rows reported by the query is 155140 (two blocks of data)
+2021.08.13 20:03:21.510984 [ 30177 ] {33b2b70a-7e48-40e3-b431-d3580c5c6735} <Information> executeQuery: Read 155140 rows, 776.61 MiB in 4.751866542 sec., 32648 rows/sec., 163.43 MiB/sec.
+
+-- Retry
+
+-- The block of 103425 rows got deduplicated
+2021.08.13 20:45:05.817280 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_2044325925592136338_224670626381852826', 103425 rows
+2021.08.13 20:45:05.822455 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Information> db.table (Replicated OutputStream): Block with ID 20210813_2044325925592136338_224670626381852826 already exists locally as part 20210813_424_424_0; ignoring it.
+
+-- The second block is 103414 rows, not 51715 rows, so it gets inserted successfully
+2021.08.13 20:45:09.054894 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_2425217170151591480_6106430219846770241', 103414 rows
+2021.08.13 20:45:09.073571 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Trace> db.table: Renaming temporary part tmp_insert_20210813_239_239_0 to 20210813_451_451_0.
+
+-- The third block
+2021.08.13 20:45:13.051942 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_16231016785560754596_9804537966436769992', 103379 rows
+2021.08.13 20:45:13.065374 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Trace> db.table: Renaming temporary part tmp_insert_20210813_240_240_0 to 20210813_452_452_0.
+
+-- The fourth block
+2021.08.13 20:45:16.813489 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_14978609919789150052_6694756734307136853', 103604 rows
+2021.08.13 20:45:16.822164 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Trace> db.table: Renaming temporary part tmp_insert_20210813_241_241_0 to 20210813_453_453_0.
+
+-- The fifth block
+2021.08.13 20:45:19.335465 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Debug> db.table (Replicated OutputStream): Wrote block with ID '20210813_9047090776261112264_1197278831556285907', 88696 rows
+2021.08.13 20:45:19.344424 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Trace> db.table: Renaming temporary part tmp_insert_20210813_242_242_0 to 20210813_454_454_0.
+
+-- The total number of rows reported by the query is 502518 (five blocks of data)
+2021.08.13 20:45:19.613576 [ 21749 ] {115638b0-8ee7-45a8-be6a-594f9a00e417} <Information> executeQuery: Read 502518 rows, 2.45 GiB in 17.397894281 sec., 28883 rows/sec., 144.36 MiB/sec.
+
+-- The number of rows in the table is 554233
+select count() from db.table;
+
+count()
+-------
+ 554233
+
+554233 = 502518 (the second insert) + 51715 (the partial block from the first insert)
+
+-- The number of rows in the source file is 502518
+$ zcat 20210813200003-1.tsv.gz | wc -l
+502518
+```
+
+ClickHouse client version 21.8.3.44 (official build).
+Connected to ClickHouse server version 21.8.3 revision 54449.

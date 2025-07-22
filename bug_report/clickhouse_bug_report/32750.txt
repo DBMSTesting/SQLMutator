@@ -1,0 +1,80 @@
+ID: 32750
+Title: After update to v21.8.11 from v21.3.17 memory usage constantly increasing.
+Description:
+Mark_cache_size is set to default 5GB.
+Dictionaries are not used.
+The uncompressed cache is disabled.
+Update to v21.8.12.29 didn't help.
+![image](https://user-images.githubusercontent.com/59286375/146013519-01575276-fd92-44c0-ba03-0c2fecb045ba.png)
+```
+# ch_query () {
+> clickhouse-client -m -n -q \
+> "
+> SELECT 'Allocated by dict' as alloc, formatReadableSize(sum(bytes_allocated)) FROM system.dictionaries;
+>
+> SELECT
+>     database,
+>     name,
+>     formatReadableSize(total_bytes)
+> FROM system.tables
+> WHERE engine IN ('Memory','Set','Join');
+>
+> SELECT
+>     'primary_key_bytes_in_memory' as pk_in_memory, formatReadableSize(sum(primary_key_bytes_in_memory)) AS primary_key_bytes_in_memory,
+>     'primary_key_bytes_in_memory_allocated' as pk_allocated_in_memory, formatReadableSize(sum(primary_key_bytes_in_memory_allocated)) AS primary_key_bytes_in_memory_allocated
+> FROM system.parts;
+>
+> SELECT
+>     metric,
+>     formatReadableSize(value)
+> FROM system.asynchronous_metrics
+> WHERE metric IN ('UncompressedCacheBytes', 'MarkCacheBytes');";
+> }
+
+# ch_query;\
+> ps -q $(pidof clickhouse-server) -o rss=;\
+> for i in {1..500};
+>  do for j in {1..20};
+>   do
+>    (curl -m1 -s -F 'metrics_list=@mlist.tsv;' 'http://127.0.0.1:8123/?readonly=1&cancel_http_readonly_queries_on_client_close=1&metrics_list_structure=Path+String&query=SELECT+Path,+groupArray(Time),+groupArray(Value),+groupArray(Timestamp)+FROM+db.points+PREWHERE+Date+>=toDate(now()-interval+7+day)+AND+Date+<=+toDate(now())+WHERE+(Path+in+metrics_list)+AND+(Time+>=+toUnixTimestamp(now()-interval+7+day)+AND+Time+<=+toUnixTimestamp(now()))+GROUP+BY+Path+FORMAT+RowBinary' --output /tmp/query_result &>/dev/null & );
+>   done;
+>  sleep 1
+>  if [[ $((${i}%25)) -eq 0 ]]; then
+>   sleep 30; ps -q $(pidof clickhouse-server) -o rss=;
+>  fi;
+>  done;\
+> sleep 60;\
+> ch_query;\
+> ps -q $(pidof clickhouse-server) -o rss=;
+
+Allocated by dict       0.00 B
+primary_key_bytes_in_memory     8.69 GiB        primary_key_bytes_in_memory_allocated   12.44 GiB
+MarkCacheBytes  0.00 B
+UncompressedCacheBytes  0.00 B
+10891440
+12313108
+13180236
+14087976
+14972784
+15837392
+16788848
+17643728
+18468476
+19435812
+20124688
+20968536
+21812532
+22665680
+23506580
+24395620
+25245124
+26062700
+26964264
+27797412
+28368952
+Allocated by dict       0.00 B
+primary_key_bytes_in_memory     8.71 GiB        primary_key_bytes_in_memory_allocated   12.47 GiB
+MarkCacheBytes  179.05 MiB
+UncompressedCacheBytes  0.00 B
+28365908
+```

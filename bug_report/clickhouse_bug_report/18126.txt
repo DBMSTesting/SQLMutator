@@ -1,0 +1,243 @@
+ID: 18126
+Title: Incorrect order from ordering by toUnixTimestamp result
+Description:
+Clickhouse version: 20.8.7.15
+
+
+**Describe the bug**
+order by the calculated field from `toUnixTimestamp` is incorrect
+
+**How to reproduce**
+I could not find a way to make a small example case to reproduce this. 
+
+**Expected behavior**
+produce a correct sorting order
+
+**Error message and/or stacktrace**
+N/A
+
+**Additional context**
+Table set:
+```sql
+CREATE TABLE tmp.logs_local
+(
+    `a` DateTime DEFAULT now(),
+    `b` DateTime,
+    `c` LowCardinality(String),
+    `d` LowCardinality(String),
+    `i` UInt64,
+    `k` LowCardinality(String),
+    `z` LowCardinality(String),
+    `l` String,
+    `m` String,
+    `n` String,
+    `o` LowCardinality(String),
+    `p` LowCardinality(String),
+    `q` UInt64
+)
+ENGINE = MergeTree
+PARTITION BY formatDateTime(b, '%Y%m%d%H')
+ORDER BY (c, d, i, k, o, p, l, m, n, b)
+TTL b + toIntervalHour(1)
+SETTINGS index_granularity = 8192, merge_with_ttl_timeout = 300;
+
+CREATE MATERIALIZED VIEW tmp.logs_local_mv
+(
+    `a` UInt8,
+    `b` DateTime,
+    `c` LowCardinality(String),
+    `d` LowCardinality(String),
+    `e` UInt64,
+    `f` UInt64,
+    `i` UInt64,
+    `k` LowCardinality(String),
+    `l` String,
+    `m` String,
+    `n` String,
+    `o` LowCardinality(String),
+    `p` LowCardinality(String),
+    `q` UInt64
+)
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{layer}-{shard}/tmp.logs_local_mv', '{replica}')
+PARTITION BY toYYYYMMDD(b)
+ORDER BY (a, c, d, e, f, k, o, p, i, l, m, n, b)
+TTL b + toIntervalMonth(60)
+SETTINGS index_granularity = 8192 AS
+SELECT
+    toUInt8((((a - b) / 60) / 60) / 24) AS a,
+    toStartOfFiveMinute(b) AS b,
+    c,
+    d,
+    dictGetUInt64('i_lookup', 'e', i) AS e,
+    dictGetUInt64('i_lookup', 'f', i) AS f,
+    i,
+    k,
+    l,
+    m,
+    n,
+    o,
+    p,
+    sum(q) AS q
+FROM usage.logs_local
+GROUP BY
+    a,
+    c,
+    d,
+    e,
+    f,
+    k,
+    o,
+    p,
+    i,
+    l,
+    m,
+    n,
+    b;
+
+CREATE TABLE tmp.logs_dt
+(
+    `a` UInt8,
+    `b` DateTime,
+    `c` LowCardinality(String),
+    `d` LowCardinality(String),
+    `e` UInt64,
+    `g` UInt64,
+    `i` UInt64,
+    `k` LowCardinality(String),
+    `l` String,
+    `m` String,
+    `n` String,
+    `o` LowCardinality(String),
+    `p` LowCardinality(String),
+    `q` UInt64
+)
+ENGINE = Distributed('shards', 'tmp', 'logs_local_mv', rand());
+
+CREATE VIEW tmp.logs
+(
+    `a` UInt8,
+    `b` DateTime,
+    `c` LowCardinality(String),
+    `d` LowCardinality(String),
+    `e` UInt64,
+    `f` String,
+    `g` UInt64,
+    `h` String,
+    `i` UInt64,
+    `j` String,
+    `k` LowCardinality(String),
+    `l` String,
+    `m` String,
+    `n` String,
+    `o` LowCardinality(String),
+    `p` LowCardinality(String),
+    `q` UInt64
+) AS
+SELECT
+    a,
+    b,
+    c,
+    d,
+    e,
+    dictGetString('f_lookup', 'f', e) AS f,
+    g,
+    dictGetString('g_lookup', 'h', g) AS h,
+    i,
+    dictGetString('h_lookup', 'j', i) AS j,
+    k,
+    l,
+    m,
+    n,
+    o,
+    p,
+    q
+FROM tmp.logs_dt;
+```
+
+Query-1:
+```sql
+SELECT
+    i,
+    toUnixTimestamp(toStartOfFiveMinute(b)) AS b_epoch,
+    toStartOfFiveMinute(b) b,
+    sum(q) AS q
+FROM tmp.logs
+WHERE ((b >= toDateTime(1605477600)) AND (b <= toDateTime(1605484799))) AND (i IN (1234))
+GROUP BY
+    i,
+    b
+ORDER BY
+    i ASC,
+    b_epoch ASC
+```
+Result-1 (*Notice `b_epoch` and `b` being sorted **incorrectly** when ordered by `b_epoch`)
+```tsv
+1234  1605481500  2020-11-15 23:05:00 2037941153646
+1234  1605478200  2020-11-15 22:10:00 1941080108378
+1234  1605483900  2020-11-15 23:45:00 1867367236053
+1234  1605478800  2020-11-15 22:20:00 1714555327681
+1234  1605481200  2020-11-15 23:00:00 2682749617694
+1234  1605480900  2020-11-15 22:55:00 1845651492094
+1234  1605481800  2020-11-15 23:10:00 2002360598451
+1234  1605483300  2020-11-15 23:35:00 1990554815138
+1234  1605480000  2020-11-15 22:40:00 1725080601443
+1234  1605479100  2020-11-15 22:25:00 1716724411355
+1234  1605482700  2020-11-15 23:25:00 1944008425062
+1234  1605477600  2020-11-15 22:00:00 2677514662118
+1234  1605479400  2020-11-15 22:30:00 1752131110220
+1234  1605484500  2020-11-15 23:55:00 2191975356521
+1234  1605477900  2020-11-15 22:05:00 2085755514341
+1234  1605480300  2020-11-15 22:45:00 1669362987122
+1234  1605482400  2020-11-15 23:20:00 1990147602919
+1234  1605483600  2020-11-15 23:40:00 1945358637792
+1234  1605480600  2020-11-15 22:50:00 1658796670520
+1234  1605479700  2020-11-15 22:35:00 1685898636560
+1234  1605484200  2020-11-15 23:50:00 1989260202209
+1234  1605478500  2020-11-15 22:15:00 1753635066041
+1234  1605482100  2020-11-15 23:15:00 1997666015567
+1234  1605483000  2020-11-15 23:30:00 1996584077151
+```
+
+Query-2:
+```sql
+SELECT
+    i,
+    toUnixTimestamp(toStartOfFiveMinute(b)) AS b_epoch,
+    toStartOfFiveMinute(b) b,
+    sum(q) AS q
+FROM tmp.logs
+WHERE ((b >= toDateTime(1605477600)) AND (b <= toDateTime(1605484799))) AND (i IN (1234))
+GROUP BY
+    i,
+    b
+ORDER BY
+    i ASC,
+    b ASC
+```
+Result-2 (*Notice `b_epoch` and `b` being sorted correctly when ordered by `b`)
+```tsv
+1234  1605477600  2020-11-15 22:00:00 2677514662118
+1234  1605477900  2020-11-15 22:05:00 2085755514341
+1234  1605478200  2020-11-15 22:10:00 1941080108378
+1234  1605478500  2020-11-15 22:15:00 1753635066041
+1234  1605478800  2020-11-15 22:20:00 1714555327681
+1234  1605479100  2020-11-15 22:25:00 1716724411355
+1234  1605479400  2020-11-15 22:30:00 1752131110220
+1234  1605479700  2020-11-15 22:35:00 1685898636560
+1234  1605480000  2020-11-15 22:40:00 1725080601443
+1234  1605480300  2020-11-15 22:45:00 1669362987122
+1234  1605480600  2020-11-15 22:50:00 1658796670520
+1234  1605480900  2020-11-15 22:55:00 1845651492094
+1234  1605481200  2020-11-15 23:00:00 2682749617694
+1234  1605481500  2020-11-15 23:05:00 2037941153646
+1234  1605481800  2020-11-15 23:10:00 2002360598451
+1234  1605482100  2020-11-15 23:15:00 1997666015567
+1234  1605482400  2020-11-15 23:20:00 1990147602919
+1234  1605482700  2020-11-15 23:25:00 1944008425062
+1234  1605483000  2020-11-15 23:30:00 1996584077151
+1234  1605483300  2020-11-15 23:35:00 1990554815138
+1234  1605483600  2020-11-15 23:40:00 1945358637792
+1234  1605483900  2020-11-15 23:45:00 1867367236053
+1234  1605484200  2020-11-15 23:50:00 1989260202209
+1234  1605484500  2020-11-15 23:55:00 2191975356521
+```

@@ -1,0 +1,66 @@
+ID: 44221
+Title: Segmentation fault in serialization after grouping with LowCardinality column
+Description:
+**Describe what's wrong**
+
+ClickHouse crashes with a complex cast expression in grouping statement if the query is made via JDBC (with DBeaver). Correctly throws an exception if the query is made via clickhouse-client.
+
+**How to reproduce**
+
+ClickHouse version: 22.6.3.35
+DBeaver: 21.2.1.202109181446
+Driver: clickhouse-jdbc v0.2.6
+
+Query via JDBC:
+```
+select
+multiIf('all' IN ('all'), 'all', id) as case_value,
+count(*)
+from
+(
+    select materialize(toLowCardinality('test_value')) as id
+    from numbers_mt(1000000)
+)
+group by case_value
+;
+
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460283 [ 3667110 ] {} <Fatal> BaseDaemon: ########################################
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460347 [ 3667110 ] {} <Fatal> BaseDaemon: (version 22.6.3.35 (official build), build id: ECE208880769F062) (from thread 3664624) (query_id: 9b227031-b105-4d3d-866e-dcb31b08242f) (query: select case when 'all' in ('all') then 'all' else id end as case_value, count(*) from ( select materialize(toLowCardinality('test_value')) as id from numbers_mt(1000000) ) group by case_value FORMAT TabSeparatedWithNamesAndTypes;) Received signal Segmentation fault (11)
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460378 [ 3667110 ] {} <Fatal> BaseDaemon: Address: 0x1 Access: read. Address not mapped to object.
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460387 [ 3667110 ] {} <Fatal> BaseDaemon: Stack trace: 0xb8b5cc0 0x171b9cda 0x171b9820 0x1728d4b7 0xb94fbea 0xb951bc5 0xb94d577 0xb95099d 0x7fd2cb044609 0x7fd2caf69133
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460448 [ 3667110 ] {} <Fatal> BaseDaemon: 2. void DB::writeAnyEscapedString<(char)39, false>(char const*, char const*, DB::WriteBuffer&) @ 0xb8b5cc0 in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460473 [ 3667110 ] {} <Fatal> BaseDaemon: 3. DB::IRowOutputFormat::write(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > const&, unsigned long) @ 0x171b9cda in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460488 [ 3667110 ] {} <Fatal> BaseDaemon: 4. DB::IRowOutputFormat::consume(DB::Chunk) @ 0x171b9820 in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460499 [ 3667110 ] {} <Fatal> BaseDaemon: 5. DB::ParallelFormattingOutputFormat::formatterThreadFunction(unsigned long, unsigned long, std::__1::shared_ptr<DB::ThreadGroupStatus> const&) @ 0x1728d4b7 in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460510 [ 3667110 ] {} <Fatal> BaseDaemon: 6. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0xb94fbea in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460530 [ 3667110 ] {} <Fatal> BaseDaemon: 7. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&)::'lambda'()::operator()() @ 0xb951bc5 in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460540 [ 3667110 ] {} <Fatal> BaseDaemon: 8. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xb94d577 in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460547 [ 3667110 ] {} <Fatal> BaseDaemon: 9. ? @ 0xb95099d in /usr/bin/clickhouse
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460556 [ 3667110 ] {} <Fatal> BaseDaemon: 10. ? @ 0x7fd2cb044609 in ?
+clickhouse-server[3664505]: 2022.12.14 11:30:53.460563 [ 3667110 ] {} <Fatal> BaseDaemon: 11. clone @ 0x7fd2caf69133 in ?
+clickhouse-server[3664505]: 2022.12.14 11:30:53.587930 [ 3667110 ] {} <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 43DE7A9BAAEC2325B42A8F250F4A2C22)
+```
+
+Query via clickhouse-client:
+```
+SELECT
+    multiIf('all' IN ('all'), 'all', id) AS case_value,
+    count(*)
+FROM
+(
+    SELECT materialize(toLowCardinality('test_value')) AS id
+    FROM numbers_mt(1000000)
+)
+GROUP BY case_value
+
+Query id: b7e878f3-2b0e-461d-808e-504daf2e6459
+
+0 rows in set. Elapsed: 0.005 sec.
+
+Received exception from server (version 22.6.3):
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Bad cast from type DB::ColumnLowCardinality to DB::ColumnString. (LOGICAL_ERROR)
+```
+
+**Expected behavior**
+
+Expected that ClickHouse will not crash with segmentation fault if the query is made via JDBC.

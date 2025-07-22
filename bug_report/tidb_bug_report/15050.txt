@@ -1,0 +1,47 @@
+ID: 15050
+Title: Goroutine leak in transaction retry
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+Connection 1:
+```sql
+create table test(id int);
+split table test between (0) and (2000) regions 2;
+insert into test values(1), (1001);
+set session tidb_distsql_scan_concurrency=1;
+set session tidb_disable_txn_auto_retry=0;
+begin;
+update test set id=id+1;
+```
+
+Connection 2 (cause connection 1 to write conflict):
+```sql
+begin;
+update test set id=id+1;
+commit;
+```
+
+Connection 1 (continue the transaction):
+```sql
+(select * from test) union (select * from test);
+commit;
+```
+
+2. What did you expect to see?
+Check http://127.0.0.1:10080/debug/pprof/goroutine?debug=1 and see no goroutine leak.
+
+
+3. What did you see instead?
+Check http://127.0.0.1:10080/debug/pprof/goroutine?debug=1 and see goroutine leak.
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+v3.0.7, master, etc.
+
+5. Reason
+The reason is that `(select * from test) union (select * from test)` is not treated as read-only statement, so it's executed again when retrying the transaction. But the result set is never closed because the statement is not expected to produce results.

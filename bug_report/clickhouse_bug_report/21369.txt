@@ -1,0 +1,95 @@
+ID: 21369
+Title: View with dictionaries and join doesnt work properly
+Description:
+**Does it reproduce on recent release?**
+did not check
+
+**How to reproduce**
+```
+CREATE TABLE summing_table
+ (
+    some_name               String,
+    user_id                 UInt64,
+    amount                  Int64,
+    currency                String
+ )
+ENGINE = SummingMergeTree()
+ORDER BY (some_name)
+
+CREATE VIEW rates AS
+   SELECT 'USD' as from_currency, 'EUR' as to_currency, 1.2 as rate
+
+CREATE VIEW agg_view AS
+  SELECT
+    summing_table.some_name as some_name,
+    dictGet('dict', 'field1', tuple(some_name)) as field1,
+    dictGet('dict', 'field2', tuple(some_name)) as field2,
+    rates.rate as rate
+  FROM summing_table
+  ANY LEFT JOIN rates
+    ON rates.from_currency = summing_table.currency
+```
+
+```
+<dictionaries>
+    <dictionary>
+        <name>dict</name>
+        <source>
+            <file>
+                <path>/etc/clickhouse-server/dictionaries/dict.csv</path>
+                <format>CSV</format>
+            </file>
+        </source>
+        <layout>
+            <complex_key_hashed />
+        </layout>
+        <structure>
+            <key>
+                <attribute>
+                    <name>some_name</name>
+                    <type>String</type>
+                    <null_value></null_value>
+                </attribute>
+            </key>
+            <attribute>
+                <name>field1</name>
+                <type>String</type>
+                <null_value>null</null_value>
+            </attribute>
+            <attribute>
+                <name>field2</name>
+                <type>UInt8</type>
+                <null_value>0</null_value>
+            </attribute>
+        </structure>
+        <lifetime>0</lifetime>
+    </dictionary>
+</dictionaries>
+```
+
+```
+insert into summing_table values ('name', 2, 20, 'USD')
+insert into summing_table values ('name', 1, 10, 'USD')
+
+SELECT *
+FROM agg_view
+
+│ name      │ null    │              0 │  1.2 │
+│ name      │ null    │              0 │  1.2 │
+
+----
+
+SELECT field2
+FROM agg_view
+WHERE field1 = 'test'
+
+Received exception from server (version 20.3.19):
+Code: 43. DB::Exception: Received from localhost:9000. DB::Exception: Illegal type String of first argument of function dictGet, expected a const string..
+```
+
+* Which ClickHouse server version to use
+20.3.19.4
+
+**Expected behavior**
+dict working correctly
+

@@ -1,0 +1,82 @@
+ID: 32749
+Title: partition by RANGE COLUMNS on varchar column with collate _bin does not adjust pruning if query includes other collation 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+create table t (a varchar(255) charset utf8mb4 collate utf8mb4_bin) partition by range columns (a) (partition puppera values less than ("AAA"), partition plowera values less than ("aaaa"));
+insert into t values ("aa");
+explain select * from t where a = "aa" collate utf8mb4_general_ci;
+select * from t where a = "aa" collate utf8mb4_general_ci;
+```
+
+### 2. What did you expect to see? (Required)
+
+Skip pruning (or have some way to take into consideration the given collation), like MySQL:
+```
+mysql> create table t (a varchar(255) charset utf8mb4 collate utf8mb4_bin) partition by range columns (a) (partition puppera values less than ("AAA"), partition plowera values less than ("aaaa"));
+Query OK, 0 rows affected (0,02 sec)
+
+mysql> insert into t values ("aa");
+Query OK, 1 row affected (0,00 sec)
+
+mysql> explain select * from t where a = "aa" collate utf8mb4_general_ci;
++----+-------------+-------+-----------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions      | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+-----------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | t     | puppera,plowera | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | Using where |
++----+-------------+-------+-----------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0,00 sec)
+
+mysql> select * from t where a = "aa" collate utf8mb4_general_ci;
++------+
+| a    |
++------+
+| aa   |
++------+
+1 row in set (0,00 sec)
+```
+
+
+### 3. What did you see instead (Required)
+Using the same pruning as if the `collate` was not given in the select query:
+```
+tidb> create table t (a varchar(255) charset utf8mb4 collate utf8mb4_bin) partition by range columns (a) (partition puppera values less than ("AAA"), partition plowera values less than ("aaaa"));
+Query OK, 0 rows affected (0,00 sec)
+
+tidb> insert into t values ("aa");
+Query OK, 1 row affected (0,00 sec)
+
+tidb> explain select * from t where a = "aa" collate utf8mb4_general_ci;
++-------------------------+----------+-----------+----------------------------+--------------------------------+
+| id                      | estRows  | task      | access object              | operator info                  |
++-------------------------+----------+-----------+----------------------------+--------------------------------+
+| TableReader_8           | 8000.00  | root      |                            | data:Selection_7               |
+| └─Selection_7           | 8000.00  | cop[tikv] |                            | eq(test.t.a, "aa")             |
+|   └─TableFullScan_6     | 10000.00 | cop[tikv] | table:t, partition:puppera | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+----------------------------+--------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> select * from t where a = "aa" collate utf8mb4_general_ci;
+Empty set (0,00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v5.5.0-alpha-442-gfbfe36ca7d
+Edition: Community
+Git Commit Hash: fbfe36ca7dd3a78a714872d468cebfce34e50116
+Git Branch: master
+UTC Build Time: 2022-03-02 11:21:12
+GoVersion: go1.17
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

@@ -1,0 +1,38 @@
+ID: 14878
+Title: [Compression] Add RoaringBitmap Compression
+Description:
+This PR implements the Roaring Bitmap compression algorithm.
+
+## Misc changes
+- `CreateTransientSegment` used to use the `COMPRESSION_UNCOMPRESSED` CompressionFunction, this made it use the uncompressed `compression_init_segment_t init_segment` function, which might not be desired.
+This method has been changed to require a `CompressionFunction &` so that can be used instead. The previous behavior has been made implicit in the compression functions that relied on it.
+
+No external library is used, all logic is implemented from scratch.
+Some modifications are made to the [existing](https://github.com/RoaringBitmap/RoaringFormatSpec/?tab=readme-ov-file) spec for serializing roaring bitmaps;
+
+- The "container" size is reduced to 2048 (STANDARD_VECTOR_SIZE)
+- An extra variation for `array` containers is introduced, storing nulls instead of non-null entries
+- The "key" of a container is removed
+- Containers are not sparse (every group of 2048 values is covered by a container, none are skipped)
+- Runs/Arrays are stored with an additional compression scheme (see <https://github.com/duckdb/duckdb/pull/14878#discussion_r1851774221>)
+
+The metadata stored per container is also changed because of this ^
+
+## Implementation Details
+
+### Analyze
+
+During the analyze phase, we determine for each container what type it should use by compressing the container to an in-memory buffer that's reused for each container.
+This makes it so that we have a very accurate estimate of the compressed size for FinalAnalyze
+
+### Compression
+
+The metadata we created per container is reused, with this metadata we know which container will be used.
+We can override the destination of the buffer to our transient segment and rerun the same compression step we performed during analyze, requiring no extra copy of the data.
+
+### Scan
+
+Each container implements a class deriving from `ContainerScanState`, allowing specialized methods to efficiently decompress the stored data into the result's ValidityMask.
+
+ValidityMasks entries (`validity_t`) are initialized to `0xFFFFFFFFFFFFFFFF` (all bits set)
+During scanning we recognize ranges of bits that are 0 (in `Array` and `Run` containers) and use `SetInvalidRange` to efficiently set them

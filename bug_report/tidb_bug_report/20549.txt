@@ -1,0 +1,90 @@
+ID: 20549
+Title: IndexMergeJoin causes panic on NULL value in outer join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+CREATE TABLE `t1` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `t2id` bigint(20) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `t2id` (`t2id`)
+);
+INSERT INTO `t1` VALUES (1,NULL);
+CREATE TABLE `t2` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  PRIMARY KEY (`id`)
+);
+SELECT /*+ INL_MERGE_JOIN(t1,t2)  */ 1 from t1 left outer join t2 on t1.t2id=t2.id;
+SELECT /*+ HASH_JOIN(t1,t2)  */ 1 from t1 left outer join t2 on t1.t2id=t2.id;
+```
+
+git blame shows that was introduced by https://github.com/pingcap/tidb/pull/19821:
+
+```
+640cb42f54 (Yuanjia Zhang         2020-09-22 15:11:59 +0800 3317) func (builder *dataReaderBuilder) buildTableReaderFromHandles(ctx context.Context, e *TableReaderExecutor, handles []kv.Handle, canReorderHandles bool) (*TableReaderExecutor, error) {
+640cb42f54 (Yuanjia Zhang         2020-09-22 15:11:59 +0800 3318)       if canReorderHandles {
+640cb42f54 (Yuanjia Zhang         2020-09-22 15:11:59 +0800 3319)               sort.Slice(handles, func(i, j int) bool {
+640cb42f54 (Yuanjia Zhang         2020-09-22 15:11:59 +0800 3320)                       return handles[i].Compare(handles[j]) < 0
+640cb42f54 (Yuanjia Zhang         2020-09-22 15:11:59 +0800 3321)               })
+640cb42f54 (Yuanjia Zhang         2020-09-22 15:11:59 +0800 3322)       }
+daad2699dd (Zhuomin(Charming) Liu 2020-07-01 16:15:51 +0800 3323)       var b distsql.RequestBuilder
+0b7c7167d1 (Long Deng             2020-09-24 20:50:28 +0800 3324)       if _, ok := handles[0].(kv.PartitionHandle); ok {
+0b7c7167d1 (Long Deng             2020-09-24 20:50:28 +0800 3325)               b.SetPartitionsAndHandles(handles)
+0b7c7167d1 (Long Deng             2020-09-24 20:50:28 +0800 3326)       } else {
+0b7c7167d1 (Long Deng             2020-09-24 20:50:28 +0800 3327)               b.SetTableHandles(getPhysicalTableID(e.table), handles)
+0b7c7167d1 (Long Deng             2020-09-24 20:50:28 +0800 3328)       }
+daad2699dd (Zhuomin(Charming) Liu 2020-07-01 16:15:51 +0800 3329)       return builder.buildTableReaderBase(ctx, e, b)
+daad2699dd (Zhuomin(Charming) Liu 2020-07-01 16:15:51 +0800 3330) }
+```
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+```
+ERROR 1105 (HY000): runtime error: index out of range [0] with length 0
+```
+
+```
+[2020/10/20 16:38:32.851 -07:00] [INFO] [conn.go:800] ["command dispatched failed"] [conn=4] [connInfo="id:4, addr:127.0.0.1:60564 status:10, collation:utf8mb4_0900_ai_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql="select /*+ INL_MERGE_JOIN(t1,t2)  */ 1 from t1 left outer join t2 on t1.t2id=t2.id"] [txn_mode=PESSIMISTIC] [err="runtime error: index out of range [0] with length 0
+github.com/pingcap/tidb/executor.(*innerMergeWorker).run.func1
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/index_lookup_merge_join.go:407
+runtime.gopanic
+	/usr/local/go/src/runtime/panic.go:679
+runtime.goPanicIndex
+	/usr/local/go/src/runtime/panic.go:75
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildTableReaderFromHandles
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/builder.go:3324
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildTableReaderForIndexJoin
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/builder.go:3193
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/builder.go:3077
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/builder.go:3070
+github.com/pingcap/tidb/executor.(*innerMergeWorker).handleTask
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/index_lookup_merge_join.go:498
+github.com/pingcap/tidb/executor.(*innerMergeWorker).run
+	/Users/pingcap/workspace/build-darwin-amd64-4.0/go/src/github.com/pingcap/tidb/executor/index_lookup_merge_join.go:428
+runtime.goexit
+	/usr/local/go/src/runtime/asm_amd64.s:1357"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+tidb_version(): Release Version: v4.0.0-beta.2-1391-g937949f44
+Edition: Community
+Git Commit Hash: 937949f44d0d25e21f5a5722dbb334773de38db9
+Git Branch: HEAD
+UTC Build Time: 2020-10-19 02:52:12
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

@@ -1,0 +1,43 @@
+ID: 66060
+Title: Grouped key in subtotal rows are not set to 0/empty file for const columns
+Description:
+**Describe what's wrong**
+The experimental analyzer returns incorrect values in grouped columns when the ROLLUP modifier is used. According to the documentation, for grouped rows, 0 or an empty value should be used. Unfortunately, for constant columns (on which the materialize function was not used), the constant value is still returned in the summaries.
+
+Bug exists from version 24.3.
+
+```
+CREATE TABLE reproduction (date Date, node UInt32) ENGINE=Memory;
+INSERT INTO reproduction values ('2023-01-01', 10);
+SELECT node, node_const, min(date) FROM (SELECT date, node, 10 AS node_const FROM reproduction) GROUP BY node, node_const WITH ROLLUP SETTINGS allow_experimental_analyzer = 1;
+   ┌─node─┬─node_const─┬──min(date)─┐
+1. │   10 │         10 │ 2023-01-01 │
+   └──────┴────────────┴────────────┘
+   ┌─node─┬─node_const─┬──min(date)─┐
+2. │   10 │         10 │ 2023-01-01 │
+   └──────┴────────────┴────────────┘
+   ┌─node─┬─node_const─┬──min(date)─┐
+3. │    0 │         10 │ 2023-01-01 │
+   └──────┴────────────┴────────────┘
+```
+
+Reproduction: https://fiddle.clickhouse.com/34ddf84b-cf1a-46f8-9106-1bd6767f72b0
+
+**Workaround**
+* Use the old analyzer
+* Wrap the constant column in the materialize function
+
+**Expected behavior**
+```
+   ┌─node─┬─node_const─┬──min(date)─┐
+1. │   10 │         10 │ 2023-01-01 │
+   └──────┴────────────┴────────────┘
+   ┌─node─┬─node_const─┬──min(date)─┐
+2. │   10 │          0 │ 2023-01-01 │
+   └──────┴────────────┴────────────┘
+   ┌─node─┬─node_const─┬──min(date)─┐
+3. │    0 │          0 │ 2023-01-01 │
+   └──────┴────────────┴────────────┘
+```
+
+It may be connected to https://github.com/ClickHouse/ClickHouse/issues/61613. There is also an issue with the lack of summaries in certain situations when using the ROLLUP modifier: https://github.com/ClickHouse/ClickHouse/issues/33632.

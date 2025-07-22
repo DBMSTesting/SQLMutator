@@ -1,0 +1,140 @@
+ID: 21288
+Title: SPM: unexpected behavior in parallel creation of global binding
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+cluster config
+2 tidb
+1 pd
+1 tikv
+
+```
+use test;
+create table t(a int, b int, index idx(a));
+```
+
+run a minute and ctrl +c
+```
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	_ "github.com/go-sql-driver/mysql"
+	"time"
+)
+
+func main() {
+	go run("root:@tcp(192.168.228.83:4000)/test?charset=utf8&parseTime=True")
+	run("root:@tcp(192.168.228.83:4001)/test?charset=utf8&parseTime=True")
+}
+
+func run(dsn string) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	
+	for i := 0; i < 1; i++ {
+		go func() {
+			c, err := db.Conn(context.Background())
+			if err != nil {
+				panic(err)
+			}
+			defer c.Close()
+			
+			for {
+				ss := []string{
+					"create global binding for select * from t using select * from t",
+				}
+				for _, s := range ss {
+					fmt.Println(s, time.Now())
+					if _, err := c.ExecContext(context.Background(), s); err != nil {
+						panic(err)
+					}
+				}
+			}
+		}()
+	}
+	time.Sleep(1 * time.Hour)
+}
+```
+```
+show global bindings;
+select * from mysql.bind_info where status != "deleted";
+admin reload bindings;
+show global bindings;
+```
+
+### 2. What did you expect to see? (Required)
+```
+mysql> show global bindings;
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| Original_sql    | Bind_sql        | Default_db | Status | Create_time             | Update_time             | Charset | Collation | Source |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| select * from t | select * from t | test       | using  | 2020-11-25 03:55:50.609 | 2020-11-25 03:55:50.609 | utf8    | utf8_bin  | manual |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+1 row in set (0.00 sec)
+
+mysql> select * from mysql.bind_info where status != "deleted";
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| original_sql    | bind_sql        | default_db | status | create_time             | update_time             | charset | collation | source |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| select * from t | select * from t | test       | using  | 2020-11-25 03:55:50.508 | 2020-11-25 03:55:50.508 | utf8    | utf8_bin  | manual |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+1 row in set (0.01 sec)
+
+mysql> admin reload bindings;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> show global bindings;
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| Original_sql    | Bind_sql        | Default_db | Status | Create_time             | Update_time             | Charset | Collation | Source |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| select * from t | select * from t | test       | using  | 2020-11-25 03:55:50.609 | 2020-11-25 03:55:50.609 | utf8    | utf8_bin  | manual |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+1 row in set (0.00 sec)
+
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> show global bindings;
+Empty set (0.00 sec)
+
+mysql> select * from mysql.bind_info where status != "deleted";
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| original_sql    | bind_sql        | default_db | status | create_time             | update_time             | charset | collation | source |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| select * from t | select * from t | test       | using  | 2020-11-25 03:55:50.508 | 2020-11-25 03:55:50.508 | utf8    | utf8_bin  | manual |
++-----------------+-----------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+1 row in set (0.01 sec)
+
+mysql> admin reload bindings;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> show global bindings;
+Empty set (0.01 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+Release Version: v4.0.0-beta.2-1630-g7a19c709d
+Edition: Community
+Git Commit Hash: 7a19c709d07d4c33009bb85bba5122b2a658505b
+Git Branch: master
+UTC Build Time: 2020-11-24 11:57:15
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

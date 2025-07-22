@@ -1,0 +1,24 @@
+ID: 13142
+Title: Fix CTEFilterPusher optimization
+Description:
+The `CTEFilterPusher` introduced with PR #12290 did not work as expected. _E.g._ the following query would crash the system:
+
+```sql
+WITH
+  a(x) AS MATERIALIZED (
+    SELECT *
+    FROM   generate_series(1, 10)
+  ),
+  b(x) AS MATERIALIZED (
+    SELECT *
+    FROM   a
+    WHERE  x < 8
+  )
+SELECT *
+FROM   b
+WHERE  x % 3 = 1;
+```
+
+The problem was, that `FindCandidates` only performs a single pass over the plan tree (which in principle would be great!). The following step `PushFilterIntoCTE`, however, invalidated a bunch of references stored in the `cte_info_map`.
+
+Instead of a single pass over the tree, my proposed change collects all CTEs once, and builds the `cte_info_map` for each CTE separately. Therefore all references are valid when passed down to `PushFilterIntoCTE`. Downside is that we have to traverse the plan tree multiple times. Maybe you (@lnkuiper, @Mytherin ?) have some ideas on how to fix that. But on a positive note, it fixes the problem 😄

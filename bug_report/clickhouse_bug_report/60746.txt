@@ -1,0 +1,95 @@
+ID: 60746
+Title: Insert-Select and insert_deduplication_token 
+Description:
+When doing an `INSERT INTO table2 SELECT * FROM table1` query passing the `insert_deduplication_token` from outside deduplication won't work if `max_insert_threads > 1` and data from `table1` can be read in parallel (e.g. contains more than one part)
+
+I've created a PR https://github.com/ClickHouse/ClickHouse/pull/60745 with the reproducer, but this bug has been here forever. The `insert_deduplication_token` was introduced in CH 22.2, and the bug can already be [reproduced in that version](https://fiddle.clickhouse.com/43093647-88a1-4852-96d9-1c260d7f4bb1).
+
+When using non-replicated MergeTree, it is a bit more difficult to understand what's happening because part deduplication is not reported in `system.part_log`. If you try to use ReplicatedMergeTree the situation gets easier to understand:
+
+```sql
+CREATE TABLE landing
+(
+    timestamp DateTime64(3),
+    status String,
+    id String
+)
+ENGINE = MergeTree()
+ORDER BY timestamp;
+
+SYSTEM STOP MERGES landing; -- Stopping merges to force 3 parts
+
+INSERT INTO landing (status, id, timestamp) SELECT * FROM generateRandom() LIMIT 1;
+INSERT INTO landing (status, id, timestamp) SELECT * FROM generateRandom() LIMIT 1;
+INSERT INTO landing (status, id, timestamp) SELECT * FROM generateRandom() LIMIT 1;
+
+SELECT count() FROM system.parts WHERE active AND (table = 'landing'); -- Confirming that there are 3 parts
+
+CREATE TABLE ds
+(
+    timestamp DateTime64(3),
+    status String,
+    id String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/ds', '{replica}')
+ORDER BY timestamp;
+
+INSERT INTO ds SELECT * FROM landing
+SETTINGS insert_deduplicate=1, insert_deduplication_token='token1', max_insert_threads=5;
+
+SELECT count() FROM ds;
+
+┌─count()─┐
+│       1 │
+└─────────┘
+
+SELECT event_time, database, table, name, error FROM system.part_log WHERE table = 'ds'
+
+┌──────────event_time─┬─database─┬─table─┬─name──────┬─error─┐
+│ 2024-03-04 08:37:59 │ default  │ ds    │ all_2_2_0 │     0 │
+│ 2024-03-04 08:37:59 │ default  │ ds    │ all_1_1_0 │   389 │
+│ 2024-03-04 08:37:59 │ default  │ ds    │ all_0_0_0 │   389 │
+└─────────────────────┴──────────┴───────┴───────────┴───────┘
+```
+
+The insert gets processed in parallel, generating 3 different parts and causing undesired deduplication.
+
+While this issue has been there forever, it was not being reproduced when reading from a remote table as `INSERT INTO table2 SELECT * FROM remote('remote_server', table1)`. It looks like this was due to some missing parallelization when reading from remote, since after this PR https://github.com/ClickHouse/ClickHouse/pull/59448 (cc @nickitat) the issue is also present when using `remote`.
+
+I've run a bisect between 24.1 and 24.2 to confirm that the issue in `remote` was introduced in that PR:
+
+```bash
+$ git bisect log
+
+git bisect start
+# status: waiting for both good and bad commits
+# bad: [891689a41506d00aa169548f5b4a8774351242c4] Merge pull request #60196 from azat/preliminary-filters-fix
+git bisect bad 891689a41506d00aa169548f5b4a8774351242c4
+# good: [5a024dfc0936e062770d0cfaad0805b57c1fba17] Merge pull request #59117 from ClickHouse/fix-analyzer-order-by-all
+git bisect good 5a024dfc0936e062770d0cfaad0805b57c1fba17
+# good: [d4ab2bf38e3562f17b436c78911649c7717fc8b4] Merge pull request #60036 from ClickHouse/s3queue-fix-possible-no-node-shard
+git bisect good d4ab2bf38e3562f17b436c78911649c7717fc8b4
+# good: [dd6b5009a98c6701a3c6117617b4c8c3a3ebbd73] Merge remote-tracking branch 'blessed/master' into i60232
+git bisect good dd6b5009a98c6701a3c6117617b4c8c3a3ebbd73
+# bad: [3a99503ecb8bd4028ea0ba15c4a1ba362762c730] Merge pull request #60488 from ClickHouse/report-respect-skipped-builds
+git bisect bad 3a99503ecb8bd4028ea0ba15c4a1ba362762c730
+# good: [9845b9ec4d67361e527d580f57b45e3bcdc37743] Merge pull request #60342 from DerekChia/patch-5
+git bisect good 9845b9ec4d67361e527d580f57b45e3bcdc37743
+# good: [0f6bec7842cd1f63c41fcbea7c66857646260b8c] Merge pull request #59291 from azat/dist/config-settings
+git bisect good 0f6bec7842cd1f63c41fcbea7c66857646260b8c
+# bad: [926295f763294d2f547d05d6acf7e44bd4e38752] Merge pull request #60040 from vitlibar/use-multiple-threads-while-reading-metadata-for-restore
+git bisect bad 926295f763294d2f547d05d6acf7e44bd4e38752
+# good: [435c42bcad5f1c15b3ee62fe19447b3776e7bd4f] Merge pull request #60458 from ClickHouse/fix-file-cluster-example
+git bisect good 435c42bcad5f1c15b3ee62fe19447b3776e7bd4f
+# bad: [90c9ae1b22be94019f8dd09d0b1c7a1afc7166ec] Merge pull request #59448 from nickitat/insert_with_max_insert_threads_into_remote_tables
+git bisect bad 90c9ae1b22be94019f8dd09d0b1c7a1afc7166ec
+# bad: [4e5cfd11d03c47d6842e2ac2c84747d72c72c291] upd comments
+git bisect bad 4e5cfd11d03c47d6842e2ac2c84747d72c72c291
+# bad: [40ea90d6725dc9accb734286dfb8ff369c949f1b] fix tests
+git bisect bad 40ea90d6725dc9accb734286dfb8ff369c949f1b
+# bad: [91a38e73b4f288fa7fbda6fbca21b452dde9f6ff] impl
+git bisect bad 91a38e73b4f288fa7fbda6fbca21b452dde9f6ff
+# first bad commit: [91a38e73b4f288fa7fbda6fbca21b452dde9f6ff] impl
+```
+
+Our only workaround now is to force `max_insert_threads = 1` when doing Insert-Select + insert_deduplication_token. Or can we do something else to parallelize a bit without causing undesired deduplication?

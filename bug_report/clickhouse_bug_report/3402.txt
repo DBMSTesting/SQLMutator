@@ -1,0 +1,35 @@
+ID: 3402
+Title: AggregatingMergeTree doesn't handle Null values correctly
+Description:
+Here is a test case which shows a different result when using an AggregatingMergeTree or a direct aggregation for a table containing Nullable columns:
+
+1) direct aggregation
+
+```
+CREATE TABLE test (ts DATETIME,id VARCHAR,str Nullable(VARCHAR),num Nullable(DOUBLE)) ENGINE=MergeTree PARTITION BY toStartOfDay(ts) ORDER BY tuple()
+
+INSERT INTO test VALUES(now(),'1',null,null)
+
+SELECT ts,id,any(str),any(num) FROM test GROUP BY ts,id
+
+┌──────────────────ts─┬─id─┬─any(str)─┬─any(num)─┐
+│ 2018-10-17 09:30:38 │ 1  │ ᴺᵁᴸᴸ     │     ᴺᵁᴸᴸ │
+└─────────────────────┴────┴──────────┴──────────┘
+```
+
+2) AggregatingMergeTree
+
+```
+CREATE TABLE test2_src (ts DATETIME,id VARCHAR,str Nullable(VARCHAR),num Nullable(DOUBLE)) ENGINE=Null
+CREATE MATERIALIZED VIEW test2_mv ENGINE=AggregatingMergeTree PARTITION BY toStartOfDay(ts) ORDER BY tuple() AS SELECT ts,id,anyState(str) str,anyState(num) num FROM test2_src GROUP BY ts,id
+
+INSERT INTO test2_src VALUES(now(),'1',null,null)
+
+SELECT ts,id,anyMerge(str),anyMerge(num) FROM test2_mv GROUP BY ts,id
+
+┌──────────────────ts─┬─id─┬─anyMerge(str)─┬─anyMerge(num)─┐
+│ 2018-10-17 09:33:16 │ 1  │               │             0 │
+└─────────────────────┴────┴───────────────┴───────────────┘
+```
+
+It seems that either Null is not stored correctly in the state value, or that the materialized view loses the fact that the column is Nullable.

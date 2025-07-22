@@ -1,0 +1,103 @@
+ID: 28866
+Title: hint INL_JOIN prepare plan cache return wrong record
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+set prepared-plan-cache.enabled
+
+/* INIT */ drop table if exists t1, t2;
+/* INIT */ create table t1  (c_int int, c_str varchar(40) character set utf8 collate utf8_bin, c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6), c_enum enum('blue','green','red','yellow','white','orange','purple') , primary key(c_int, c_str)  , key(c_int) , key(c_str) , key(c_decimal) , unique key(c_datetime) , key(c_timestamp) ,key(c_enum));
+/* INIT */ create table t2  (c_int int, c_str varchar(40) character set utf8 collate utf8_bin, c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6), c_enum enum('blue','green','red','yellow','white','orange','purple') , primary key(c_str)   , unique key(c_str)  , key(c_decimal)   );
+
+prepare stmt from "insert into t2 values (?, ?, ?, ?, 78.500410, 2.236, ?)";
+set @a1=589,@a2="happy chatterjee",@a3="2020-04-04 20:46:05",@a4="2020-02-01 19:21:33",@a5="green";
+execute stmt using @a1,@a2,@a3,@a4,@a5;
+
+set @a1=589,@a2="trusting ritchie",@a3="2020-03-27 20:25:46",@a4="2020-06-21 22:13:33",@a5="green";
+execute stmt using @a1,@a2,@a3,@a4,@a5;
+
+prepare stmt from "insert into t1 values (?, ?, ?, ?, 78.500410, 2.236, ?)";
+set @a1=589,@a2="trusting ritchie",@a3="2020-03-27 20:25:46",@a4="2020-06-21 22:13:33",@a5="green";
+execute stmt using @a1,@a2,@a3,@a4,@a5;
+
+
+begin;
+prepare stmt from "select /*+ INL_JOIN(t1,t2) */  * from t1 join t2 on t1.c_str <= t2.c_str where t1.c_int in (?, ?, ?)";
+set @a=207,@b=104,@c=361;
+execute stmt using @a,@b,@c;
+set @a=589,@b=136,@c=202; --check
+execute stmt using @a,@b,@c;
+commit;
+
+```
+### 2. What did you expect to see? (Required)
+
+```
+mysql> set @a=589,@b=136,@c=202;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt using @a,@b,@c;
++-------+------------------+---------------------+---------------------+----------+-----------+--------+-------+------------------+---------------------+---------------------+----------+-----------+--------+
+| c_int | c_str            | c_datetime          | c_timestamp         | c_double | c_decimal | c_enum | c_int | c_str            | c_datetime          | c_timestamp         | c_double | c_decimal | c_enum |
++-------+------------------+---------------------+---------------------+----------+-----------+--------+-------+------------------+---------------------+---------------------+----------+-----------+--------+
+|   589 | trusting ritchie | 2020-03-27 20:25:46 | 2020-06-21 22:13:33 | 78.50041 |  2.236000 | green  |   589 | trusting ritchie | 2020-03-27 20:25:46 | 2020-06-21 22:13:33 | 78.50041 |  2.236000 | green  |
++-------+------------------+---------------------+---------------------+----------+-----------+--------+-------+------------------+---------------------+---------------------+----------+-----------+--------+
+1 row in set (0.01 sec)
+
+mysql> explain for connection 11;
++------------------------------+---------+---------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------+--------+------+
+| id                           | estRows | actRows | task      | access object | execution info                                                                                                                                                                                                                            | operator info                                                     | memory | disk |
++------------------------------+---------+---------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------+--------+------+
+| HashJoin_21                  | 0.01    | 1       | root      |               | time:5.36ms, loops:2, build_hash_table:{total:1.22ms, fetch:1.2ms, build:22.3µs}, probe:{concurrency:5, total:25.2ms, max:5.15ms, probe:254µs, fetch:25ms}                                                                                | CARTESIAN inner join, other cond:le(test.t1.c_str, test.t2.c_str) | N/A    | N/A  |
+| ├─TableReader_24(Build)      | 0.00    | 1       | root      |               | time:865.2µs, loops:2, cop_task: {num: 1, max: 1.04ms, proc_keys: 1, rpc_num: 1, rpc_time: 992.7µs, copr_cache_hit_ratio: 0.00}                                                                                                           | data:Selection_23                                                 | N/A    | N/A  |
+| │ └─Selection_23             | 0.00    | 1       | cop[tikv] |               | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_process_keys_size: 105, total_keys: 2, rocksdb: {delete_skipped_count: 1, key_skipped_count: 2, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}} | in(test.t1.c_int, 589, 136, 202)                                  | N/A    | N/A  |
+| │   └─TableFullScan_22       | 1.00    | 1       | cop[tikv] | table:t1      | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                              | keep order:false, stats:pseudo                                    | N/A    | N/A  |
+| └─TableReader_34(Probe)      | 2.00    | 2       | root      |               | time:4.7ms, loops:2, cop_task: {num: 1, max: 4.66ms, proc_keys: 2, rpc_num: 1, rpc_time: 4.63ms, copr_cache_hit_ratio: 0.00}                                                                                                              | data:TableFullScan_33                                             | N/A    | N/A  |
+|   └─TableFullScan_33         | 2.00    | 2       | cop[tikv] | table:t2      | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 2, total_process_keys_size: 210, total_keys: 3, rocksdb: {delete_skipped_count: 2, key_skipped_count: 4, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}} | keep order:false, stats:pseudo                                    | N/A    | N/A  |
++------------------------------+---------+---------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------+--------+------+
+6 rows in set (0.00 sec)
+
+
+```
+### 3. What did you see instead (Required)
+
+```
+mysql> set @a=589,@b=136,@c=202;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt using @a,@b,@c;
+Empty set (0.01 sec)
+
+mysql> explain for connection 11;
++---------------------------------+-----------+---------+-----------+---------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+--------+------+
+| id                              | estRows   | actRows | task      | access object                         | execution info                                                                                                                                                                                                                                                                                                                                                         | operator info                                                                                                         | memory | disk |
++---------------------------------+-----------+---------+-----------+---------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+--------+------+
+| IndexJoin_11                    | 300000.00 | 0       | root      |                                       | time:1.69ms, loops:1, inner:{total:2.16ms, concurrency:5, task:1, construct:20.2µs, fetch:2.14ms, build:148ns}, probe:2.94µs                                                                                                                                                                                                                                           | inner join, inner:IndexLookUp_10, other cond:le(test.t1.c_str, test.t2.c_str)                                         | N/A    | N/A  |
+| ├─TableReader_21(Build)         | 10000.00  | 2       | root      |                                       | time:145.7µs, loops:3, cop_task: {num: 1, max: 3.72ms, proc_keys: 2, rpc_num: 1, rpc_time: 3.7ms, copr_cache_hit_ratio: 0.00}                                                                                                                                                                                                                                          | data:TableFullScan_20                                                                                                 | N/A    | N/A  |
+| │ └─TableFullScan_20            | 10000.00  | 2       | cop[tikv] | table:t2                              | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 2, total_process_keys_size: 210, total_keys: 3, rocksdb: {delete_skipped_count: 2, key_skipped_count: 4, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}                                                                                                                              | keep order:false, stats:pseudo                                                                                        | N/A    | N/A  |
+| └─IndexLookUp_10(Probe)         | 30.00     | 0       | root      |                                       | time:1.99ms, loops:1,                                                                                                                                                                                                                                                                                                                                                  |                                                                                                                       | N/A    | N/A  |
+|   ├─IndexRangeScan_8(Build)     | 30.00     | 0       | cop[tikv] | table:t1, index:PRIMARY(c_int, c_str) | time:1.87ms, loops:1, cop_task: {num: 1, max: 1.78ms, proc_keys: 0, rpc_num: 1, rpc_time: 1.74ms, copr_cache_hit_ratio: 0.00}, tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 0, total_process_keys_size: 0, total_keys: 3, rocksdb: {delete_skipped_count: 0, key_skipped_count: 0, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}} | range: decided by [in(test.t1.c_int, 207, 104, 361) le(test.t1.c_str, test.t2.c_str)], keep order:false, stats:pseudo | N/A    | N/A  |
+|   └─TableRowIDScan_9(Probe)     | 30.00     | 0       | cop[tikv] | table:t1                              |                                                                                                                                                                                                                                                                                                                                                                        | keep order:false, stats:pseudo                                                                                        | N/A    | N/A  |
++---------------------------------+-----------+---------+-----------+---------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+--------+------+
+6 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.3.0-alpha-1085-g90ccd6a5d
+Edition: Community
+Git Commit Hash: 90ccd6a5d4c42a0f61be44901b491a08c58dae59
+Git Branch: master
+UTC Build Time: 2021-10-13 08:51:10
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

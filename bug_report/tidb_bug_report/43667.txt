@@ -1,0 +1,72 @@
+ID: 43667
+Title: jepsen failed when non prepared plan cache enabled
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Run jepsen monotonic test, it failed with the following anomaly
+```
+Let:
+  T1 = {:type :ok, :f :inc, :value {1 2537}, :process 25, :time 300449388947, :txn-info {:txn_scope \"global\", :start_ts 441330713692733646, :commit_ts 441330713705840673, :txn_commit_mode \"async_commit\", :async_commit_fallback false, :one_pc_fallback false}, :index 84408}
+  T2 = {:type :ok, :f :read, :value {0 2580, 1 2537, 2 2557, 3 2605, 4 2595, 5 2554, 6 2624, 7 2624}, :process 25, :time 300468429538, :txn-info {:start_ts 441330713705840709}, :index 84424}
+  T3 = {:type :ok, :f :read, :value {0 2581, 1 2539, 2 2557, 3 2606, 4 2600, 5 2561, 6 2627, 7 2600}, :process 21, :time 300544546255, :txn-info {:start_ts 441330713718685865}, :index 84492}
+  T4 = {:type :ok, :f :read, :value {0 2554, 1 2521, 2 2530, 3 2586, 4 2570, 5 2530, 6 2608, 7 2601}, :process 16, :time 299716491456, :txn-info {:start_ts 441330713509232707}, :index 83734}
+  T5 = {:type :ok, :f :read, :value {0 2562, 1 2523, 2 2533, 3 2589, 4 2577, 5 2537, 6 2609, 7 2606}, :process 20, :time 299855371407, :txn-info {:start_ts 441330713548292141}, :index 83868}
+  T6 = {:type :ok, :f :read, :value {0 2566, 1 2525, 2 2535, 3 2591, 4 2580, 5 2538, 6 2612, 7 2607}, :process 15, :time 299960005931, :txn-info {:start_ts 441330713574768652}, :index 83950}
+  T7 = {:type :ok, :f :read, :value {0 2570, 1 2528, 2 2538, 3 2593, 4 2583, 5 2542, 6 2613, 7 2610}, :process 21, :time 300065232344, :txn-info {:start_ts 441330713600720975}, :index 84030}
+  T8 = {:type :ok, :f :read, :value {0 2572, 1 2531, 2 2547, 3 2597, 4 2589, 5 2544, 6 2614, 7 2618}, :process 15, :time 300201044452, :txn-info {:start_ts 441330713627197662}, :index 84164}
+  T9 = {:type :ok, :f :read, :value {0 2573, 1 2534, 2 2547, 3 2599, 4 2593, 5 2549, 6 2617, 7 2620}, :process 21, :time 300275993196, :txn-info {:start_ts 441330713653149821}, :index 84236}
+  T10 = {:type :ok, :f :read, :value {0 2579, 1 2535, 2 2557, 3 2603, 4 2595, 5 2553, 6 2623, 7 2623}, :process 16, :time 300412959557, :txn-info {:start_ts 441330713692733516}, :index 84376}
+
+Then:
+  - T1 < T2, because T1 completed at index 84408, 0.000 seconds before the invocation of T2, at index 84409.
+  - T2 < T3, because T2 observed 0 = 2580, and T3 observed a higher value 2581.
+  - T3 < T4, because T3 observed 7 = 2600, and T4 observed a higher value 2601.
+  - T4 < T5, because T4 observed 0 = 2554, and T5 observed a higher value 2562.
+  - T5 < T6, because T5 observed 0 = 2562, and T6 observed a higher value 2566.
+  - T6 < T7, because T6 observed 0 = 2566, and T7 observed a higher value 2570.
+  - T7 < T8, because T7 observed 0 = 2570, and T8 observed a higher value 2572.
+  - T8 < T9, because T8 observed 0 = 2572, and T9 observed a higher value 2573.
+  - T9 < T10, because T9 observed 0 = 2573, and T10 observed a higher value 2579.
+  - However, T10 < T1, because T10 observed 1 = 2535, and T1 observed a higher value 2537: a contradiction!
+```
+
+We found that T3 (441330713718685865) requested a wrong key somehow. As the following tidb general log shows, there should be point-gets by  pk equals 0 to 7. However the tikv debug log shows that it received pk = 4 twice and didn't receive pk = 7. We have rerun the test with `tidb_enable_non_prepared_plan_cache=0` multiple times and cannot reproduce the issue.
+<pre>
+# tidb general log
+[2023/05/08 10:51:06.900 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="select (val) from cycle where pk = 1"]
+[2023/05/08 10:51:06.901 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="<b>select (val) from cycle where pk = 4</b>"]
+[2023/05/08 10:51:06.902 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="select (val) from cycle where pk = 5"]
+[2023/05/08 10:51:06.904 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="select (val) from cycle where pk = 6"]
+[2023/05/08 10:51:06.906 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="select (val) from cycle where pk = 2"]
+[2023/05/08 10:51:06.908 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="select (val) from cycle where pk = 0"]
+[2023/05/08 10:51:06.913 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="<b>select (val) from cycle where pk = 7</b>"]
+[2023/05/08 10:51:06.918 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql="select @@tidb_current_ts ts"]
+[2023/05/08 10:51:06.919 +00:00] [INFO] [session.go:3858] [GENERAL_LOG] [conn=1877950467078619541] [user=root@10.233.117.62] [schemaVersion=45] [txnStartTS=441330713718685865] [forUpdateTS=441330713718685865] [isReadConsistency=false] [currentDB=test] [isPessimistic=true] [sessionTxnMode=PESSIMISTIC] [sql=COMMIT]
+# tikv debug log
+[2023/05/08 10:51:06.899 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 3, 46, 10]))"] [key=7480000000000000FF645F728000000000FF0000030000000000FA] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.902 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 1, 235, 9]))"] [key=7480000000000000FF645F728000000000FF0000010000000000FA] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.902 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 4, 40, 10]))"] [key=<b>7480000000000000FF645F728000000000FF0000040000000000FA</b>] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.903 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 5, 1, 10]))"] [key=7480000000000000FF645F728000000000FF0000050000000000FA] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.905 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 6, 67, 10]))"] [key=7480000000000000FF645F728000000000FF0000060000000000FA] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.906 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 2, 253, 9]))"] [key=7480000000000000FF645F728000000000FF0000020000000000FA] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.911 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 0, 21, 10]))"] [key=7480000000000000FF645F728000000000FF0000000000000000FA] [start_ts=441330713718685865]
+[2023/05/08 10:51:06.916 +00:00] [INFO] [mod.rs:685] ["storage.get() done"] [value="Ok(Some([128, 0, 2, 0, 0, 0, 2, 3, 1, 0, 3, 0, 4, 40, 10]))"] [key=<b>7480000000000000FF645F728000000000FF0000040000000000FA</b>] [start_ts=441330713718685865]
+</pre>
+
+### 2. What did you expect to see? (Required)
+
+No anomaly should be detected by jepsen.
+
+### 3. What did you see instead (Required)
+
+Jepsen failed.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+7.1.0-rc

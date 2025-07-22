@@ -1,0 +1,96 @@
+ID: 50239
+Title: DB::Exception: Block structure mismatch in Pipe::unitePipes stream: different number of columns
+Description:
+**Describe the problem**
+
+Setting a table with a PK/ORDER BY using functions in a column like toYYYYMMDD/toDate/toDateTime .... to downsample and allow a less granular ordering creates some problems in queries. If using `do_not_merge_across_partitions_select_final` queries with FINAL do not work.
+
+**How to reproduce**
+
+```sql
+SET do_not_merge_across_partitions_select_final=1;
+
+CREATE TABLE test_block_mismatch
+(
+    a UInt32,
+    b DateTime
+)
+ENGINE = ReplacingMergeTree
+    PARTITION BY toYYYYMM(b)
+    ORDER BY (toDate(b), a)
+
+-- Insert a = 1 in partition 1
+INSERT INTO test_block_mismatch VALUES
+(1, toDateTime('2023-01-01 12:12:12'));
+INSERT INTO test_block_mismatch VALUES
+(1, toDateTime('2023-01-01 12:12:12'));
+SELECT count(*) FROM test_block_mismatch FINAL;
+
+-- Insert a = 1 into partition 2
+INSERT INTO test_block_mismatch VALUES
+(1, toDateTime('2023-02-02 12:12:12'));
+INSERT INTO test_block_mismatch VALUES
+(1, toDateTime('2023-02-02 12:12:12'));
+SELECT count(*) FROM test_block_mismatch FINAL;
+
+-- Insert a = 2 into partition 1
+INSERT INTO test_block_mismatch VALUES
+(2, toDateTime('2023-01-01 12:12:12'));
+INSERT INTO test_block_mismatch VALUES
+(2, toDateTime('2023-01-01 12:12:12'));
+SELECT count(*) FROM test_block_mismatch FINAL;
+```
+
+* Which ClickHouse server version to use
+
+Happens on 22.7+ 
+
+* Stack trace
+
+```
+ 2023.05.25 17:33:04.956590 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Debug> executeQuery: (from [::ffff:127.0.0.1]:52202, user: admin) SELECT count(*) FROM test_block_mismatch FINAL; (stage: Complete)
+2023.05.25 17:33:04.956726 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> ContextAccess (admin): Access granted: SELECT(a) ON tests.test_block_mismatch
+2023.05.25 17:33:04.956742 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2023.05.25 17:33:04.956784 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Debug> tests.test_block_mismatch (6f7cfa9d-a244-4f19-9f10-b4b851393612) (SelectExecutor): Key condition: unknown
+2023.05.25 17:33:04.956814 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Debug> tests.test_block_mismatch (6f7cfa9d-a244-4f19-9f10-b4b851393612) (SelectExecutor): MinMax index condition: unknown
+2023.05.25 17:33:04.957075 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Debug> tests.test_block_mismatch (6f7cfa9d-a244-4f19-9f10-b4b851393612) (SelectExecutor): Selected 6/6 parts by partition key, 6 parts by primary key, 6/6 marks by primary key, 6 marks to read from 6 ranges
+2023.05.25 17:33:04.957113 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> MergeTreeInOrderSelectProcessor: Reading 1 ranges in order from part 202301_1_1_0, approx. 1 rows starting from 0
+2023.05.25 17:33:04.957118 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> MergeTreeInOrderSelectProcessor: Reading 1 ranges in order from part 202301_2_2_0, approx. 1 rows starting from 0
+2023.05.25 17:33:04.957348 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> MergeTreeInOrderSelectProcessor: Reading 1 ranges in order from part 202301_5_5_0, approx. 1 rows starting from 0
+2023.05.25 17:33:04.957372 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> MergeTreeInOrderSelectProcessor: Reading 1 ranges in order from part 202301_6_6_0, approx. 1 rows starting from 0
+2023.05.25 17:33:04.957579 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> MergeTreeInOrderSelectProcessor: Reading 1 ranges in order from part 202302_3_3_0, approx. 1 rows starting from 0
+2023.05.25 17:33:04.957600 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Trace> MergeTreeInOrderSelectProcessor: Reading 1 ranges in order from part 202302_4_4_0, approx. 1 rows starting from 0
+2023.05.25 17:33:04.957812 [ 2200 ] {08844603-45d8-47f0-84ee-c1dc48cf2754} <Error> executeQuery: Code: 49. DB::Exception: Block structure mismatch in Pipe::unitePipes stream: different number of columns:
+a UInt32 UInt32(size = 0), b DateTime UInt32(size = 0), toDate(b) Date UInt16(size = 0)
+a UInt32 UInt32(size = 0), b DateTime UInt32(size = 0), toDate(b) Date UInt16(size = 0), toDate(b) Date UInt16(size = 0). (LOGICAL_ERROR) (version 23.3.2.37 (official build)) (from [::ffff:127.0.0.1]:52202) (in query: SELECT count(*) FROM test_block_mismatch FINAL;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0xe1e20b5 in /usr/bin/clickhouse
+1. ? @ 0x127ce58c in /usr/bin/clickhouse
+2. ? @ 0x127cbfdb in /usr/bin/clickhouse
+3. DB::Pipe::unitePipes(std::vector<DB::Pipe, std::allocator<DB::Pipe>>, std::vector<std::shared_ptr<DB::IProcessor>, std::allocator<std::shared_ptr<DB::IProcessor>>>*, bool) @ 0x12a06a6d in /usr/bin/clickhouse
+4. DB::ReadFromMergeTree::spreadMarkRangesAmongStreamsFinal(DB::RangesInDataParts&&, unsigned long, std::vector<String, std::allocator<String>> const&, std::shared_ptr<DB::ActionsDAG>&) @ 0x14dbfe30 in /usr/bin/clickhouse
+5. DB::ReadFromMergeTree::spreadMarkRanges(DB::RangesInDataParts&&, unsigned long, DB::ReadFromMergeTree::AnalysisResult&, std::shared_ptr<DB::ActionsDAG>&) @ 0x14dc7c7e in /usr/bin/clickhouse
+6. DB::ReadFromMergeTree::initializePipeline(DB::QueryPipelineBuilder&, DB::BuildQueryPipelineSettings const&) @ 0x14dc940f in /usr/bin/clickhouse
+7. DB::ISourceStep::updatePipeline(std::vector<std::unique_ptr<DB::QueryPipelineBuilder, std::default_delete<DB::QueryPipelineBuilder>>, std::allocator<std::unique_ptr<DB::QueryPipelineBuilder, std::default_delete<DB::QueryPipelineBuilder>>>>, DB::BuildQueryPipelineSettings const&) @ 0x14d8cd6c in /usr/bin/clickhouse
+8. DB::QueryPlan::buildQueryPipeline(DB::QueryPlanOptimizationSettings const&, DB::BuildQueryPipelineSettings const&) @ 0x14da52e9 in /usr/bin/clickhouse
+9. DB::InterpreterSelectWithUnionQuery::execute() @ 0x138d49f8 in /usr/bin/clickhouse
+10. ? @ 0x13bf9ec7 in /usr/bin/clickhouse
+11. DB::executeQuery(String const&, std::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x13bf746d in /usr/bin/clickhouse
+12. DB::TCPHandler::runImpl() @ 0x149c994c in /usr/bin/clickhouse
+13. DB::TCPHandler::run() @ 0x149df159 in /usr/bin/clickhouse
+14. Poco::Net::TCPServerConnection::start() @ 0x17919874 in /usr/bin/clickhouse
+15. Poco::Net::TCPServerDispatcher::run() @ 0x1791aa9b in /usr/bin/clickhouse
+16. Poco::PooledThread::run() @ 0x17aa2327 in /usr/bin/clickhouse
+17. Poco::ThreadImpl::runnableEntry(void*) @ 0x17a9fd5d in /usr/bin/clickhouse
+18. ? @ 0x7f9783894b43 in ?
+19. ? @ 0x7f9783926a00 in ?
+
+
+0 rows in set. Elapsed: 0.002 sec. 
+
+Received exception from server (version 23.3.2):
+Code: 49. DB::Exception: Received from laptop:9440. DB::Exception: Block structure mismatch in Pipe::unitePipes stream: different number of columns:
+a UInt32 UInt32(size = 0), b DateTime UInt32(size = 0), toDate(b) Date UInt16(size = 0)
+a UInt32 UInt32(size = 0), b DateTime UInt32(size = 0), toDate(b) Date UInt16(size = 0), toDate(b) Date UInt16(size = 0). (LOGICAL_ERROR)
+```
+

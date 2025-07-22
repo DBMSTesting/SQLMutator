@@ -1,0 +1,69 @@
+ID: 52692
+Title: pipelined dml get unexpected conflict
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```go
+func TestFlushSingleKeyMultiTimes(t *testing.T) {
+	require.Nil(t, failpoint.Enable("tikvclient/pipelinedMemDBMinFlushKeys", `return(10)`))
+	require.Nil(t, failpoint.Enable("tikvclient/pipelinedMemDBMinFlushSize", `return(100)`))
+	require.Nil(t, failpoint.Enable("tikvclient/pipelinedMemDBForceFlushSizeThreshold", `return(10240)`))
+	defer func() {
+		require.Nil(t, failpoint.Disable("tikvclient/pipelinedMemDBMinFlushKeys"))
+		require.Nil(t, failpoint.Disable("tikvclient/pipelinedMemDBMinFlushSize"))
+		require.Nil(t, failpoint.Disable("tikvclient/pipelinedMemDBForceFlushSizeThreshold"))
+	}()
+
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set session tidb_dml_type = bulk")
+	tk.MustExec("drop table if exists t_base")
+	tk.MustExec("create table t_base(a int primary key, b varchar(255))")
+	var init strings.Builder
+	init.WriteString("insert into t_base values")
+	for i := 0; i < 10000; i++ {
+		if i > 0 {
+			init.WriteString(",")
+		}
+		init.WriteString(fmt.Sprintf("(%d, '%d')", i, i))
+	}
+	tk.MustExec(init.String())
+	for _, clustered := range []string{"CLUSTERED", "NONCLUSTERED"} {
+		tk.MustExec("drop table if exists t_" + clustered)
+		tk.MustExec(fmt.Sprintf("create table t_%s(a int, b varchar(255), primary key (a) %s)", clustered, clustered))
+		tk.MustExec("insert into t_" + clustered + " select a % 10, b from t_base" +
+			" on duplicate key update a = values(a) % 10, b = values(b)")
+	}
+}
+```
+
+```bash
+# start playground in tikv-slim mode
+tiup playground nightly --without-monitor --tiflash=0 --mode tikv-slim
+# run the test
+go test ./tests/realtikvtest/pipelineddmltest --tags=intest -trimpath -with-real-tikv=true -run TestFlushSingleKeyMultiTimes 
+```
+
+### 2. What did you expect to see? (Required)
+
+Test pass
+  
+### 3. What did you see instead (Required)
+
+```
+Messages:       sql:insert into t_NONCLUSTERED select a % 10, b from t_base on duplicate key update a = values(a) % 10, b = values(b), [], error stack [kv:1062]Duplicate entry '0' for key 't_NONCLUSTERED.PRIMARY'
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+53c050b5f96b515dded408fc427829dc0aec1485
+

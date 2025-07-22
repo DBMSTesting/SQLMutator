@@ -1,0 +1,47 @@
+ID: 23893
+Title: ddl: ddl rollingback error may lead the json unmarshal error(2)
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Take cancel add index for example, let mock the error code in Line 45 of `rollingback.go` with hash e1fccc6e980bb0cf0ca4e18c6ddb142551c116cd
+```
+func convertAddIdxJob2RollbackJob(t *meta.Meta, job *model.Job, tblInfo *model.TableInfo, indexInfo *model.IndexInfo, err error) (int64, error) {
+	job.State = model.JobStateRollingback
+        // here
+	return 0, errors.New("mock update version and tableInfo error")
+	if indexInfo.Primary {
+		nullCols, err := getNullColInfos(tblInfo, indexInfo)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		for _, col := range nullCols {
+			// Field PreventNullInsertFlag flag reset.
+			col.Flag &^= mysql.PreventNullInsertFlag
+		}
+	}
+```
+For the sake of manual cancel operation, let hang on `StateDeleteOnly` in Line507 with `index.go` for a while in which we can execute `admin cancel ddl job jobID` in the other client.
+```
+	case model.StateDeleteOnly:
+		time.Sleep(time.Second * 20)
+		// delete only -> write only
+		indexInfo.State = model.StateWriteOnly
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+Since `convertAddIdxJob2RollbackJob` encounters an error in the internal logic, we should keep the job state as it is (canceling) and record the error count and message wait for the next ddl round. Once the error count is beyond the limitation, it job is canceled directly.
+
+### 3. What did you see instead (Required)
+Since `convertAddIdxJob2RollbackJob` encounters an error in the internal logic, the job can't be set as `JobStateRollingback` at every first beginning. That will leads to the rollbacking logic done with something like `ERROR 1105 (HY000): json: cannot unmarshal bool into Go value of type string`
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master
+

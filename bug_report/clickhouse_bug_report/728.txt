@@ -1,0 +1,100 @@
+ID: 728
+Title: Exception for valid query due to unused column being removed when running a multiIf inside an aggregated function in a sub-query
+Description:
+Take for example the following query:
+
+```
+SELECT 
+    sum(total_count) AS total, 
+    domain
+FROM 
+(
+    SELECT 
+        COUNT(*) AS total_count, 
+        toUInt64(0) AS facebookHits, 
+        domain
+    FROM transactions 
+    GROUP BY domain
+    UNION ALL 
+    SELECT 
+        COUNT(*) AS total_count, 
+        SUM(if(domain = 'facebook.com', 1, 0)) AS facebookHits, 
+        domain
+    FROM clicks 
+    GROUP BY domain
+) 
+GROUP BY domain
+LIMIT 2
+FORMAT JSON
+
+```
+
+This is perfectly valid semantically speaking but for some reason running it outputs the following exception:
+
+Code: 47. DB::Exception: Received from localhost:9000, ::1. DB::Exception: Unknown column: if(equals(domain, 'facebook.com'), 1, 0), there are only columns domain. 
+
+This only happens if an aggregated function is ran on the case/if statement, it doesn't happen when an aggregated function is ran directly on a column and it doesn't happen if the resulting column (in this case AS facebookHits) is used in the uppermost SELECT.
+
+Furthermore if I revert the order of the "lower" SELECTS so that the one with the SUM(if(domain= .... etc) is the first then the query runs as expected.
+
+I assume that what is happening here it the "facebookHits" column from the first select is optimized out for some reason ?
+
+
+Now that I'm reading this maybe I'm not explaining it in the best way so let me exemplify with these two queries:
+
+```
+SELECT 
+    sum(total_count) AS total, 
+    domain
+FROM 
+(
+    SELECT 
+        COUNT(*) AS total_count, 
+        toUInt64(0) AS facebookHits, 
+        domain
+    FROM transactions 
+    GROUP BY domain
+    UNION ALL 
+    SELECT 
+        COUNT(*) AS total_count, 
+        SUM(if(domain = 'facebook.com', 1, 0)) AS facebookHits, 
+        domain
+    FROM clicks 
+    GROUP BY domain
+) 
+GROUP BY domain
+LIMIT 2
+FORMAT JSON
+
+```
+
+<- This throws the aformentioned exception 
+
+
+```
+SELECT 
+    sum(total_count) AS total, 
+    domain
+FROM 
+(
+    SELECT 
+        COUNT(*) AS total_count, 
+        SUM(if(domain = 'facebook.com', 1, 0)) AS facebookHits, 
+        domain
+    FROM clicks 
+    GROUP BY domain
+UNION ALL 
+    SELECT 
+        COUNT(*) AS total_count, 
+        toUInt64(0) AS facebookHits, 
+        domain
+    FROM transactions 
+    GROUP BY domain
+) 
+GROUP BY domain
+LIMIT 2
+FORMAT JSON
+
+```
+
+<- This is valid

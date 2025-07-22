@@ -1,0 +1,95 @@
+ID: 12948
+Title: Fix several CTE related issues
+Description:
+This PR fixes several issues related to recursive and materialized CTEs.
+
+1. Materialized CTEs did not work properly with `INSERT` statements.
+
+2. `TransformRecursiveCTE` was too restrictive
+
+```sql
+WITH RECURSIVE t AS (
+  SELECT 1 AS a
+    UNION ALL
+  SELECT a+1
+  FROM t
+  WHERE a < 10
+), s AS (
+  (VALUES (5), (6), (7), (8), (9), (10), (11), (12), (13), (42))
+  EXCEPT  -- (**)
+  TABLE t
+)
+SELECT * FROM s AS _(x) ORDER BY x;
+```
+
+The `EXCEPT -- (**)` was interpreted as a recursive set operation, which clearly is not the case. This query can now be executed, which was not possible before.
+
+---
+
+3. Materialized CTEs were sometimes inlined and thereby duplicated
+```sql
+WITH t0(x) AS MATERIALIZED (
+  SELECT x FROM t1
+), t1(x) AS MATERIALIZED (
+  SELECT 1
+)
+SELECT * FROM t0;
+```
+
+_E.g._ the query above was happily accepted by the system. However, eventhough both CTEs are materialized, `t1` still appeared twice in the query plan. A new check and exception in `bind_basetableref.cpp` now prevents this from happening.
+
+The plan before this PR:
+
+```
+┌───────────────────────────┐                                                          
+│            CTE            │                                                          
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                          
+│             t0            ├──────────────┐                                           
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │                                           
+│           idx: 0          │              │                                           
+└─────────────┬─────────────┘              │                                                                        
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐                             
+│         PROJECTION        ││            CTE            │                             
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             
+│             1             ││             t1            ├──────────────┐              
+│                           ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │              
+│                           ││          idx: 14          │              │              
+└─────────────┬─────────────┘└─────────────┬─────────────┘              │                                           
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         DUMMY_SCAN        ││         PROJECTION        ││          CTE_SCAN         │
+│                           ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│                           ││             1             ││           idx: 0          │
+└───────────────────────────┘└─────────────┬─────────────┘└───────────────────────────┘                             
+                             ┌─────────────┴─────────────┐                             
+                             │         DUMMY_SCAN        │                             
+                             └───────────────────────────┘ 
+```
+
+Instead of essentially giving up and throwing an exception, the system could as well perform a dependency analysis to reorder the materialized CTEs. Which could then result in the correct plan:
+
+```
+┌───────────────────────────┐                                                          
+│            CTE            │                                                          
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                          
+│             t1            ├──────────────┐                                           
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │                                           
+│           idx: 0          │              │                                           
+└─────────────┬─────────────┘              │                                                                        
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐                             
+│         PROJECTION        ││            CTE            │                             
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             
+│             1             ││             t0            ├──────────────┐              
+│                           ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │              
+│                           ││           idx: 8          │              │              
+└─────────────┬─────────────┘└─────────────┬─────────────┘              │                                           
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         DUMMY_SCAN        ││          CTE_SCAN         ││          CTE_SCAN         │
+│                           ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│                           ││           idx: 0          ││           idx: 8          │
+└───────────────────────────┘└───────────────────────────┘└───────────────────────────┘
+```
+
+However, this is not part of this PR. For now, it is best (I think) to throw an exception.
+
+4. Fix PIVOT statements after materialized CTE fixes.
+  The changes to fix (3) broke MATERIALIZED CTEs in PIVOT statements. This has been fixed.

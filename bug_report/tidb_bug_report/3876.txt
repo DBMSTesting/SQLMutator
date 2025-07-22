@@ -1,0 +1,78 @@
+ID: 3876
+Title: Parallel truncate table & add index possible race condition
+Description:
+```sql
+ALTER TABLE `4d34f858-8cc0-4e9e-ba82-10633ac6011b` ADD INDEX `711bb866-2df5-4724-a450-b3d41fe52869` (`6a913c6f-926d-4bd1-949f-ea72a7bb233b`);
+TRUNCATE TABLE `4d34f858-8cc0-4e9e-ba82-10633ac6011b`;
+```
+
+When SQL above are executed in parallel, sometimes `ADD INDEX` will fail with error:
+
+```
+ERROR: Error 1146: Table '%!s(MISSING).%!s(MISSING)' doesn't exist
+```
+
+Besides, when failing with errors, `ADD INDEX` also costs notable time (normal: <0.2s, error: ~4s)
+
+- When executed in **serial** in TiDB, no errors so far.
+- When executed in **parallel** in MySQL, no errors so far.
+
+TiDB log:
+
+```
+2017/07/25 13:57:37 ddl.go:401: [info] [ddl] start DDL job ID:1318, Type:truncate table, State:none, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:1, Query:
+TRUNCATE TABLE `4d34f858-8cc0-4e9e-ba82-10633ac6011b`
+2017/07/25 13:57:37 ddl_worker.go:262: [info] [ddl] run DDL job ID:1318, Type:truncate table, State:none, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:0
+2017/07/25 13:57:37 domain.go:93: [info] [ddl] diff load InfoSchema from version 1893 to 1894, in 1.348769ms
+2017/07/25 13:57:37 ddl_worker.go:368: [info] [ddl] wait latest schema version 1894 changed, take time 52.478148ms
+2017/07/25 13:57:37 ddl_worker.go:117: [info] [ddl] finish DDL job ID:1318, Type:truncate table, State:synced, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:0
+2017/07/25 13:57:37 ddl.go:438: [info] [ddl] DDL job 1318 is finished
+2017/07/25 13:57:37 domain.go:354: [info] [ddl] on DDL change, must reload
+2017/07/25 13:57:37 bg_worker.go:70: [info] [ddl] run background job ID:1318, Type:truncate table, State:none, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:0
+2017/07/25 13:57:37 reorg.go:170: [info] [ddl] deleted 246 keys take time 0.014289436, deleted 246 keys in total
+2017/07/25 13:57:37 bg_worker.go:129: [info] [ddl] finish background job ID:1318, Type:truncate table, State:done, SchemaState:none, SchemaID:1, TableID:1303, RowCount:246, ArgLen:1
+2017/07/25 13:57:38 2pc.go:548: [info] 2PC clean up done, tid: 393468250135199748
+2017/07/25 13:57:38 txn.go:56: [warning] [kv] Retry txn 393468250135199748 original txn 393468250135199748 err [try again later]: tikv restarts txn: Txn(Mvcc(WriteConflict))
+2017/07/25 13:57:38 ddl.go:401: [info] [ddl] start DDL job ID:1319, Type:add index, State:none, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:4, Query:
+ALTER TABLE `4d34f858-8cc0-4e9e-ba82-10633ac6011b` ADD INDEX `711bb866-2df5-4724-a450-b3d41fe52869` (`6a913c6f-926d-4bd1-949f-ea72a7bb233b`)
+2017/07/25 13:57:38 ddl_worker.go:262: [info] [ddl] run DDL job ID:1319, Type:add index, State:none, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:0
+2017/07/25 13:57:38 ddl_worker.go:313: [info] [ddl] the DDL job is normal to cancel because [schema:1146]Table '%s.%s' doesn't exist
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/table.go:165: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/index.go:186: 
+2017/07/25 13:57:38 ddl_worker.go:117: [info] [ddl] finish DDL job ID:1319, Type:add index, State:cancelled, SchemaState:none, SchemaID:1, TableID:1303, RowCount:0, ArgLen:0
+2017/07/25 13:57:41 adapter.go:216: [warning] [268][TIME_QUERY] 3.179905513s ALTER TABLE `4d34f858-8cc0-4e9e-ba82-10633ac6011b` ADD INDEX `711bb866-2df5-4724-a450-b3d41fe52869` (`6a913c6f-926d-4bd1-949f-ea72a7bb233b`)
+2017/07/25 13:57:41 tidb.go:166: [info] RollbackTxn for ddl/autocommit error. 
+2017/07/25 13:57:41 txn.go:174: [info] [kv] Rollback txn 393468250135199747
+2017/07/25 13:57:41 session.go:623: [warning] [268] session error:
+[schema:1146]Table '%s.%s' doesn't exist
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl.go:442: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl.go:451: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl_api.go:1415: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl_api.go:838: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/executor/ddl.go:227: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/executor/ddl.go:74: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/executor/adapter.go:182: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/tidb.go:172: 
+{
+  "currDBName": "test",
+  "id": 268,
+  "status": 2,
+  "strictMode": true,
+  "user": "root@127.0.0.1"
+}
+2017/07/25 13:57:41 conn.go:377: [warning] [268] dispatch error:
+id:268, addr:127.0.0.1:51693 status:2, collation:utf8_general_ci, user:root
+ALTER TABLE `4d34f858-8cc0-4e9e-ba82-10633ac6011b` ADD INDEX `711bb866-2df5-4724-a450-b3d41fe52869` (`6a913c6f-926d-4bd1-949f-ea72a7bb233b`)
+[schema:1146]Table '%s.%s' doesn't exist
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl.go:442: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl.go:451: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl_api.go:1415: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/ddl/ddl_api.go:838: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/executor/ddl.go:227: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/executor/ddl.go:74: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/executor/adapter.go:182: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/tidb.go:172: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/session.go:625: 
+/Users/Breezewish/PingCAP/src/github.com/pingcap/tidb/server/conn.go:681: 
+2017/07/25 13:57:41 server.go:211: [info] [268] close connection
+```

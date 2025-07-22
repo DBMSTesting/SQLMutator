@@ -1,0 +1,44 @@
+ID: 14024
+Title: Adds Julia support for scalar UDFs
+Description:
+This PR adds support and tests for defining scalar UDFs in julia and using them in duckdb. Thank you for an incredible tool.
+
+Below is an example. 
+
+```
+using DuckDB
+function MyAddition(info::DuckDB.duckdb_function_info, input::DuckDB.duckdb_data_chunk, output::DuckDB.duckdb_vector)
+    input = DuckDB.DataChunk(input, false)
+    n = DuckDB.get_size(input)
+    a_data = DuckDB.get_array(DuckDB.get_vector(input, 1), Int64, n)
+    b_data = DuckDB.get_array(DuckDB.get_vector(input, 2), Int64, n)
+
+    output_data = DuckDB.get_array(DuckDB.Vec(output), Int64, n)
+    for row in 1:n
+        output_data[row] = a_data[row] + b_data[row]
+    end
+end
+
+
+db = DuckDB.DB()
+con = DuckDB.connect(db)
+# create a scalar function
+f = DuckDB.duckdb_create_scalar_function()
+DuckDB.duckdb_scalar_function_set_name(f, "my_addition")
+# add two bigint parameters
+type = DuckDB.duckdb_create_logical_type(DuckDB.DUCKDB_TYPE_BIGINT)
+DuckDB.duckdb_table_function_add_parameter(f, type)
+DuckDB.duckdb_table_function_add_parameter(f, type)
+# set the return type to bigint
+DuckDB.duckdb_scalar_function_set_return_type(f, type)
+DuckDB.duckdb_destroy_logical_type(type)
+# set up the function
+CMyAddition = @cfunction(MyAddition, Cvoid, (DuckDB.duckdb_function_info, DuckDB.duckdb_data_chunk, DuckDB.duckdb_vector))
+DuckDB.duckdb_scalar_function_set_function(f, CMyAddition)
+# register and cleanup
+DuckDB.duckdb_register_scalar_function(con.handle, f)
+DuckDB.duckdb_destroy_scalar_function(f)
+
+DuckDB.query(con, "CREATE TABLE big_table AS SELECT i FROM range(9) t(i)") |> DataFrame
+DuckDB.query(con, "SELECT my_addition(i, i) FROM big_table") |> DataFrame
+```

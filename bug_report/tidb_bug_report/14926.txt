@@ -1,0 +1,55 @@
+ID: 14926
+Title: remove constant expressions in order by items
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+```
+mysql> select max(t.col) from (select 'a' as col union all select '' as col) as t;
++------------+
+| max(t.col) |
++------------+
+| NULL       |
++------------+
+1 row in set (0.00 sec)
+```
+
+2. What did you expect to see?
+
+The result should be `a` instead of `NULL`.
+
+3. What did you see instead?
+
+```
+mysql> explain select max(t.col) from (select 'a' as col union all select '' as col) as t;
++------------------------------------+-------+------+-----------------------------------+
+| id                                 | count | task | operator info                     |
++------------------------------------+-------+------+-----------------------------------+
+| StreamAgg_23                       | 1.00  | root | funcs:max(Column#3)->Column#4     |
+| └─TopN_26                          | 1.00  | root | Column#3:desc, offset:0, count:1  |
+|   └─Union_30                       | 1.60  | root |                                   |
+|     ├─Projection_31                | 0.80  | root | cast(a)->Column#3                 |
+|     │ └─Projection_43              | 0.80  | root |                                   |
+|     │   └─TopN_34                  | 0.80  | root | Column#9:desc, offset:0, count:1  |
+|     │     └─Projection_44          | 0.80  | root | cast(a)->Column#9                 |
+|     │       └─Selection_35         | 0.80  | root | not(isnull(cast("a")))            |
+|     │         └─TableDual_36       | 1.00  | root | rows:1                            |
+|     └─Projection_37                | 0.80  | root | cast()->Column#3                  |
+|       └─Projection_45              | 0.80  | root |                                   |
+|         └─TopN_40                  | 0.80  | root | Column#10:desc, offset:0, count:1 |
+|           └─Projection_46          | 0.80  | root | cast()->Column#10                 |
+|             └─Selection_41         | 0.80  | root | not(isnull(cast("")))             |
+|               └─TableDual_42       | 1.00  | root | rows:1                            |
++------------------------------------+-------+------+-----------------------------------+
+```
+Projection_43 is inserted in `postOptimization` for TopN, it is empty because Selection_35 produces empty schema. The root cause is that the order by item of TopN is a ScalarFunction `cast('a')`, which is a constant expression actually but not being folded into a Constant. Check places, i.e, projection elimination and topn pushdown, to ensure it is converted to Constant and removed from the order by clause.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+master: 6e867b7cbcc0b2b2709f379a31358e34c7453447
+```

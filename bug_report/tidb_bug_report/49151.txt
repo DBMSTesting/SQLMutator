@@ -1,0 +1,55 @@
+ID: 49151
+Title: Transaction cannot be committed/rollbacked via binary protocol after TTL manager timed out
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```js
+  const c = await mysql.createConnection({ host: TIDB_HOST, port: 4000, user: "root", database: 'test' });
+  try {
+    await c.query("set @@tidb_general_log=1");
+    await c.query("drop table if exists t1");
+    await c.query("create table t1 (a int, b int)");
+    await c.query("insert into t1 values (3, 2), (2, 3)");
+    log("show config", await pp(c.query("show config where name like '%max-txn-ttl'")));
+    await c.query("begin");
+    await c.query("update t1 set a=4 where a=3");
+    log("select(1):", await pp(c.query("select * from t1")));
+    log("wait 45 seconds");
+    await sleep(45*1000);
+    log("continue");
+    log("select(2):", await pp(c.query("select * from t1")));
+    log("rollback(bin):", await pp(c.execute("rollback")));
+    log("commit(bin):  ", await pp(c.execute("commit")));
+    log("commit(txt):  ", await pp(c.query("commit")));
+  } finally {
+    await close(c);
+  }
+```
+
+### 2. What did you expect to see? (Required)
+
+No error returned by `rollback(bin)` and `commit(bin)`.
+
+### 3. What did you see instead (Required)
+
+<pre>
+2023-12-04T10:49:43.457Z show config [{"Type":"tidb","Instance":"127.0.0.1:4000","Name":"performance.max-txn-ttl","Value":"30000"}]
+2023-12-04T10:49:43.467Z select(1): [{"a":4,"b":2},{"a":2,"b":3}]
+2023-12-04T10:49:43.467Z wait 45 seconds
+2023-12-04T10:50:28.476Z continue
+2023-12-04T10:50:28.478Z select(2): TTL manager has timed out, pessimistic locks may expire, please commit or rollback this transaction
+<b>2023-12-04T10:50:28.481Z rollback(bin): TTL manager has timed out, pessimistic locks may expire, please commit or rollback this transaction</b>
+<b>2023-12-04T10:50:28.482Z commit(bin):   TTL manager has timed out, pessimistic locks may expire, please commit or rollback this transaction</b>
+2023-12-04T10:50:28.486Z commit(txt):   {"fieldCount":0,"affectedRows":0,"insertId":0,"info":"","serverStatus":2,"warningStatus":0}
+</pre>
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+v7.4.0

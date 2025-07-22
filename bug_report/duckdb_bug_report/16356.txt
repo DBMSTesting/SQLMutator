@@ -1,0 +1,232 @@
+ID: 16356
+Title: Push Select into ArrayColumnData to avoid scanning arrays that are not required for the query
+Description:
+This PR implements a dedicated `ArrayColumnData::Select` method that is used to push a selection into the scan of an array directly. This method finds consecutive ranges of data that are required for the query by iterating over the selection vector, and then scans them by alternating through `Skip` and `Scan`. This can greatly improve performance compared to the current approach (`Scan + Slice`) when (1) the array is large, and (2) the filter is selective.
+
+#### Benchmarks
+
+For giant arrays and sparse selections this can make very large performance differences (>100X faster). For example, running the below query which selects 1/2000 rows from a table with integer arrays of size 1024, we can see enormous performance improvements:
+
+```sql
+CREATE TABLE arrays AS SELECT i%2000 as id, [i + x for x in range(1024)]::INT[1024] arr FROM range(10000000) tbl(i);
+select * from arrays where id=0;
+```
+
+| v1.2  |  New   |
+|-------|--------|
+| 1.89s | 0.023s |
+
+The performance benefits are dependent on the selectivity of the filter and the size of the array - there are also cases where this approach is slower than the old approach. I've tested the new approach with various selectivities and array sizes, the benchmark results are located below in the section `Benchmarks: Scan + Slice vs the new Skip and Scan`.
+
+### Heuristic
+We can see that, in general, the new approach of skipping + scanning consecutive ranges performs better when we (1) select fewer rows, and (2) when the array size is larger. For small arrays the skipping can cause serious performance degradations as well. 
+
+Because of that we try to adaptively switch between the two approaches - we knew before we start the slicing + skipping how many consecutive ranges we are selecting. We use this information together with the array size to switch between the two approaches. As a heuristic, I've set that we select the new approach if the number of consecutive ranges we are scanning is less than `array_size / 2`. That means that for an array size of `1024`, we will use the new approach if we are selecting up to `512` consecutive ranges. For an array size of 5, we only use the new approach for up to `2` consecutive ranges. This seems to provide a good balance of performance on the benchmark.
+
+See the final `Benchmarks: Adaptive` for the results - we seem to always either match or improve the performance of the current version with this approach.
+
+
+
+
+#### Benchmarks: Scan + Slice vs the new Skip and Scan
+
+| Array Size | Selectivity | Scan + Slice | Skip and Scan | speedup |
+|-----------:|-------------|-----------:|-----------------:|--------:|
+| 5          | 50.0%       | 0.023      | 0.056            | 0.4107  |
+| 5          | 25.0%       | 0.013      | 0.028            | 0.4643  |
+| 5          | 12.5%       | 0.01       | 0.016            | 0.625   |
+| 5          | 6.25%       | 0.008      | 0.012            | 0.6667  |
+| 5          | 3.12%       | 0.006      | 0.009            | 0.6667  |
+| 5          | 1.56%       | 0.006      | 0.007            | 0.8571  |
+| 5          | 0.78%       | 0.007      | 0.006            | 1.1667  |
+| 5          | 0.39%       | 0.006      | 0.005            | 1.2     |
+| 5          | 0.2%        | 0.007      | 0.005            | 1.4     |
+| 5          | 0.1%        | 0.006      | 0.005            | 1.2     |
+| 10         | 50.0%       | 0.019      | 0.031            | 0.6129  |
+| 10         | 25.0%       | 0.011      | 0.017            | 0.6471  |
+| 10         | 12.5%       | 0.008      | 0.012            | 0.6667  |
+| 10         | 6.25%       | 0.006      | 0.009            | 0.6667  |
+| 10         | 3.12%       | 0.005      | 0.005            | 1.0     |
+| 10         | 1.56%       | 0.005      | 0.004            | 1.25    |
+| 10         | 0.78%       | 0.005      | 0.003            | 1.6667  |
+| 10         | 0.39%       | 0.005      | 0.003            | 1.6667  |
+| 10         | 0.2%        | 0.005      | 0.003            | 1.6667  |
+| 10         | 0.1%        | 0.005      | 0.002            | 2.5     |
+| 20         | 50.0%       | 0.017      | 0.021            | 0.8095  |
+| 20         | 25.0%       | 0.01       | 0.013            | 0.7692  |
+| 20         | 12.5%       | 0.006      | 0.009            | 0.6667  |
+| 20         | 6.25%       | 0.005      | 0.006            | 0.8333  |
+| 20         | 3.12%       | 0.005      | 0.003            | 1.6667  |
+| 20         | 1.56%       | 0.005      | 0.002            | 2.5     |
+| 20         | 0.78%       | 0.005      | 0.002            | 2.5     |
+| 20         | 0.39%       | 0.005      | 0.002            | 2.5     |
+| 20         | 0.2%        | 0.004      | 0.002            | 2.0     |
+| 20         | 0.1%        | 0.004      | 0.002            | 2.0     |
+| 40         | 50.0%       | 0.018      | 0.021            | 0.8571  |
+| 40         | 25.0%       | 0.01       | 0.013            | 0.7692  |
+| 40         | 12.5%       | 0.007      | 0.008            | 0.875   |
+| 40         | 6.25%       | 0.005      | 0.005            | 1.0     |
+| 40         | 3.12%       | 0.005      | 0.003            | 1.6667  |
+| 40         | 1.56%       | 0.005      | 0.002            | 2.5     |
+| 40         | 0.78%       | 0.006      | 0.001            | 6.0     |
+| 40         | 0.39%       | 0.005      | 0.001            | 5.0     |
+| 40         | 0.2%        | 0.005      | 0.001            | 5.0     |
+| 40         | 0.1%        | 0.004      | 0.001            | 4.0     |
+| 80         | 50.0%       | 0.018      | 0.018            | 1.0     |
+| 80         | 25.0%       | 0.01       | 0.012            | 0.8333  |
+| 80         | 12.5%       | 0.007      | 0.007            | 1.0     |
+| 80         | 6.25%       | 0.005      | 0.004            | 1.25    |
+| 80         | 3.12%       | 0.005      | 0.002            | 2.5     |
+| 80         | 1.56%       | 0.004      | 0.001            | 4.0     |
+| 80         | 0.78%       | 0.004      | 0.001            | 4.0     |
+| 80         | 0.39%       | 0.004      | 0.001            | 4.0     |
+| 80         | 0.2%        | 0.004      | 0.001            | 4.0     |
+| 80         | 0.1%        | 0.004      | 0.001            | 4.0     |
+| 160        | 50.0%       | 0.034      | 0.033            | 1.0303  |
+| 160        | 25.0%       | 0.018      | 0.02             | 0.9     |
+| 160        | 12.5%       | 0.011      | 0.011            | 1.0     |
+| 160        | 6.25%       | 0.007      | 0.005            | 1.4     |
+| 160        | 3.12%       | 0.006      | 0.003            | 2.0     |
+| 160        | 1.56%       | 0.005      | 0.002            | 2.5     |
+| 160        | 0.78%       | 0.005      | 0.001            | 5.0     |
+| 160        | 0.39%       | 0.005      | 0.001            | 5.0     |
+| 160        | 0.2%        | 0.005      | 0.001            | 5.0     |
+| 160        | 0.1%        | 0.005      | 0.0              | inf     |
+| 320        | 50.0%       | 0.064      | 0.059            | 1.0847  |
+| 320        | 25.0%       | 0.033      | 0.033            | 1.0     |
+| 320        | 12.5%       | 0.018      | 0.017            | 1.0588  |
+| 320        | 6.25%       | 0.012      | 0.009            | 1.3333  |
+| 320        | 3.12%       | 0.008      | 0.005            | 1.6     |
+| 320        | 1.56%       | 0.007      | 0.003            | 2.3333  |
+| 320        | 0.78%       | 0.006      | 0.001            | 6.0     |
+| 320        | 0.39%       | 0.006      | 0.001            | 6.0     |
+| 320        | 0.2%        | 0.006      | 0.001            | 6.0     |
+| 320        | 0.1%        | 0.006      | 0.001            | 6.0     |
+| 640        | 50.0%       | 0.12       | 0.114            | 1.0526  |
+| 640        | 25.0%       | 0.063      | 0.06             | 1.05    |
+| 640        | 12.5%       | 0.035      | 0.03             | 1.1667  |
+| 640        | 6.25%       | 0.021      | 0.016            | 1.3125  |
+| 640        | 3.12%       | 0.014      | 0.008            | 1.75    |
+| 640        | 1.56%       | 0.011      | 0.004            | 2.75    |
+| 640        | 0.78%       | 0.009      | 0.002            | 4.5     |
+| 640        | 0.39%       | 0.008      | 0.002            | 4.0     |
+| 640        | 0.2%        | 0.008      | 0.001            | 8.0     |
+| 640        | 0.1%        | 0.007      | 0.0              | inf     | 
+
+
+#### Benchmarks: Adaptive
+
+| Array Size | Selectivity | v1.2 | New | speedup |
+|-----------:|-------------|-----------:|-----------------:|--------:|
+| 5          | 50.0%       | 0.023      | 0.023            | 1.0     |
+| 5          | 25.0%       | 0.013      | 0.013            | 1.0     |
+| 5          | 12.5%       | 0.01       | 0.009            | 1.1111  |
+| 5          | 6.25%       | 0.008      | 0.008            | 1.0     |
+| 5          | 3.12%       | 0.006      | 0.007            | 0.8571  |
+| 5          | 1.56%       | 0.006      | 0.006            | 1.0     |
+| 5          | 0.78%       | 0.007      | 0.006            | 1.1667  |
+| 5          | 0.39%       | 0.006      | 0.006            | 1.0     |
+| 5          | 0.2%        | 0.007      | 0.006            | 1.1667  |
+| 5          | 0.1%        | 0.006      | 0.004            | 1.5     |
+| 10         | 50.0%       | 0.019      | 0.019            | 1.0     |
+| 10         | 25.0%       | 0.011      | 0.011            | 1.0     |
+| 10         | 12.5%       | 0.008      | 0.008            | 1.0     |
+| 10         | 6.25%       | 0.006      | 0.006            | 1.0     |
+| 10         | 3.12%       | 0.005      | 0.005            | 1.0     |
+| 10         | 1.56%       | 0.005      | 0.005            | 1.0     |
+| 10         | 0.78%       | 0.005      | 0.005            | 1.0     |
+| 10         | 0.39%       | 0.005      | 0.005            | 1.0     |
+| 10         | 0.2%        | 0.005      | 0.003            | 1.6667  |
+| 10         | 0.1%        | 0.005      | 0.002            | 2.5     |
+| 20         | 50.0%       | 0.017      | 0.017            | 1.0     |
+| 20         | 25.0%       | 0.01       | 0.01             | 1.0     |
+| 20         | 12.5%       | 0.006      | 0.006            | 1.0     |
+| 20         | 6.25%       | 0.005      | 0.005            | 1.0     |
+| 20         | 3.12%       | 0.005      | 0.005            | 1.0     |
+| 20         | 1.56%       | 0.005      | 0.005            | 1.0     |
+| 20         | 0.78%       | 0.005      | 0.005            | 1.0     |
+| 20         | 0.39%       | 0.005      | 0.002            | 2.5     |
+| 20         | 0.2%        | 0.004      | 0.002            | 2.0     |
+| 20         | 0.1%        | 0.004      | 0.001            | 4.0     |
+| 40         | 50.0%       | 0.018      | 0.018            | 1.0     |
+| 40         | 25.0%       | 0.01       | 0.01             | 1.0     |
+| 40         | 12.5%       | 0.007      | 0.007            | 1.0     |
+| 40         | 6.25%       | 0.005      | 0.005            | 1.0     |
+| 40         | 3.12%       | 0.005      | 0.005            | 1.0     |
+| 40         | 1.56%       | 0.005      | 0.005            | 1.0     |
+| 40         | 0.78%       | 0.006      | 0.001            | 6.0     |
+| 40         | 0.39%       | 0.005      | 0.001            | 5.0     |
+| 40         | 0.2%        | 0.005      | 0.001            | 5.0     |
+| 40         | 0.1%        | 0.004      | 0.001            | 4.0     |
+| 80         | 50.0%       | 0.018      | 0.018            | 1.0     |
+| 80         | 25.0%       | 0.01       | 0.01             | 1.0     |
+| 80         | 12.5%       | 0.007      | 0.006            | 1.1667  |
+| 80         | 6.25%       | 0.005      | 0.005            | 1.0     |
+| 80         | 3.12%       | 0.005      | 0.004            | 1.25    |
+| 80         | 1.56%       | 0.004      | 0.002            | 2.0     |
+| 80         | 0.78%       | 0.004      | 0.001            | 4.0     |
+| 80         | 0.39%       | 0.004      | 0.001            | 4.0     |
+| 80         | 0.2%        | 0.004      | 0.001            | 4.0     |
+| 80         | 0.1%        | 0.004      | 0.001            | 4.0     |
+| 160        | 50.0%       | 0.034      | 0.034            | 1.0     |
+| 160        | 25.0%       | 0.018      | 0.018            | 1.0     |
+| 160        | 12.5%       | 0.011      | 0.011            | 1.0     |
+| 160        | 6.25%       | 0.007      | 0.007            | 1.0     |
+| 160        | 3.12%       | 0.006      | 0.003            | 2.0     |
+| 160        | 1.56%       | 0.005      | 0.002            | 2.5     |
+| 160        | 0.78%       | 0.005      | 0.001            | 5.0     |
+| 160        | 0.39%       | 0.005      | 0.001            | 5.0     |
+| 160        | 0.2%        | 0.005      | 0.0              | inf     |
+| 160        | 0.1%        | 0.005      | 0.001            | 5.0     |
+| 320        | 50.0%       | 0.064      | 0.064            | 1.0     |
+| 320        | 25.0%       | 0.033      | 0.034            | 0.9706  |
+| 320        | 12.5%       | 0.018      | 0.019            | 0.9474  |
+| 320        | 6.25%       | 0.012      | 0.009            | 1.3333  |
+| 320        | 3.12%       | 0.008      | 0.005            | 1.6     |
+| 320        | 1.56%       | 0.007      | 0.003            | 2.3333  |
+| 320        | 0.78%       | 0.006      | 0.002            | 3.0     |
+| 320        | 0.39%       | 0.006      | 0.001            | 6.0     |
+| 320        | 0.2%        | 0.006      | 0.001            | 6.0     |
+| 320        | 0.1%        | 0.006      | 0.001            | 6.0     |
+| 640        | 50.0%       | 0.12       | 0.132            | 0.9091  |
+| 640        | 25.0%       | 0.063      | 0.064            | 0.9844  |
+| 640        | 12.5%       | 0.035      | 0.031            | 1.129   |
+| 640        | 6.25%       | 0.021      | 0.015            | 1.4     |
+| 640        | 3.12%       | 0.014      | 0.008            | 1.75    |
+| 640        | 1.56%       | 0.011      | 0.004            | 2.75    |
+| 640        | 0.78%       | 0.009      | 0.002            | 4.5     |
+| 640        | 0.39%       | 0.008      | 0.001            | 8.0     |
+| 640        | 0.2%        | 0.008      | 0.001            | 8.0     |
+| 640        | 0.1%        | 0.007      | 0.001            | 7.0     |
+
+
+
+#### Benchmark Script
+```sql
+import subprocess
+import re
+import numpy
+shell = 'build/reldebug/duckdb'
+
+total_values = 100000000
+def run_experiment(array_size, modulo):
+	table_size = int(total_values / array_size)
+	load = f'''
+	CREATE TABLE arrays AS SELECT i%{modulo} as id, [i + x for x in range({array_size})]::INT[{array_size}] arr FROM range({table_size}) tbl(i);
+	'''
+	query = 'SELECT SUM(LIST_SUM(arr)) FROM arrays WHERE id=0;'
+	args = [shell]
+	args += ['-c', load]
+	args += ['-c', '.timer on']
+	for i in range(3):
+		args += ['-c', query]
+	proc = subprocess.run(args, capture_output=True)
+	output = proc.stdout.decode('utf8')
+	timings = re.findall('real ([0-9]+[.][0-9]+)', output)
+	print(f'{array_size}\t{round(100 * 1/modulo,2)}%\t{round(numpy.mean([float(x) for x in timings]),3)}')
+
+print('Array Size\tSelectivity\tTiming')
+for array_size in [5, 10, 20, 40, 80, 160, 320, 640]:
+	for modulo in [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
+		run_experiment(array_size, modulo)
+```

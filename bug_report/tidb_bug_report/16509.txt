@@ -1,0 +1,70 @@
+ID: 16509
+Title: executor: plan changed to lead to query result changed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. What did you do?
+CI task `integration-copr-test` failed
+data: https://github.com/tikv/copr-test/blob/master/push-down-test/prepare/0_data.sql
+
+First time I execute the SQL:
+```sql
+mysql> SELECT NOT '2033-12-12' AS field1, NOT ( ~ 0 ) AS field2 FROM `table1_int_autoinc` WHERE `col_varbinary_32_key` && `col_bit_key`;
++--------+--------+
+| field1 | field2 |
++--------+--------+
+|      0 |      0 |
++--------+--------+
+1 row in set, 1 warning (0.00 sec)
+
+mysql> explain SELECT NOT '2033-12-12' AS field1, NOT ( ~ 0 ) AS field2 FROM `table1_int_autoinc` WHERE `col_varbinary_32_key` && `col_bit_key`;
++------------------------------------+---------+-----------+----------------------------------------------------------------------------+--------------------------------------------------------------------+
+| id                                 | estRows | task      | access object                                                              | operator info                                                      |
++------------------------------------+---------+-----------+----------------------------------------------------------------------------+--------------------------------------------------------------------+
+| Projection_4                       | 5325.33 | root      |                                                                            | 0->Column#62, 0->Column#63                                         |
+| └─Selection_5                      | 5325.33 | root      |                                                                            | test.table1_int_autoinc.col_bit_key                                |
+|   └─IndexLookUp_11                 | 6656.67 | root      |                                                                            |                                                                    |
+|     ├─IndexRangeScan_9(Build)      | 6656.67 | cop[tikv] | table:table1_int_autoinc, index:col_varbinary_32_key(col_varbinary_32_key) | range:[-inf,"[48]"), ("[48]",+inf], keep order:false, stats:pseudo |
+|     └─TableRowIDScan_10(Probe)     | 6656.67 | cop[tikv] | table:table1_int_autoinc                                                   | keep order:false, stats:pseudo                                     |
++------------------------------------+---------+-----------+----------------------------------------------------------------------------+--------------------------------------------------------------------+
+5 rows in set, 1 warning (0.00 sec)
+```
+
+About 10 seconds later:
+```sql
+mysql> explain SELECT NOT '2033-12-12' AS field1, NOT ( ~ 0 ) AS field2 FROM `table1_int_autoinc` WHERE `col_varbinary_32_key` && `col_bit_key`;
++-----------------------------+---------+-----------+--------------------------+----------------------------------------------+
+| id                          | estRows | task      | access object            | operator info                                |
++-----------------------------+---------+-----------+--------------------------+----------------------------------------------+
+| Projection_4                | 0.53    | root      |                          | 0->Column#62, 0->Column#63                   |
+| └─Selection_5               | 0.53    | root      |                          | test.table1_int_autoinc.col_bit_key          |
+|   └─TableReader_8           | 0.67    | root      |                          | data:Selection_7                             |
+|     └─Selection_7           | 0.67    | cop[tikv] |                          | test.table1_int_autoinc.col_varbinary_32_key |
+|       └─TableFullScan_6     | 1.00    | cop[tikv] | table:table1_int_autoinc | keep order:false, stats:pseudo               |
++-----------------------------+---------+-----------+--------------------------+----------------------------------------------+
+5 rows in set, 1 warning (0.00 sec)
+
+mysql> SELECT NOT '2033-12-12' AS field1, NOT ( ~ 0 ) AS field2 FROM `table1_int_autoinc` WHERE `col_varbinary_32_key` && `col_bit_key`;
+Empty set, 2 warnings (0.01 sec)
+```
+
+### 2. What did you expect to see?
+Test pass
+
+### 3. What did you see instead?
+```
+[2020-04-16T12:03:46.237Z] Test case: sql/randgen/2_logical_1.sql
+[2020-04-16T12:03:46.237Z] Statement: #235 -  SELECT NOT '2033-12-12' AS field1, NOT ( ~ 0 ) AS field2 FROM `table1_int_autoinc` WHERE `col_varbinary_32_key` && `col_bit_key` /* QNO 237 CON_ID 96 */ ;
+[2020-04-16T12:03:46.237Z] NoPushDown Output: 
+[2020-04-16T12:03:46.237Z] field1	field2
+[2020-04-16T12:03:46.237Z] 
+[2020-04-16T12:03:46.237Z] 
+[2020-04-16T12:03:46.237Z] WithPushDown Output: 
+[2020-04-16T12:03:46.237Z] field1	field2
+[2020-04-16T12:03:46.237Z] 0	0
+```
+
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+master

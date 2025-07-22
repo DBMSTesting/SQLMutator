@@ -1,0 +1,34 @@
+ID: 38683
+Title: Exception Not found column in query with group by and with clause
+Description:
+**How to reproduce**
+``` sql
+-- create local table on cluster 
+CREATE TABLE default.test_alias on cluster preonline_hk5 (`a` Int64, `b` Int64, `c` Int64, `day` Date, `rtime` DateTime) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/default/test_alias', '{replica}') PARTITION BY toYYYYMMDD(day) ORDER BY (rtime, a, b, c) TTL day + toIntervalDay(60) SETTINGS index_granularity = 8192
+
+-- create distributed table on cluster 
+CREATE TABLE default.test_alias_all on cluster preonline_hk5 (`a` Int64, `b` Int64, `c` Int64, `day` Date, `rtime` DateTime) ENGINE = Distributed('preonline_hk5', 'default', 'test_alias', rand())
+
+-- query with group by and with clause
+WITH 
+    sum(if((a >= 0) AND (b != 100) AND (c = 0), 1, 0)) AS r1, 
+    sum(if((a >= 0) AND (b != 100) AND (c > 220), 1, 0)) AS r2 
+SELECT 
+    (intDiv(toUInt32(rtime), 20) * 20) * 1000 AS t, 
+    (r1 * 100) / (r1 + r2) AS m
+FROM default.test_alias_all
+WHERE day = today()
+GROUP BY t
+ORDER BY t ASC
+``` 
+
+Throw exception: 
+```
+Received exception from server (version 22.6.1):
+Code: 10. DB::Exception: Received from 202.168.117.51:9000. DB::Exception: Not found column countIf(and(greaterOrEquals(a, 0), notEquals(b, 100), equals(c, 0))) in block. There are only columns: multiply(multiply(intDiv(toUInt32(rtime), 20), 20), 1000), r1, r2: While executing Remote. (NOT_FOUND_COLUMN_IN_BLOCK)
+
+```
+
+
+* Which ClickHouse server version to use
+I reproduce this issue successfully  it in v21.10, v22.5, v22.6. 

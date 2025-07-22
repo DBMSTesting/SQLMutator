@@ -1,0 +1,111 @@
+ID: 45690
+Title: Error message formatting issue for memory quota exceeds message
+Description:
+## Bug Report
+
+Error message:
+```
+mysql>SHOW ANALYZE STATUS\G
+...
+Fail_reason | Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=5982671465148985941]%!(EXTRA *errors.fundamental=analyze panic due to memory quota exceeds, please try with smaller samplerate(refer to 110000/count)) 
+...
+```
+
+### 1. Minimal reproduce step (Required)
+
+Logs:
+```json
+{"caller":"analyze_col_v2.go:645","level":null,"message":"analyze worker panicked","recover":"Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=5982671465149185533]","stack":"<cut>","time":"2023/07/30 10:51:32.720 +00:00","timestamp":null}
+```
+
+Stack:
+```
+github.com/pingcap/tidb/executor.(*AnalyzeColumnsExecV2).subBuildWorker.func1
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/analyze_col_v2.go:645
+runtime.gopanic
+	/usr/local/go/src/runtime/panic.go:884
+github.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/action.go:189
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume.func2
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:455
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:467
+github.com/pingcap/tidb/statistics.BuildHistAndTopN.func1
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/builder.go:246
+runtime.gopanic
+	/usr/local/go/src/runtime/panic.go:884
+github.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/action.go:189
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume.func2
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:455
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:467
+github.com/pingcap/tidb/statistics.buildHist.func1
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/builder.go:165
+runtime.gopanic
+	/usr/local/go/src/runtime/panic.go:884
+github.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/action.go:189
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume.func2
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:455
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:467
+github.com/pingcap/tidb/util/memory.(*Tracker).BufferedConsume
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/memory/tracker.go:497
+github.com/pingcap/tidb/statistics.buildHist
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/builder.go:175
+github.com/pingcap/tidb/statistics.BuildHistAndTopN
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/builder.go:398
+github.com/pingcap/tidb/executor.(*AnalyzeColumnsExecV2).subBuildWorker
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/analyze_col_v2.go:779
+github.com/pingcap/tidb/executor.(*AnalyzeColumnsExecV2).buildSamplingStats.func3
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/analyze_col_v2.go:348
+github.com/pingcap/tidb/executor.(*notifyErrorWaitGroupWrapper).Run.func1
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/analyze_utils.go:127
+```
+
+Looks like in `(e *AnalyzeColumnsExecV2) subBuildWorker` there is this
+```go
+        defer func() {
+                if r := recover(); r != nil {
+                        logutil.BgLogger().Error("analyze worker panicked", zap.Any("recover", r), zap.Stack("stack"))
+                        metrics.PanicCounter.WithLabelValues(metrics.LabelAnalyze).Inc()
+                        resultCh <- getAnalyzePanicErr(r)
+                }
+        }()
+```
+
+And in `(a *PanicOnExceed) Action` there is this:
+```go
+        if a.invoker == SingleQuery {
+                panic(PanicMemoryExceedWarnMsg + WarnMsgSuffixForSingleQuery + fmt.Sprintf("[conn=%d]", a.ConnID))
+        }
+        panic(PanicMemoryExceedWarnMsg + WarnMsgSuffixForInstance + fmt.Sprintf("[conn=%d]", a.ConnID))
+```
+
+And in `util/memory/action.go` this is defined:
+```go
+const (
+        // PanicMemoryExceedWarnMsg represents the panic message when out of memory quota.
+        PanicMemoryExceedWarnMsg string = "Your query has been cancelled due to exceeding the allowed memory limit"
+        // WarnMsgSuffixForSingleQuery represents the suffix of the warning message when out of memory quota for a single query.
+        WarnMsgSuffixForSingleQuery string = " for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again."
+        // WarnMsgSuffixForInstance represents the suffix of the warning message when out of memory quota for the tidb-server instance.
+        WarnMsgSuffixForInstance string = " for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again."
+)
+```
+
+And in `getAnalyzePanicErr()` there is this:
+```
+                if strings.Contains(msg, memory.PanicMemoryExceedWarnMsg) {
+                        return errors.Errorf(msg, errAnalyzeOOM)
+                }
+```
+
+So it looks to me that `errors.Errorf()` is called with the formatted warning message, but that there is no placeholder for the second argument (`errAnalyzeOOM`).
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v7.1.1

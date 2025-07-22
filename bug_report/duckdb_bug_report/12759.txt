@@ -1,0 +1,42 @@
+ID: 12759
+Title: Maintain prepared statement parameter types explicitly instead of converting into literals
+Description:
+This PR modifies the way prepared statement parameters work so that the original types are maintained, instead of directly converting them to literals. The reason this is necessary is the new binding rules for literals (https://github.com/duckdb/duckdb/pull/10115, https://github.com/duckdb/duckdb/pull/10194) can cause confusing results otherwise as the user-provided type will be ignored. For example, in the current version:
+
+```sql
+D prepare v1 as select 111::short * $1;
+D execute v1(1000::bigint);
+-- Out of Range Error: Overflow in multiplication of INT16 (111 * 1000)!
+```
+
+The problem is that we convert `1000` to an integer literal, which then adapts to the short type on the other side, causing the overflow error.
+
+This PR changes the behavior so that the type is preserved in the `BoundParameterData`, leading to the following behavior:
+
+```sql
+D prepare v1 as select 111::short * $1;
+D execute v1(1000);
+Out of Range Error: Overflow in multiplication of INT16 (111 * 1000)!
+D execute v1(1000::bigint);
+┌────────┐
+│  res   │
+│ int64  │
+├────────┤
+│ 111000 │
+└────────┘
+```
+
+This is now consistent again with substituting the actual expression where the prepared statement parameter is:
+
+```sql
+D select 111::short * 1000;
+Out of Range Error: Overflow in multiplication of INT16 (111 * 1000)!
+D select 111::short * 1000::bigint AS res;
+┌────────┐
+│  res   │
+│ int64  │
+├────────┤
+│ 111000 │
+└────────┘
+
+```

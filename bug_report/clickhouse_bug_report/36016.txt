@@ -1,0 +1,62 @@
+ID: 36016
+Title:  Query MV distributed table failed on v22.3.2.2 but success on v21.8.14.5
+Description:
+**Describe what's wrong**
+
+> query MV distributed table failed on v22.3.2.2 but success on 21.8.14.5
+
+**How to reproduce**
+* Which ClickHouse server version to use
+  - v22.3.2.2
+* my cluster setting as:
+```
+<remote_servers>
+    <df_cluster>
+	<shard>
+	     <replica>
+		  <host>10.1.20.22</host>
+		  <port>9000</port>
+	     </replica>
+	</shard>
+	<shard>
+	     <replica>
+		  <host>10.1.20.23</host>
+		  <port>9000</port>
+	     </replica>
+	</shard>
+    </df_cluster>
+</remote_servers>
+```
+* create tables on both 10.1.20.22 and 10.1.20.23 as follow sqls;
+```
+// create src table  
+clickhouse-client -q "create database test;"
+clickhouse-client -q "CREATE TABLE test.src (time DateTime(), tag UInt64, v UInt64) ENGINE = MergeTree PRIMARY KEY (time)  ORDER BY time ;"
+
+// create mv tables  dst_agg, dst_local, dst_mv
+clickhouse-client -q "CREATE TABLE test.dst_agg (time DateTime(), tag UInt64, v_agg AggregateFunction(sum, UInt64)) ENGINE = AggregatingMergeTree PRIMARY KEY (time, tag)  ORDER BY (time,tag) ;"
+clickhouse-client -q "CREATE VIEW test.dst_local  (time DateTime(), tag UInt64, v UInt64) AS SELECT time, tag, sumMerge(v_agg) AS v FROM test.dst_agg GROUP BY (time,tag);"
+clickhouse-client -q "CREATE MATERIALIZED VIEW test.dst_mv TO test.dst_agg (time DateTime(), tag UInt64, v UInt64) AS SELECT toStartOfDay(time) AS time, tag, sumState(v) AS v_agg FROM test.src GROUP BY time,tag ORDER BY time,tag;"
+
+// create Distributed table test.dst  on cluster `df_cluster`
+clickhouse-client -q "CREATE TABLE test.dst as test.dst_local ENGINE = Distributed('df_cluster', 'test', 'dst_local');"
+
+// add data
+clickhouse-client -q "insert into test.src (time, tag, v) values (now(), 1, 2) ;"
+```
+* error message when query 
+```
+// query failed on 10.1.20.22
+[root@22 ~]# clickhouse-client -q "select v from test.dst;"
+Received exception from server (version 22.3.2):
+Code: 215. DB::Exception: Received from localhost:9000. DB::Exception: Received from 10.1.20.23:9000. DB::Exception: Column `time` is not under aggregate function and not in GROUP BY: While processing time, tag, sumMerge(v_agg). 
+
+// query failed on 10.1.20.23
+[root@23 ~]# clickhouse-client -q "select tag from test.dst;"
+Received exception from server (version 22.3.2):
+Code: 215. DB::Exception: Received from localhost:9000. DB::Exception: Received from 10.1.20.22:9000. DB::Exception: Column `time` is not under aggregate function and not in GROUP BY: While processing time, tag, sumMerge(v_agg).
+```
+
+expect query success.
+
+

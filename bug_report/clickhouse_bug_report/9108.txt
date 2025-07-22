@@ -1,0 +1,140 @@
+ID: 9108
+Title: Bad cast in `FULL JOIN` on `LowCardinality` columns
+Description:
+**Describe the bug or unexpected behaviour**
+
+When executing a `FULL OUTER JOIN` on one or more tables and `USING` one or more `LowCardinality(String)` columns, ClickHouse returns the following exception even though all joining columns are of the same type:
+
+```
+Code: 368, e.displayText() = DB: :Exception: Bad cast from type DB: :ColumnString to DB: :ColumnLowCardinality (version 20.1.3.7 (official build))
+```
+
+**How to reproduce**
+
+* Which ClickHouse server version to use: `20.1.3.7` on Ubuntu 18.04
+* Which interface to use, if matters: See description in section below
+
+Here is a `CREATE TABLE` which mimics the tables on which I am observing this issue:
+
+```sql
+CREATE TABLE metrics
+(
+  date                            Date,
+  title                           LowCardinality(String),
+  author                          LowCardinality(String),
+  type                            LowCardinality(String),
+  metric                          Float64
+)
+Engine = MergeTree
+PARTITION BY subtractDays(date, toDayOfWeek(date) % 7)
+ORDER BY (date, type, author, title);
+```
+
+Below is an example `FULL OUTER JOIN ... USING` query on that table which joins to result sets from the same table on the same column:
+
+```sql
+SELECT
+  *
+FROM
+(
+  SELECT
+    title,
+    avg(metric) this_year
+  FROM `metrics`
+  WHERE `metrics`.`date` BETWEEN '2020-01-01' AND '2020-01-31'
+  GROUP BY
+    title
+)
+FULL OUTER JOIN
+(
+  SELECT
+    title,
+    avg(metric) last_year
+  FROM `metrics`
+  WHERE `metrics`.`date` BETWEEN '2019-01-01' AND '2019-01-31'
+  GROUP BY
+    title
+)
+USING title;
+```
+
+I have observed this style of query working on smaller tables, but it is consistently results in an exception on tables of a certain size. If there are partition or cardinality numbers I can provide to help better diagnose this, please let me know.
+
+Prior to updating to version `20.1.3.7`, this same query was previously resulting in the "Memory limit exceeded" exception described in #7528.
+
+**Expected behavior**
+
+When `USING` columns of `LowCardinality(String)` type to conduct a `FULL OUTER JOIN`, there should be no casting or conversion issues.
+
+**Error message and/or stacktrace**
+
+Depending on the interface and `FORMAT`, this exception appears in different ways. For example, while using the command line interface, the client returns a portion of the result set before printing the following message and automatically reconnecting:
+
+```
+Exception on client:
+Code: 271. DB::Exception: Data compressed with different methods, given method byte 69, previous method byte 82: while receiving packet from localhost:9000
+```
+
+Furthermore, using the HTTP interface with `FORMAT JSON` appended to the query results in a portion of the result set before the exception message is printed into invalid JSON:
+
+```json
+{
+	"title": "Title",
+	"metric": "341"
+},
+{
+	"title": Code: 368, e.displayText() = DB: :Exception: Bad cast from type DB: :ColumnString to DB: :ColumnLowCardinality (version 20.1.3.7 (official build))
+```
+
+Regardless of the interface, the "clickhouse-server.err.log" file includes the same error related to a "Bad cast" involving `DB::ColumnString to DB::ColumnLowCardinality`:
+
+```
+2020.02.13 23:49:54.448944 [ 124 ] {0aa3887a-b398-486e-9526-99a23d87c8de} <Error> executeQuery: Code: 368, e.displayText() = DB::Exception: Bad cast from type DB::ColumnString to DB::ColumnLowCardinality (version 20.1.3.7 (official build)) (from 192.168.6.24:58178) (in query: SELECT   * FROM (   SELECT     title   FROM `metrics`   GROUP BY     title ) FULL OUTER JOIN (   SELECT     title   FROM `metrics`   GROUP BY     product ) USING   title FORMAT TabSeparatedWithNamesAndTypes;), Stack trace (when copying this message, always include the lines below):
+
+0. 0xbc3212c Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+1. 0x4f6cbc9 DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+2. 0x8ae3384 std::__1::enable_if<is_reference_v<DB::ColumnLowCardinality const&>, DB::ColumnLowCardinality const&>::type typeid_cast<DB::ColumnLowCardinality const&, DB::IColumn const>(DB::IColumn const&)  in /usr/bin/clickhouse
+3. 0x8ad8c3c DB::DataTypeLowCardinality::serializeTextEscaped(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const  in /usr/bin/clickhouse
+4. 0x97e7221 DB::IRowOutputFormat::write(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > const&, unsigned long)  in /usr/bin/clickhouse
+5. 0x97e70da DB::IRowOutputFormat::consume(DB::Chunk)  in /usr/bin/clickhouse
+6. 0x91eb6f9 DB::OutputStreamToOutputFormat::write(DB::Block const&)  in /usr/bin/clickhouse
+7. 0x91649f2 DB::MaterializingBlockOutputStream::write(DB::Block const&)  in /usr/bin/clickhouse
+8. 0x8a9e5a4 DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::__1::atomic<bool>*)  in /usr/bin/clickhouse
+9. 0x8dc476f DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>)  in /usr/bin/clickhouse
+10. 0x4ffdaaf DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)  in /usr/bin/clickhouse
+11. 0x5001993 DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)  in /usr/bin/clickhouse
+12. 0x9bb8f7c Poco::Net::HTTPServerConnection::run()  in /usr/bin/clickhouse
+13. 0x9bb5a07 Poco::Net::TCPServerConnection::start()  in /usr/bin/clickhouse
+14. 0x9bb5dfd Poco::Net::TCPServerDispatcher::run()  in /usr/bin/clickhouse
+15. 0xbca488f Poco::PooledThread::run()  in /usr/bin/clickhouse
+16. 0xbca1958 Poco::ThreadImpl::runnableEntry(void*)  in /usr/bin/clickhouse
+17. 0xbca31f9 ?  in /usr/bin/clickhouse
+18. 0x76db start_thread  in /lib/x86_64-linux-gnu/libpthread-2.27.so
+19. 0x12188f clone  in /lib/x86_64-linux-gnu/libc-2.27.so
+
+2020.02.13 23:49:54.449770 [ 124 ] {} <Error> HTTPHandler: Code: 368, e.displayText() = DB::Exception: Bad cast from type DB::ColumnString to DB::ColumnLowCardinality, Stack trace (when copying this message, always include the lines below):
+
+0. 0xbc3212c Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+1. 0x4f6cbc9 DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+2. 0x8ae3384 std::__1::enable_if<is_reference_v<DB::ColumnLowCardinality const&>, DB::ColumnLowCardinality const&>::type typeid_cast<DB::ColumnLowCardinality const&, DB::IColumn const>(DB::IColumn const&)  in /usr/bin/clickhouse
+3. 0x8ad8c3c DB::DataTypeLowCardinality::serializeTextEscaped(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const  in /usr/bin/clickhouse
+4. 0x97e7221 DB::IRowOutputFormat::write(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > const&, unsigned long)  in /usr/bin/clickhouse
+5. 0x97e70da DB::IRowOutputFormat::consume(DB::Chunk)  in /usr/bin/clickhouse
+6. 0x91eb6f9 DB::OutputStreamToOutputFormat::write(DB::Block const&)  in /usr/bin/clickhouse
+7. 0x91649f2 DB::MaterializingBlockOutputStream::write(DB::Block const&)  in /usr/bin/clickhouse
+8. 0x8a9e5a4 DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::__1::atomic<bool>*)  in /usr/bin/clickhouse
+9. 0x8dc476f DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>)  in /usr/bin/clickhouse
+10. 0x4ffdaaf DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)  in /usr/bin/clickhouse
+11. 0x5001993 DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)  in /usr/bin/clickhouse
+12. 0x9bb8f7c Poco::Net::HTTPServerConnection::run()  in /usr/bin/clickhouse
+13. 0x9bb5a07 Poco::Net::TCPServerConnection::start()  in /usr/bin/clickhouse
+14. 0x9bb5dfd Poco::Net::TCPServerDispatcher::run()  in /usr/bin/clickhouse
+15. 0xbca488f Poco::PooledThread::run()  in /usr/bin/clickhouse
+16. 0xbca1958 Poco::ThreadImpl::runnableEntry(void*)  in /usr/bin/clickhouse
+17. 0xbca31f9 ?  in /usr/bin/clickhouse
+18. 0x76db start_thread  in /lib/x86_64-linux-gnu/libpthread-2.27.so
+19. 0x12188f clone  in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.1.3.7 (official build))
+```
+
+*Note: query modified slightly from original for obfuscation purposes.*

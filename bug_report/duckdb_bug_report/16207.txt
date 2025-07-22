@@ -1,0 +1,28 @@
+ID: 16207
+Title: Ensure MergeCollectionTask has a writer
+Description:
+We had two users crash with the following backtrace:
+
+```
+    frame #0: 0x0000ffffab2571ec
+    frame #1: 0x0000aaaaac00c5fc duckling`duckdb::InternalException::InternalException(this=<unavailable>, msg=<unavailable>) at exception.cpp:328:2
+    frame #2: 0x0000aaaaac1ee418 duckling`duckdb::optional_ptr<duckdb::OptimisticDataWriter, true>::CheckValid(this=<unavailable>) const at optional_ptr.hpp:34:11
+    frame #3: 0x0000aaaaac1eea8c duckling`duckdb::MergeCollectionTask::Execute(duckdb::PhysicalBatchInsert const&, duckdb::ClientContext&, duckdb::GlobalSinkState&, duckdb::LocalSinkState&) [inlined] duckdb::optional_ptr<duckdb::OptimisticDataWriter, true>::operator*(this=<unavailable>) at optional_ptr.hpp:43:3
+    frame #4: 0x0000aaaaac1eea84 duckling`duckdb::MergeCollectionTask::Execute(this=0x0000aaaaf1b06150, op=<unavailable>, context=0x0000aaaba820d8d0, gstate_p=0x0000aaab06880f00, lstate_p=<unavailable>) at physical_batch_insert.cpp:219:90
+    frame #5: 0x0000aaaaac1d2e10 duckling`duckdb::PhysicalBatchInsert::Sink(duckdb::ExecutionContext&, duckdb::DataChunk&, duckdb::OperatorSinkInput&) const [inlined] duckdb::PhysicalBatchInsert::ExecuteTask(this=0x0000aaaafa62ab40, context=<unavailable>, gstate_p=0x0000aaab06880f00, lstate_p=0x0000aab12d442960) const at physical_batch_insert.cpp:425:8
+    frame #6: 0x0000aaaaac1d2dd8 duckling`duckdb::PhysicalBatchInsert::Sink(duckdb::ExecutionContext&, duckdb::DataChunk&, duckdb::OperatorSinkInput&) const [inlined] duckdb::PhysicalBatchInsert::ExecuteTasks(this=0x0000aaaafa62ab40, context=<unavailable>, gstate_p=0x0000aaab06880f00, lstate_p=0x0000aab12d442960) const at physical_batch_insert.cpp:431:9
+    frame #7: 0x0000aaaaac1d2dd8 duckling`duckdb::PhysicalBatchInsert::Sink(this=0x0000aaaafa62ab40, context=0x0000aab2fffd7cb0, chunk=<unavailable>, input=<unavailable>) const at physical_batch_insert.cpp:494:4
+    frame #8: 0x0000aaaaac353158 duckling`duckdb::PipelineExecutor::ExecutePushInternal(duckdb::DataChunk&, duckdb::ExecutionBudget&, unsigned long) [inlined] duckdb::PipelineExecutor::Sink(this=0x0000aab2fffd7c00, chunk=0x0000aab2fffd7d30, input=0x0000fffec0aba8d8) at pipeline_executor.cpp:521:24
+    frame #9: 0x0000aaaaac353130 duckling`duckdb::PipelineExecutor::ExecutePushInternal(this=0x0000aab2fffd7c00, input=0x0000aab2fffd7d30, chunk_budget=0x0000fffec0aba980, initial_idx=0) at pipeline_executor.cpp:332:23
+    frame #10: 0x0000aaaaac34f7b4 duckling`duckdb::PipelineExecutor::Execute(this=0x0000aab2fffd7c00, max_chunks=<unavailable>) at pipeline_executor.cpp:201:13
+    frame #11: 0x0000aaaaac34f258 duckling`duckdb::PipelineTask::ExecuteTask(duckdb::TaskExecutionMode) [inlined] duckdb::PipelineExecutor::Execute(this=<unavailable>) at pipeline_executor.cpp:278:9
+    frame #12: 0x0000aaaaac34f250 duckling`duckdb::PipelineTask::ExecuteTask(this=0x0000aab16dafd630, mode=<unavailable>) at pipeline.cpp:51:33
+    frame #13: 0x0000aaaaac348298 duckling`duckdb::ExecutorTask::Execute(this=0x0000aab16dafd630, mode=<unavailable>) at executor_task.cpp:49:11
+    frame #14: 0x0000aaaaac356600 duckling`duckdb::TaskScheduler::ExecuteForever(this=0x0000aaaaf0105560, marker=0x0000aaaaf00ee578) at task_scheduler.cpp:189:32
+    frame #15: 0x0000ffffab0a31fc
+    frame #16: 0x0000ffffab2ad5c8
+```
+
+Core dump analysis showed that the assertion `D_ASSERT(lstate.writer);` in `MergeCollectionTask::Execute` (i.e. it is crashing because  `lstate.writer` is NULLPTR) was not satisfied when `PhysicalBatchInsert::Sink` was processing merge tasks from (other) pipeline executors.
+
+My suspicion is that this is only likely to happen for heavily concurrent workloads (applicable to the two users which crashed). The patch submitted as part of this PR has addressed the issue for these users.

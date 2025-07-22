@@ -1,0 +1,162 @@
+ID: 7939
+Title: 'cancel_http_readonly_queries_on_client_close' setting cause request stuck
+Description:
+There are non-expected behavior with a two settings combination:
+```
+cancel_http_readonly_queries_on_client_close = 1
+readonly > 0
+```
+With this settings a query, sent via HTTP interface, will stuck and won't be processed.
+
+Example:
+1) works OK
+```
+readonly = 0
+cancel_http_readonly_queries_on_client_close = 1
+```
+
+```
+$ echo "select name,value from system.settings where name like '%readonly%' FORMAT TSV" | curl --netrc-file netrc-test  -v -m10 'http://<host>:8123' --show-error -f  -d @-; echo $?
+* Rebuilt URL to: http://<host>:8123/
+*   Trying <ip>...
+* Connected to <host> (<ip>) port 8123 (#0)
+* Server auth using Basic with user '<user>'
+> POST / HTTP/1.1
+> Host: <host>:8123
+> Authorization: Basic <>
+> User-Agent: curl/7.47.0
+> Accept: */*
+> Content-Length: 78
+> Content-Type: application/x-www-form-urlencoded
+> 
+* upload completely sent off: 78 out of 78 bytes
+< HTTP/1.1 200 OK
+< Date: Wed, 27 Nov 2019 05:15:43 GMT
+< Connection: Keep-Alive
+< Content-Type: text/tab-separated-values; charset=UTF-8
+< X-ClickHouse-Server-Display-Name: <host>
+< Transfer-Encoding: chunked
+< X-ClickHouse-Query-Id: fe705d80-9ad7-40cc-89e5-5b2b1cb35e32
+< Keep-Alive: timeout=3
+< X-ClickHouse-Summary: {"read_rows":"240","read_bytes":"36541","written_rows":"0","written_bytes":"0","total_rows_to_read":"0"}
+< 
+readonly	0
+cancel_http_readonly_queries_on_client_close	1
+* Connection #0 to host <host> left intact
+0
+```
+
+2) doesn't work
+```
+readonly = 2
+cancel_http_readonly_queries_on_client_close = 1
+```
+```
+$ echo "select name,value from system.settings where name like '%readonly%' FORMAT TSV" | curl --netrc-file netrc-test  -v -m10 'http://<host>:8123' --show-error -f  -d @-; echo $?
+* Rebuilt URL to: http://<host>:8123/
+*   Trying <ip>...
+* Connected to <host> (<ip>) port 8123 (#0)
+* Server auth using Basic with user '<user>'
+> POST / HTTP/1.1
+> Host: <host>:8123
+> Authorization: Basic <>
+> User-Agent: curl/7.47.0
+> Accept: */*
+> Content-Length: 78
+> Content-Type: application/x-www-form-urlencoded
+> 
+* upload completely sent off: 78 out of 78 bytes
+* Operation timed out after 10001 milliseconds with 0 bytes received
+* Closing connection 0
+curl: (28) Operation timed out after 10001 milliseconds with 0 bytes received
+28
+```
+
+```
+2019.11.27 12:09:56.116071 [ 66 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: POST, Address: <client_ip>:49976, User-Agent: curl/7.47.0, Length: 78, Content Type: applica
+tion/x-www-form-urlencoded, Transfer Encoding: identity                                                                                                                                                     
+2019.11.27 12:09:56.116223 [ 66 ] {} <Trace> HTTPHandler: Request URI: /                                                                                                                                    
+2019.11.27 12:09:56.116594 [ 66 ] {01ba4101-4a00-4105-977c-8dae920181c9} <Debug> executeQuery: (from <client_ip>:49976, user: <user>) select name,value from system.settings where name like '%r
+eadonly%' FORMAT TSV                                                                                                                                                                                        
+2019.11.27 12:09:56.117509 [ 66 ] {01ba4101-4a00-4105-977c-8dae920181c9} <Trace> InterpreterSelectQuery: FetchColumns -> Complete                                                                           
+2019.11.27 12:09:56.117643 [ 66 ] {01ba4101-4a00-4105-977c-8dae920181c9} <Debug> executeQuery: Query pipeline:                                                                                              
+Expression                                                                                                                                                                                                  
+ Expression                                                                                                                                                                                                 
+  Filter                                                                                                                                                                                                    
+   One                                                           
+
+2019.11.27 12:10:06.111148 [ 66 ] {01ba4101-4a00-4105-977c-8dae920181c9} <Error> executeQuery: Code: 394, e.displayText() = DB::Exception: Query was cancelled (version 19.17.4.11 (official build)) (from <client_ip>:49976) (in query: select name,value from system.settings where name like '%readonly%' FORMAT TSV), Stack trace:
+
+0. 0x5623fa47ef60 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x5623fa47ed35 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x5623fa179479 ? /usr/bin/clickhouse
+3. 0x5623fd6d4f27 DB::IBlockInputStream::read() /usr/bin/clickhouse
+4. 0x5623fd6f350b DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*) /usr/bin/clickhouse
+5. 0x5623fd969827 DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std:
+:function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>) /usr/bin/clickhouse
+6. 0x5623fa513dee DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&) /usr/bin/clickhouse
+7. 0x5623fa516169 DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&) /usr/bin/clickhouse
+8. 0x5623fe4080e9 Poco::Net::HTTPServerConnection::run() /usr/bin/clickhouse
+9. 0x5623fe404660 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+10. 0x5623fe404d7d Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+11. 0x5623ffadaef1 Poco::PooledThread::run() /usr/bin/clickhouse
+12. 0x5623ffad8c9c Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+13. 0x56240024ee00 ? /usr/bin/clickhouse
+14. 0x7f6e87d9f494 start_thread /lib/x86_64-linux-gnu/libpthread-2.24.so
+15. 0x7f6e876d5aff clone /lib/x86_64-linux-gnu/libc-2.24.so
+
+2019.11.27 12:10:06.111614 [ 66 ] {01ba4101-4a00-4105-977c-8dae920181c9} <Error> HTTPHandler: Code: 394, e.displayText() = DB::Exception: Query was cancelled, Stack trace:
+
+0. 0x5623fa47ef60 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x5623fa47ed35 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x5623fa179479 ? /usr/bin/clickhouse
+3. 0x5623fd6d4f27 DB::IBlockInputStream::read() /usr/bin/clickhouse
+4. 0x5623fd6f350b DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*) /usr/bin/clickhouse
+5. 0x5623fd969827 DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std:
+:function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>) /usr/bin/clickhouse
+6. 0x5623fa513dee DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&) /usr/bin/clickhouse
+7. 0x5623fa516169 DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&) /usr/bin/clickhouse
+8. 0x5623fe4080e9 Poco::Net::HTTPServerConnection::run() /usr/bin/clickhouse
+9. 0x5623fe404660 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+10. 0x5623fe404d7d Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+11. 0x5623ffadaef1 Poco::PooledThread::run() /usr/bin/clickhouse
+12. 0x5623ffad8c9c Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+13. 0x56240024ee00 ? /usr/bin/clickhouse
+14. 0x7f6e87d9f494 start_thread /lib/x86_64-linux-gnu/libpthread-2.24.so
+15. 0x7f6e876d5aff clone /lib/x86_64-linux-gnu/libc-2.24.so
+ (version 19.17.4.11 (official build))
+```
+
+This problem present in version `19.17.4.11`, `19.15.3.6` (i tested this two only)
+Do not present in version: `19.13.4.32`
+
+
+* Which interface to use, if matters
+HTTP
+* Non-default settings, if any
+The full list of non-default settings, just in case
+```
+:) select name,value from system.settings where changed=1;
+
+┌─name─────────────────────────────────────────┬─value───────┐
+│ use_uncompressed_cache                       │ 0           │
+│ load_balancing                               │ random      │
+│ distributed_aggregation_memory_efficient     │ 1           │
+│ max_parallel_replicas                        │ 1           │
+│ log_queries                                  │ 1           │
+│ enable_http_compression                      │ 1           │
+│ input_format_skip_unknown_fields             │ 1           │
+│ send_progress_in_http_headers                │ 1           │
+│ http_headers_progress_interval_ms            │ 1000        │
+│ allow_distributed_ddl                        │ 0           │
+│ readonly                                     │ 2           │
+│ max_memory_usage                             │ 0           │
+│ max_memory_usage_for_user                    │ 77309411328 │
+│ allow_ddl                                    │ 0           │
+│ cancel_http_readonly_queries_on_client_close │ 1           │
+└──────────────────────────────────────────────┴─────────────┘
+
+15 rows in set. Elapsed: 0.003 sec. 
+```
+
+Thus, we can't use `cancel_http_readonly_queries_on_client_close = 1` setting with a `readonly` accounts now

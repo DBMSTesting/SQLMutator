@@ -1,0 +1,133 @@
+ID: 21097
+Title: Unexpected size of part after merge, causing data loss
+Description:
+We have a cluster, 2 shards, 2 replicas for each shard, running ClickHouse v20.11.3.3-stable.
+
+We had an issue, described in https://github.com/ClickHouse/ClickHouse/issues/18844, on replicas of shard1, set 
+`min_merge_bytes_to_use_direct_io` setting to `0`, and performed rolling restart of the cluster.
+
+Then, during startup, replica1 of shard2 reported:
+```
+2021.01.19 16:46:44.634218 [ 24768 ] {} <Information> DatabaseOrdinary (<database>): Total 33 tables and 0 dictionaries.
+2021.01.19 16:46:50.827672 [ 24860 ] {} <Information> DatabaseOrdinary (<database>): 72.72727272727273%
+2021.01.19 16:46:53.419954 [ 24869 ] {} <Error> auto DB::MergeTreeData::loadDataParts(bool)::(anonymous class)::operator()() const: Code: 228, e.displayText() = DB::Exception: /var/lib/clickhouse/data/<database>/<table>/20201101_20201127_0_1120161_412/<column>.bin has unexpected size: 81322926 instead of 81265582, Stack trace (when copying this message, always include the lines below):
+
+0. DB::MergeTreeDataPartChecksum::checkSize(std::__1::shared_ptr<DB::IDisk> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xe6c81d4 in /usr/bin/clickhouse
+1. DB::MergeTreeDataPartChecksums::checkSizes(std::__1::shared_ptr<DB::IDisk> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xe6c8719 in /usr/bin/clickhouse
+2. DB::IMergeTreeDataPart::checkConsistencyBase() const @ 0xe624980 in /usr/bin/clickhouse
+3. DB::MergeTreeDataPartWide::checkConsistency(bool) const @ 0xe6d6efb in /usr/bin/clickhouse
+4. ? @ 0xe685477 in /usr/bin/clickhouse
+5. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x7bb9311 in /usr/bin/clickhouse
+6. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() @ 0x7bbb7ff in /usr/bin/clickhouse
+7. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7bb69d1 in /usr/bin/clickhouse
+8. ? @ 0x7bba223 in /usr/bin/clickhouse
+9. start_thread @ 0x7fa3 in /usr/lib/x86_64-linux-gnu/libpthread-2.28.so
+10. clone @ 0xf94cf in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+ (version 20.11.3.3)
+
+2021.01.19 16:46:53.420106 [ 24869 ] {} <Error> <database>.<table>: Part /var/lib/clickhouse/data/<database>/<table>/20201101_20201127_0_1120161_412 is broken. Looking for parts to replace it.
+2021.01.19 16:46:53.420266 [ 24869 ] {} <Error> <database>.<table>: Detaching broken part /var/lib/clickhouse/data/<database>/<table>/20201101_20201127_0_1120161_412 because it covers less than 2 parts. You need to resolve this manually
+2021.01.19 16:47:05.801251 [ 24857 ] {} <Error> <database>.<table>: Removing locally missing part from ZooKeeper and queueing a fetch: 20201101_20201127_0_1120161_412
+2021.01.19 16:47:12.522816 [ 24796 ] {} <Information> <database>.<table> (ReplicatedMergeTreeQueue): Not executing log entry queue-0071840393 for part 20201101_20201127_0_1120161_412 because another log entry for the same part is being processed. This shouldn't happen often.
+2021.01.19 16:47:12.522844 [ 24796 ] {} <Information> <database>.<table>: Will not fetch part 20201101_20201127_0_1120161_412 covering 20201127_20201127_1113831_1113831_0. Not executing log entry queue-0071840393 for part 20201101_20201127_0_1120161_412 because another log entry for the same part is being processed. This shouldn't happen often.
+...
+2021.01.19 17:01:02.963088 [ 24788 ] {} <Information> <database>.<table>: DB::Exception: No active replica has part 20201101_20201127_0_1120161_412 or covering part
+2021.01.19 17:01:03.018069 [ 24812 ] {} <Warning> <database>.<table> (ReplicatedMergeTreePartCheckThread): Checking part 20201101_20201127_0_1120161_412
+2021.01.19 17:01:03.018857 [ 24812 ] {} <Warning> <database>.<table> (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20201101_20201127_0_1120161_412.
+2021.01.19 17:01:03.045305 [ 24812 ] {} <Error> <database>.<table> (ReplicatedMergeTreePartCheckThread): No replica has part covering 20201101_20201127_0_1120161_412 and a merge is impossible: we didn't find smaller parts with either the same min block or the same max block.
+2021.01.19 17:01:03.053242 [ 24812 ] {} <Error> <database>.<table> (ReplicatedMergeTreePartCheckThread): Part 20201101_20201127_0_1120161_412 is lost forever.
+```
+
+at the same time, replica2 of shard2 reported
+```
+2021.01.19 16:56:50.867175 [ 8342 ] {} <Warning> <database>.<table> (ReplicatedMergeTreePartCheckThread): Checking part 20201101_20201127_0_1120161_412
+2021.01.19 16:56:50.870064 [ 8342 ] {} <Warning> <database>.<table> (ReplicatedMergeTreePartCheckThread): Checking data of part 20201101_20201127_0_1120161_412.
+2021.01.19 16:56:58.159885 [ 8342 ] {} <Error> <database>.<table> (ReplicatedMergeTreePartCheckThread): Part 20201101_20201127_0_1120161_412 looks broken. Removing it and queueing a fetch.
+2021.01.19 16:56:58.172599 [ 8342 ] {} <Information> <database>.<table>: Renaming 20201101_20201127_0_1120161_412 to broken20201101_20201127_0_1120161_412 and forgiving it.
+2021.01.19 16:56:58.211773 [ 8358 ] {} <Warning> <database>.<table> (ReplicatedMergeTreePartCheckThread): Checking part 20201101_20201127_0_1120161_412
+2021.01.19 16:56:58.211812 [ 8318 ] {} <Information> <database>.<table>: DB::Exception: No active replica has part 20201101_20201127_0_1120161_412 or covering part
+2021.01.19 16:56:58.212158 [ 8358 ] {} <Warning> <database>.<table> (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20201101_20201127_0_1120161_412.
+2021.01.19 16:56:58.219291 [ 8358 ] {} <Error> <database>.<table> (ReplicatedMergeTreePartCheckThread): No replica has part covering 20201101_20201127_0_1120161_412 and a merge is impossible: we didn't find smaller parts with either the same min block or the same max block.
+2021.01.19 16:56:58.221562 [ 8358 ] {} <Error> <database>.<table> (ReplicatedMergeTreePartCheckThread): Part 20201101_20201127_0_1120161_412 is lost forever.
+```
+
+Thus, restarting r1s2 triggered data check, then some part found broken, r2s2 was requested for missing part, r2s2 checked the part and found it broken too. Both replicas moved broken part to the `detached` directory, causing data loss.
+
+Accordingly to the `system.parts_log` table, both replicas performed merge operation for the `20201101_20201127_0_1120161_412` part independently and successfully before, there are no other events for this part.
+
+
+```
+r1s2 :) select * from part_log where part_name='20201101_20201127_0_1120161_412' \G                                              
+
+SELECT *
+FROM part_log                                                                                                                                 
+WHERE part_name = '20201101_20201127_0_1120161_412'
+
+Row 1:                                                                                                                                        
+──────
+event_type:         MergeParts
+event_date:         2020-12-17                                                                                                                
+event_time:         2020-12-17 21:35:44
+duration_ms:        5441196                                                                                                                   
+database:           <database>                                                                                                           
+table:              <table>
+part_name:          20201101_20201127_0_1120161_412                                                                                           
+partition_id:       202011
+path_on_disk:       /var/lib/clickhouse/data/<database>/<table>/20201101_20201127_0_1120161_412/                                          
+rows:               2311924947                                                                                                                
+size_in_bytes:      48028197237
+merged_from:        ['20201101_20201110_0_393081_411','20201110_20201118_393082_748829_385','20201118_20201127_748830_1120161_368']           
+bytes_uncompressed: 797386240429
+read_rows:          2311924947
+read_bytes:         797386240429                                                                                                              
+peak_memory_usage:  192222837
+error:              0                                                                                                                         
+exception:
+
+1 rows in set. Elapsed: 1.803 sec. Processed 207.12 million rows, 8.77 GB (114.89 million rows/s., 4.86 GB/s.)
+```
+```
+r2s2 :) select * from system.part_log where part_name='20201101_20201127_0_1120161_412' \G
+
+SELECT *
+FROM system.part_log
+WHERE part_name = '20201101_20201127_0_1120161_412'
+
+Row 1:
+──────
+event_type:         MergeParts
+event_date:         2020-12-17
+event_time:         2020-12-17 21:38:42
+duration_ms:        5619733
+database:           <database>
+table:              <table>
+part_name:          20201101_20201127_0_1120161_412
+partition_id:       202011
+path_on_disk:       /var/lib/clickhouse/data/<databse>/<table>/20201101_20201127_0_1120161_412/                                          
+rows:               2311924947
+size_in_bytes:      48028197237
+merged_from:        ['20201101_20201110_0_393081_411','20201110_20201118_393082_748829_385','20201118_20201127_748830_1120161_368']           
+bytes_uncompressed: 797386240429
+read_rows:          2311924947
+read_bytes:         797386240429
+peak_memory_usage:  175086659
+error:              0
+exception:
+
+1 rows in set. Elapsed: 6.031 sec. Processed 211.84 million rows, 8.97 GB (35.13 million rows/s., 1.49 GB/s.)
+```
+
+I tried to attach the part, but got following error
+```
+/var/lib/clickhouse/data/<database>/<table>/detached/attaching_20201101_20201127_0_1120161_412/<column>.bin has unexpected size: 81322926 instead of 81265582. 
+```
+Actual file size was bigger than expected, so i checked the last 57344 bytes and found that it's only zeroes. I cut the excessive zeroes from the end of the files, reported as broken, one-by-one, and attached the part successfully after that.
+
+It's doesn't look like a result of HW issue, since both replicas performed merge independently, and both has the same problems with excessive zeroes in the end.
+
+Few notes:
+a) Cluster was upgraded to v20.11.3.3-stable before the merge was happened, and haven't been restarted before the events described
+b) Problem, described in https://github.com/ClickHouse/ClickHouse/issues/3304, was found on shard1 only, but broken part was found on shard2. Not sure if it's related, but still.
+
+I will be glad to have any hints on how to prevent similar situations in the future.
+Thanks!

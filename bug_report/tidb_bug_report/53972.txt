@@ -1,0 +1,95 @@
+ID: 53972
+Title: `tidb_enable_async_merge_global_stats` cannot work correctly
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. Start the TiDB with the following code:
+```patch
+diff --git a/pkg/statistics/handle/globalstats/global_stats.go b/pkg/statistics/handle/globalstats/global_stats.go
+index 78ee277659..9a814ca4ca 100644
+--- a/pkg/statistics/handle/globalstats/global_stats.go
++++ b/pkg/statistics/handle/globalstats/global_stats.go
+@@ -103,6 +103,7 @@ func MergePartitionStats2GlobalStats(
+        histIDs []int64,
+ ) (globalStats *GlobalStats, err error) {
+        if sc.GetSessionVars().EnableAsyncMergeGlobalStats {
++               logutil.BgLogger().Info("use async merge global stats", zap.String("table", globalTableInfo.Name.L))
+                worker, err := NewAsyncMergePartitionStats2GlobalStats(statsHandle, globalTableInfo, histIDs, is)
+                if err != nil {
+                        return nil, errors.Trace(err)
+@@ -113,6 +114,7 @@ func MergePartitionStats2GlobalStats(
+                }
+                return worker.Result(), nil
+        }
++       logutil.BgLogger().Info("use blocking merge global stats", zap.String("table", globalTableInfo.Name.L))
+        return blockingMergePartitionStats2GlobalStats(sc, statsHandle.GPool(), opts, is, globalTableInfo, isIndex, histIDs, nil, statsHandle)
+ }
+```
+2. Create a database and partitioned table:
+```sql
+CREATE DATABASE IF NOT EXISTS partition_example;
+USE partition_example;
+CREATE TABLE example_table (
+    id INT NOT NULL,
+    name VARCHAR(50),
+    PRIMARY KEY (id)
+)
+PARTITION BY RANGE (id) (
+    PARTITION p0 VALUES LESS THAN (2),
+    PARTITION p1 VALUES LESS THAN (4),
+    PARTITION p2 VALUES LESS THAN (6),
+    PARTITION p3 VALUES LESS THAN (8),
+    PARTITION p4 VALUES LESS THAN MAXVALUE
+);
+
+```
+3. Insert 3000 rows:
+```ts
+import { Client } from "https://deno.land/x/mysql/mod.ts";
+
+const client = await new Client().connect({
+  hostname: "127.0.0.1",
+  port: 4000,
+  username: "root",
+  db: "partition_example",
+  password: "",
+});
+
+async function insertData() {
+  for (let i = 1; i <= 3000; i++) {
+    const name = `Name${i}`;
+    await client.execute(`INSERT INTO example_table (id, name) VALUES (?, ?)`, [
+      i,
+      name,
+    ]);
+  }
+}
+
+await insertData();
+
+await client.close();
+
+console.log("Inserted 3000 rows into example_table");
+```
+4. Check the logs.
+
+### 2. What did you expect to see? (Required)
+```log
+use async merge global stats
+```
+
+### 3. What did you see instead (Required)
+```log
+[2024/06/12 19:38:12.833 +08:00] [INFO] [save.go:221] ["directly update count"] [category=stats] [tableID=109] [results.Count=2993] [count=2993]
+[2024/06/12 19:38:12.960 +08:00] [INFO] [analyze.go:744] ["analyze table `partition_example`.`example_table` has finished"] [partition=p4] ["job info"="auto analyze table all columns with 256 buckets, 500 topn, 1 samplerate"] ["start time"=2024/06/12 19:38:12.820 +08:00] ["end time"=2024/06/12 19:38:12.958 +08:00] [cost=137.905ms] ["sample rate reason"="use min(1, 110000/2993) as the sample-rate=1"]
+[2024/06/12 19:38:12.963 +08:00] [INFO] [global_stats.go:117] ["use blocking merge global stats"] [table=example_table]
+```
+
+### 4. What is your TiDB version? (Required)
+
+v7.5.1 with patch
+

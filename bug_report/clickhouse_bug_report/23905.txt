@@ -1,0 +1,58 @@
+ID: 23905
+Title: "Cannot read all data" exception when sending External Data in RowBinary format
+Description:
+**Describe the bug**
+Supplying External Data in RowBinary format is broken.
+
+**Does it reproduce on recent release?**
+should be reproducible with 21.4.6.55
+[The list of releases](https://github.com/ClickHouse/ClickHouse/blob/master/utils/list-versions/version_date.tsv)
+
+**How to reproduce**
+run docker container using fresh ClickHouse image:
+`docker run --rm -t -i --name=ch --net=host --ulimit nofile=262144:262144 yandex/clickhouse-server`
+
+Executing a straightforward query fetching a couple of integers from supplied data consisting of 32-bit integers 1 and 2 transferred in RowBinary format as 8 bytes fails complaining about third row even though we've sent only two:
+```
+echo "0x0: 0100000002000000" | xxd -r - | curl -F "tmp=@-" "http://localhost:8123/?query=select+TaskID+from+tmp+format+JSON&tmp_structure=TaskID+UInt32&tmp_format=RowBinary"
+Code: 33, e.displayText() = DB::Exception: Cannot read all data. Bytes read: 2. Bytes expected: 4.: (at row 3)
+: While executing SourceFromInputStream (version 21.4.6.55 (official build))
+```
+While it should've executed fine returning two rows "TaskID": 1 and "TaskID": 2
+
+Adding two stray bytes at the end of the RowBinary buffer causes error to disappear:
+```
+echo "0x0: 01000000020000000304" | xxd -r - | curl -F "tmp=@-" "http://localhost:8123/?query=select+TaskID+from+tmp+format+JSON&tmp_structure=TaskID+UInt32&tmp_format=RowBinary"
+{
+	"meta":
+	[
+		{
+			"name": "TaskID",
+			"type": "UInt32"
+		}
+	],
+
+	"data":
+	[
+		{
+			"TaskID": 1
+		},
+		{
+			"TaskID": 2
+		},
+		{
+			"TaskID": 168625155
+		}
+	],
+
+	"rows": 3,
+
+	"statistics":
+	{
+		"elapsed": 0.000203513,
+		"rows_read": 3,
+		"bytes_read": 12
+	}
+}
+```
+However now query returns a gibberish third value 168625155 which is 03040DOA in hex suggesting that trailing `\r\n` after multipart/form-data value are erroneously treated as part of the value causing parsing of correct RowBinary block to fail.

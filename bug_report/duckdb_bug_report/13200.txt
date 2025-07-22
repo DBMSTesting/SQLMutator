@@ -1,0 +1,121 @@
+ID: 13200
+Title: Segfault for simultaneous UPDATE and DROP on same table
+Description:
+### What happens?
+
+When doing these simultaneously, the `UPDATE` query segfaults in `duckdb::StorageLock::GetExclusiveLock()`.
+
+Stack trace:
+```
+         21:   threads.emplace_back([&]() {
+         22:     duckdb::Connection con(db);
+      >  23:     auto result = con.Query("UPDATE t1 SET i = 4 WHERE i = 2");
+         24:     if (result->HasError()) {
+         25:       std::cerr << result->GetError() << "\n";
+         26:       return;
+#14   Object "/opt/duckdb/libduckdb.so", at 0x7c96750ae046, in duckdb::Connection::Query(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)
+#13   Object "/opt/duckdb/libduckdb.so", at 0x7c96750ada3f, in duckdb::ClientContext::Query(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool)
+#12   Object "/opt/duckdb/libduckdb.so", at 0x7c96750ab213, in duckdb::ClientContext::ExecutePendingQueryInternal(duckdb::ClientContextLock&, duckdb::PendingQueryResult&)
+#11   Object "/opt/duckdb/libduckdb.so", at 0x7c96750ab1a7, in duckdb::PendingQueryResult::ExecuteInternal(duckdb::ClientContextLock&)
+#10   Object "/opt/duckdb/libduckdb.so", at 0x7c96750aa547, in duckdb::ClientContext::FetchResultInternal(duckdb::ClientContextLock&, duckdb::PendingQueryResult&)
+#9    Object "/opt/duckdb/libduckdb.so", at 0x7c96750a9fe7, in duckdb::ClientContext::CleanupInternal(duckdb::ClientContextLock&, duckdb::BaseQueryResult*, bool)
+#8    Object "/opt/duckdb/libduckdb.so", at 0x7c96750a9e1f, in duckdb::ClientContext::EndQueryInternal(duckdb::ClientContextLock&, bool, bool)
+#7    Object "/opt/duckdb/libduckdb.so", at 0x7c9675235a77, in duckdb::TransactionContext::Commit()
+#6    Object "/opt/duckdb/libduckdb.so", at 0x7c967523550c, in duckdb::MetaTransaction::Commit()
+#5    Object "/opt/duckdb/libduckdb.so", at 0x7c9675236f36, in duckdb::DuckTransactionManager::CommitTransaction(duckdb::ClientContext&, duckdb::Transaction&)
+#4    Object "/opt/duckdb/libduckdb.so", at 0x7c9675234ceb, in duckdb::DuckTransactionManager::RemoveTransaction(duckdb::DuckTransaction&, bool)
+#3    Object "/opt/duckdb/libduckdb.so", at 0x7c96752336f3, in duckdb::UndoBuffer::Cleanup()
+#2    Object "/opt/duckdb/libduckdb.so", at 0x7c96751cd0c4, in duckdb::UpdateSegment::CleanupUpdate(duckdb::UpdateInfo&)
+#1    Object "/opt/duckdb/libduckdb.so", at 0x7c967520a4e5, in duckdb::StorageLock::GetExclusiveLock()
+#0    Source "./nptl/pthread_mutex_lock.c", line 80, in ___pthread_mutex_lock [0x7c967309ffe4]
+Segmentation fault (Signal sent by the kernel [(nil)])
+Segmentation fault (core dumped)
+```
+
+Documentation I can find says that snapshot isolation is used for data, and specifies what forms of concurrent DML can cause conflicts, but doesn't say anything about DDL.
+
+I understand if this is undefined and the segfault is the best that can be done, but the docs don't mention it so I figure maybe it's a bug and something more graceful can be done here.
+
+### To Reproduce
+
+```
+#include <deque>
+#include <iostream>
+#include <thread>
+
+#include "duckdb/main/appender.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
+
+int main() {
+  duckdb::DuckDB db(/*path=*/nullptr);
+  duckdb::Connection con(db);
+  con.Query("CREATE TABLE t1 (i INT)");
+  duckdb::Appender appender(con, "t1");
+  appender.AppendRow(1);
+  appender.AppendRow(2);
+  appender.AppendRow(3);
+  appender.Close();
+
+  std::deque<std::thread> threads;
+
+  threads.emplace_back([&]() {
+    duckdb::Connection con(db);
+    auto result = con.Query("UPDATE t1 SET i = 4 WHERE i = 2");
+    if (result->HasError()) {
+      std::cerr << result->GetError() << "\n";
+      return;
+    }
+  });
+
+  threads.emplace_back([&]() {
+    duckdb::Connection con(db);
+    auto result = con.Query("DROP TABLE t1");
+    if (result->HasError()) {
+      std::cerr << result->GetError() << "\n";
+      return;
+    }
+  });
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  return 0;
+}
+```
+
+### OS:
+
+Ubuntu 24.04, x86
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+C++
+
+### Full Name:
+
+James Hill
+
+### Affiliation:
+
+Promoted.ai
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

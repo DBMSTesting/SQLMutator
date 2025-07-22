@@ -1,0 +1,60 @@
+ID: 17808
+Title: P1-[4.0 bug hunting]-[SQL Plan Management]-Server panic for NATURAL LEFT JOIN on partitioned table
+Description:
+Bug Hunter issue tidb-challenge-program/bug-hunting-issue#14
+
+---
+
+Consider the following statements:
+
+```sql
+CREATE TABLE t0(c0 NUMERIC PRIMARY KEY);
+CREATE TABLE t1(c0 INT) PARTITION BY HASH(NOT c0) PARTITIONS 2;
+SELECT * FROM t1 NATURAL LEFT JOIN t0; -- ERROR 2013 (HY000): Lost connection to MySQL server during query
+```
+When executing these statements, the connection to the server drops:
+```
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 5
+Server version: 5.7.25-TiDB- TiDB Server (Apache License 2.0), MySQL 5.7 compatible
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> CREATE TABLE t0(c0 NUMERIC PRIMARY KEY);
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> CREATE TABLE t1(c0 INT) PARTITION BY HASH(NOT c0) PARTITIONS 2;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> SELECT * FROM t1 NATURAL LEFT JOIN t0;
+ERROR 2013 (HY000): Lost connection to MySQL server during query
+```
+The server logs the following stack trace:
+```
+[2020/04/15 10:31:31.971 +02:00] [ERROR] [conn.go:658] ["connection running loop panic"] [conn=5] [lastSQL="SELECT * FROM t1 NATURAL LEFT JOIN t0"] [err="runtime error: index out of range [-1]"] [stack="goroutine 5125 [running]:\ngithub.com/pingcap/tidb/server.(*clientConn).Run.func1(0x2cdd5e0, 0xc0112f40f0, 0xc0016735f0)\n\t/tidb-4.0.0-rc/server/conn.go:656 +0xee\npanic(0x27c2a80, 0xc0113c3b40)\n\t/usr/lib/go-1.13/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/planner/core.(*DataSource).PruneColumns(0xc00061d860, 0xc012097498, 0x1, 0x1, 0x0, 0x0)\n\t/tidb-4.0.0-rc/planner/core/rule_column_pruning.go:227 +0xab1\ngithub.com/pingcap/tidb/planner/core.(*LogicalUnionAll).PruneColumns(0xc011398f30, 0xc012097498, 0x1, 0x1, 0x1, 0x4)\n\t/tidb-4.0.0-rc/planner/core/rule_column_pruning.go:190 +0x36f\ngithub.com/pingcap/tidb/planner/core.(*LogicalProjection).PruneColumns(0xc001183550, 0xc012097490, 0x1, 0x1, 0x1, 0x1)\n\t/tidb-4.0.0-rc/planner/core/rule_column_pruning.go:76 +0x4f8\ngithub.com/pingcap/tidb/planner/core.(*LogicalProjection).PruneColumns(0xc0011831e0, 0xc0120973d0, 0x1, 0x1, 0x2719a20, 0xc001152960)\n\t/tidb-4.0.0-rc/planner/core/rule_column_pruning.go:76 +0x4f8\ngithub.com/pingcap/tidb/planner/core.(*columnPruner).optimize(0x428f240, 0x2cdd5e0, 0xc0112f40f0, 0x2d149a0, 0xc0011831e0, 0x2d149a0, 0xc0011831e0, 0x0, 0x0)\n\t/tidb-4.0.0-rc/planner/core/rule_column_pruning.go:31 +0x6b\ngithub.com/pingcap/tidb/planner/core.logicalOptimize(0x2cdd5e0, 0xc0112f40f0, 0x23a2, 0x2d149a0, 0xc0011831e0, 0xeda9aa, 0x282ca80, 0x2901820, 0x2c9a101)\n\t/tidb-4.0.0-rc/planner/core/optimizer.go:155 +0x116\ngithub.com/pingcap/tidb/planner/core.DoOptimize(0x2cdd5e0, 0xc0112f40f0, 0x2d15ca0, 0xc0120e3900, 0x23a2, 0x2d149a0, 0xc0011831e0, 0x0, 0x0, 0x0, ...)\n\t/tidb-4.0.0-rc/planner/core/optimizer.go:124 +0x60\ngithub.com/pingcap/tidb/planner.optimize(0x2cdd5e0, 0xc0112f40f0, 0x2d15ca0, 0xc0120e3900, 0x2cdf1a0, 0xc0019c8340, 0x2d0ade0, 0xc01206e870, 0x0, 0x0, ...)\n\t/tidb-4.0.0-rc/planner/optimize.go:189 +0x5a9\ngithub.com/pingcap/tidb/planner.Optimize(0x2cdd5e0, 0xc0112f40f0, 0x2d15ca0, 0xc0120e3900, 0x2cdf1a0, 0xc0019c8340, 0x2d0ade0, 0xc01206e870, 0x0, 0x0, ...)\n\t/tidb-4.0.0-rc/planner/optimize.go:63 +0x28f\ngithub.com/pingcap/tidb/executor.(*Compiler).Compile(0xc000ae4dc8, 0x2cdd5e0, 0xc0112f40f0, 0x2ce4a20, 0xc0019c8340, 0x0, 0x0, 0x0)\n\t/tidb-4.0.0-rc/executor/compiler.go:61 +0x253\ngithub.com/pingcap/tidb/session.(*session).execute(0xc0120e3900, 0x2cdd5e0, 0xc0112f40f0, 0xc0011d90e1, 0x25, 0xc000b39ea0, 0x0, 0x0, 0xc000ae5178, 0x23f610a)\n\t/tidb-4.0.0-rc/session/session.go:1135 +0x5cf\ngithub.com/pingcap/tidb/session.(*session).Execute(0xc0120e3900, 0x2cdd5e0, 0xc0112f40f0, 0xc0011d90e1, 0x25, 0x0, 0x0, 0x0, 0x0, 0x0)\n\t/tidb-4.0.0-rc/session/session.go:1089 +0xdb\ngithub.com/pingcap/tidb/server.(*TiDBContext).Execute(0xc0112f4480, 0x2cdd5e0, 0xc0112f40f0, 0xc0011d90e1, 0x25, 0xeff1e1, 0x2a06fc8, 0xc000ae5278, 0xc000ae5268, 0xf9f572)\n\t/tidb-4.0.0-rc/server/driver_tidb.go:248 +0x7c\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc0016735f0, 0x2cdd5e0, 0xc0112f40f0, 0xc0011d90e1, 0x25, 0x0, 0x0)\n\t/tidb-4.0.0-rc/server/conn.go:1256 +0x91\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch(0xc0016735f0, 0x2cdd5e0, 0xc0112f40f0, 0xc0011d90e1, 0x26, 0x25, 0x0, 0x0)\n\t/tidb-4.0.0-rc/server/conn.go:897 +0x5e2\ngithub.com/pingcap/tidb/server.(*clientConn).Run(0xc0016735f0, 0x2cdd5e0, 0xc0112f40f0)\n\t/tidb-4.0.0-rc/server/conn.go:711 +0x27c\ngithub.com/pingcap/tidb/server.(*Server).onConn(0xc000ccb290, 0xc0016735f0)\n\t/tidb-4.0.0-rc/server/server.go:415 +0xaf9\ncreated by github.com/pingcap"]
+```
+I can reproduce this both on the RC and the latest master (commit 7e71069ffa6052b497eaaaa2c3863bff4fe0ef3f).
+
+Environment:
+```
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: 
+Git Commit Hash: 
+Git Branch: 
+UTC Build Time: 2020-04-15 06:06:10
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+The classification assigns a P0 to `Process crash, etc.`, which is why I propose this severity level.

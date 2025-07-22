@@ -1,0 +1,93 @@
+ID: 12834
+Title: Overload `MIN/MAX/MAX_BY/MIN_BY` to return the "top" `N` values
+Description:
+ This adds an additional overload to the `MIN/MAX/MAX_BY/MIN_BY/ARG_MIN/ARG_MAX` aggregate functions that take an `N` integer as the last argument and returns the "top"/"bottom" `N` values as a list instead of a single value. 
+
+Generally computing the "top N in each group" in SQL is a [very common](https://stackoverflow.com/search?q=sql+top+n+in+group&s=f0d67570-1567-4fec-b01b-16825782b205) but somewhat complicated operation, usually requiring a subquery + window operation to order and filter on row number, e.g.
+
+## Example
+
+```sql
+
+-- Given the table
+FROM t1;
+----
+┌─────────┬───────┐
+│   grp   │  val  │
+│ varchar │ int32 │
+├─────────┼───────┤
+│ a       │     2 │
+│ a       │     1 │
+│ b       │     5 │
+│ b       │     4 │
+│ a       │     3 │
+│ b       │     6 │
+└─────────┴───────┘
+
+-- Get the top 3 'val's of each group 'grp'
+SELECT rs.val, rs.grp 
+FROM (
+  SELECT val, grp, row_number() OVER (PARTITION BY grp ORDER BY val DESC) as rid
+  FROM t1
+) AS rs 
+WHERE rid < 4;
+-----
+┌───────┬─────────┐
+│  val  │   grp   │
+│ int32 │ varchar │
+├───────┼─────────┤
+│     6 │ b       │
+│     5 │ b       │
+│     4 │ b       │
+│     3 │ a       │
+│     2 │ a       │
+│     1 │ a       │
+└───────┴─────────┘
+
+-- Or even worse, if you want the values as lists
+
+SELECT array_agg(rs.val), rs.grp 
+FROM (
+  SELECT val, grp, row_number() OVER (PARTITION BY grp ORDER BY val DESC) as rid 
+  FROM t1 ORDER BY val DESC
+) as rs 
+WHERE rid < 4 
+GROUP BY rs.grp;
+----
+┌───────────────────┬─────────┐
+│ array_agg(rs.val) │   grp   │
+│      int32[]      │ varchar │
+├───────────────────┼─────────┤
+│ [3, 2, 1]         │ a       │
+│ [6, 5, 4]         │ b       │
+└───────────────────┴─────────┘
+
+-- Youch! 
+-- But with this PR, you can simply do:
+
+SELECT max(val, 3) FROM t1 GROUP BY gap;
+----
+┌─────────────┐
+│ max(val, 3) │
+│   int32[]   │
+├─────────────┤
+│ [3, 2, 1]   │
+│ [6, 5, 4]   │
+└─────────────┘
+
+-- Also works with max_by/arg_max
+SELECT arg_max(grp, val, 3) FROM t1;
+----
+┌──────────────────────┐
+│ arg_max(grp, val, 3) │
+│      varchar[]       │
+├──────────────────────┤
+│ [b, b, b]            │
+└──────────────────────┘
+```
+
+## Implementation
+
+The current implementation provides specializations for values (and every combination of value/argument pairs in case of `arg_max/min`) with a physical type of `INTEGER`, `BIGINT`, `DOUBLE`, `FLOAT`, `VARCHAR`, everything else falls back to a "sort key" serialization based implementation. We can extend this in the future and specialize for more primitive types.
+
+The `VARCHAR` and fallback "sort key" specializations uses the aggregate arena allocator so all memory is tracked, and will also reuse the existing allocation in the priority queue heap slot whenever an entry is evicted and the new entry fits within the previous blob. 

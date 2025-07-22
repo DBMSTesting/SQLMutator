@@ -1,0 +1,56 @@
+ID: 5714
+Title: Distributed Query fails when DNS cannot resolve hostname in an unrelated cluster
+Description:
+We are running two ClickHouse nodes and defining a few different clusters for different purposes.  Some of the clusters are for distributed queries and some are for `ON CLUSTER` DDL.  Logically, we use one of the nodes for writing and the other for reading.  We are deployed on Kubernetes, so there are times when node names are not (DNS) resolvable (i.e., when a Pod is not running).  We use a combination of headless services and ClusterIP services where appropriate.  Given that background, we are trying to understand why if DNS cannot resolve a cluster member hostname in a cluster that's not relevant to a distributed query, it fails.
+
+For example, assume we have the following cluster definitions, where we use the below `read` cluster for distributed queries and `admin` cluster for `ON CLUSTER` DDL:
+
+```
+  <remote_servers>
+    <read>
+      <shard>
+        <replica>
+          <host>node-read</host>
+          <port>9000</port>
+        </replica>
+      </shard>
+    </read>
+    <admin>
+      <shard>
+        <replica>
+          <host>node-write</host>
+          <port>9000</port>
+        </replica>
+        <replica>
+          <host>node-read</host>
+          <port>9000</port>
+        </replica>
+      </shard>
+    </admin>
+  </remote_servers>
+```
+
+With a fully replicated table such as this:
+
+```
+CREATE TABLE test.rep_t
+  (`item_id` UInt64,
+  `name` String,
+  `last_epoch` UInt64)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{database}/{table}/{shard}', '{replica}', last_epoch) PARTITION BY 0 * item_id ORDER BY item_id
+```
+
+and a distributed table such as
+
+```
+CREATE TABLE test.dist_t AS rep_t ENGINE = Distributed(read, test, rep_t)
+```
+
+If `node-write` is down such that DNS would not be able to resolve it's IP, we cannot issue any queries ON `node-read` against the distributed table.  For example, a select throws an error such as:
+
+```
+Received exception from server (version 19.6.2):
+Code: 1000. DB::Exception: Received from read:9000, 10.101.129.77. DB::Exception: Host not found: node-write.
+```
+
+We are running server 19.6.2.11, over the HTTP interface.

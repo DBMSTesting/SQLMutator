@@ -1,0 +1,153 @@
+ID: 10674
+Title: TOTALS row disappears in some queries
+Description:
+**Describe the bug**
+After upgrading from 19.6.2.11 to 20.3.7.46, I've noticed that TOTALS row disappeared from some queries where it was previously available. I could not determine what is causing this, but it looks like a bug (or at least some inconsistency).
+
+**How to reproduce**
+* Which ClickHouse server version to use
+
+20.3.7.46
+
+* Which interface to use, if matters
+
+native clickhouse-client
+
+* Non-default settings, if any
+
+default single server setup from docker
+
+* `CREATE TABLE` statements for all tables involved
+
+```sql
+CREATE TABLE foo (server_date Date, dimension_1 String, metric_1 UInt32) ENGINE = MergeTree() PARTITION BY toYYYYMM(server_date) ORDER BY (server_date);
+CREATE TABLE bar (server_date Date, dimension_1 String, metric_2 UInt32) ENGINE = MergeTree() PARTITION BY toYYYYMM(server_date) ORDER BY (server_date);
+```
+
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+
+```sql
+INSERT INTO foo VALUES ('2020-01-01', 'test1', 10), ('2020-01-01', 'test2', 20);
+INSERT INTO bar VALUES ('2020-01-01', 'test2', 30), ('2020-01-01', 'test3', 40);
+```
+
+* Queries to run that lead to unexpected result
+
+Query without any filters, TOTALS row is available:
+
+```sql
+SELECT 
+    dimension_1, 
+    sum_metric_1, 
+    sum_metric_2
+FROM 
+(
+    SELECT 
+        dimension_1, 
+        sum(metric_1) AS sum_metric_1
+    FROM foo
+    GROUP BY dimension_1
+        WITH TOTALS
+) AS subquery_1
+ALL FULL OUTER JOIN 
+(
+    SELECT 
+        dimension_1, 
+        sum(metric_2) AS sum_metric_2
+    FROM bar
+    GROUP BY dimension_1
+        WITH TOTALS
+) AS subquery_2 USING (dimension_1)
+ORDER BY dimension_1 ASC
+
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│ test1       │           10 │            0 │
+│ test2       │           20 │           30 │
+│ test3       │            0 │           40 │
+└─────────────┴──────────────┴──────────────┘
+
+Totals:
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│             │           30 │           70 │
+└─────────────┴──────────────┴──────────────┘
+
+2 rows in set. Elapsed: 0.004 sec. 
+```
+
+Another similar query with `sum_metric_2 > 20` filter, TOTALS row is still available:
+
+```sql
+SELECT 
+    dimension_1, 
+    sum_metric_1, 
+    sum_metric_2
+FROM 
+(
+    SELECT 
+        dimension_1, 
+        sum(metric_1) AS sum_metric_1
+    FROM foo
+    GROUP BY dimension_1
+        WITH TOTALS
+) AS subquery_1
+ALL FULL OUTER JOIN 
+(
+    SELECT 
+        dimension_1, 
+        sum(metric_2) AS sum_metric_2
+    FROM bar
+    GROUP BY dimension_1
+        WITH TOTALS
+) AS subquery_2 USING (dimension_1)
+WHERE sum_metric_2 > 20
+ORDER BY dimension_1 ASC
+
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│ test2       │           20 │           30 │
+│ test3       │            0 │           40 │
+└─────────────┴──────────────┴──────────────┘
+
+Totals:
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│             │           30 │           70 │
+└─────────────┴──────────────┴──────────────┘
+
+2 rows in set. Elapsed: 0.004 sec. 
+```
+
+And finally the exact same query, but with a `sum_metric_2 < 20` filter, TOTALS row disappears :confused: 
+
+```sql
+SELECT 
+    dimension_1, 
+    sum_metric_1, 
+    sum_metric_2
+FROM 
+(
+    SELECT 
+        dimension_1, 
+        sum(metric_1) AS sum_metric_1
+    FROM foo
+    GROUP BY dimension_1
+        WITH TOTALS
+) AS subquery_1
+ALL FULL OUTER JOIN 
+(
+    SELECT 
+        dimension_1, 
+        sum(metric_2) AS sum_metric_2
+    FROM bar
+    GROUP BY dimension_1
+        WITH TOTALS
+) AS subquery_2 USING (dimension_1)
+WHERE sum_metric_2 < 20
+ORDER BY dimension_1 ASC
+
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│ test1       │           10 │            0 │
+└─────────────┴──────────────┴──────────────┘
+
+1 rows in set. Elapsed: 0.004 sec.
+```
+
+Is there some kind of workaround to get the totals row in the last query?

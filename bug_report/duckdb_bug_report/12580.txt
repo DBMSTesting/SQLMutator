@@ -1,0 +1,106 @@
+ID: 12580
+Title: Add `bind_expression` callback to scalar function, and use it to turn `typeof` into a `BoundConstantExpression` 
+Description:
+This PR adds a new callback to scalar functions - `bind_expression`. This callback can be used post-bind to modify the resulting `BoundFunctionExpression`, and also turn it into a different expression if desired. The callback is as follows:
+
+```cpp
+struct FunctionBindExpressionInput {
+	optional_ptr<FunctionData> bind_data;
+	BoundFunctionExpression &function;
+};
+typedef unique_ptr<Expression> (*function_bind_expression_t)(FunctionBindExpressionInput &input);
+```
+
+#### typeof constant
+
+The `typeof` function is extended to use this callback to turn itself into a `BoundConstantExpression`. This can be seen in the `EXPLAIN` plan, e.g.:
+
+```sql
+explain select typeof(l_orderkey) from lineitem;
+┌───────────────────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          'BIGINT'         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          lineitem         │
+└───────────────────────────┘    
+```
+
+Whereas in previous versions:
+
+```sql
+D explain select typeof(l_orderkey) from lineitem;
+┌───────────────────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│     typeof(l_orderkey)    │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          lineitem         │
+└───────────────────────────┘                             
+```
+
+The reason this is useful is that `typeof` is a function that returns a constant - but the system is not aware of that in the current version. As such, code that branches on the type of an expression cannot be flattened/simplified. For example, in the old implementation, when doing a `CASE` that filters based on `typeof` - we can see that both aggregates are computed as the system does not realize that `typeof` is really a constant function:
+
+```sql
+EXPLAIN
+SELECT 
+    CASE
+    WHEN typeof(MIN(l_orderkey))='BIGINT'
+    THEN MIN(l_orderkey)
+    ELSE MAX(l_orderkey)
+    END AS result
+FROM lineitem;
+┌───────────────────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│           result          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│    UNGROUPED_AGGREGATE    │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          min(#0)          │
+│          max(#1)          │
+└─────────────┬─────────────┘                                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          lineitem         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         l_orderkey        │
+└───────────────────────────┘                             
+
+```
+
+In the new implementation, we can see that the `MAX` function is stripped/removed entirely:
+
+```sql
+┌───────────────────────────┐
+│    UNGROUPED_AGGREGATE    │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          min(#0)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         l_orderkey        │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          lineitem         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         l_orderkey        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       EC: 149996355       │
+└───────────────────────────┘                             
+```
+
+### Macros
+
+While such branching might seem odd in regular SQL, it is rather useful for (table) macros in which we do not know the types of the input arguments. By allowing the pruning of expression trees that will never be executed at compile time we can write macros that adapt to the input type much more effectively. 

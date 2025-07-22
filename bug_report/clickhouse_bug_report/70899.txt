@@ -1,0 +1,36 @@
+ID: 70899
+Title: Leaking temporary tables
+Description:
+**Company or project name**
+
+We run a bunch of clusters, all with 3 replicas and replicated databases, no distributed tables. On average each cluster ingests around 100M rows per day spread across 2 tables.
+
+**Describe what's wrong**
+
+Not all temporary tables are being cleaned up, leading to ever-growing amount of memory usage by the server, ultimately resulting in all queries failing due to inability to allocate more memory. Only work around is to restart all replicas in the cluster, which is currently happening on average twice a day for each cluster. This is very annoying and time consuming.
+
+Can't really reproduce it in isolation, only observable in production.
+
+**Does it reproduce on the most recent release?**
+
+Yes, we started observing this behavior since at least 1 year ago, and every LTS release since then.
+
+**How to reproduce**
+
+* Clickhouse-server 24.8.4.13
+* Official Java client
+* We run multi-statement query, where the first statements will be CREATE TEMPORARY and the last statement will be a SELECT query. The Java client will split these statements and run them with a named session_id, with a timeout of 1 second (which we set explicitly).
+
+**Expected behavior**
+
+All sessions and their temporary tables are cleaned up when expired and no longer in use.
+
+**Additional context**
+
+We noticed that on some of these clusters, memory consumption starts grow gradually, and for clusters with more data, we have to restart the servers more than once each 24 hours. We noticed that started happening around the time we introduced temporary tables into our queries.
+We use TEMPORARY tables with Join engine, since we have to join multiple times with the same data, sometimes more than 10x per query.
+I did some digging myself, with some help of Antony Andelic, and found that the memory leak was indeed in the `HashJoinStorage` which is allocated when creating the temporary table - verified using `jemalloc` profiling.
+
+After some more digging, I was able to determine that there are indeed a bunch of directories in `/data/_temporary_and_external_tables`, with names similar to `_tmp_0350ea4c%2D340f%2D4bd5%2Da9e6%2D60fd8a326e2b/` and with a single 0-byte file inside named `1.bin`, all dated since the start of the server, on average there are about 2 of these directories per minute, since the server was last restarted and started serving requests.
+
+Then I set log_level to TRACE and looked for the log outputs from `Interpreters/Session.cpp`, and wrote a simple script to match creates with closes, and indeed, it seems like some sessions just never get closed, corresponding by timestamp to the directories in `/data/_temporary_and_external_tables`. I suspect it has something to do with the `(use_count() != 1)` branch in the `closeSessions` method, but can't confirm it because it's impractical to capture logs with log_level `TEST` and it's LOG_TEST call - maybe it should be a LOG_TRACE instead.

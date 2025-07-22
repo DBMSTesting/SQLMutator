@@ -1,0 +1,72 @@
+ID: 5256
+Title: Got incorrect data in Distributed engine with ReplicatedMergeTree local table.
+Description:
+clickhouse version:19.5.1
+We have a distributed table with ReplicatedMergeTree local table.
+The cluster configuration:
+<remote_servers incl="clickhouse_remote_servers">
+        <ha_cluster>
+                <shard>
+                        <internal_replication>true</internal_replication>
+                        <replica>
+                                <host>172.29.62.43</host>
+                                <port>7000</port>
+                                <user>default</user>
+                                <password>****</password>
+                        </replica>
+                         <replica>
+                                <host>172.29.62.44</host>
+                                <port>7000</port>
+                                <user>default</user>
+                                <password>****</password>
+                        </replica>
+                </shard>
+                <shard>
+                        <internal_replication>true</internal_replication>
+                        <replica>
+                                <host>172.29.62.45</host>
+                                <port>7000</port>
+                                <user>default</user>
+                                <password>****</password>
+                        </replica>
+                        <replica>
+                                <host>172.29.62.46</host>
+                                <port>7000</port>
+                                <user>default</user>
+                                <password>****</password>
+                        </replica>
+                </shard>
+                ...
+        </ha_cluster>
+</remote_servers>
+
+The created SQL of local table is:
+CREATE TABLE db.local_t_coupon_*** (
+`id` UInt64, 
+`created_at` Nullable(String), 
+`created_by` Nullable(String), 
+`updated_at` Nullable(String), 
+`day_id` UInt32,
+ `etl_time` UInt64
+) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/local_t_coupon_***', '{replica}') PARTITION BY day_id ORDER BY (etl_time, day_id) SETTINGS index_granularity = 8192;
+
+The created SQL of distributed table is:
+CREATE TABLE db.all_t_coupon_*** (
+`id` UInt64, 
+`created_at` Nullable(String), 
+`created_by` Nullable(String), 
+`updated_at` Nullable(String),
+`day_id` UInt32, 
+`etl_time` UInt64
+) ENGINE = Distributed(ha_cluster, 'db', 'local_t_coupon_***', id);
+
+We put a script in crontab to insert data into the distributed table every 15 minutes.
+But got a wrong answer when executed 'select count() from all_t_coupon_*** where day_id=20190513 and etl_time=20190513223000;', especially after executed 'alter table local_t_coupon_*** delete where day_id=20190513 and etl_time=20190513223000;' and reinsert data in this period.
+
+The log file show some error:
+2019.05.13 22:49:47.877578 [ 12 ] {} <Error> db.local_t_coupon_*** (StorageReplicatedMergeTree): DB::StorageReplicatedMergeTree::queueTask()::<lambda(DB::StorageReplicatedMergeTree::LogEntryPtr&)>: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = No message received
+2019.05.13 22:50:22.775704 [ 7 ] {} <Error> db.local_t_coupon_*** (StorageReplicatedMergeTree): DB::StorageReplicatedMergeTree::queueTask()::<lambda(DB::StorageReplicatedMergeTree::LogEntryPtr&)>: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = No message received
+2019.05.13 22:50:22.784626 [ 17 ] {} <Error> db.local_t_coupon_*** (StorageReplicatedMergeTree): DB::StorageReplicatedMergeTree::queueTask()::<lambda(DB::StorageReplicatedMergeTree::LogEntryPtr&)>: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = No message received
+2019.05.13 22:50:23.664754 [ 6 ] {} <Warning> db.local_t_coupon_*** (Data): Tried to add obsolete part 20190513_15314_15319_1 covered by 20190513_15314_15333_4 (state Committed)
+2019.05.13 22:50:23.664767 [ 6 ] {} <Warning> db.local_t_coupon_*** (MergerMutator): Unexpected number of parts removed when adding 20190513_15314_15319_1: 0 instead of 6
+2019.05.13 22:50:23.698580 [ 9 ] {} <Warning> db.local_t_coupon_*** (Data): Tried to add obsolete part 20190513_15325_15325_0 covered by 20190513_15314_15333_4 (state Committed)

@@ -1,0 +1,58 @@
+ID: 41182
+Title: Random results of ORDER BY with LIMIT and a segfault
+Description:
+Hello! It seems I have managed to produce a segfault in my ClickHouse server.
+
+I have a table that looks like this:
+```
+CREATE TABLE test_table (
+	"column_1" String NOT NULL,
+	"column_2" LowCardinality(String) NOT NULL,
+	"column_3" LowCardinality(String) NOT NULL,
+	"timestamp" Datetime64(6) NOT NULL
+)
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM("timestamp")
+PRIMARY KEY ("column_1", "column_2", "timestamp", "column_3")
+;
+```
+
+Then I run a query that looks likes this
+```
+SELECT max(timestamp) FROM (
+	SELECT timestamp, column_1, column_2, column_3
+	FROM test_table
+	ORDER BY timestamp asc
+	LIMIT 1500
+)
+```
+
+Next, 3 strange things happen:
+1. I am a getting a different result timestamp every time I run this query (no data is being inserted into the table and I ran OPTIMIZE FINAL earlier to make sure no merging is happening in the background)
+2. If I change the limit to anything below 1500 (even 1499) the problem disappears.
+3. When testing this query on my production server that has a lot other queries running on it at the same time I managed to crash the server and I got a stack trace that looks like this
+```
+2022.09.08 09:20:56.777322 [ 2857169 ] {} <Fatal> BaseDaemon: ########################################
+2022.09.08 09:20:56.777425 [ 2857169 ] {} <Fatal> BaseDaemon: (version 22.6.2.12 (official build), build id: 52AFD84A0FEDD1BA) (from thread 2857119) (query_id: c94aa1c3-4b1e-4d34-a35a-a94c22d7e3ea) (query: select max(timestamp) from ( SELECT timestamp, column_1, column_2, column_3 FROM test_table
+ order by timestamp asc, id asc limit 1500 )) Received signal Segmentation fault (11)
+2022.09.08 09:20:56.777461 [ 2857169 ] {} <Fatal> BaseDaemon: Address: 0x6 Access: read. Address not mapped to object.
+2022.09.08 09:20:56.777500 [ 2857169 ] {} <Fatal> BaseDaemon: Stack trace: 0x1668ecb5 0x1739af43 0x12df9570 0x171903a7 0x171af8da 0x171a47fe 0x171a60c4 0xb94d077 0xb95049d 0x7fabdf964609 0x7fabdf889133
+2022.09.08 09:20:56.777560 [ 2857169 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::compareAt(unsigned long, unsigned long, DB::IColumn const&, int) const @ 0x1668ecb5 in /usr/bin/clickhouse
+2022.09.08 09:20:56.777583 [ 2857169 ] {} <Fatal> BaseDaemon: 3. DB::PartialSortingTransform::transform(DB::Chunk&) @ 0x1739af43 in /usr/bin/clickhouse
+2022.09.08 09:20:56.777604 [ 2857169 ] {} <Fatal> BaseDaemon: 4. DB::ISimpleTransform::transform(DB::Chunk&, DB::Chunk&) @ 0x12df9570 in /usr/bin/clickhouse
+2022.09.08 09:20:56.777627 [ 2857169 ] {} <Fatal> BaseDaemon: 5. DB::ISimpleTransform::work() @ 0x171903a7 in /usr/bin/clickhouse
+2022.09.08 09:20:56.777644 [ 2857169 ] {} <Fatal> BaseDaemon: 6. DB::ExecutionThreadContext::executeTask() @ 0x171af8da in /usr/bin/clickhouse
+2022.09.08 09:20:56.777664 [ 2857169 ] {} <Fatal> BaseDaemon: 7. DB::PipelineExecutor::executeStepImpl(unsigned long, std::__1::atomic<bool>*) @ 0x171a47fe in /usr/bin/clickhouse
+2022.09.08 09:20:56.777691 [ 2857169 ] {} <Fatal> BaseDaemon: 8. ? @ 0x171a60c4 in /usr/bin/clickhouse
+2022.09.08 09:20:56.777714 [ 2857169 ] {} <Fatal> BaseDaemon: 9. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xb94d077 in /usr/bin/clickhouse
+2022.09.08 09:20:56.777774 [ 2857169 ] {} <Fatal> BaseDaemon: 10. ? @ 0xb95049d in /usr/bin/clickhouse
+2022.09.08 09:20:56.777792 [ 2857169 ] {} <Fatal> BaseDaemon: 11. ? @ 0x7fabdf964609 in ?
+2022.09.08 09:20:56.777805 [ 2857169 ] {} <Fatal> BaseDaemon: 12. clone @ 0x7fabdf889133 in ?
+2022.09.08 09:20:56.971010 [ 2857169 ] {} <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 894C4AAB85FCB9AAC26136BC446CC5AF)
+```
+
+I froze the partition and attached it to local clickhouse server running newest 22.8 version and the random timestamp problem was still there. I couldn't get it to produce a segfault but the local instance has no other query running on it so that's not really comparable.
+
+Has someone seen anything like this before?
+
+I would be happy to share the partition since that's probably where the problem lies but the data stored on it is private. Is there some method of randomizing/encrypting the column_* columns without affecting the primary key?

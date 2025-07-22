@@ -1,0 +1,100 @@
+ID: 5254
+Title: "Unknown identifier" with 2+ JOINs and not aliased column outside of selected list
+Description:
+server version() = 19.5.3.8
+
+**How to reproduce**
+
+Test tables with data
+```
+CREATE TABLE test1
+(
+  id bigint,
+  code text
+)
+engine = MergeTree
+ORDER BY id
+;
+
+CREATE TABLE test2
+(
+  id bigint,
+  code text,
+  test1_id bigint,
+  test3_id bigint
+)
+engine = MergeTree
+ORDER BY id
+;
+
+CREATE TABLE test3
+(
+  id bigint,
+  code text
+)
+engine = MergeTree
+ORDER BY id
+;
+
+insert into test1 (id, code)
+select top 100000 number, toString(number) FROM system.numbers;
+
+insert into test2 (id, code, test1_id, test3_id)
+select top 100000 number, toString(number), number, number FROM system.numbers;
+
+insert into test3 (id, code)
+select top 100000 number, toString(number) FROM system.numbers;
+```
+
+Test queries:
+```
+-- ok
+select
+    test2.id as c0
+from
+    test1
+    join test2 on test2.test1_id = test1.id
+--     join test3 on test2.test3_id = test3.id
+where
+    test1.code in ('1', '2', '3')
+order by case when test1.code is null then 1 else 0 end
+;
+
+-- ok
+select
+    test2.id as c0
+from
+    test1
+    join test2 on test2.test1_id = test1.id
+    join test3 on test2.test3_id = test3.id
+where
+    test1.code in ('1', '2', '3')
+--     order by case when test1.code is null then 1 else 0 end
+;
+
+-- fail
+select
+    test2.id as c0
+from
+    test1
+    join test2 on test2.test1_id = test1.id
+    join test3 on test2.test3_id = test3.id
+where
+    test1.code in ('1', '2', '3')
+order by case when test1.code is null then 1 else 0 end
+;
+```
+Exception message:
+```
+SELECT test2.id AS c0
+FROM test1 
+INNER JOIN test2 ON test2.test1_id = test1.id
+INNER JOIN test3 ON test2.test3_id = test3.id
+WHERE test1.code IN ('1', '2', '3')
+ORDER BY multiIf(isNull(test1.code), 1, 0) ASC
+
+Received exception from server (version 19.5.3):
+Code: 47. DB::Exception: Received from localhost:9000, 127.0.0.1. DB::Exception: Unknown identifier: test1.code, context: query: 'SELECT c0 FROM (SELECT * FROM test1  INNER JOIN test2 ON `--test2.test1_id` = `--test1.id`)  INNER JOIN test3 ON `--test2.test3_id` = id WHERE `--test1.code` IN ('1', '2', '3') ORDER BY multiIf(isNull(test1.code), 1, 0) ASC' required_names: '--test1.code''test1.code''id''c0''--test2.test3_id' source_tables: 'test3' table_aliases: complex_aliases: masked_columns: array_join_columns: source_columns: '--test1.code' 'c0' '--test2.test3_id' . 
+
+0 rows in set. Elapsed: 0.004 sec. 
+```

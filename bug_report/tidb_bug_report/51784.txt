@@ -1,0 +1,64 @@
+ID: 51784
+Title: insert ignore may cause data and index inconsistency
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+``` SQL
+store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a smallint(6) DEFAULT '-13202', b varchar(221) NOT NULL DEFAULT '9k23s0uioddlcahb5qmd9mulds8hd6go0q6cxlsshbj3w9y08yuqcky1gv90eldi4ylbno8ofs15o2exlyka6vt653idyy84b0s8qxtnxq501', " +
+		"c tinyint(1) NOT NULL DEFAULT '0', PRIMARY KEY (c, b));")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	tk3 := testkit.NewTestKit(t, store)
+	tk3.MustExec("use test")
+
+	d := dom.DDL()
+	originalCallback := d.GetHook()
+	defer d.SetHook(originalCallback)
+	callback := &callback.TestDDLCallback{}
+	//_, err := tk1.Exec("INSERT INTO t VALUES (-18585,'+zmNHMov7KF~tF*DFb',1), (-18585,'0',1), (-18585,'1',1), (-18585,'9k23s0uioddlcahb5qmd9mulds8hd6go0q6cxlsshbj3w9y08yuqcky1gv90eldi4ylbno8ofs15o2exlyka6vt653idyy84b0s8qxtnxq501',1), (-18585,'Q',1), (-18585,'s',1);;")
+	//assert.NoError(t, err)
+
+	onJobUpdatedExportedFunc := func(job *model.Job) {
+		if t.Failed() {
+			return
+		}
+		switch job.SchemaState {
+		case model.StateDeleteOnly:
+			_, err := tk1.Exec("INSERT INTO t VALUES (-18585,'+zmNHMov7KF~tF*DFb',1), (-18585,'0',1), (-18585,'1',1), (-18585,'9k23s0uioddlcahb5qmd9mulds8hd6go0q6cxlsshbj3w9y08yuqcky1gv90eldi4ylbno8ofs15o2exlyka6vt653idyy84b0s8qxtnxq501',1), (-18585,'Q',1), (-18585,'s',1);;")
+			assert.NoError(t, err)
+		case model.StateWriteReorganization:
+			idx := testutil.FindIdxInfo(dom, "test", "t", "idx")
+			if idx.BackfillState == model.BackfillStateReadyToMerge {
+				_, err := tk1.Exec("insert ignore into `t`  values ( '06j$GwD*zizDUEEy&*-',null,-2028 ) ,( '((J)',0,17786 ) ,( 'SD$ruyO$%c',1,null ) ,( 'a3Ex',0,24877 ) ,( 'O=M',1,31913 ) ,( '7njQI*',0,17610 );")
+				assert.NoError(t, err)
+				return
+			}
+		}
+	}
+	callback.OnJobUpdatedExported.Store(&onJobUpdatedExportedFunc)
+	d.SetHook(callback)
+
+	tk.MustExec("alter table t add unique index idx(b);")
+	tk.MustExec("admin check table t;")
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+test pass
+### 3. What did you see instead (Required)
+failed
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

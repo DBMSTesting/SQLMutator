@@ -1,0 +1,102 @@
+ID: 14888
+Title: Writing MAP(VARCHAR, VARCHAR) columns with lots of repeated keys/values to Parquet results in unexpectedly large files
+Description:
+### What happens?
+
+This is probably also a problem for other nested types, but my problem is with maps.  :)
+
+Using DuckDB to write MAP(VARCHAR, VARCHAR) columns with lots of repeated keys/values to Parquet results in larger files than expected.  In particular, files written by DuckDB are very bloated compared to files written by PyArrow.  This appears to be due to a lack of dictionary encoding for these columns in precisely the case where dictionary encoding is handy. 
+
+
+### To Reproduce
+
+Create a 100,000 row test file in DuckDB with one entry per map using 10 unique keys and 10 unique values:
+
+```sql
+copy (
+    select map([trunc(random() * 10)::varchar], [trunc(random() * 10)::varchar]) as m
+    from generate_series(1, 100000)
+) to './test.parquet';
+```
+
+Run a Python script to convert our generated file to Arrow and rewrite to Parquet with PyArrow:
+
+```python
+import pyarrow.parquet as pq
+
+table = pq.read_table("./test.parquet")
+pq.write_table(table, "./test2.parquet")
+```
+
+Take a look at the size from the shell (random data, size may vary slightly):
+```
+ls -l ./test*.parquet
+```
+```
+-rw-r--r--  1 marvold  staff  379426 Nov 18 15:34 ./test.parquet
+-rw-r--r--  1 marvold  staff  101337 Nov 18 15:34 ./test2.parquet
+```
+
+Look for dictionary encodings from the shell (requires parquet-cli, dictionary order may also vary due to randomness):
+```
+parquet dictionary -c m.key_value.key ./test.parquet
+```
+```
+Row group 0 has no dictionary for "m.key_value.key"
+```
+```
+parquet dictionary -c m.key_value.key ./test2.parquet
+```
+```
+Row group 0 dictionary for "m.key_value.key":
+     0: "4.0"
+     1: "9.0"
+     2: "1.0"
+     3: "5.0"
+     4: "3.0"
+     5: "8.0"
+     6: "6.0"
+     7: "7.0"
+     8: "2.0"
+     9: "0.0"
+```
+
+### OS:
+
+macOS Sequoia 15.1 aarch64 (but unlikely to be OS-specific, symptoms seen on Linux builds too)
+
+### DuckDB Version:
+
+tested 1.1.3, local source build from main
+
+### DuckDB Client:
+
+CLI (but unlikely to be client-specific, symptoms seen on NodeJS clients too)
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Michael Arvold
+
+### Affiliation:
+
+Millworks Analytics
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,117 @@
+ID: 59356
+Title: execution info in plan is wrong when encounters a pessimistic lock error and then retries execution
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+prepare:
+
+```sql
+create table t (id bigint, b int, unique index(id));
+```
+
+Execute the following two SQL statements simultaneously in 2 session:
+
+```sql
+begin;
+insert into t values (1,1) on duplicate key update b=b+1;
+select sleep(1);
+commit;
+```
+
+Then you will see a slow log like the following:
+
+
+<img width="2635" alt="Image" src="https://github.com/user-attachments/assets/ea19e1c4-0219-49d4-86e7-ee417a05c43e" />
+
+the plan is:
+
+```sql
+
+| id       | estRows | estCost | actRows | task | access object | execution info                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | operator info | memory    | disk  |
+| Insert_1 | 0.00    | 0.00    | 0       | root |               | total_time:2.03s, total_open:19.8µs, total_close:4.25µs, loops:7, prepare: 2.02s, check_insert: {total_time: 9.42ms, mem_insert_time: 113.7µs, prefetch: 9.31ms, rpc:{BatchGet:{num_rpc:5, total_time:1.79ms},ResolveLock:{num_rpc:1, total_time:7.42ms}, time_detail: {total_kv_read_wall_time: 429µs, tikv_wall_time: 585µs}, resolve_lock_time:7.42ms, scan_detail: {total_process_keys: 4, total_process_keys_size: 170, total_keys: 12, get_snapshot_time: 62µs, rocksdb: {key_skipped_count: 8, block: {}}}}}, lock_keys: {time:287.3µs, region:1, keys:2, slowest_rpc: {total: 0.000s, region_id: 16, store: 127.0.0.1:20160, time_detail: {tikv_wall_time: 112.2µs}, scan_detail: {get_snapshot_time: 18.7µs, rocksdb: {key_skipped_count: 9, block: {}}}, }, lock_rpc:261.375µs, rpc_count:1} | N/A           | 144 Bytes | N/A   |
+```
+
+Related slow log:
+
+```log
+# Time: 2025-02-10T13:23:28.275639+08:00
+# Txn_start_ts: 455911671651893252
+# User@Host: root[root] @ 127.0.0.1 [127.0.0.1]
+# Conn_ID: 4271898648
+# Exec_retry_time: 1.004038917 Exec_retry_count: 1
+# Query_time: 1.013477084
+# Parse_time: 0
+# Compile_time: 0.000092084
+# Rewrite_time: 0.000027042
+# Optimize_time: 0.000064625
+# Wait_TS: 0
+# LockKeys_time: 1.012846
+# DB: test
+# Is_internal: false
+# Digest: df2024ca5c53ee304fc0bac7c12b441005286a1242483273339166ebe112ec94
+# Mem_max: 8336
+# Prepared: false
+# Plan_from_cache: false
+# Plan_from_binding: false
+# Has_more_results: false
+# KV_total: 1.021116583
+# PD_total: 0
+# Backoff_total: 0
+# Unpacked_bytes_sent_tikv_total: 2015
+# Unpacked_bytes_received_tikv_total: 1505
+# Unpacked_bytes_sent_tikv_cross_zone: 0
+# Unpacked_bytes_received_tikv_cross_zone: 0
+# Unpacked_bytes_sent_tiflash_total: 0
+# Unpacked_bytes_received_tiflash_total: 0
+# Unpacked_bytes_sent_tiflash_cross_zone: 0
+# Unpacked_bytes_received_tiflash_cross_zone: 0
+# Write_sql_response_total: 0
+# Result_rows: 0
+# Succ: true
+# IsExplicitTxn: true
+# IsSyncStatsFailed: false
+# Plan: tidb_decode_plan('sAaIMAkyN18xCTAJMAlOL0EJMAl0b3RhbF90aW1lOjIuMDNzLCAJEihvcGVuOjE5LjjCtRUUJGNsb3NlOjQuMjUFFaBsb29wczo3LCBwcmVwYXJlOiAyLjAycywgY2hlY2tfaW5zZXJ0OiB7dBljLCA5LjQybXMsIG1lbQ0hCXwUIDExMy43BVcccHJlZmV0Y2gBLQQzMQEtSHJwYzp7QmF0Y2hHZXQ6e251bV8BEwA1EawFvkgxLjc5bXN9LFJlc29sdmVMb2NrGSsAMTIrAAA3BYUIfSwgATkYX2RldGFpbBWoKGt2X3JlYWRfd2FsLRgMIDQyOQWaDHRpa3YuGAAENTghCQx9LCByCXQQX2xvY2sJjgljFCwgc2Nhbj5iADhwcm9jZXNzX2tleXM6IDQRmy4XACRfc2l6ZTogMTcwER4JLTgxMiwgZ2V0X3NuYXBzaG8xPQQ2MgWggHJvY2tzZGI6IHtrZXlfc2tpcHBlZF9jb3VudDogOCwgYgGgDDoge30BAQQsIAEODVgAeyEKFDoyODcuMwlKEGVnaW9uITcFeCQyLCBzbG93ZXN0JXkAICnTJDogMC4wMDBzLCAJLyxfaWQ6IDE2LCBzdG9BDjQxMjcuMC4wLjE6MjAxNgHKBGltLm8BOk4BDDExMi4ByAB9PjYBSvEABDE4TS1y8wAAOTLzAAQsIBH0QT0UMjYxLjM3IcAALEFgLSZAMX0JMTQ0IEJ5dGVzCU4vQQo=')
+# Binary_plan: tidb_decode_binary_plan('ugaoCrUGCghJbnNlcnRfMTgBQAFSA04vQVpCdG90YWxfdGltZToyLjAzcywgdAUSKG9wZW46MTkuOMK1FRQkY2xvc2U6NC4yNQUVgGxvb3BzOjditQNwcmVwYXJlOiAyLjAycywgY2hlY2tfaQVuCDogex1kLCA5LjQybXMsIG1lbQ0hCX0UIDExMy43BVgccHJlZmV0Y2gBLQQzMQEtSHJwYzp7QmF0Y2hHZXQ6e251bV8BEwQ1LA2tBb9IMS43OW1zfSxSZXNvbHZlTG9jaxkrADEyKwAANwWFCH0sIAE5GF9kZXRhaWwVqChrdl9yZWFkX3dhbC0ZDCA0MjkFmgx0aWt2LhgABDU4IQoMfSwgcgl0EF9sb2NrCY4JYxQsIHNjYW4+YgA4cHJvY2Vzc19rZXlzOiA0EZsuFwAkX3NpemU6IDE3MBEeCS04MTIsIGdldF9zbmFwc2hvMT0ENjIFoIByb2Nrc2RiOiB7a2V5X3NraXBwZWRfY291bnQ6IDgsIGIBoAw6IHt9AQEIYpUCAQ8NWQB7IQsUOjI4Ny4zCUsQZWdpb24hOAV5JDIsIHNsb3dlc3Qlei3UJDogMC4wMDBzLCAJLyxfaWQ6IDE2LCBzdG9BDzQxMjcuMC4wLjE6MjAxNgHLBGltLnABOk8BDDExMi4ByQB9PjcBSvIABDE4TS5y9AAAOTL0ABAsIH0sIAX0QT4UMjYxLjM3IcEALEFhLSdEMX1wkAF4////////////ARgB')
+# Resource_group: default
+# Request_unit_read: 2.377593994140625
+# Request_unit_write: 5.1
+ insert into t values (1,1) on duplicate key update b=b+1;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+The slow query total `Query_time` is 1.013477084s, but in the plan execution info, `total_time:2.03s` is wrong.
+
+BTW, from the execution plan and the slow logs, it is hard to quickly know that this slow query is caused by waiting for the lock and not by the database slowing down, so it is recommended to refine the runtime stats for the lock 
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+
+```sql
+> select tidb_version();
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v9.0.0-alpha-225-gd7a8b679ad             |
+| Edition: Community                                        |
+| Git Commit Hash: d7a8b679ad730794a46086f387c510e9d67cc692 |
+| Git Branch: master                                        |
+| UTC Build Time: 2025-02-10 05:12:05                       |
+| GoVersion: go1.23.6                                       |
+| Race Enabled: false                                       |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+```
+

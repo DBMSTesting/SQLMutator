@@ -1,0 +1,93 @@
+ID: 44894
+Title: storage: TiKV takes up too much disk when using partitioned-raft-kv
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Deploy TiDB(v7.1.0) cluster `tidb-praft` with `partitioned-raft-kv: true`. 3 TiKV of this cluster is deployed in the same mechine,(port 20160-20162).
+
+Clean up TiDB's data by `tiup cluster clean --data tidb-praft`.(BTW, **this command will also clean user's metadata, including password.** Not sure whether it is expected.)
+
+Use `du -sh /tidb-data/tikv-20160/tablets` to get TiKV's initial disk usage, which is 215M.
+
+Run script below, which will create a table, insert 4 rows and drop it for 100 times:
+
+```bash
+num=1
+db=test$num
+t=t$num
+du -sh /tidb-data/tikv-20160/tablets
+mysql -h127.0.0.1 -P4000 -uroot -e "create database $db;use $db;create table $t(a int);"
+for i in {1..100}
+do
+    num=$i
+
+    mysql -h127.0.0.1 -P4000 -uroot -e "use $db;create table $t(a int);"
+
+    mysql -h127.0.0.1 -P4000 -uroot -e "use $db;insert into $t values (1);insert into $t values (1);insert into $t values (1);insert into $t values (1);"
+
+    mysql -h127.0.0.1 -P4000 -uroot -e "use $db;drop table $t;"
+done
+mysql -h127.0.0.1 -P4000 -uroot -e "drop database $db;"
+du -sh /tidb-data/tikv-20160/tablets
+``` 
+
+Since all tables(and their database) is dropped, it's expected to see a similar disk usage. But the last `du -sh /tidb-data/tikv-20160/tablets` shows 620M. And it does not decrease after 10min(gc time).
+
+Otherwise, it's not compatiable with that shown in TiDB dashboard. (Or I misunderstand the meaning of graph below.)
+
+<img width="533" alt="image" src="https://github.com/pingcap/tidb/assets/43516416/0b10729c-658f-4283-a82f-b4b00ebeef7d">
+
+A more strange thing is that, after 12 hours(20230622-10:30), the size of `/tidb-data/tikv-20160/tablets` becomes 30G.
+
+`select * from mysql.tidb;` shows that GC is executed normally.
+
+```mysql
+MySQL [(none)]> select * from mysql.tidb;
++--------------------------+--------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------+
+| VARIABLE_NAME            | VARIABLE_VALUE                                                                                         | COMMENT                                                                                     |
++--------------------------+--------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------+
+| bootstrapped             | True                                                                                                   | Bootstrap flag. Do not delete.                                                              |
+| tidb_server_version      | 146                                                                                                    | Bootstrap version. Do not delete.                                                           |
+| system_tz                | Asia/Shanghai                                                                                          | TiDB Global System Timezone.                                                                |
+| new_collation_enabled    | True                                                                                                   | If the new collations are enabled. Do not edit it.                                          |
+| tikv_gc_leader_uuid      | 62378c596840002                                                                                        | Current GC worker leader UUID. (DO NOT EDIT)                                                |
+| tikv_gc_leader_desc      | host:localhost.localdomain, pid:28830, start at 2023-06-21 21:42:39.266526446 +0800 CST m=+7.445697743 | Host name and pid of current GC leader. (DO NOT EDIT)                                       |
+| tikv_gc_leader_lease     | 20230622-10:21:39.301 +0800                                                                            | Current GC worker leader lease. (DO NOT EDIT)                                               |
+| tikv_gc_auto_concurrency | true                                                                                                   | Let TiDB pick the concurrency automatically. If set false, tikv_gc_concurrency will be used |
+| tikv_gc_enable           | true                                                                                                   | Current GC enable status                                                                    |
+| tikv_gc_run_interval     | 10m0s                                                                                                  | GC run interval, at least 10m, in Go format.                                                |
+| tikv_gc_life_time        | 10m0s                                                                                                  | All versions within life time will not be collected by GC, at least 10m, in Go format.      |
+| tikv_gc_last_run_time    | 20230622-10:17:39.266 +0800                                                                            | The time when last GC starts. (DO NOT EDIT)                                                 |
+| tikv_gc_safe_point       | 20230622-10:07:39.266 +0800                                                                            | All versions after safe point can be accessed. (DO NOT EDIT)                                |
+| tikv_gc_scan_lock_mode   | legacy                                                                                                 | Mode of scanning locks, "physical" or "legacy"                                              |
+| tikv_gc_mode             | distributed                                                                                            | Mode of GC, "central" or "distributed"                                                      |
++--------------------------+--------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------+
+15 rows in set (0.00 sec)
+```
+
+This phenomenon takes lots of disk space and makes me confused. Since a empty database instance should not take so many disk space, it seems like a bug. If it's expected, is there any wsy(or config) to clean these data automatedly?
+
+### 4. What is your TiDB version? (Required)
+
+```mysql
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                               |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.1.0
+Edition: Community
+Git Commit Hash: 635a4362235e8a3c0043542e629532e3c7bb2756
+Git Branch: heads/refs/tags/v7.1.0
+UTC Build Time: 2023-05-30 10:58:57
+GoVersion: go1.20.3
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+

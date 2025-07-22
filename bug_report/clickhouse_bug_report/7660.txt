@@ -1,0 +1,107 @@
+ID: 7660
+Title: Server won't start after moving to multiple block devices
+Description:
+This is going to be a long one, so I apologize in advance...
+
+I have ClickHouse 19.16.2 running in AWS, with a 15TiB data volume mounted on /data and it is already 90% full. I wanted to add another volume and let ClickHouse move some of the data to the  new volume. So I mounted a new volume on /data-2 and added a default storage policy to config.xml like this:
+```
+    <path>/data/</path>
+
+    <storage_configuration>
+        <disks>
+            <data_1>
+                <path>/data/</path>
+            </data_1>
+            <data_2>
+                <path>/data-2/</path>
+            </data_2>
+        </disks>
+
+        <policies>
+            <default>
+                <volumes>
+                    <data_vol_1>
+                        <disk>data_1</disk>
+                    </data_vol_1>
+                    <data_vol_2>
+                        <disk>data_2</disk>
+                    </data_vol_2>
+                </volumes>
+                <move_factor>0.2</move_factor>
+            </default>
+        </policies>
+    </storage_configuration>
+```
+After restarting ClickHouse, I saw that it started moving parts from /data to /data-2 as I expected. For example in the server log:
+```
+2019.11.06 11:35:30.812657 [ 19 ] {} <Trace> MergeTreePartsMover: Part 20180201_20180207_29916_29966_2 was cloned to /data-2/data/mydbname/mytablename/detached/20180201_20180207_29916_29966_2/
+2019.11.06 11:35:30.813436 [ 19 ] {} <Trace> MergeTreePartsMover: Part 20180201_20180207_29916_29966_2 was moved to /data-2/data/mydbname/mytablename/20180201_20180207_29916_29966_2/
+```
+Something that looked a little suspicious: the free space on /data was going down very slowly, a lot slower than the speed in which /data-2 was getting filled. So it looked like ClickHouse was not deleting the moved parts from /data, but I thought that perhaps it happens later, in the background.
+
+After moving about 780GB of data, the server log started showing lots of errors like this one:
+```
+2019.11.06 11:53:11.145040 [ 98 ] {233b4c12-6322-40c1-bf63-32e5e93bb2bd} <Error> HTTPHandler: Code: 252, e.displayText() = DB::Exception: Too many parts (300). Merges are processing significantly slower than inserts., Stack trace:
+
+0. 0x564653cf17b0 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x564653cf1585 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x564653a7a072 ? /usr/bin/clickhouse
+3. 0x564657359674 DB::MergeTreeBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+4. 0x564657675601 DB::PushingToViewsBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+5. 0x56465767f9a3 DB::SquashingBlockOutputStream::finalize() /usr/bin/clickhouse
+6. 0x56465767fbd1 DB::SquashingBlockOutputStream::writeSuffix() /usr/bin/clickhouse
+7. 0x56465783f162 DB::StorageBuffer::writeBlockToDestination(DB::Block const&, std::shared_ptr<DB::IStorage>) /usr/bin/clickhouse
+8. 0x56465783f8c5 DB::StorageBuffer::flushBuffer(DB::StorageBuffer::Buffer&, bool, bool) /usr/bin/clickhouse
+9. 0x564657844dce DB::BufferBlockOutputStream::insertIntoBuffer(DB::Block const&, DB::StorageBuffer::Buffer&) /usr/bin/clickhouse
+10. 0x564657845590 DB::BufferBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+11. 0x564657675601 DB::PushingToViewsBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+12. 0x56465767f9a3 DB::SquashingBlockOutputStream::finalize() /usr/bin/clickhouse
+13. 0x56465767fbd1 DB::SquashingBlockOutputStream::writeSuffix() /usr/bin/clickhouse
+14. 0x564656f21df7 DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*) /usr/bin/clickhouse
+15. 0x56465704d495 DB::NullAndDoCopyBlockInputStream::readImpl() /usr/bin/clickhouse
+16. 0x564656f047f7 DB::IBlockInputStream::read() /usr/bin/clickhouse
+17. 0x564656f2175b DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*) /usr/bin/clickhouse
+18. 0x564657198657 DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>) /usr/bin/clickhouse
+19. 0x564653d858ae DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&) /usr/bin/clickhouse
+20. 0x564653d87c29 DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&) /usr/bin/clickhouse
+21. 0x564657c16a69 Poco::Net::HTTPServerConnection::run() /usr/bin/clickhouse
+22. 0x564657c12fe0 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+23. 0x564657c136fd Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+24. 0x5646592e98d1 Poco::PooledThread::run() /usr/bin/clickhouse
+25. 0x5646592e767c Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+26. 0x564659a591e0 ? /usr/bin/clickhouse
+27. 0x7f2018cdb6ba start_thread /lib/x86_64-linux-gnu/libpthread-2.23.so
+28. 0x7f201860541d __clone /lib/x86_64-linux-gnu/libc-2.23.so
+ (version 19.16.2.2 (official build))
+```
+I stopped all inserts into the database, and tried to restart it, hoping that it will be able to recover. But the server crashed, complaining about duplicate parts. For example:
+```
+2019.11.06 13:05:43.323415 [ 1 ] {} <Error> Application: Caught exception while loading metadata: Code: 132, e.displayText() = DB::Exception: Cannot create table from metadata file /data/metadata/mydbname//mytablename.sql, error: DB::Exception: Part 201902_111733_112037_4_371552 already exists, stack trace:
+0. 0x55f1fac127b0 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x55f1fac12585 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x55f1fa99f327 ? /usr/bin/clickhouse
+3. 0x55f1fac5f28e ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::_List_iterator<ThreadFromGlobalPool>) /usr/bin/clickhouse
+4. 0x55f1fac5f89e ThreadFromGlobalPool::ThreadFromGlobalPool<ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}>(ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}&&)::{lambda()#1}::operator()() const /usr/bin/clickhouse
+5. 0x55f1fac5cd5c ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/bin/clickhouse
+6. 0x55f20097a1e0 ? /usr/bin/clickhouse
+7. 0x7f22fe71b6ba start_thread /lib/x86_64-linux-gnu/libpthread-2.23.so
+8. 0x7f22fe04541d __clone /lib/x86_64-linux-gnu/libc-2.23.so
+, Stack trace:
+
+0. 0x55f1fac127b0 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x55f1fac12585 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x55f1faa21ca3 ? /usr/bin/clickhouse
+3. 0x55f1fe5d6636 ? /usr/bin/clickhouse
+4. 0x55f1fac5f28e ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::_List_iterator<ThreadFromGlobalPool>) /usr/bin/clickhouse
+5. 0x55f1fac5f89e ThreadFromGlobalPool::ThreadFromGlobalPool<ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}>(ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}&&)::{lambda()#1}::operator()() const /usr/bin/clickhouse
+6. 0x55f1fac5cd5c ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/bin/clickhouse
+7. 0x55f20097a1e0 ? /usr/bin/clickhouse
+8. 0x7f22fe71b6ba start_thread /lib/x86_64-linux-gnu/libpthread-2.23.so
+9. 0x7f22fe04541d __clone /lib/x86_64-linux-gnu/libc-2.23.so
+ (version 19.16.2.2 (official build))
+2019.11.06 13:05:43.323485 [ 1 ] {} <Information> Application: Shutting down storages.
+2019.11.06 13:05:43.328743 [ 1 ] {} <Debug> Application: Shutted down storages.
+2019.11.06 13:05:43.329416 [ 1 ] {} <Debug> Application: Destroyed global context.
+```
+It seems that ClickHouse finds parts that exist both under /data and /data-2, because they were moved to /data-2 but not deleted from /data . 
+Please advise.

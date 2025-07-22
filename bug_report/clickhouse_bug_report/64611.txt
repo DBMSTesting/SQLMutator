@@ -1,0 +1,60 @@
+ID: 64611
+Title: AMBIGUOUS_COLUMN_NAME when reading from MV with mismatching schema
+Description:
+Repro:
+
+```
+create table src (x Int64) engine Memory;
+create table dst (s String, lc LowCardinality(String)) engine MergeTree order by s;
+create materialized view mv to dst (s String, lc String) as select '' as s, toLowCardinality('') as lc from src;
+insert into src values (1);
+select s, lc from mv where ignore(lc) settings allow_experimental_analyzer=0;
+```
+(Notice that column `lc` has different type in the materialized view vs its destination table `dst`. This is supposed to be allowed. Reading from the MV automatically converts from dst types to mv types, see `makeConvertingActions()` call in `StorageMaterializedView::read()`.)
+
+Error:
+```
+Code: 352. DB::Exception: Block structure mismatch in (columns with identical name must have identical structure) stream: different types:
+lc String String(size = 0)
+lc LowCardinality(String) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, String(size = 1))). (AMBIGUOUS_COLUMN_NAME), Stack trace (when copying this message, always include the lines below):
+
+0. /home/ubuntu/ClickHouse/contrib/llvm-project/libcxx/include/exception:141: std::exception::capture() @ 0x000000000aa2c262
+1. /home/ubuntu/ClickHouse/contrib/llvm-project/libcxx/include/exception:116: std::exception::exception[abi:v15000]() @ 0x000000000aa2c22d
+2. /home/ubuntu/ClickHouse/base/poco/Foundation/src/Exception.cpp:27: Poco::Exception::Exception(String const&, int) @ 0x0000000022a22100
+3. /home/ubuntu/ClickHouse/src/Common/Exception.cpp:99: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x0000000012d295ee
+4. /home/ubuntu/ClickHouse/src/Common/Exception.h:95: DB::Exception::Exception(String&&, int, bool) @ 0x000000000aa221aa
+5. /home/ubuntu/ClickHouse/src/Common/Exception.h:68: DB::Exception::Exception(PreformattedMessage&&, int) @ 0x000000000aa1f9a9
+6. /home/ubuntu/ClickHouse/src/Common/Exception.h:113: DB::Exception::Exception<std::basic_string_view<char, std::char_traits<char>>&, String, String>(int, FormatStringHelperImpl<std::type_identity<std::basic_string_view<char, std::char_traits<char>>&>::type, std::type_identity<String>::type, std::type_identit
+y<String>::type>, std::basic_string_view<char, std::char_traits<char>>&, String&&, String&&) @ 0x000000001992703b
+7. /home/ubuntu/ClickHouse/src/Core/Block.cpp:36: void DB::onError<void, std::basic_string_view<char, std::char_traits<char>>&, String, String>(int, FormatStringHelperImpl<std::type_identity<std::basic_string_view<char, std::char_traits<char>>&>::type, std::type_identity<String>::type, std::type_identity<Strin
+g>::type>, std::basic_string_view<char, std::char_traits<char>>&, String&&, String&&) @ 0x000000001991f46f
+8. /home/ubuntu/ClickHouse/src/Core/Block.cpp:52: void DB::checkColumnStructure<void>(DB::ColumnWithTypeAndName const&, DB::ColumnWithTypeAndName const&, std::basic_string_view<char, std::char_traits<char>>, bool, int) @ 0x000000001991959b
+9. /home/ubuntu/ClickHouse/src/Core/Block.cpp:0: DB::Block::insert(DB::ColumnWithTypeAndName) @ 0x0000000019919f69
+10. /home/ubuntu/ClickHouse/src/Interpreters/ActionsDAG.cpp:759: DB::ActionsDAG::updateHeader(DB::Block const&) const @ 0x000000001a4340d1
+11. /home/ubuntu/ClickHouse/src/Processors/QueryPlan/SourceStepWithFilter.cpp:39: DB::SourceStepWithFilter::applyPrewhereActions(DB::Block, std::shared_ptr<DB::PrewhereInfo> const&) @ 0x000000001ddef878
+12. /home/ubuntu/ClickHouse/src/Storages/MergeTree/MergeTreeSelectProcessor.cpp:177: DB::MergeTreeSelectProcessor::transformHeader(DB::Block, std::shared_ptr<DB::PrewhereInfo> const&) @ 0x000000001ce78aa3
+13. /home/ubuntu/ClickHouse/src/Processors/QueryPlan/ReadFromMergeTree.cpp:1775: DB::ReadFromMergeTree::updatePrewhereInfo(std::shared_ptr<DB::PrewhereInfo> const&) @ 0x000000001dd35733
+14. /home/ubuntu/ClickHouse/src/Processors/QueryPlan/Optimizations/optimizePrewhere.cpp:174: DB::QueryPlanOptimizations::optimizePrewhere(std::vector<DB::QueryPlanOptimizations::Frame, std::allocator<DB::QueryPlanOptimizations::Frame>>&, std::list<DB::QueryPlan::Node, std::allocator<DB::QueryPlan::Node>>&) @ 0
+x000000001de0ccb1
+15. /home/ubuntu/ClickHouse/src/Processors/QueryPlan/Optimizations/optimizeTree.cpp:123: DB::QueryPlanOptimizations::optimizeTreeSecondPass(DB::QueryPlanOptimizationSettings const&, DB::QueryPlan::Node&, std::list<DB::QueryPlan::Node, std::allocator<DB::QueryPlan::Node>>&) @ 0x000000001de04c33
+16. /home/ubuntu/ClickHouse/src/Processors/QueryPlan/QueryPlan.cpp:506: DB::QueryPlan::optimize(DB::QueryPlanOptimizationSettings const&) @ 0x000000001dd0a5dd
+17. /home/ubuntu/ClickHouse/src/Processors/QueryPlan/QueryPlan.cpp:169: DB::QueryPlan::buildQueryPipeline(DB::QueryPlanOptimizationSettings const&, DB::BuildQueryPipelineSettings const&) @ 0x000000001dd0a0f7
+18. /home/ubuntu/ClickHouse/src/Interpreters/InterpreterSelectWithUnionQuery.cpp:380: DB::InterpreterSelectWithUnionQuery::execute() @ 0x000000001b61270b
+19. /home/ubuntu/ClickHouse/src/Interpreters/executeQuery.cpp:1208: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x000000001bbc0e17
+20. /home/ubuntu/ClickHouse/src/Interpreters/executeQuery.cpp:1375: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x000000001bbbb30a
+21. /home/ubuntu/ClickHouse/src/Server/TCPHandler.cpp:523: DB::TCPHandler::runImpl() @ 0x000000001d4417d9
+22. /home/ubuntu/ClickHouse/src/Server/TCPHandler.cpp:2342: DB::TCPHandler::run() @ 0x000000001d456abf
+23. /home/ubuntu/ClickHouse/base/poco/Net/src/TCPServerConnection.cpp:43: Poco::Net::TCPServerConnection::start() @ 0x00000000228ca9b9
+24. /home/ubuntu/ClickHouse/base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x00000000228cb208
+25. /home/ubuntu/ClickHouse/base/poco/Foundation/src/ThreadPool.cpp:188: Poco::PooledThread::run() @ 0x0000000022aa2074
+26. /home/ubuntu/ClickHouse/base/poco/Foundation/src/Thread.cpp:46: Poco::(anonymous namespace)::RunnableHolder::run() @ 0x0000000022a9ee1a
+27. /home/ubuntu/ClickHouse/base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000022a9db5e
+28. ? @ 0x00007ffff7c94ac3
+29. ? @ 0x00007ffff7d26850
+```
+
+Doesn't fail with `optimize_move_to_prewhere=0`
+
+Probably broken by https://github.com/ClickHouse/ClickHouse/pull/58554
+
+Presumably what happens is that the WHERE expression, which would normally run after the LowCardinality -> String conversion, gets moved to PREWHERE, where it would run before the LowCardinality -> String conversion, on different data type, and the planning gets confused by that in some way.

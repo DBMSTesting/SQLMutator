@@ -1,0 +1,111 @@
+ID: 13936
+Title: DB::Exception: Block structure mismatch in function connect between Converting and Concat stream: different number of columns
+Description:
+## env 
+- clickhosue-server : version 20.5.2.7 (official build)
+
+## table structure
+```sql
+recom_stats_dws.load_clk_log_day -- TBD
+(
+  `uid` String COMMENT 'user id',
+  `item_id` String COMMENT 'item id',
+  `recom_token` String,
+  `position` Int16,
+  -- `algo_list` String,
+  `algo` String,
+  -- `sub_algo` String,
+  `score` Nullable(float),  -- Nullable
+  -- `os_name` String,
+  -- `context` String,
+  `label`  UInt8 COMMENT 'user click this item, 1 for TP 0 for FP',
+  `dt` FixedString(8),  -- YYYYMMDD
+  `scene` String
+)
+ENGINE = MergeTree()
+PARTITION BY (dt, scene)
+ORDER BY (label, uid, item_id, recom_token)  -- TBD
+SETTINGS index_granularity = 8192;
+```
+This table is not a distributed table. We use this table in e-commerce scenarios.
+
+## Describe the bug
+When I  use `cat script.sql | clickhouse-client -mn` to query the server, I got error message below:
+
+>  Block structure mismatch in function connect between Converting and Concat stream: different number of columns: rate Float32 Float32(size = 0), algo String String(size = 0), pos Int32 Const(size = 0, Int32(size = 1)), scene String String(size = 0), dt String Const(size = 0, String(size = 1)) (version 20.5.2.7 (official build))
+
+This is script.sql:
+```sql
+select -- ① precesion in each scene
+		toFloat32(a.cnt/b.cnt) as rate,
+		'all' as algo,
+		toInt32(-1) as pos,
+		a.scene as scene,
+		'20200715' as dt
+from
+(
+	select  -- calculate #click in each scene
+		count(distinct recom_token) as cnt,
+		scene
+	from
+		recom_stats_dws.load_clk_log_day
+	where 
+		dt='20200715' and label = 1 and algo != 'others'
+	group by
+		scene
+) AS a
+INNER JOIN
+(
+	select  -- calculate #load in each scene
+		count(distinct recom_token) as cnt,
+		scene
+	from
+		recom_stats_dws.load_clk_log_day
+	where
+		dt='20200715' and algo != 'others'
+	group by
+		scene
+) AS b
+on
+	a.scene = b.scene
+
+union all
+
+select  -- ② precesion in each scene,  and  algo != 'old_rule'
+	toFloat32(aa.cnt/bb.cnt),
+	'algo_sum',
+	toInt32(-1),
+	aa.scene,
+	'20200715'
+from
+(
+	select   -- calculate #click in each scene, and  algo != 'old_rule'
+		count(distinct recom_token) as cnt,
+		scene
+	from
+		recom_stats_dws.load_clk_log_day
+	where
+		dt='20200715' and label = 1 and algo != 'others' and algo != 'old_rule'
+	group by
+		scene
+) AS aa
+INNER JOIN
+(
+	select  -- -- calculate #load in each scene,  and algo != 'old_rule'
+		count(distinct recom_token) as cnt,
+		scene
+	from
+		recom_stats_dws.load_clk_log_day
+	where
+		dt='20200715' and algo != 'others' and algo != 'old_rule'
+	group by
+		scene
+) AS bb
+on
+	aa.scene = bb.scene;
+```
+
+## Additional context
+I have tested my script.sql. Regard it as `A union all B`,  and query `A` or `B` alone will get a correct result. I suppose that it may parse the query in a wrong way.
+
+Or if there is some issue in my script, hope to get your help.

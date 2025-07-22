@@ -1,0 +1,51 @@
+ID: 56402
+Title: TTL tasks may fail if the TiDB sets `isolation-read.engines` to `tidb,tiflash` and the table doesn't have `TiFlash` replica.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. Start a TiDB server with `isolation-read.engines` set to `tidb,tiflash`.
+2. Create a new TTL table:
+```sql
+CREATE TABLE t1 (
+    id int PRIMARY KEY,
+    created_at TIMESTAMP
+) TTL = `created_at` + INTERVAL 3 MONTH;
+```
+3. Select the `tidb_ttl_job_history`. You'll find that the ttl job has failed:
+```sql
++----------------------------------+----------+-----------------+--------------+------------+----------------+---------------------+---------------------+---------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+--------------+-------------------+----------+
+| job_id                           | table_id | parent_table_id | table_schema | table_name | partition_name | create_time         | finish_time         | ttl_expire          | summary_text                                                                                                                                                                                                                                                               | expired_rows | deleted_rows | error_delete_rows | status   |
++----------------------------------+----------+-----------------+--------------+------------+----------------+---------------------+---------------------+---------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+--------------+-------------------+----------+
+| 8cdb068f35564d7c81f3795a4cb6afe7 |      104 |             104 | test         | t1         | NULL           | 2024-09-29 14:43:42 | 2024-09-29 14:44:00 | 2024-06-29 14:43:42 | {"total_rows":0,"success_rows":0,"error_rows":0,"total_scan_task":1,"scheduled_scan_task":1,"finished_scan_task":1,"scan_task_err":"[planner:1815]Internal : No access path for table 't1' is found with 'tidb_isolation_read_engines' = '', valid values can be 'tikv'."} |            0 |            0 |                 0 | finished |
++----------------------------------+----------+-----------------+--------------+------------+----------------+---------------------+---------------------+---------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------+--------------+-------------------+----------+
+1 row in set (0.01 sec)
+```
+
+Here are some acceptable choices:
+
+1. Don't acquire the scan task if the node itself cannot read on the table (e.g. the table doesn't have `tiflash` replica, but the node is set to use `tidb,tiflash` engine).
+2. Always use the `tidb,tikv,tiflash` engines for TTL session.
+
+### 4. What is your TiDB version? (Required)
+
+```
+mysql> select tidb_version();
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v8.3.0
+Edition: Community
+Git Commit Hash: 1a0c3ac3292fff7742faa0c00a662ccb66ba40db
+Git Branch: HEAD
+UTC Build Time: 2024-08-20 10:13:01
+GoVersion: go1.21.10
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

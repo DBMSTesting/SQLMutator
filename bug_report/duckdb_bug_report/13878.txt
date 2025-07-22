@@ -1,0 +1,51 @@
+ID: 13878
+Title: 13810 unnest cross join error
+Description:
+Fixes https://github.com/duckdblabs/duckdb-internal/issues/2979
+
+The original plan with no optimization looks like this 
+```
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             c             │
+│                           │
+│          ~0 Rows          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│    ((y + z) > CAST(0 AS   │
+│          INTEGER))        │
+│                           │
+│          ~0 Rows          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             y             │
+│             z             │
+│                           │
+│          ~0 Rows          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNNEST          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       CROSS_PRODUCT       ├──────────────┐
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         PROJECTION        ││         PROJECTION        │
+│    ────────────────────   ││    ────────────────────   │
+│             x             ││             y             │
+│                           ││                           │
+│          ~1 Rows          ││          ~1 Rows          │
+└─────────────┬─────────────┘└─────────────┬─────────────┘
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         DUMMY_SCAN        ││         DUMMY_SCAN        │
+└───────────────────────────┘└───────────────────────────┘
+```
+
+The UNNEST has an index, and is a blocking operator (I think?). The filter above it is extracted so that it can be used as a potential join filter. The problem here is that the filter has bindings from the unnest, so when we attempt to use it to join the two tables, the join order optimizer will throw an error because the filter bindings (which are only available above the unnest) are not available below the unnest. 
+
+The solution I have for this is to optimize everything below the unnest separately. In the future I may want to implement a pushdown/pullup unnest optimizer to find the best place to put an unnest. 

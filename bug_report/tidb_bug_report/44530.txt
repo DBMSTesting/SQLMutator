@@ -1,0 +1,50 @@
+ID: 44530
+Title: CursorFetch will get updated rows, even the rows are updated after `executing`.
+Description:
+The following JDBC codes will show the bug (in v6.1.5):
+
+```java
+public static void txnTest() throws SQLException, InterruptedException {
+    ConnectionImpl conn = (ConnectionImpl) DriverManager.getConnection("jdbc:mysql://127.0.0.1:4000/test?useCursorFetch=true&defaultFetchSize=1", "root", "");
+    conn.prepareStatement("drop table if exists t").execute();
+    conn.prepareStatement("create table t (id int primary key, value int)").execute();
+    conn.prepareStatement("set tidb_executor_concurrency = 1").execute();
+
+    conn.prepareStatement("begin").execute();
+    conn.prepareStatement("insert into t values (1, 1)").execute();
+
+    ResultSet rs = conn.prepareStatement("select value from t union all select value from t union all select value from t").executeQuery();
+    rs.next();
+    System.out.println("The first result is: " + rs.getInt(1));
+
+    conn.prepareStatement("update t set value = 2 where id = 1").execute();
+    rs.next();
+    System.out.println("The second result is: " + rs.getInt(1));
+
+    conn.prepareStatement("update t set value = 2 where id = 1").execute();
+    rs.next();
+    System.out.println("The third result is: " + rs.getInt(1));
+    conn.prepareStatement("commit").execute();
+
+}
+```
+
+The output is:
+
+```
+The first result is: 1
+The second result is: 1
+The third result is: 2
+```
+
+The expected (MySQL) output is:
+
+```
+The first result is: 1
+The second result is: 1
+The third result is: 1
+```
+
+Although the `update` statement is executed after when the cursor is created, the cursor can still read the newest result.
+
+It only affects the version <6.1, on which the implementation of cursorFetch is lazily fetching results.

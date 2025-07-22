@@ -1,0 +1,98 @@
+ID: 22048
+Title: A huge number of MySQL dictionaries with `share_connection` option: SYSTEM RELOAD DICTIONARIES is freezing (version 21.3.2.5 (official build))
+Description:
+(Sorry, the test case is quite complex).
+
+When upgrading from ClickHouse 20.3 to 21.3.2.5, we found a regression.
+
+We defined in ClickHouse nearly 50 MySQL dictionaries.
+All of these dictionaries are pointy to the same MySQL database. Due to this high number, we are using the close connection and share connection option :
+```
+   <dictionary>
+      <name>hour_types</name>
+      <source>
+         <mysql incl="mysql_source">
+            <db>fvrm</db>
+            <table>hour_types</table>
+            <close_connection>true</close_connection>
+            <share_connection>true</share_connection>
+         </mysql>
+      </source>
+      <layout>
+         <hashed/>
+      </layout>
+      <structure>
+         <id>
+            <name>id</name>
+            <type>UInt32</type>
+            <expression>CAST(id AS UNSIGNED)</expression>
+         </id>
+         <attribute>
+            <name>name</name>
+            <type>String</type>
+            <null_value>(UNDEFINED)</null_value>
+         </attribute>
+      </structure>
+      <lifetime>0</lifetime>
+   </dictionary>
+```
+
+We have a script that ask for the reload of the dictionaries, and then create the corresponding dictionary tables  if they are not existing:
+```
+SYSTEM RELOAD DICTIONARIES;
+CREATE TABLE IF NOT EXISTS fvrm.hour_types (`id` UInt64, `name` String) ENGINE = Dictionary(hour_types);
+...
+```
+The issue here, is when we launch this script a second or a third time without restarting clickhouse server, the query SYSTEM RELOAD DICTIONARIES is blocked.
+
+For example, the result of a SHOW PROCESSLIST:
+```
+Row 1:
+──────
+is_initial_query:     1
+user:                 admin
+query_id:             4f939d04-aa79-4ce2-a17b-d92cb16fb243
+address:              ::1
+port:                 35028
+initial_user:         admin
+initial_query_id:     4f939d04-aa79-4ce2-a17b-d92cb16fb243
+initial_address:      ::1
+initial_port:         35028
+interface:            1
+os_user:              root
+client_hostname:      localhost
+client_name:          ClickHouse 
+client_revision:      54447
+client_version_major: 21
+client_version_minor: 3
+client_version_patch: 2
+http_method:          0
+http_user_agent:      
+http_referer:         
+forwarded_for:        
+quota_key:            
+elapsed:              89.233185793
+is_cancelled:         0
+read_rows:            0
+read_bytes:           0
+total_rows_approx:    0
+written_rows:         0
+written_bytes:        0
+memory_usage:         0
+peak_memory_usage:    0
+query:                SYSTEM RELOAD DICTIONARIES;
+thread_ids:           [7100]
+ProfileEvents.Names:  ['Query','ReadCompressedBytes','CompressedReadBufferBlocks','CompressedReadBufferBytes','IOBufferAllocs','IOBufferAllocBytes','ContextLock']
+ProfileEvents.Values: [1,36,1,10,1,89,11]
+Settings.Names:       ['use_uncompressed_cache','load_balancing','max_bytes_before_external_group_by','max_bytes_before_external_sort','max_memory_usage','max_memory_usage_for_all_queries']
+Settings.Values:      ['0','random','173224755','173224755','346449510','692899020']
+```
+
+And if I activate trace log, the log file is full of:
+
+```
+2021.03.23 16:37:51.824660 [ 8664 ] {} <Trace> mysqlxx::Pool: (fvrm@127.0.0.1:12306 as user clickhouse): Iterating through existing MySQL connections
+2021.03.23 16:37:51.824671 [ 8664 ] {} <Trace> mysqlxx::Pool: (fvrm@127.0.0.1:12306 as user clickhouse): Trying to allocate a new connection.
+2021.03.23 16:37:51.824676 [ 8664 ] {} <Trace> mysqlxx::Pool: (fvrm@127.0.0.1:12306 as user clickhouse): Unable to create a new connection: Max number of connections has been reached.
+2021.03.23 16:37:51.824683 [ 8664 ] {} <Trace> mysqlxx::Pool: (fvrm@127.0.0.1:12306 as user clickhouse): Sleeping for 1 seconds.
+```

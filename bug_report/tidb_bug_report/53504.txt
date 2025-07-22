@@ -1,0 +1,105 @@
+ID: 53504
+Title: planner: Plan Cache returns unexpected error when encountering large negative number
+Description:
+## Bug Report
+
+It has two issues:
+
+1. The behavior is not compatible with MySQL. MySQL didn't return a warning, but TiDB did.
+2. The behavior is not consistent with or without plan cache. With plan cache, it returns an error but not warning.
+
+### 1. Minimal reproduce step (Required)
+
+```
+create table t (v bigint);
+prepare stmt5 from 'select * from t where v = -?;';
+set @arg=1;
+execute stmt5 using @arg;
+set @arg=-9223372036854775808;
+execute stmt5 using @arg;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> create table t (v bigint);
+Query OK, 0 rows affected (0.06 sec)
+
+mysql> prepare stmt5 from 'select * from t where v = -?;';
+Query OK, 0 rows affected (0.01 sec)
+Statement prepared
+
+mysql> set @arg=1;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt5 using @arg;
+Empty set (0.00 sec)
+
+mysql> set @arg=-9223372036854775808;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt5 using @arg;
+Empty set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> create table t (v bigint);
+Query OK, 0 rows affected (0.11 sec)
+
+mysql> prepare stmt5 from 'select * from t where v = -?;';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> set @arg=1;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt5 using @arg;
+Empty set (0.01 sec)
+
+mysql> set @arg=-9223372036854775808;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt5 using @arg;
+ERROR 1815 (HY000): expression eq(test.t.v, unaryminus(-9223372036854775808)) cannot be pushed down
+```
+
+However, if you execute the second statement without plan cache, it'll return a warning but not error
+
+```
+mysql> prepare stmt5 from 'select * from t where v = -?;';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> set @arg=-9223372036854775808;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt5 using @arg;
+Empty set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                          |
++---------+------+------------------------------------------------------------------------------------------------------------------+
+| Warning | 1105 | skip prepared plan-cache: 'unaryminus(cast(-9223372036854775808, decimal(20,0) BINARY))' may be converted to INT |
++---------+------+------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                               |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v8.0.0
+Edition: Community
+Git Commit Hash: 8ba1fa452b1ccdbfb85879ea94b9254aabba2916
+Git Branch: HEAD
+UTC Build Time: 2024-03-28 14:22:15
+GoVersion: go1.21.4
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

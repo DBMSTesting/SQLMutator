@@ -1,0 +1,51 @@
+ID: 17813
+Title: P1-[4.0 bug hunting]-[SQL Plan Management]-Server panic for predicate t0.c0=9223372036854775808 when using partitions
+Description:
+Bug Hunter issue tidb-challenge-program/bug-hunting-issue#9
+
+---
+
+Consider the following statements:
+
+```sql
+CREATE TABLE t0(c0 INT) PARTITION BY HASH(c0) PARTITIONS 3;
+SELECT * FROM t0 WHERE t0.c0=9223372036854775808;
+```
+When executing the `SELECT`, the server unexpectedly panics:
+``` 
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 4863
+Server version: 5.7.25-TiDB-v4.0.0-beta.2-231-gc66320c46 TiDB Server (Apache License 2.0), MySQL 5.7 compatible
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> CREATE TABLE t0(c0 INT) PARTITION BY HASH(c0) PARTITIONS 3;
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> SELECT * FROM t0 WHERE t0.c0=9223372036854775808;
+ERROR 2013 (HY000): Lost connection to MySQL server during query
+```
+The bug seems to be specific to the constant. A smaller constant, such as 9223372036854775807, does not result in the error. The bug also only seems to occur for 3 partitions or more. The server logs the following:
+```
+[2020/04/14 18:05:54.075 +02:00] [ERROR] [conn.go:661] ["connection running loop panic"] [conn=4863] [lastSQL="SELECT * FROM t0 WHERE t0.c0=9223372036854775808"] [err="runtime error: index out of range [-2]"] [stack="goroutine 505122901 [running]:\ngithub.com/pingcap/tidb/server.(*clientConn).Run.func1(0x2d62780, 0xc009940b70, 0xc0043645b0)\n\t/tidb/server/conn.go:659 +0xee\npanic(0x2835c80, 0xc03ddda400)\n\t/usr/lib/go-1.13/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/planner/core.getPartitionInfo(0x2d9bb40, 0xc0499a8500, 0xc00259a780, 0xc0007fc3d0, 0x1, 0x4, 0x2, 0x2d84160)\n\t/tidb/planner/core/point_get_plan.go:1154 +0x23d\ngithub.com/pingcap/tidb/planner/core.tryPointGetPlan(0x2d9bb40, 0xc0499a8500, 0xc005dcb380, 0x0)\n\t/tidb/planner/core/point_get_plan.go:677 +0x23a\ngithub.com/pingcap/tidb/planner/core.TryFastPlan(0x2d9bb40, 0xc0499a8500, 0x2d64300, 0xc005dcb380, 0xc01c89f001, 0x30)\n\t/tidb/planner/core/point_get_plan.go:373 +0x298\ngithub.com/pingcap/tidb/planner.Optimize(0x2d62780, 0xc009940b70, 0x2d9bb40, 0xc0499a8500, 0x2d64300, 0xc005dcb380, 0x2d90f40, 0xc004d81aa0, 0x0, 0x0, ...)\n\t/tidb/planner/optimize.go:43 +0x12a3\ngithub.com/pingcap/tidb/executor.(*Compiler).Compile(0xc0007fcdc8, 0x2d62780, 0xc009940b70, 0x2d69bc0, 0xc005dcb380, 0x0, 0x0, 0x0)\n\t/tidb/executor/compiler.go:61 +0x253\ngithub.com/pingcap/tidb/session.(*session).execute(0xc0499a8500, 0x2d62780, 0xc009940b70, 0xc0352cb041, 0x30, 0xc0216c03c0, 0x0, 0x0, 0xc0007fd178, 0x2459b2a)\n\t/tidb/session/session.go:1134 +0x5cf\ngithub.com/pingcap/tidb/session.(*session).Execute(0xc0499a8500, 0x2d62780, 0xc009940b70, 0xc0352cb041, 0x30, 0x0, 0x0, 0x0, 0x0, 0x0)\n\t/tidb/session/session.go:1085 +0xdb\ngithub.com/pingcap/tidb/server.(*TiDBContext).Execute(0xc009940ea0, 0x2d62780, 0xc009940b70, 0xc0352cb041, 0x30, 0xf2a1e1, 0x2a856a8, 0xc0007fd278, 0xc0007fd268, 0xfca692)\n\t/tidb/server/driver_tidb.go:248 +0x7c\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc0043645b0, 0x2d62780, 0xc009940b70, 0xc0352cb041, 0x30, 0x0, 0x0)\n\t/tidb/server/conn.go:1266 +0x91\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch(0xc0043645b0, 0x2d62780, 0xc009940b70, 0xc0352cb041, 0x31, 0x30, 0x0, 0x0)\n\t/tidb/server/conn.go:900 +0x5e2\ngithub.com/pingcap/tidb/server.(*clientConn).Run(0xc0043645b0, 0x2d62780, 0xc009940b70)\n\t/tidb/server/conn.go:714 +0x27c\ngithub.com/pingcap/tidb/server.(*Server).onConn(0xc0009d1d90, 0xc0043645b0)\n\t/tidb/server/server.go:415 +0xb12\ncreated by github.com/pingcap/tidb/server.(*Server).Run\n\t/tidb/server/server.go:333 +0x709\n"]
+```
+
+Environment:
+``` 
+| Release Version: v4.0.0-beta.2-231-gc66320c46
+Git Commit Hash: c66320c46456c0d5b23b3b0403be6b9f8227d6d8
+Git Branch: master
+UTC Build Time: 2020-04-14 11:12:29
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
+```
+
+I propose P0 as a bug level, since it matches the following description: `Process crash, etc.`

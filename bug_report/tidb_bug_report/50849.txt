@@ -1,0 +1,50 @@
+ID: 50849
+Title: error stack lost after joining errors
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+``` diff
+diff --git a/pkg/executor/aggregate/agg_hash_executor.go b/pkg/executor/aggregate/agg_hash_executor.go
+index 8608890c8f..36e1d61e87 100644
+--- a/pkg/executor/aggregate/agg_hash_executor.go
++++ b/pkg/executor/aggregate/agg_hash_executor.go
+@@ -151,6 +151,9 @@ func (e *HashAggExec) Close() error {
+        if e.stats != nil {
+                defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), e.stats)
+        }
++       if e.Ctx().GetSessionVars().ConnectionID != 0{
++               panic(errors.New("test"))
++       }
+        if e.IsUnparallelExec {
+                e.childResult = nil
+                e.groupSet, _ = set.NewStringSetWithMemoryUsage()
+(END)
+```
+
+
+``` sql
+drop table if exists t;
+create table t(a int);
+insert into t values(1);
+insert into t select * from t;
+select  /*+hash_agg()*/ sum(t1.a) from t t1 join t t2;
+```
+
+### 2. What did you expect to see? (Required)
+``` log
+[2024/01/31 18:14:55.593 +08:00] [INFO] [conn.go:1155] ["command dispatched failed"] [conn=2097154] [session_alias=] [connInfo="id:2097154, addr:127.0.0.1:44340 status:10, collation:utf8mb4_0900_ai_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql="select /*+hash_agg()*/ sum(t1.a) from t t1 join t t2"] [txn_mode=PESSIMISTIC] [timestamp=447400141283131392] [err="test\ngithub.com/pingcap/tidb/pkg/executor/aggregate.(*HashAggExec).Close\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/executor/aggregate/agg_hash_executor.go:155\ngithub.com/pingcap/tidb/pkg/executor/internal/exec.Close\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/executor/internal/exec/executor.go:330\ngithub.com/pingcap/tidb/pkg/executor.(*recordSet).Finish.func1\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/executor/adapter.go:187\nsync.(*Once).doSlow\n\t/home/xhy/.gvm/gos/go1.21.5/src/sync/once.go:74\nsync.(*Once).Do\n\t/home/xhy/.gvm/gos/go1.21.5/src/sync/once.go:65\ngithub.com/pingcap/tidb/pkg/executor.(*recordSet).Finish\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/executor/adapter.go:186\ngithub.com/pingcap/tidb/pkg/session.(*execStmtResult).Finish.func1\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/session/session.go:2435\nsync.(*Once).doSlow\n\t/home/xhy/.gvm/gos/go1.21.5/src/sync/once.go:74\nsync.(*Once).Do\n\t/home/xhy/.gvm/gos/go1.21.5/src/sync/once.go:65\ngithub.com/pingcap/tidb/pkg/session.(*execStmtResult).Finish\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/session/session.go:2432\ngithub.com/pingcap/tidb/pkg/server/internal/resultset.(*tidbResultSet).Finish\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/internal/resultset/resultset.go:69\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).writeChunks\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/conn.go:2375\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).writeResultSet\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/conn.go:2262\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).handleStmt\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/conn.go:2055\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).handleQuery\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/conn.go:1775\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).dispatch\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/conn.go:1349\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).Run\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/conn.go:1122\ngithub.com/pingcap/tidb/pkg/server.(*Server).onConn\n\t/home/xhy/Development/github.com/pingcap/tidb/pkg/server/server.go:713\nruntime.goexit\n\t/home/xhy/.gvm/gos/go1.21.5/src/runtime/asm_amd64.s:1650"]
+```
+
+
+### 3. What did you see instead (Required)
+``` log
+[2024/01/31 18:09:07.494 +08:00] [INFO] [conn.go:1155] ["command dispatched failed"] [conn=2097154] [session_alias=] [connInfo="id:2097154, addr:127.0.0.1:41558 status:10, collation:utf8mb4_0900_ai_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql="select sum(t1.a) from t t1 join t t2"] [txn_mode=PESSIMISTIC] [timestamp=447400050031067136] [err=test]
+```
+
+
+### 4. What is your TiDB version? (Required)
+
+commit after https://github.com/pingcap/tidb/pull/49224

@@ -1,0 +1,150 @@
+ID: 13172
+Title: Memory increasing with size of input when using C appender API
+Description:
+### What happens?
+
+I'm using the C API to insert data into a table using appender and data chunk.
+I notice that memory usage increase with the quantity of data I insert. I use a disk-backed DB.
+This prevents me to create really big databases. Maybe I'm not using the C API correctly, but currently I don't see what is wrong in what I do.
+
+Best,
+Vincent
+
+### To Reproduce
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <duckdb.h>
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <path> <nb_frames>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    int vect_size = duckdb_vector_size();
+    duckdb_database db;
+    duckdb_connection con;
+
+    if (duckdb_open(argv[1], &db) == DuckDBError)
+        goto die;
+
+    if (duckdb_connect(db, &con) == DuckDBError)
+        goto die;
+
+    duckdb_state st;
+    duckdb_result res;
+    st = duckdb_query(con, "CREATE OR REPLACE TABLE data (ts TIMESTAMPTZ NOT NULL, book DECIMAL(18,5)[100] NOT NULL)", &res);
+    if (st == DuckDBError)
+        goto die;
+
+    duckdb_appender appender;
+    if (duckdb_appender_create(con, NULL, "data", &appender) == DuckDBError)
+        goto die;
+
+    duckdb_data_chunk chunk;
+    duckdb_logical_type types[2];
+    types[0] = duckdb_create_logical_type(DUCKDB_TYPE_TIMESTAMP_TZ);
+    duckdb_logical_type dec = duckdb_create_decimal_type(18, 5);
+    int arr_len = 100;
+    types[1] = duckdb_create_array_type(dec, arr_len);
+    chunk = duckdb_create_data_chunk(types, 2);
+    duckdb_data_chunk_set_size(chunk, vect_size);
+
+    duckdb_vector tss_vect = duckdb_data_chunk_get_vector(chunk, 0);
+    int64_t *tss_data = duckdb_vector_get_data(tss_vect);
+
+    duckdb_vector arr_vect = duckdb_data_chunk_get_vector(chunk, 1);
+    duckdb_vector arr_child_vect = duckdb_array_vector_get_child(arr_vect);
+    int64_t *arr_data = duckdb_vector_get_data(arr_child_vect);
+
+    int nb_frames = strtol(argv[2], NULL, 10);
+    for (int j = 0; j < nb_frames; j++) {
+        for (int i = 0; i < vect_size; i++) {
+            tss_data[i] = (int64_t)1000000*(vect_size*j+i);
+            for (int k = 0; k < arr_len; k++) {
+                arr_data[i*arr_len+k] = rand() % 10000000000;
+            }
+        }
+        st = duckdb_append_data_chunk(appender, chunk);
+        if (st == DuckDBError) {
+            return EXIT_FAILURE;
+        }
+        /* duckdb_appender_flush(appender); */
+    }
+
+    // cleanup (even if its useless)
+    duckdb_destroy_data_chunk(&chunk);
+    duckdb_appender_destroy(&appender);
+    duckdb_disconnect(&con);
+    duckdb_close(&db);
+    return EXIT_SUCCESS;
+
+ die:
+    fprintf(stderr, "%s\n", duckdb_result_error(&res));
+    return EXIT_FAILURE;
+}
+```
+
+```
+[vb@sita /tmp]% time ./a.out truc.db 100
+./a.out truc.db 100 1,00s user 0,39s system 1,40s elapsed 99% cpu 1,402 total
+avg shared (code):         0 KB
+avg unshared (data/stack): 0 KB
+total (sum):               0 KB
+max memory:                355 MB
+page faults from disk:     0
+other page faults:         131513
+[vb@sita /tmp]% time ./a.out truc.db 200
+./a.out truc.db 200 1,85s user 0,51s system 2,38s elapsed 99% cpu 2,381 total
+avg shared (code):         0 KB
+avg unshared (data/stack): 0 KB
+total (sum):               0 KB
+max memory:                448 MB
+page faults from disk:     0
+other page faults:         161542
+[vb@sita /tmp]% time ./a.out truc.db 300
+./a.out truc.db 300 2,65s user 0,94s system 3,60s elapsed 99% cpu 3,605 total
+avg shared (code):         0 KB
+avg unshared (data/stack): 0 KB
+total (sum):               0 KB
+max memory:                533 MB
+page faults from disk:     0
+other page faults:         272642
+```
+
+### OS:
+
+Linux x64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+C API
+
+### Full Name:
+
+Vincetn Bernardoff
+
+### Affiliation:
+
+Deepmarker
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [ ] Yes, I have

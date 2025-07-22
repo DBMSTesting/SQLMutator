@@ -1,0 +1,48 @@
+ID: 5790
+Title: Incorrect LowCardinality dictionary after a merge
+Description:
+The error message is `DB::Exception: Incorrect mark: (0,0,8192) or (0,0) in data, (0,8,8192) in ml_sm_ep1.dict.mrk file: Cannot read mark 0 at row 0 in file ml_sm_ep1.dict.mrk, mrk file offset: 16`
+The problem started to appear after CH was upgraded from 18.14.19 to 19.7.3.
+
+A part was merged successfully on June 25.
+It was a big part, O_DIRECT was used (min_merge_bytes_to_use_direct_io is 10,737,418,240).
+```
+2019.06.25 04:15:39.991131 [ 9 ] {} <Debug> (MergerMutator): Merging 6 parts: from 201906_7424_7690_4 to 201906_8224_8229_1 into tmp_merge_201906_7424_8229_5
+2019.06.25 04:15:40.004476 [ 9 ] {} <Debug> (MergerMutator): Selected MergeAlgorithm: Vertical
+2019.06.25 04:15:40.004880 [ 9 ] {} <Debug> (MergerMutator): Will merge parts reading files in O_DIRECT
+...
+2019.06.25 07:17:53.849397 [ 9 ] {} <Trace> (Data): Renaming temporary part tmp_merge_201906_7424_8229_5 to 201906_7424_8229_5.
+```
+On June 26 it gets checked, and there is a problem:
+```
+2019.06.26 08:25:10.337857 [ 45 ] {} <Warning> (ReplicatedMergeTreePartCheckThread): Checking part 201906_7424_8229_5
+...
+2019.06.26 09:12:29.399597 [ 45 ] {} <Debug> checkDataPart: Checking column ml_sm_ep1 in /var/lib/clickhouse/data/.../201906_7424_8229_5/
+2019.06.26 09:12:29.488877 [ 45 ] {} <Error> (ReplicatedMergeTreePartCheckThread): void DB::ReplicatedMergeTreePartCheckThread::checkPart(const String&): Code: 247, e.displayText() = DB::Exception: Incorrect mark: (0,0,8192) or (0,0) in data, (0,8,8192) in /var/lib/clickhouse/data/.../201906_7424_8229_5/ml_sm_ep1.dict.mrk file: Cannot read mark 0 at row 0 in file /var/lib/clickhouse/data/.../201906_7424_8229_5/ml_sm_ep1.dict.mrk, mrk file offset: 16, Stack trace:
+
+0. clickhouse-server(StackTrace::StackTrace()+0x16) [0x75f3b16]
+1. clickhouse-server() [0x6dfb067]
+2. clickhouse-server() [0x6dfcd09]
+3. clickhouse-server(DB::DataTypeLowCardinality::enumerateStreams(std::function<void (std::vector<DB::IDataType::Substream, std::allocator<DB::IDataType::Substream> > const&)> const&, std::vector<DB::IDataType::Substream, std::allocator<DB::IDataType::Substream>
+ >&) const+0x76) [0x6978a16]
+4. clickhouse-server(DB::checkDataPart(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::MergeTreeIndexGranularity const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool, std
+::vector<std::shared_ptr<DB::IDataType const>, std::allocator<std::shared_ptr<DB::IDataType const> > > const&, std::vector<std::shared_ptr<DB::IMergeTreeIndex>, std::allocator<std::shared_ptr<DB::IMergeTreeIndex> > > const&, std::function<bool ()>)+0x1267) [0x6d
+fe4b7]
+5. clickhouse-server(DB::checkDataPart(std::shared_ptr<DB::MergeTreeDataPart const>, bool, std::vector<std::shared_ptr<DB::IDataType const>, std::allocator<std::shared_ptr<DB::IDataType const> > > const&, std::vector<std::shared_ptr<DB::IMergeTreeIndex>, std::al
+locator<std::shared_ptr<DB::IMergeTreeIndex> > > const&, std::function<bool ()>)+0xc3) [0x6dff643]
+6. clickhouse-server(DB::ReplicatedMergeTreePartCheckThread::checkPart(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)+0x75e) [0x6dda02e]
+7. clickhouse-server(DB::ReplicatedMergeTreePartCheckThread::run()+0xf5) [0x6ddad85]
+8. clickhouse-server(DB::BackgroundSchedulePoolTaskInfo::execute()+0xfa) [0x68e02da]
+9. clickhouse-server(DB::BackgroundSchedulePool::threadFunction()+0x6a) [0x68e09aa]
+10. clickhouse-server() [0x68e0a29]
+11. clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1ab) [0x75f9aab]
+12. clickhouse-server() [0xb4d035f]
+13. /lib/x86_64-linux-gnu/libpthread.so.0(+0x7494) [0x7fe9961b2494]
+14. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7fe9957e4aff]
+ (version 19.7.3.9 (official build))
+```
+My cluster has three replicas. I upgraded the first replica on June 13, the second on June 20, and the third on June 24 (the last replica had all the leaders at that time). The problem first appeared on June 25, a few hours after the last upgrade. Since then it happened two more times on different servers, but always the same table and the same column.
+
+ml_sm_ep1 is LowCardinality(String).
+The table has two LowCardinality(String) columns, the other one is two times smaller when compressed.
+The table also has a few Array(LowCardinality(String)).

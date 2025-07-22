@@ -1,0 +1,127 @@
+ID: 975
+Title: [Bug]: When using cursor , SQL hang
+Description:
+### Please check the issue list for the same bug
+
+- [X] I have checked issue list and this bug is encountered for the first time.
+
+### Environment
+
+```markdown
+- OB Version&commit_id or other module version&commit_id (e.g. observer V3.1.2 8b23a93):
+- Hardware parameter:OS type & Compliler & CPU etc. 
+- Others
+### 部署：1台obproxy 3个实例
+### 版本：
+obproxy (OceanBase 3.2.0 1)
+observer 实例版本 3.1.1
+
+### 硬件：
+obproxy :  8core, 32G
+observer : 16core ,64G
+
+### OS
+obproxy及obsever 都部署在以下版本系统中
+Distributor ID: CentOS
+Description:    CentOS Linux release 7.5.1804 (Core) 
+Release:        7.5.1804
+```
+
+
+### Fast Reproduce Steps(Required)
+
+测试表为1.37亿，无主键及索引建；我使用分页抽取，开启十个并行度
+十个sql如下：
+String q0 = "SELECT * FROM `hugedata_db`.`t_users`   limit 0, 13785876";
+String q1 = "SELECT * FROM `hugedata_db`.`t_users`   limit 13785876, 13785876";
+String q2 = "SELECT * FROM `hugedata_db`.`t_users`   limit 27571752, 13785876";
+String q3 = "SELECT * FROM `hugedata_db`.`t_users`   limit 41357628, 13785876";
+String q4 = "SELECT * FROM `hugedata_db`.`t_users`   limit 55143504, 13785876";
+String q5 = "SELECT * FROM `hugedata_db`.`t_users`   limit 68929380, 13785876";
+String q6 = "SELECT * FROM `hugedata_db`.`t_users`   limit 82715256, 13785876";
+String q7 = "SELECT * FROM `hugedata_db`.`t_users`   limit 96501132, 13785876";
+String q8 = "SELECT * FROM `hugedata_db`.`t_users`   limit 110287008, 13785876";
+String q9 = "SELECT * FROM `hugedata_db`.`t_users`   limit 124072884, 13785876";
+任务有8成概率失败，但偶尔可以成功，设置为5或3并行度的分页大概率成功。
+### 测试代码如下
+![image](https://user-images.githubusercontent.com/19281610/175481602-a782d949-a2f6-4fa9-a23b-eed3a1c1d211.png)
+
+大部分情况是9个sql跑的很快，剩余一个sql(如q9 SELECT * FROM `hugedata_db`.`t_users`  limit 124072884, 13785876，也可能是别的sql，此处仅举例，多跑几次任务 就可能是别的sql hang住) hang住了；q9在连接的状态是active的(如图)
+![image](https://user-images.githubusercontent.com/19281610/175478549-371bc07c-20f0-4513-a9f9-773fbd4cc521.png)
+且q9 从日志看他并不是一点数据没读出，而是已经读出9千万了差400百万读不出且hang住了，最后会被net_write_timeout超时。
+### obproxy日志如下：
+![image](https://user-images.githubusercontent.com/19281610/175479062-9795bbfb-ea20-4599-8eef-b60c3c5927c6.png)
+连接断开的日志
+![image](https://user-images.githubusercontent.com/19281610/175479719-630e33bd-99b7-4ad7-a1ee-d591617aba9f.png)
+
+### 表数据所在实例节点observer日志如下(只截图断开时间的部分日志供参考)：
+![image](https://user-images.githubusercontent.com/19281610/175479942-7afb4c32-986e-45ec-a704-13b55c868f67.png)
+
+![image](https://user-images.githubusercontent.com/19281610/175482349-654595ca-0f94-4331-a8d1-a93c5351fa57.png)
+
+
+### observer 的warn日志应该是有价值的就是从截图摘出来的文本：
+```
+[2022-06-24 14:25:28.547824] INFO  [RPC.OBMYSQL] ob_mysql_handler.cpp:186 [4081][0][Y0-0000000000000000] [lt=2] [dc=0] process wakeup c has error(ref=0, sessid=3221945693)
+[2022-06-24 14:25:28.547841] INFO  [RPC.OBMYSQL] obsm_handler.cpp:165 [4081][0][Y0-0000000000000000] [lt=4] [dc=0] kill and revert session(conn->version_=0, conn->sessid_=3221945693, proxy_sessid=1113, server_id=2, tmp_ret=0, eret=0)
+[2022-06-24 14:25:28.547849] INFO  easy_connection.c:398 [4081][0][Y0-0000000000000000] [lt=3] [dc=0] Socket closed, fd(1824), conn(10.99.0.233:2881_10.99.0.184:49818_1824_0x7fd13c97cf60 tp=0 t=1656050775514141-1656051928547783 s=3 r=0 io=998/960829412 sq
+=0), ev_is_pending(0), ev_is_active(0), ev_timer_pending_addr(0x7fd13c97bad0), ev_timer_pending(1), timeout_watcher(0x7fd13c97d030).
+[2022-06-24 14:25:28.547889] INFO  [RPC.OBMYSQL] obsm_handler.cpp:245 [4081][0][Y0-0000000000000000] [lt=2] [dc=0] mark sessid unused(conn->version_=0, conn->sessid_=3221945693, proxy_sessid=1113, server_id=2)
+[2022-06-24 14:25:28.547893] INFO  [RPC.OBMYSQL] obsm_handler.cpp:260 [4081][0][Y0-0000000000000000] [lt=3] [dc=0] unlock session of tenant(conn->version_=0, conn->sessid_=3221945693, proxy_sessid=1113, conn->tenant_id_=1001)
+[2022-06-24 14:25:28.547901] INFO  [RPC.OBMYSQL] obsm_handler.cpp:283 [4081][0][Y0-0000000000000000] [lt=2] [dc=0] connection close(easy_connection_str(c)="0.0.0.0_10.99.0.184:49818_-1_0x7fd13c97cf60 tp=0 t=1656050775514141-1656051928547783 s=3 r=0 io=998
+/960829412 sq=0", version=0, sessid=3221945693, proxy_sessid=1113, tenant_id=1001, server_id=2, from_proxy=true, from_java_client=false, c/s protocol="OB_2_0_CS_TYPE", is_need_clear_sessid_=true, ret=0)
+[2022-06-24 14:25:28.547914] WARN  [SERVER] flush_buffer_internal (ob_mysql_request_utils.cpp:204) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=10] [dc=65174] send error happen, quit current query(ret=-4124)
+[2022-06-24 14:25:28.547919] WARN  [SERVER] flush_buffer (ob_mysql_request_utils.cpp:408) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=4] [dc=0] failed to flush_buffer(ret=-4124)
+[2022-06-24 14:25:28.547922] WARN  [SERVER] flush_buffer (obmp_base.cpp:974) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] failed to flush_buffer(ret=-4124)
+[2022-06-24 14:25:28.547925] WARN  [SERVER] try_encode_with (obmp_base.cpp:1078) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] failed to flush_buffer(ret=-4124, last_ret=-4019)
+[2022-06-24 14:25:28.547928] WARN  [SERVER] response_packet (obmp_base.cpp:1121) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] failed to encode packet(ret=-4124)
+[2022-06-24 14:25:28.547932] WARN  [SERVER] response_query_result (ob_sync_plan_driver.cpp:269) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] response packet fail(ret=-4124, row=0x7fd3656edcb0, row_num=9789781, can_retry=false)
+[2022-06-24 14:25:28.547936] WARN  [SERVER] response_query_result (ob_sync_plan_driver.cpp:287) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] fail to iterate and response(ret=-4124, row_num=9789781, can_retry=false)
+[2022-06-24 14:25:28.547939] WARN  [SERVER] response_result (ob_sync_plan_driver.cpp:76) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] response query result fail(ret=-4124)
+[2022-06-24 14:25:28.548027] WARN  [SQL.EXE] end_participant (ob_sql_trans_control.cpp:1445) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] session has been killed(ret=-5066, my_session->get_session_state()=4, my_session->get_sessid()=322194569
+3, proxy_sessid=1113)
+[2022-06-24 14:25:28.548034] WARN  [SQL] end_participant (ob_result_set.cpp:462) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] fail to end participant(ret=-5066, is_rollback=false, participants=[{tid:1100611139454025, partition_id:0, part_cnt:
+0}])
+[2022-06-24 14:25:28.548038] WARN  [SQL.EXE] end_stmt (ob_sql_trans_control.cpp:1249) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] session has been killed(ret=-5066, my_session->get_session_state()=4, my_session->get_sessid()=3221945693, prox
+y_sessid=1113)
+[2022-06-24 14:25:28.548043] WARN  [SQL] end_stmt (ob_result_set.cpp:370) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] fail to end stmt(ret=-5066, is_rollback=true)
+[2022-06-24 14:25:28.548047] WARN  [SQL] close (ob_result_set.cpp:843) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] fail close main query(ret=0, do_close_plan_ret=-5066)
+[2022-06-24 14:25:28.548050] WARN  [SERVER] response_result (ob_sync_plan_driver.cpp:92) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=1] [dc=0] close result set fail(cret=-5066)
+[2022-06-24 14:25:28.548060] INFO  [SERVER] obmp_base.cpp:1163 [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] sending error packet(err=-4124, bt="0x9786d2e 0x9297565 0x928e97d 0x92bbee1 0x92b8db9 0x98ad35c 0x90a956f 0x9089efb 0x90a81cf 0x9087e0
+4 0x9088327 0x2bf4284 0x95718e5 0x9570572 0x956d09f", extra_err_info=NULL)
+[2022-06-24 14:25:28.548063] WARN  [SERVER] send_error_packet (obmp_base.cpp:1170) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] connection already disconnected(ret=-4124)
+[2022-06-24 14:25:28.548066] WARN  [SERVER] response_result (ob_sync_plan_driver.cpp:196) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] send error packet fail(sret=-4124, ret=-4124)
+[2022-06-24 14:25:28.548069] WARN  [SERVER] do_process (obmp_query.cpp:670) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] execute query fail(ret=-4124, timeout_timestamp=1656223575515378)
+[2022-06-24 14:25:28.548087] INFO  [SQL.SESSION] ob_sql_session_info.cpp:90 [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] revert schema guard success by sql(session_id=1113, tenant_id=1001, schema_version=1655974784316328)
+[2022-06-24 14:25:28.548097] WARN  [SHARE.SCHEMA] revert (ob_schema_mgr_cache.cpp:89) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] long time to hold one guard(schema_mgr=0x7fcfea6da4d0, tenant_id=1, version=1655880042729544, cur_timestamp=165
+6051928548093, ref_timestamp=1656050775514780, lbt()="0x9786d2e 0x2787772 0x2555ca8 0x6025124 0x586265f 0x92bc7f8 0x92b8db9 0x98ad35c 0x90a956f 0x9089efb 0x90a81cf 0x9087e04 0x9088327 0x2bf4284 0x95718e5 0x9570572 0x956d09f")
+[2022-06-24 14:25:28.548103] WARN  [SHARE.SCHEMA] revert (ob_schema_mgr_cache.cpp:89) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=4] [dc=0] long time to hold one guard(schema_mgr=0x7fcf85bd62d0, tenant_id=1001, version=1655974784316328, cur_timestamp=
+1656051928548101, ref_timestamp=1656050775514780, lbt()="0x9786d2e 0x2787772 0x2555ca8 0x6025124 0x586265f 0x92bc7f8 0x92b8db9 0x98ad35c 0x90a956f 0x9089efb 0x90a81cf 0x9087e04 0x9088327 0x2bf4284 0x95718e5 0x9570572 0x956d09f")
+[2022-06-24 14:25:28.548127] WARN  [SQL.SESSION] set_session_state_ (ob_basic_session_info.cpp:4140) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] session is killed(ret=-5066, sessid_=3221945693, proxy_sessid_=1113, version_=0, state=1)
+[2022-06-24 14:25:28.548133] WARN  [SERVER] process (obmp_query.cpp:293) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] fail execute sql(conn_valid=false, ret=-4124, ret="OB_CONNECT_ERROR")
+[2022-06-24 14:25:28.548142] WARN  [SERVER] process (obmp_query.cpp:320) [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=3] [dc=0] connection in error, maybe has disconnected(tmp_ret=-4124)
+[2022-06-24 14:25:28.548179] TRACE [TRACE]obmp_base.cpp:911 [4026][1726][YB420A6300E9-0005E206AF4E046D] [lt=2] [dc=0] [slow query](TRACE=begin_ts=1656050775515493 2022-06-24 06:06:15.515493|[process_begin] u=0 in_queue_time:115, receive_ts:165605077551537
+8, enqueue_ts:1656050775515491|[start_sql] u=0 addr:{ip:"10.99.0.184", port:49818}|[query_begin] u=1 trace_id:YB420A6300E9-0005E206AF4E046D|[before_processor_run] u=0 |[session] u=1 sid:3221945693, tenant_id:1001|[parse_begin] u=3 stmt:"SELECT `user_code`
+,`user_name`,`label`,`user_state`,`create_time`,`update_time`,`delete_flag`,`in_flow`,`contact_type`,`device_type` FROM `hugedata_db`.`t_users`   limit 124072884, 13785876", stmt_len:189|[cache_get_plan_begin] u=1 |[tl_calc_by_range_end] u=4 |[tl_calc_par
+t_id_end] u=0 |[pc_choose_plan] u=1 |[check_priv] u=1 |[cache_get_plan_end] u=0 |[plan_id] u=0 plan_id:3886|[exec_begin] u=2 arg1:false, end_trans_cb:false|[start_trans] u=14 trans_id:{hash:13803104520073566401, inc:3127477, addr:{ip:"10.99.0.233", port:2
+882}, t:1656050775515516}|[start_trans] u=0 trans_id:{hash:13803104520073566401, inc:3127477, addr:{ip:"10.99.0.233", port:2882}, t:1656050775515516}, timeout:1656223575515378, start_time:1656050775515378|[do_open_plan_begin] u=0 plan_id:3886|[sql_start_s
+tmt_begin] u=1 |[sql_start_stmt_end] u=17 |[exec_plan_begin] u=0 |[exec_plan_end] u=7 |[sql_start_participant_begin] u=0 |[start_part] u=8 ret:0, trans_id:{hash:13803104520073566401, inc:3127477, addr:{ip:"10.99.0.233", port:2882}, t:1656050775515516}|[sq
+l_start_participant_end] u=1 |[do_open_plan_end] u=0 |[storage_table_scan_begin] u=12 |[storage_table_scan_end] u=120 |[get_row] u=218283510 |[close_plan_begin] u=934748745 |[revert_scan_iter] u=80 |[end_participant_begin] u=2 |[end_participant] u=6 ret:-
+5066|[end_participant_end] u=7 |[start_end_stmt] u=0 |[end_stmt] u=9 |[close_plan_end] u=0 |[auto_end_plan_begin] u=3 |[auto_end_plan_end] u=0 |[result_set_close] u=0 ret:-5066, arg1:-5066, arg2:0, arg3:0, async:false|[exec_end] u=19 |[query_end] u=63 |[p
+rocess_end] u=14 run_ts:1656050775515494|total_timeu=1153032652)
+[2022-06-24 14:25:28.548171] INFO  [SQL.SESSION] ob_sql_session_info.cpp:322 [4019][1712][Y0-0000000000000000] [lt=13] [dc=0] end trans successfully(sessid=3221945693, proxy_sessid=1113, version=0, trans id={hash:13803104520073566401, inc:3127477, addr:"1
+0.99.0.233:2882", t:1656050775515516}, has_called_txs_end_trans=true)
+[2022-06-24 14:25:28.548208] INFO  [SERVER] obmp_disconnect.cpp:86 [4019][1712][Y0-0000000000000000] [lt=13] [dc=0] free session successfully(sessid=3221945693, version=0)
+```
+
+### Actual Behavior
+
+q9 为什么会hang住，读不出数据，且设置net_write_timeout也是无效的(https://github.com/oceanbase/oceanbase/issues/972)
+
+### Expected Behavior
+
+_No response_
+
+### other information
+
+_No response_

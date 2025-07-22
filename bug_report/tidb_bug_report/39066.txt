@@ -1,0 +1,131 @@
+ID: 39066
+Title: Crash in (*Database).GetTable
+Description:
+## Bug Report
+
+We used the Fuzz engine to modify some Test(TestLoadBackupMetaPartionTable) data, and then the following crash appeared. We hope to get the help of the developer to confirm whether it is a real bug.
+(This problem occurs when dbName is random data)
+
+### 1. Minimal reproduce step (Required)
+
+Simplified Test Code
+
+```go
+	tblName := model.NewCIStr("t1")
+	dbName := model.NewCIStr("\xff\xff\xff\xff")
+	tblID := int64(123)
+	partID1 := int64(124)
+	partID2 := int64(125)
+	mockTbl := &model.TableInfo{
+		ID:   tblID,
+		Name: tblName,
+		Partition: &model.PartitionInfo{
+			Definitions: []model.PartitionDefinition{
+				{ID: partID1},
+				{ID: partID2},
+			},
+		},
+	}
+	mockStats := handle.JSONTable{
+		DatabaseName: dbName.String(),
+		TableName:    tblName.String(),
+	}
+	mockDB := model.DBInfo{
+		ID:   1,
+		Name: dbName,
+		Tables: []*model.TableInfo{
+			mockTbl,
+		},
+	}
+	dbBytes, err := json.Marshal(mockDB)
+	require.NoError(t, err)
+	tblBytes, err := json.Marshal(mockTbl)
+	require.NoError(t, err)
+	statsBytes, err := json.Marshal(mockStats)
+	require.NoError(t, err)
+
+	mockSchemas := []*backuppb.Schema{
+		{
+			Db:    dbBytes,
+			Table: tblBytes,
+			Stats: statsBytes,
+		},
+	}
+
+	mockFiles := []*backuppb.File{
+		// should include 1.sst - 3.sst
+		{
+			Name:     "1.sst",
+			StartKey: tablecodec.EncodeRowKey(partID1, []byte("a")),
+			EndKey:   tablecodec.EncodeRowKey(partID1, []byte("b")),
+		},
+		{
+			Name:     "2.sst",
+			StartKey: tablecodec.EncodeRowKey(partID1, []byte("b")),
+			EndKey:   tablecodec.EncodeRowKey(partID2, []byte("a")),
+		},
+		{
+			Name:     "3.sst",
+			StartKey: tablecodec.EncodeRowKey(partID2, []byte("a")),
+			EndKey:   tablecodec.EncodeRowKey(partID2+1, []byte("b")),
+		},
+		// shouldn't include 4.sst
+		{
+			Name:     "4.sst",
+			StartKey: tablecodec.EncodeRowKey(tblID-1, []byte("a")),
+			EndKey:   tablecodec.EncodeRowKey(tblID, []byte("a")),
+		},
+	}
+
+	meta := mockBackupMeta(mockSchemas, mockFiles)
+
+	data, err := proto.Marshal(meta)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = store.WriteFile(ctx, metautil.MetaFile, data)
+	require.NoError(t, err)
+
+	dbs, err := LoadBackupTables(
+		ctx,
+		metautil.NewMetaReader(
+			meta,
+			store,
+			&backuppb.CipherInfo{
+				CipherType: encryptionpb.EncryptionMethod_PLAINTEXT,
+			},
+		),
+	)
+
+	tbl := dbs[dbName.String()].GetTable(tblName.String())
+```
+
+### 2. What did you expect to see? (Required)
+
+Test Passed
+
+### 3. What did you see instead (Required)
+
+Crash Log
+
+```go
+panic: runtime error: invalid memory address or nil pointer dereference [recovered]
+        panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x8 pc=0x160c442]
+
+goroutine 138 [running]:
+testing.tRunner.func1.2({0x174c160, 0x311fc20})
+        /home/gogen/.local/go/src/testing/testing.go:1209 +0x24e
+testing.tRunner.func1()
+        /home/gogen/.local/go/src/testing/testing.go:1212 +0x218
+panic({0x174c160, 0x311fc20})
+        /home/gogen/.local/go/src/runtime/panic.go:1038 +0x215
+github.com/pingcap/tidb/br/pkg/utils.(*Database).GetTable(0x173bd00, {0xc000c0a218, 0x2})
+        /home/gogen/workspace/gowork/src/topproj/tidb/br/pkg/utils/schema.go:35 +0x22
+github.com/pingcap/tidb/br/pkg/utils.FuzzTestLoadBackupMetaPartionTable({0xc00098a400, 0x1, 0x200})
+        /home/gogen/workspace/gowork/src/topproj/tidb/br/pkg/utils/schema_test.go_TestLoadBackupMetaPartionTable_test.go:157 +0xe1a
+```
+
+### 4. What is your TiDB version? (Required)
+
+9c4f94dd70010806710153d27fd5b734f99c4cb1

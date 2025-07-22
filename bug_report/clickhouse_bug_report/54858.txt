@@ -1,0 +1,75 @@
+ID: 54858
+Title: "Cannot read out of marks range" with function in the PK and FINAL clause in query
+Description:
+
+Data for repro in the attachement: [data.zip](https://github.com/ClickHouse/ClickHouse/files/12677249/data.zip)
+
+Schema 
+
+```
+CREATE TABLE test_table
+(
+    `tid` UInt64,
+    `processed_at` DateTime,
+    `created_at` DateTime,
+    `amount` Int64
+)
+ENGINE = ReplacingMergeTree()
+PARTITION BY toStartOfQuarter(created_at)
+PRIMARY KEY (toStartOfDay(created_at), toStartOfDay(processed_at))
+ORDER BY (toStartOfDay(created_at), toStartOfDay(processed_at), tid)
+SETTINGS index_granularity = 8192
+;
+```
+
+Inserting data:
+```
+cat /tmp/data.tsv  | clickhouse-client --query='INSERT INTO test_table FORMAT TSV'
+```
+
+The failing query :
+
+```
+SELECT sum(amount) FROM test_table FINAL WHERE processed_at between '2023-09-19 00:00:00' AND '2023-09-20 01:00:00';
+```
+
+The result:
+```
+Received exception from server (version 23.8.2):
+Code: 36. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read out of marks range.: While executing MergeTreeInOrder. (BAD_ARGUMENTS)
+```
+
+Expected result - no error (empty dataset)
+
+<details>
+<summary>error stacktrace for master (23.9.1)</summary>
+
+
+
+```
+Received exception from server (version 23.9.1):
+Code: 36. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read out of marks range.: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder). Stack trace:
+
+0. ./build_docker/./src/Common/Exception.cpp:98: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c6d2e77 in /usr/bin/clickhouse
+1. DB::Exception::Exception<char const (&) [32]>(int, char const (&) [32]) @ 0x000000000b349a80 in /usr/bin/clickhouse
+2. ./build_docker/./src/Storages/MergeTree/MergeTreeRangeReader.cpp:0: DB::MergeTreeRangeReader::Stream::read(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&, unsigned long, bool) @ 0x0000000012ee516b in /usr/bin/clickhouse
+3. ./build_docker/./src/Storages/MergeTree/MergeTreeRangeReader.h:240: DB::MergeTreeRangeReader::read(unsigned long, DB::MarkRanges&) @ 0x0000000012eed346 in /usr/bin/clickhouse
+4. ./build_docker/./src/Storages/MergeTree/MergeTreeReadTask.cpp:158: DB::MergeTreeReadTask::read(DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x0000000012ef4d8c in /usr/bin/clickhouse
+5. ./build_docker/./src/Storages/MergeTree/MergeTreeSelectAlgorithms.h:53: DB::MergeTreeInOrderSelectAlgorithm::readFromTask(DB::MergeTreeReadTask&, DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x00000000137077af in /usr/bin/clickhouse
+6. ./build_docker/./src/Storages/MergeTree/MergeTreeSelectProcessor.cpp:162: DB::MergeTreeSelectProcessor::read() @ 0x0000000012ee2aa7 in /usr/bin/clickhouse
+7. ./build_docker/./src/Storages/MergeTree/MergeTreeSource.cpp:181: DB::MergeTreeSource::tryGenerate() @ 0x00000000136fdb18 in /usr/bin/clickhouse
+8. ./build_docker/./contrib/llvm-project/libcxx/include/optional:344: DB::ISource::work() @ 0x00000000132bbf0a in /usr/bin/clickhouse
+9. ./build_docker/./src/Processors/Executors/ExecutionThreadContext.cpp:0: DB::ExecutionThreadContext::executeTask() @ 0x00000000132d3dda in /usr/bin/clickhouse
+10. ./build_docker/./src/Processors/Executors/PipelineExecutor.cpp:273: DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x00000000132ca950 in /usr/bin/clickhouse
+11. ./build_docker/./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:833: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::PipelineExecutor::spawnThreads()::$_0, void ()>>(std::__function::__policy_storage const*) @ 0x00000000132cba4f in /usr/bin/clickhouse
+12. ./build_docker/./base/base/../base/wide_integer_impl.h:809: ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0x000000000c7b7b9e in /usr/bin/clickhouse
+13. ./build_docker/./src/Common/ThreadPool.cpp:0: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000c7bb65c in /usr/bin/clickhouse
+14. ./build_docker/./base/base/../base/wide_integer_impl.h:809: void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000c7b9ea4 in /usr/bin/clickhouse
+15. ? @ 0x00007f55a1c94b43 in ?
+16. ? @ 0x00007f55a1d26a00 in ?
+. (BAD_ARGUMENTS)
+```
+
+</details>
+
+To be rechecked: it seems it used to work on some older versions and has been broken in 22.X

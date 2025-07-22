@@ -1,0 +1,155 @@
+ID: 1436
+Title: WHERE clause not working in materialized view
+Description:
+Hi,
+
+We are facing a weird issue using a materialized view to select a subset of the rows inserted in to a table.
+
+Currently we have two ClickHouse servers (version 1.1.54292) running on two separate virtual boxes, s1.node.consul and s4.node.consul.
+
+metrika.xml looks like this on s1.node.consul:
+
+	<?xml version="1.0"?>
+
+	<yandex>
+		<macros>
+			<shard>01</shard>
+			<replica>s1.node.consul</replica>
+		</macros>
+
+		<remote_servers>
+			<analytics>
+				<shard>
+					<weight>1</weight>
+					<internal_replication>true</internal_replication>
+					<replica>
+						<host>s1.node.consul</host>
+						<port>9000</port>
+					</replica>
+				</shard>
+				<shard>
+					<weight>1</weight>
+					<internal_replication>true</internal_replication>
+					<replica>
+						<host>s4.node.consul</host>
+						<port>9000</port>
+					</replica>
+				</shard>
+			</analytics>
+		</remote_servers>
+
+		<zookeeper>
+			<node>
+				<host>s1.node.consul</host>
+				<port>2181</port>
+			</node>
+		</zookeeper>
+
+		<networks>
+			<ip>::/0</ip>
+		</networks>
+
+		<clickhouse_compression>
+		</clickhouse_compression>
+	</yandex>
+
+s4.node.consul is similar, except
+
+    <macros>
+        <shard>02</shard>
+        <replica>s4.node.consul</replica>
+    </macros>
+
+We have a distributed table, testmv.events, where we insert rows. We also have a materialized view, testmv.some_events, where we only want the events with EventType=100. But if I insert a row with EventType=1, it will end up in the some_events table.
+
+In production we have a similar setup, except we only have one shard with two replicas, and the distributed tables have no sharding key defined. And the materialized view selects from the distributed table, and not the local table. Somewhat similar to some_events_v2 below.
+
+Interestingly some_events_v2 behaves as expected, only containing rows with EventType=100.
+
+Here is a complete test case:
+
+
+	CREATE DATABSE testmv;
+
+	USE testmv;
+
+	CREATE TABLE testmv.events_replica (
+		EventDate Date,
+		SessionUuid FixedString(16),
+		EventType UInt8,
+		EventText String
+	) ENGINE = ReplicatedMergeTree(
+		'/clickhouse/tables/analytics/{shard}/testmv_events',
+		'{replica}',
+		EventDate,
+		cityHash64(SessionUuid),
+		(EventDate, cityHash64(SessionUuid)),
+		8192
+	);
+
+	CREATE TABLE testmv.events AS testmv.events_replica
+		ENGINE = Distributed(analytics, testmv, events_replica, cityHash64(SessionUuid));
+
+	CREATE MATERIALIZED VIEW testmv.some_events_replica
+	ENGINE = ReplicatedMergeTree(
+		'/clickhouse/tables/analytics/{shard}/testmv_some_events',
+		'{replica}',
+		EventDate,
+		cityHash64(SessionUuid),
+		(EventDate, cityHash64(SessionUuid)),
+		8192
+	)
+	POPULATE
+	AS SELECT
+		EventDate,
+		SessionUuid,
+		EventText
+	FROM testmv.events_replica
+	WHERE EventType=100;
+
+	CREATE TABLE testmv.some_events AS testmv.some_events_replica
+		ENGINE = Distributed(analytics, testmv, some_events_replica);
+
+	CREATE MATERIALIZED VIEW testmv.some_events_replica_v2
+	ENGINE = ReplicatedMergeTree(
+		'/clickhouse/tables/analytics/{shard}/testmv_some_events_v2',
+		'{replica}',
+		EventDate,
+		cityHash64(SessionUuid),
+		(EventDate, cityHash64(SessionUuid)),
+		8192
+	)
+	POPULATE
+	AS SELECT
+		EventDate,
+		SessionUuid,
+		EventText
+	FROM testmv.events
+	WHERE EventType=100;
+
+	CREATE TABLE testmv.some_events_v2 AS testmv.some_events_replica_v2
+		ENGINE = Distributed(analytics, testmv, some_events_replica_v2);
+
+	INSERT INTO events (EventDate, SessionUuid, EventType, EventText) VALUES (toDate('2017-11-02'), 'aaaaaaaaaaaaaaaa', 1, 'EventType=1');
+	INSERT INTO events (EventDate, SessionUuid, EventType, EventText) VALUES (toDate('2017-11-02'), 'bbbbbbbbbbbbbbbb', 1, 'EventType=1');
+	INSERT INTO events (EventDate, SessionUuid, EventType, EventText) VALUES (toDate('2017-11-02'), 'cccccccccccccccc', 100, 'EventType=100');
+
+
+	SELECT * FROM some_events;
+
+	┌──EventDate─┬─SessionUuid──────┬─EventText───┐
+	│ 2017-11-02 │ aaaaaaaaaaaaaaaa │ EventType=1 │
+	└────────────┴──────────────────┴─────────────┘
+	┌──EventDate─┬─SessionUuid──────┬─EventText─────┐
+	│ 2017-11-02 │ cccccccccccccccc │ EventType=100 │
+	└────────────┴──────────────────┴───────────────┘
+	┌──EventDate─┬─SessionUuid──────┬─EventText───┐
+	│ 2017-11-02 │ bbbbbbbbbbbbbbbb │ EventType=1 │
+	└────────────┴──────────────────┴─────────────┘
+
+
+	SELECT * FROM some_events_v2;
+
+	┌──EventDate─┬─SessionUuid──────┬─EventText─────┐
+	│ 2017-11-02 │ cccccccccccccccc │ EventType=100 │
+	└────────────┴──────────────────┴───────────────┘

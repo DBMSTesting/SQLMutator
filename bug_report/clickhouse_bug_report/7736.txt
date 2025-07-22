@@ -1,0 +1,48 @@
+ID: 7736
+Title: Issues with Temporary tables and readonly/cancel_http_readonly_queries_on_client_close setting
+Description:
+Hello,
+
+I'm trying to create a temporary table while using `readonly=2` and `cancel_http_readonly_queries_on_client_close = 1` on ClickHouse master. Based on the code temporary tables should work properly with this settings.
+
+Running the following query:
+
+```
+curl -X POST \
+  'http://127.0.0.1:8123/?query_id=1232&session_id=2&readonly=2&cancel_http_readonly_queries_on_client_close=1' \
+  -d 'CREATE TEMPORARY TABLE `table_tmp1` AS SELECT 1 FORMAT JSON'
+```
+  
+- Will never return. Query will run forever. 
+- Removing `readonly=2` or `cancel_http_readonly_queries_on_client_close = 1` - query will run as expected.
+
+From my findings problems is in `HttpHandler.cpp` line 602:
+
+```
+appendCallback([&context, &socket](const Progress &)
+{
+    /// Assume that at the point this method is called no one is reading data from the socket any more.
+    /// True for read-only queries.
+    try
+    {
+        char b;
+        int status = socket.receiveBytes(&b, 1, MSG_DONTWAIT | MSG_PEEK);
+        if (status == 0)
+            context.killCurrentQuery();
+    }
+    catch (Poco::TimeoutException &)
+    {
+    }
+    catch (...)
+    {
+        context.killCurrentQuery();
+    }
+});
+```
+Line:
+
+```
+int status = socket.receiveBytes(&b, 1, MSG_DONTWAIT | MSG_PEEK);
+```
+
+Blocks forever and never returns till connection get closed.  

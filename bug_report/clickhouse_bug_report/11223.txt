@@ -1,0 +1,110 @@
+ID: 11223
+Title: Different expressions with the same alias _subquery10
+Description:
+**How to reproduce**
+``` sql
+CREATE TABLE customer
+(
+    `c_custkey` Int32,
+    `c_name` String,
+    `c_address` String,
+    `c_nationkey` Int32,
+    `c_phone` FixedString(15),
+    `c_acctbal` Decimal(18, 2),
+    `c_mktsegment` FixedString(10),
+    `c_comment` String,
+    CONSTRAINT pk CHECK c_custkey >= 0
+)
+ENGINE = MergeTree
+ORDER BY c_custkey
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE orders
+(
+    `o_orderkey` Int32,
+    `o_custkey` Int32,
+    `o_orderstatus` FixedString(1),
+    `o_totalprice` Decimal(18, 2),
+    `o_orderdate` Date,
+    `o_orderpriority` FixedString(15),
+    `o_clerk` FixedString(15),
+    `o_shippriority` Int32,
+    `o_comment` String,
+    CONSTRAINT c1 CHECK o_totalprice >= 0
+)
+ENGINE = MergeTree
+ORDER BY (o_orderdate, o_orderkey)
+SETTINGS index_granularity = 8192;
+```
+``` sql
+SET join_use_nulls = 1;
+select
+	count(*)
+from
+	(
+		select
+			substring(c_phone from 1 for 2) as cntrycode,
+			c_acctbal
+		from
+			customer as c
+		left join
+			orders as o
+		on o.o_custkey = c.c_custkey
+		where
+			o.o_custkey is null
+			and substring(c.c_phone from 1 for 2) in
+				('13', '31', '23', '29', '30', '18', '17')
+			and c.c_acctbal > (
+				select
+					avg(c.c_acctbal)
+				from
+					customer as c
+				where
+					c.c_acctbal > toDecimal32(0.00, 2)
+					and substring(c.c_phone from 1 for 2) in
+						('13', '31', '23', '29', '30', '18', '17')
+			)
+	) as custsale
+
+```
+**Error message and/or stacktrace**
+```
+2020.05.27 15:15:28.620483 [ 4725 ] {891c8bde-3b3d-42d8-8117-f3ea5c32fb07} <Error> executeQuery: Code: 179, e.displayText() = DB::Exception: Different expressions with the same alias _subquery10:
+CAST('0.00', 'Decimal(18, 2)') AS _subquery10
+and
+CAST('0.00', 'Decimal(18, 2)') AS _subquery10
+ (version 20.5.1.1) (from [::1]:53560) (in query: SELECT count(*) FROM (SELECT substring(c_phone, 1, 2) AS cntrycode, c_acctbal FROM customer AS c LEFT JOIN orders AS o ON o.o_custkey = c.c_custkey WHERE isNull(o.o_custkey) AND (substring(c.c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')) AND (c.c_acctbal > (SELECT avg(c.c_acctbal) FROM customer AS c WHERE (c.c_acctbal > toDecimal32(0., 2)) AND (substring(c.c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17'))))) AS custsale), Stack trace (when copying this message, always include the lines below):
+
+0. /home/qoega/clickhouse/build/../contrib/poco/Foundation/src/Exception.cpp:27: Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xbfc7bec in /home/qoega/clickhouse/build/programs/clickhouse
+1. /home/qoega/clickhouse/build/../src/Common/Exception.cpp:32: DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x5158039 in /home/qoega/clickhouse/build/programs/clickhouse
+2. /home/qoega/clickhouse/build/../contrib/libcxx/include/string:2134: DB::QueryAliasesMatcher<DB::QueryAliasesWithSubqueries>::visitOther(std::__1::shared_ptr<DB::IAST> const&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IAST>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IAST> > > >&) @ 0x9243cc9 in /home/qoega/clickhouse/build/programs/clickhouse
+3. /home/qoega/clickhouse/build/../src/Interpreters/QueryAliasesVisitor.cpp:57: DB::QueryAliasesMatcher<DB::QueryAliasesWithSubqueries>::visit(std::__1::shared_ptr<DB::IAST> const&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IAST>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IAST> > > >&) @ 0x924403b in /home/qoega/clickhouse/build/programs/clickhouse
+4. /home/qoega/clickhouse/build/../src/Parsers/DumpASTNode.h:37: DB::InDepthNodeVisitor<DB::QueryAliasesMatcher<DB::QueryAliasesWithSubqueries>, false, std::__1::shared_ptr<DB::IAST> const>::visit(std::__1::shared_ptr<DB::IAST> const&) @ 0x92441a5 in /home/qoega/clickhouse/build/programs/clickhouse
+5. /home/qoega/clickhouse/build/../src/Interpreters/InDepthNodeVisitor.h:47: DB::InDepthNodeVisitor<DB::QueryAliasesMatcher<DB::QueryAliasesWithSubqueries>, false, std::__1::shared_ptr<DB::IAST> const>::visit(std::__1::shared_ptr<DB::IAST> const&) @ 0x924424d in /home/qoega/clickhouse/build/programs/clickhouse
+6. /home/qoega/clickhouse/build/../src/Interpreters/InDepthNodeVisitor.h:47: DB::InDepthNodeVisitor<DB::QueryAliasesMatcher<DB::QueryAliasesWithSubqueries>, false, std::__1::shared_ptr<DB::IAST> const>::visit(std::__1::shared_ptr<DB::IAST> const&) @ 0x924424d in /home/qoega/clickhouse/build/programs/clickhouse
+7. /home/qoega/clickhouse/build/../src/Interpreters/InDepthNodeVisitor.h:45: DB::SyntaxAnalyzer::normalize(std::__1::shared_ptr<DB::IAST>&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IAST>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IAST> > > >&, DB::Settings const&) @ 0x928316d in /home/qoega/clickhouse/build/programs/clickhouse
+8. /home/qoega/clickhouse/build/../src/Interpreters/SyntaxAnalyzer.cpp:806: DB::SyntaxAnalyzer::analyzeSelect(std::__1::shared_ptr<DB::IAST>&, DB::SyntaxAnalyzerResult&&, DB::SelectQueryOptions const&, std::__1::vector<DB::TableWithColumnNamesAndTypes, std::__1::allocator<DB::TableWithColumnNamesAndTypes> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::TableJoin>) const @ 0x928509b in /home/qoega/clickhouse/build/programs/clickhouse
+9. /home/qoega/clickhouse/build/../src/Interpreters/InterpreterSelectQuery.cpp:318: DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&)::'lambda'(bool)::operator()(bool) const @ 0x91b6a09 in /home/qoega/clickhouse/build/programs/clickhouse
+10. /home/qoega/clickhouse/build/../src/Parsers/ASTSelectQuery.h:57: DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x91bab65 in /home/qoega/clickhouse/build/programs/clickhouse
+11. /home/qoega/clickhouse/build/../src/Interpreters/InterpreterSelectQuery.cpp:168: DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x91bc165 in /home/qoega/clickhouse/build/programs/clickhouse
+12. /home/qoega/clickhouse/build/../contrib/libcxx/include/vector:1681: DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x91fbbb1 in /home/qoega/clickhouse/build/programs/clickhouse
+13. /home/qoega/clickhouse/build/../src/Core/Block.h:27: DB::InterpreterSelectWithUnionQuery::getSampleBlock(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&) @ 0x91fc86a in /home/qoega/clickhouse/build/programs/clickhouse
+14. /home/qoega/clickhouse/build/../src/Interpreters/getTableExpressions.cpp:83: DB::getColumnsFromTableExpression(DB::ASTTableExpression const&, DB::Context const&, DB::NamesAndTypesList&, DB::NamesAndTypesList&, DB::NamesAndTypesList&) (.constprop.0) @ 0x92c4e39 in /home/qoega/clickhouse/build/programs/clickhouse
+15. /home/qoega/clickhouse/build/../src/Interpreters/getTableExpressions.cpp:134: DB::getDatabaseAndTablesWithColumns(std::__1::vector<DB::ASTTableExpression const*, std::__1::allocator<DB::ASTTableExpression const*> > const&, DB::Context const&) @ 0x92c61d2 in /home/qoega/clickhouse/build/programs/clickhouse
+16. /home/qoega/clickhouse/build/../contrib/libcxx/include/vector:1003: DB::JoinedTables::resolveTables() @ 0x922b761 in /home/qoega/clickhouse/build/programs/clickhouse
+17. /home/qoega/clickhouse/build/../src/Interpreters/InterpreterSelectQuery.cpp:264: DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x91bb218 in /home/qoega/clickhouse/build/programs/clickhouse
+18. /home/qoega/clickhouse/build/../src/Interpreters/InterpreterSelectQuery.cpp:168: DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x91bc165 in /home/qoega/clickhouse/build/programs/clickhouse
+19. /home/qoega/clickhouse/build/../contrib/libcxx/include/vector:1681: DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x91fbbb1 in /home/qoega/clickhouse/build/programs/clickhouse
+20. /home/qoega/clickhouse/build/../contrib/libcxx/include/vector:461: DB::InterpreterFactory::get(std::__1::shared_ptr<DB::IAST>&, DB::Context&, DB::QueryProcessingStage::Enum) @ 0x9193334 in /home/qoega/clickhouse/build/programs/clickhouse
+21. /home/qoega/clickhouse/build/../contrib/libcxx/include/memory:2587: DB::executeQueryImpl(char const*, char const*, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, DB::ReadBuffer*) @ 0x92bd44b in /home/qoega/clickhouse/build/programs/clickhouse
+22. /home/qoega/clickhouse/build/../src/Interpreters/executeQuery.cpp:618: DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0x92c1126 in /home/qoega/clickhouse/build/programs/clickhouse
+23. /home/qoega/clickhouse/build/../programs/server/TCPHandler.cpp:251: DB::TCPHandler::runImpl() @ 0x51b9167 in /home/qoega/clickhouse/build/programs/clickhouse
+24. /home/qoega/clickhouse/build/../programs/server/TCPHandler.cpp:1197: DB::TCPHandler::run() @ 0x51b9d3c in /home/qoega/clickhouse/build/programs/clickhouse
+25. /home/qoega/clickhouse/build/../contrib/poco/Net/src/TCPServerConnection.cpp:57: Poco::Net::TCPServerConnection::start() @ 0xbf02ba7 in /home/qoega/clickhouse/build/programs/clickhouse
+26. /home/qoega/clickhouse/build/../contrib/libcxx/include/atomic:856: Poco::Net::TCPServerDispatcher::run() @ 0xbf02fab in /home/qoega/clickhouse/build/programs/clickhouse
+27. /home/qoega/clickhouse/build/../contrib/poco/Foundation/include/Poco/Mutex_POSIX.h:59: Poco::PooledThread::run() @ 0xc041f1e in /home/qoega/clickhouse/build/programs/clickhouse
+28. /home/qoega/clickhouse/build/../contrib/poco/Foundation/include/Poco/AutoPtr.h:223: Poco::ThreadImpl::runnableEntry(void*) @ 0xc03e88c in /home/qoega/clickhouse/build/programs/clickhouse
+29. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+30. /build/glibc-OTsEL5/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97: __clone @ 0x12188f in /usr/lib/debug/lib/x86_64-linux-gnu/libc-2.27.so
+
+```

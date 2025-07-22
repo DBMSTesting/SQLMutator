@@ -1,0 +1,98 @@
+ID: 64453
+Title: MapFilter does not preserve LowCardinality of key and this leads to incorrect table metadata
+Description:
+**Does it reproduce on the most recent release?**
+
+Yes, on `24.4.1`
+
+**Does it reproduce on the LTS releases?**
+
+And on `23.8.14.6` and `24.3.3.102` too.
+
+**How to reproduce**
+
+1. Create a test database
+
+```sql
+CREATE DATABASE test_db engine=Atomic;
+```
+
+2. Create a test table with a column of `Map(LowCardinality(String), String)` type
+
+```sql
+CREATE TABLE test_db.table_1
+(
+    `key` String,
+    `attributes_map` Map(LowCardinality(String), String)
+)
+ENGINE = MergeTree
+ORDER BY tuple()
+SETTINGS index_granularity = 8192;
+```
+
+3. Insert a row into the table
+
+```sql
+INSERT INTO test_db.table_1 (key,attributes_map) 
+VALUES
+('key_1',{'attr_1': 'value_1', 'attr_2': 'value_2', 'attr_3': 'value_3'});
+```
+
+4. Create another table with `CREATE TABLE ... AS` by filtering the first table with the help of `mapFilter`
+
+```sql
+CREATE TABLE test_db.table_2
+ENGINE=MergeTree()
+ORDER BY (tuple())
+AS (
+    select key,
+    mapFilter(
+        (key,value) -> key != 'attr_1',
+        attributes_map
+    ) as attributes_map
+    from test_db.table_1
+);
+
+```
+
+5. Check table structure
+
+```sql
+SHOW CREATE TABLE test_db.table_2;
+```
+
+```
+CREATE TABLE test_db.table_2
+(
+    `key` String,
+    `attributes_map` Map(String, String)
+)
+ENGINE = MergeTree
+ORDER BY tuple()
+SETTINGS index_granularity = 8192
+```
+
+6. Check table
+
+```sql
+CHECK TABLE
+test_db.table_2
+SETTINGS check_query_single_value_result = 0;
+```
+
+```
++---------+---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|part_path|is_passed|message                                                                                                                                                                                                                                                                                                                                                                                          |
++---------+---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|all_1_1_0|0        |Code: 246. DB::Exception: Columns doesn't match in part /var/lib/clickhouse/store/05f/05f029d5-d192-4d2a-aa8d-3b360ff6aae7/all_1_1_0/. Expected: columns format version: 1                                                                                                                                                                                                                       |
+|         |         |2 columns:                                                                                                                                                                                                                                                                                                                                                                                       |
+|         |         |`key` String                                                                                                                                                                                                                                                                                                                                                                                     |
+|         |         |`attributes_map` Map(String, String)                                                                                                                                                                                                                                                                                                                                                             |
+|         |         |. Found: columns format version: 1                                                                                                                                                                                                                                                                                                                                                               |
+|         |         |2 columns:                                                                                                                                                                                                                                                                                                                                                                                       |
+|         |         |`key` String                                                                                                                                                                                                                                                                                                                                                                                     |
+|         |         |`attributes_map` Map(String, String)                                                                                                                                                                                                                                                                                                                                                             |
+|         |         |. (CORRUPTED_DATA) (version 24.4.1.2088 (official build))                                                                                                                                                                                                                                                                                                                                        |
++---------+---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+```

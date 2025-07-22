@@ -1,0 +1,105 @@
+ID: 12986
+Title: Compatibility issues with the DataFrame.groupBy method of the experimental Spark API
+Description:
+### What happens?
+
+The DataFrame.groupBy method of the experimental Spark API does not behave the same way as pyspark. Some of the examples in the groupBy docstring do not work.
+
+1. `groupBy` with no grouping columns fails. Because `DataFrame.agg` is not implemented, which I assume is intentional, this means that you cannot aggregate a column without specifying a grouping. I can `DataFrame.relation.aggregate()` as a workaround.
+2. `groupBy` with a list of grouping columns fails. This may be expected. It can easily be fixed by handling that case. If you'd like me to open a PR with a fix, please let me know.
+3. `groupBy().count()` produces a column named `"count_star()"` whereas pyspark produces `"count"`.
+
+### To Reproduce
+
+Global imports and variables:
+```
+from duckdb.experimental.spark.sql import DataFrame, SparkSession
+import duckdb.experimental.spark.sql.functions as F
+spark = SparkSession.builder.getOrCreate()
+df = spark.createDataFrame([(2, "Alice"), (2, "Bob"), (2, "Bob"), (5, "Bob")], schema=["age", "name"])
+```
+1. `groupBy` with no grouping columns fails.
+```
+df.groupBy().avg().show()
+```
+```
+ParserException                           Traceback (most recent call last)
+Cell In[4], line 1
+----> 1 df.groupBy().avg().show()
+
+File ~/python-envs/duckdb/lib/python3.11/site-packages/duckdb/experimental/spark/sql/group.py:39, in df_varargs_api.<locals>._api(self, *cols)
+     37 group_by = str(self._grouping)
+     38 projections = self._grouping.get_columns()
+---> 39 jdf = getattr(self._df.relation, "apply")(
+     40     function_name=name,  # aggregate function
+     41     function_aggr=expressions,  # inputs to aggregate
+     42     group_expr=group_by,  # groups
+     43     projected_columns=projections,  # projections
+     44 )
+     45 return DataFrame(jdf, self.session)
+
+ParserException: Parser Error: SELECT clause without selection list
+```
+2. `groupBy` with a list of grouping columns fails. 
+```
+df.groupBy(["name", "age"]).count()
+```
+```
+...
+TypeError: ColumnExpression(): incompatible function arguments. The following argument types are supported:
+    1. (name: str) -> duckdb.duckdb.Expression
+
+Invoked with: ['name', 'age']
+```
+This can be fixed by replacing the end of the method with something like this:
+```
+        if len(cols) == 1 and isinstance(cols[0], list):
+            columns = cols[0]
+        else:
+            columns = cols
+        return GroupedData(Grouping(*columns), self)
+```
+
+3. `groupBy().count()` produces a column named `count_star()`
+```
+df.groupBy("name").count().columns
+```
+```
+['name', 'count_star()']
+```
+
+### OS:
+
+MacOS aarch64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python
+
+### Full Name:
+
+Daniel Thom
+
+### Affiliation:
+
+National Renewable Energy Laboratory (NREL)
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

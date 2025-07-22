@@ -1,0 +1,117 @@
+ID: 27687
+Title: TIDB Instantly runs out of memory when adding index
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+TiDB deployed with Kubernetes AWS deployment, 32gb memory dedicated node (https://docs.pingcap.com/tidb-in-kubernetes/stable/deploy-on-aws-eks/)
+
+Created a table with the following schema
+
+
+```
+CREATE TABLE `outgoing_emails` (
+  `id` bigint(20) NOT NULL,
+  `token` varchar(32) COLLATE utf8mb4_bin NOT NULL,
+  `user_id` bigint(20) DEFAULT NULL,
+  `brand_id` bigint(20) DEFAULT NULL,
+  `retailer_id` bigint(22) DEFAULT NULL,
+  `template` varchar(255) COLLATE utf8mb4_general_ci NOT NULL,
+  `subject` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `send_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `sent_at` timestamp NULL DEFAULT NULL,
+  `bounced_at` timestamp NULL DEFAULT NULL,
+  `delivered_at` timestamp NULL DEFAULT NULL,
+  `first_opened_at` timestamp NULL DEFAULT NULL,
+  `last_opened_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `open_count` bigint(20) NOT NULL DEFAULT '0',
+  `message_id` varchar(100) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `provider` varchar(50) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `promotional` tinyint(1) NOT NULL DEFAULT '0',
+  `idempotence_token` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `provider_id` bigint(20) DEFAULT NULL,
+  `brand_customer_id` bigint(20) DEFAULT NULL,
+  `brand_lead_id` bigint(20) DEFAULT NULL,
+  `retailer_customer_id` bigint(20) DEFAULT NULL,
+  `non_user_email_address` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+  UNIQUE KEY `idx_token` (`token`),
+  UNIQUE KEY `unq_idempotence_token` (`idempotence_token`),
+  KEY `idx_template__user_id__send_at` (`template`,`user_id`,`send_at`),
+  KEY `idx_template__send_at` (`template`,`send_at`),
+  KEY `idx_template__brand_id__send_at` (`template`,`brand_id`,`send_at`),
+  KEY `idx_created_at` (`created_at`),
+  KEY `idx_retailer_id` (`retailer_id`),
+  KEY `idx_provider_message_id` (`provider`,`message_id`),
+  KEY `idx_send_at__sent_at` (`send_at`,`sent_at`),
+  KEY `idx_updated_at__template` (`updated_at`,`template`),
+  KEY `idx_user_id` (`user_id`),
+  KEY `idx_template__brand_id__retailer_id__send_at` (`template`,`brand_id`,`retailer_id`,`send_at`),
+  KEY `idx_template__brand_customer_id__send_at` (`template`,`brand_customer_id`,`send_at`),
+  KEY `idx_brand_id__template__send_at` (`brand_id`,`template`,`send_at`),
+  KEY `idx_template__guest_non_user_email_address__send_at` (`template`,`non_user_email_address`,`send_at`),
+  KEY `idx_non_user_email_address` (`non_user_email_address`),
+  KEY `idx_brand_id__send_at` (`brand_id`,`send_at`),
+  KEY `idx_retailer_id__send_at` (`retailer_id`,`send_at`),
+  KEY `idx_user_id__send_at` (`user_id`,`send_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+```
+
+Inserted 3 million records with random values (I don't know how to reproduce trivially)
+
+```
+select count(*) from outgoing_emails;
++----------+
+| count(*) |
++----------+
+|  3273930 |
++----------+
+```
+
+I ran:
+
+```
+alter table outgoing_emails add index idx_updated_at (updated_at);
+```
+
+No other queries are running on the cluster.
+
+### 2. What did you expect to see? (Required)
+
+Add index ok
+
+
+### 3. What did you see instead (Required)
+
+TiDB uses 30+ gb almost immediately and is OOMKilled repeatedly
+
+![image](https://user-images.githubusercontent.com/1468196/131413338-8493ba1f-3485-4675-8a64-a3921fac6957.png)
+
+
+Row count is much higher than actual rows in `admin show ddl jobs` output
+```
++--------+----------------------+---------------------+--------------+----------------------+-----------+----------+-----------+---------------------+---------------------+---------------+
+| JOB_ID | DB_NAME              | TABLE_NAME          | JOB_TYPE     | SCHEMA_STATE         | SCHEMA_ID | TABLE_ID | ROW_COUNT | START_TIME          | END_TIME            | STATE         |
++--------+----------------------+---------------------+--------------+----------------------+-----------+----------+-----------+---------------------+---------------------+---------------+
+|     81 | email_sender_staging | outgoing_emails     | add index    | write reorganization |        53 |       57 |  10726792 | 2021-08-30 21:40:26 | NULL                | running       |
+```
+
+I see this log as well - is it related?
+
+```
+[2021/08/30 22:28:20.615 +00:00] [ERROR] [misc.go:117] ["panic in the recoverable goroutine"] [label=ddl] [funcInfo=backfillWorker.run] [r={}] [stack="goroutine 1463010 [running]:\ngithub.com/pingcap/tidb/util.GetStack(...)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/util/misc.go:78\ngithub.com/pingcap/tidb/util.Recover(0x3affd76, 0x3, 0x3b26528, 0x12, 0x0, 0x0)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/util/misc.go:121 +0x2d5\npanic(0x38ffa80, 0xc002840120)\n\t/usr/local/go/src/runtime/panic.go:965 +0x1b9\ngithub.com/pingcap/tidb/util/codec.CutOne(0xc0029459eb, 0x9, 0x9, 0x612d5b84, 0x24b5132d, 0x223afda30da, 0xc00393cbe0, 0x2688e98, 0xc002840108, 0x13, ...)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/util/codec/codec.go:900 +0x12a\ngithub.com/pingcap/tidb/kv.NewCommonHandle(0xc0029459eb, 0x9, 0x9, 0x3ef84cf03a, 0xc04374c124b5132d, 0xc0021d9ad0)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/kv/key.go:247 +0xd4\ngithub.com/pingcap/tidb/tablecodec.DecodeRowKey(0xc0029459e0, 0x14, 0x14, 0x25dd4ec, 0xc00196dd80, 0xc0010ae8f0, 0xc002840108)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/tablecodec/tablecodec.go:273 +0x225\ngithub.com/pingcap/tidb/ddl.tryDecodeToHandleString(0xc0029459e0, 0x14, 0x14, 0x2, 0x13)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/backfilling.go:427 +0x49\ngithub.com/pingcap/tidb/ddl.(*reorgBackfillTask).String(0xc00393cf68, 0x5ee64b5f7a40004, 0x1)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/backfilling.go:187 +0x87\ngithub.com/pingcap/tidb/ddl.(*baseIndexWorker).fetchRowColVals(0xc0021d9ad0, 0x4072fe0, 0xc0023de4d0, 0x39, 0xc0029459e0, 0x14, 0x14, 0xc0023e22a0, 0x13, 0x18, ...)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/index.go:1008 +0x2fb\ngithub.com/pingcap/tidb/ddl.(*addIndexWorker).BackfillDataInTxn.func2(0x4030d40, 0xc0001a2000, 0x4072fe0, 0xc0023de4d0, 0x0, 0xc000cd4130)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/index.go:1125 +0x13e\ngithub.com/pingcap/tidb/kv.RunInNewTxn(0x4030d40, 0xc0001a2000, 0x4069090, 0xc0009f28a0, 0x1, 0xc00393d538, 0x0, 0x0)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/kv/txn.go:46 +0x103\ngithub.com/pingcap/tidb/ddl.(*addIndexWorker).BackfillDataInTxn(0xc0021d9ad0, 0x39, 0xc0029459e0, 0x14, 0x14, 0xc0023e22a0, 0x13, 0x18, 0x0, 0x0, ...)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/index.go:1120 +0x16f\ngithub.com/pingcap/tidb/ddl.(*backfillWorker).handleBackfillTask(0xc0029d6900, 0xc000b7a480, 0xc001872880, 0x400ac70, 0xc0021d9ad0, 0x2)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/backfilling.go:244 +0x1df\ngithub.com/pingcap/tidb/ddl.(*backfillWorker).run(0xc0029d6900, 0xc000b7a480, 0x400ac70, 0xc0021d9ad0, 0xc0024e2000)\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/backfilling.go:313 +0x2d7\ncreated by github.com/pingcap/tidb/ddl.(*worker).writePhysicalTableRecord\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/ddl/backfilling.go:613 +0xa6f\n"]
+```
+
+Same issue as #22453
+
+When DDL is cancelled, memory usage drops to < 1GB
+
+I had no issue migrating a table with similar number of records but fewer columns and indexes. I don't know what is special about this table to cause an issue.
+
+
+### 4. What is your TiDB version? (Required)
+
+`5.7.25-TiDB-v5.2.0`

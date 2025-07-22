@@ -1,0 +1,48 @@
+ID: 5847
+Title: MergeTree: some parts are broken after successful insertion
+Description:
+**Describe the bug**
+
+Rarely, some blocks, after successful insertions, appeared to be broken (see logs):
+
+
+**How to reproduce**
+* version 19.6.2.11 (official build)
+
+**Expected behavior**
+All blocks are replicated and merged OK
+
+**Error message and/or stacktrace**
+
+Here is grep of some lines, related to the problem:
+```
+2019.06.30 21:29:16.712300 [ 31 ] {} <Error> x.deals (ReplicatedMergeTreePartCheckThread): Part bb98c46de6189682197845022e935af8_3031_3031_0 looks broken. Removing it and queueing a fetch.
+2019.06.30 21:29:16.712754 [ 54 ] {} <Error> InterserverIOHTTPHandler: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = Assertion violation: std::char_traits<char>::length(rPath.data()) == rPath.size() in file "../contrib/poco/Foundation/src/File.cpp", line 46 (version 19.6.2.11 (official build))
+2019.06.30 21:29:16.713703 [ 31 ] {} <Error> x.deals (ReplicatedMergeTreePartCheckThread): void DB::ReplicatedMergeTreePartCheckThread::run(): std::exception. Code: 1001, type: std::bad_cast, e.what() = std::bad_cast, version = 19.6.2.11 (official build)
+2019.06.30 21:29:21.713935 [ 22 ] {} <Warning> x.deals (ReplicatedMergeTreePartCheckThread): Checking part bb98c46de6189682197845022e935af8_3031_3031_0
+
+
+2019.06.30 21:34:19.679034 [ 25 ] {} <Warning> x.deals (StorageReplicatedMergeTree): Part bb98c46de6189682197845022e935af8_3031_3031_0 (that was selected for merge) with age 303 seconds exists locally but not in ZooKeeper. Won't do merge with that part and will check it.
+2019.06.30 21:34:19.679099 [ 26 ] {} <Warning> x.deals (ReplicatedMergeTreePartCheckThread): Checking part bb98c46de6189682197845022e935af8_3031_3031_0
+2019.06.30 21:34:19.679401 [ 26 ] {} <Error> x.deals (ReplicatedMergeTreePartCheckThread): Unexpected part bb98c46de6189682197845022e935af8_3031_3031_0 in filesystem. Removing.
+2019.06.30 21:34:19.679415 [ 26 ] {} <Information> x.deals (Data): Renaming bb98c46de6189682197845022e935af8_3031_3031_0 to unexpected_bb98c46de6189682197845022e935af8_3031_3031_0 and forgiving it.
+
+
+2019.06.30 22:14:28.205959 [ 28 ] {} <Warning> x.deals (ReplicatedMergeTreePartCheckThread): Checking part bb98c46de6189682197845022e935af8_3031_3031_0
+2019.06.30 22:14:28.209214 [ 28 ] {} <Error> x.deals (ReplicatedMergeTreePartCheckThread): No replica has part covering bb98c46de6189682197845022e935af8_3031_3031_0 and a merge is impossible: we didn't find smaller parts with either the same min block or the same max block.
+2019.06.30 22:14:28.222811 [ 28 ] {} <Error> x.deals (ReplicatedMergeTreePartCheckThread): Part bb98c46de6189682197845022e935af8_3031_3031_0 is lost forever.
+```
+
+**Additional context**
+I investigated broken part, it seems, that file checksums.txt (version 4, compressed by lz4) is broken. **After removing checksums.txt, the part is attached successfully**.
+
+Broken checksums.txt lead to the fact that after reading it, one column name is `\00ontract_size` (zero first byte) instead of `contract_size`: (https://github.com/yandex/ClickHouse/blob/master/dbms/src/Storages/MergeTree/MergeTreeDataPartChecksum.cpp#L177). This is why assert fires from `poco::File`: 
+```
+File::File(const std::string& rPath): FileImpl(rPath)
+{
+	poco_assert(std::char_traits<char>::length(rPath.data()) == rPath.size());
+}
+```
+
+Unfortunately I can't reproduce the case of writing bad checksums.txt locally.
+

@@ -1,0 +1,186 @@
+ID: 52600
+Title: when leader switch, autoid service does not reset the map
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```diff
+diff --git a/pkg/autoid_service/autoid.go b/pkg/autoid_service/autoid.go
+index a0ae1279c0..f23ccce9e6 100644
+--- a/pkg/autoid_service/autoid.go
++++ b/pkg/autoid_service/autoid.go
+@@ -350,6 +350,10 @@ func MockForTest(store kv.Storage) autoid.AutoIDAllocClient {
+        return ret
+ }
+ 
++func (s *Service) OwnerManager() owner.Manager {
++       return s.leaderShip
++}
++
+ // Close closes the Service and clean up resource.
+ func (s *Service) Close() {
+        if s.leaderShip != nil && s.leaderShip.IsOwner() {
+diff --git a/pkg/server/http_status.go b/pkg/server/http_status.go
+index 86bad5964c..66a633380a 100644
+--- a/pkg/server/http_status.go
++++ b/pkg/server/http_status.go
+@@ -204,6 +204,24 @@ func (b *Ballast) GenHTTPHandler() func(w http.ResponseWriter, r *http.Request)
+        }
+ }
+ 
++type xxxHandler struct {
++       *Server
++}
++
++func (h xxxHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
++       om := h.Server.autoIDService.OwnerManager()
++       if om.IsOwner() {
++               err := om.ResignOwner(context.Background())
++               if err != nil {
++                       handler.WriteError(w, err)
++                       return
++               }
++               handler.WriteData(w, "success!")
++       } else {
++               handler.WriteData(w, "not owner")
++       }
++}
++
+ func (s *Server) startHTTPServer() {
+        router := mux.NewRouter()
+ 
+@@ -238,6 +256,9 @@ func (s *Server) startHTTPServer() {
+        router.Handle("/ddl/history", tikvhandler.NewDDLHistoryJobHandler(tikvHandlerTool)).Name("DDL_History")
+        router.Handle("/ddl/owner/resign", tikvhandler.NewDDLResignOwnerHandler(tikvHandlerTool.Store.(kv.Storage))).Name("DDL_Owner_Resign")
+ 
++
++       router.Handle("/autoid/leader/resign", xxxHandler{s})
++
+        // HTTP path for get the TiDB config
+        router.Handle("/config", fn.Wrap(func() (*config.Config, error) {
+                return config.GetGlobalConfig(), nil
+```
+
+I modify the source code to provide a leader resign http api.
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+1. tiup playground --mode tikv-slim
+2. start two tidb server instance
+
+./bin/tidb-server -store=tikv -path=127.0.0.1:2379 -P 4000 -status 10080
+./bin/tidb-server -store=tikv -path=127.0.0.1:2379 -P 4001 -status 10081
+
+The leader is 10080 because it starts first
+
+3. mysql -h 127.0.0.1 -u root -P 4000
+
+```
+create table t (id int primary key auto_increment, k int) auto_id_cache = 1;
+insert into t (k) values (1);
+insert into t (k) values (2);
+insert into t (k) values (3);
+insert into t (k) values (5);
+
+mysql> select * from t;
++------+------+
+| id   | k    |
++------+------+
+|    1 |    1 |
+|    2 |    2 |
+|    3 |    3 |
+|    4 |    5 |
++------+------+
+```
+
+4. resign leader first from tidb 10080
+
+curl http://127.0.0.1:10080/autoid/leader/resign
+
+5. continue insert into table
+
+insert into t (k) values (6);
+insert into t (k) values (7);
+insert into t (k) values (8);
+mysql> select * from t;
++------+------+
+| id   | k    |
++------+------+
+|    1 |    1 |
+|    2 |    2 |
+|    3 |    3 |
+|    4 |    5 |
+| 4001 |    6 |
+| 4002 |    7 |
+| 4003 |    8 |
++------+------+
+
+6. resign leader from tidb 10081, let the leader back to 10080
+
+curl http://127.0.0.1:10081/autoid/leader/resign
+
+7. continue insert into table
+
+insert into t (k) values (9);
+insert into t (k) values (10);
+insert into t (k) values (11);
+mysql> select * from t;
+mysql> select * from t;
++------+------+
+| id   | k    |
++------+------+
+|    1 |    1 |
+|    2 |    2 |
+|    3 |    3 |
+|    4 |    5 |
+|    5 |    9 |
+|    6 |   10 |
+|    7 |   11 |
+| 4001 |    6 |
+| 4002 |    7 |
+| 4003 |    8 |
++------+------+
+10 rows in set (0.00 sec)
+
+
+
+### 2. What did you expect to see? (Required)
+
+
+In the last step, the id should be 4005,4006,4007 or 8001,8002,8003
+**The auto id should never decrease!** 
+
+
+### 3. What did you see instead (Required)
+
+When tidb leader switch from 10080 to 10081, and back to 10080 again, the allocated autoid decrease!
+The could cause a duplicate entry error
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master
+
+```
+mysql>  select tidb_version();
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                            |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v8.1.0-alpha-83-g3fff0f2529-dirty
+Edition: Community
+Git Commit Hash: 3fff0f252952177486f39d439558e507c7f06f28
+Git Branch: master
+UTC Build Time: 2024-04-15 04:22:18
+GoVersion: go1.21.0
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

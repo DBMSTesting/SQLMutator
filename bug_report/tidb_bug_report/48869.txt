@@ -1,0 +1,149 @@
+ID: 48869
+Title: error message "connect: cannot assign requested address" on AUTO_ID_CACHE=1 tables
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+A user is using DM to migrate to TiDB, and they have lots of tables with AUTO_ID_CACHE=1.
+During the migration, some errors occured.
+
+The error message looks like this:
+
+```
+[2023/11/17 08:03:33.415 +00:00] [INFO] [autoid_service.go:97] ["[autoid client] connect to leader"] [addr=db-tidb-0.db-tidb-peer.tidb1379661944646413053.svc:10080]	
+[2023/11/17 08:03:33.412 +00:00] [INFO] [autoid_service.go:159] ["[autoid client] reset grpc connection"] [reason="rpc error: code = Unavailable desc = connection error: desc = \"transport: Error while dialing: dial tcp [10.250.26.138:10080](http://10.250.26.138:10080/): connect: cannot assign requested address\""]
+```
+
+This error message indicate that the tcp ports are used up... the root cause is grpc client leak.\
+
+There are two ways for the leak:
+
+1. Currently, each table has its autoid allocator, and **each auto id allocator has a grpc client**, each grpc client has its tcp connections.    so if there are 60K tables, it means there are 60K tcp connections, which is close to the 65535 tcp port count limitation
+2. If there are a lot DDL operations, it may involve the information schema rebuild, and during which, the table may be dropped and recreated ... but the allocator of the table is not closed, so this could cause the leak.
+
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Check the TCP connection counts before:
+
+```
+ps -ef|grep tidb-server
+genius   1840005  869310  4 11:54 pts/0    00:00:01 ./bin/tidb-server -store=tikv -path=127.0.0.1:2379
+genius   1840042    4595  0 11:54 pts/3    00:00:00 grep --color=auto tidb-server
+
+lsof -p 1840005 -nP |grep TCP
+tidb-serv 1840005 genius    8u     IPv4            9669571       0t0      TCP 127.0.0.1:55470->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius    9u     IPv4            9687350       0t0      TCP 127.0.0.1:55474->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   10u     IPv4            9676490       0t0      TCP 127.0.0.1:42178->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   11u     IPv4            9679750       0t0      TCP 127.0.0.1:42190->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   12u     IPv4            9687351       0t0      TCP 127.0.0.1:42206->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   13u     IPv4            9667567       0t0      TCP 127.0.0.1:42218->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   14u     IPv4            9684597       0t0      TCP 127.0.0.1:55488->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   15u     IPv4            9679751       0t0      TCP 127.0.0.1:55500->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   16u     IPv6            9667571       0t0      TCP *:4000 (LISTEN)
+tidb-serv 1840005 genius   18u     IPv6            9667573       0t0      TCP *:10080 (LISTEN)
+tidb-serv 1840005 genius   19u     IPv4            9682299       0t0      TCP 127.0.0.1:55516->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   20u     IPv4            9679754       0t0      TCP 127.0.0.1:55528->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   21u     IPv6            9667576       0t0      TCP 127.0.0.1:4000->127.0.0.1:34812 (ESTABLISHED)
+```
+
+The execute the following SQLs:
+
+```
+create table t0 (id int auto_increment) auto_id_cache=1;
+create table t1 (id int auto_increment) auto_id_cache=1;
+create table t2 (id int auto_increment) auto_id_cache=1;
+create table t3 (id int auto_increment) auto_id_cache=1;
+create table t4 (id int auto_increment) auto_id_cache=1;
+create table t5 (id int auto_increment) auto_id_cache=1;
+create table t6 (id int auto_increment) auto_id_cache=1;
+create table t7 (id int auto_increment) auto_id_cache=1;
+create table t8 (id int auto_increment) auto_id_cache=1;
+create table t9 (id int auto_increment) auto_id_cache=1;
+insert into t0 values ();
+insert into t1 values ();
+insert into t1 values ();
+insert into t3 values ();
+insert into t4 values ();
+insert into t5 values ();
+insert into t6 values ();
+insert into t7 values ();
+insert into t8 values ();
+insert into t9 values ();
+```
+
+Check the tcp connections after that:
+
+```
+lsof -p 1840005 -nP |grep TCP
+tidb-serv 1840005 genius    8u     IPv4            9669571       0t0      TCP 127.0.0.1:55470->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius    9u     IPv4            9687350       0t0      TCP 127.0.0.1:55474->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   10u     IPv4            9676490       0t0      TCP 127.0.0.1:42178->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   11u     IPv4            9679750       0t0      TCP 127.0.0.1:42190->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   12u     IPv4            9687351       0t0      TCP 127.0.0.1:42206->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   13u     IPv4            9667567       0t0      TCP 127.0.0.1:42218->127.0.0.1:20160 (ESTABLISHED)
+tidb-serv 1840005 genius   14u     IPv4            9684597       0t0      TCP 127.0.0.1:55488->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   15u     IPv4            9679751       0t0      TCP 127.0.0.1:55500->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   16u     IPv6            9667571       0t0      TCP *:4000 (LISTEN)
+tidb-serv 1840005 genius   18u     IPv6            9667573       0t0      TCP *:10080 (LISTEN)
+tidb-serv 1840005 genius   19u     IPv4            9682299       0t0      TCP 127.0.0.1:55516->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   20u     IPv4            9679754       0t0      TCP 127.0.0.1:55528->127.0.0.1:2379 (ESTABLISHED)
+tidb-serv 1840005 genius   21u     IPv6            9667576       0t0      TCP 127.0.0.1:4000->127.0.0.1:34812 (ESTABLISHED)
+tidb-serv 1840005 genius   24u     IPv6            9676519       0t0      TCP 192.168.0.16:10080->192.168.0.16:46350 (ESTABLISHED)
+tidb-serv 1840005 genius   25u     IPv4            9679867       0t0      TCP 192.168.0.16:52832->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   27u     IPv6            9680644       0t0      TCP 192.168.0.16:10080->192.168.0.16:52832 (ESTABLISHED)
+tidb-serv 1840005 genius   29u     IPv4            9683320       0t0      TCP 192.168.0.16:52838->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   30u     IPv6            9690218       0t0      TCP 192.168.0.16:10080->192.168.0.16:52838 (ESTABLISHED)
+tidb-serv 1840005 genius   31u     IPv4            9687643       0t0      TCP 192.168.0.16:52854->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   32u     IPv6            9685413       0t0      TCP 192.168.0.16:10080->192.168.0.16:52854 (ESTABLISHED)
+tidb-serv 1840005 genius   33u     IPv4            9682424       0t0      TCP 192.168.0.16:51794->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   34u     IPv6            9691203       0t0      TCP 192.168.0.16:10080->192.168.0.16:51794 (ESTABLISHED)
+tidb-serv 1840005 genius   35u     IPv4            9689239       0t0      TCP 192.168.0.16:51804->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   36u     IPv6            9682437       0t0      TCP 192.168.0.16:10080->192.168.0.16:51804 (ESTABLISHED)
+tidb-serv 1840005 genius   37u     IPv4            9686886       0t0      TCP 192.168.0.16:52108->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   38u     IPv6            9684753       0t0      TCP 192.168.0.16:10080->192.168.0.16:52108 (ESTABLISHED)
+tidb-serv 1840005 genius   39u     IPv4            9686887       0t0      TCP 192.168.0.16:52110->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   40u     IPv6            9692519       0t0      TCP 192.168.0.16:10080->192.168.0.16:52110 (ESTABLISHED)
+tidb-serv 1840005 genius   41u     IPv4            9681462       0t0      TCP 192.168.0.16:52116->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   42u     IPv6            9684755       0t0      TCP 192.168.0.16:10080->192.168.0.16:52116 (ESTABLISHED)
+tidb-serv 1840005 genius   43u     IPv4            9690223       0t0      TCP 192.168.0.16:52126->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   44u     IPv6            9688228       0t0      TCP 192.168.0.16:10080->192.168.0.16:52126 (ESTABLISHED)
+tidb-serv 1840005 genius   45u     IPv4            9690224       0t0      TCP 192.168.0.16:52132->192.168.0.16:10080 (ESTABLISHED)
+tidb-serv 1840005 genius   46u     IPv6            9687654       0t0      TCP 192.168.0.16:10080->192.168.0.16:52132 (ESTABLISHED)
+```
+
+
+
+### 2. What did you expect to see? (Required)
+
+create table with AUTO_ID_CACHE=1 should not increase the tcp connection of tidb
+
+### 3. What did you see instead (Required)
+
+Each table with AUTO_ID_CACHE=1 would increase the tcp connection of tidb
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+mysql> select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                       |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.6.0-alpha-264-g67b70e5207
+Edition: Community
+Git Commit Hash: 67b70e52072e8001773ac389379718bb9c60624e
+Git Branch: master
+UTC Build Time: 2023-11-24 03:53:28
+GoVersion: go1.21.0
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+

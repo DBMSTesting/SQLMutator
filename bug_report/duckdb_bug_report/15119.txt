@@ -1,0 +1,125 @@
+ID: 15119
+Title: Logging
+Description:
+This draft PR introduces a Logger to DuckDB. The logger will enable the communication of various types of information to both users and developers.
+
+The logger works without any globals and should be fast enough to have log statements compiled into the release builds. By default logging will be disabled but should be configurable through a runtime global setting
+
+## How to use
+First of all, the logger currently has 6 levels: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` and `FATAL`.
+
+Secondly, the logger uses no globals, a log statement always requires some sort of context. We currently support `ThreadContext`, `ExecutionContext`, `ClientContext`, `FileOpener` and `DatabaseInstance`. 
+
+### Basics
+This PR includes a bunch of templating magic to make this work, so our basic log statement looks like:
+```C++
+Logger::Warn(db_instance, "hi i'm a log entry");
+```
+We can also use other log levels or contexts:
+```C++
+Logger::Info(client_context, "this goes to the client_context local logger");
+Logger::Fatal(thread_context, "this goes to the thread local logger");
+```
+
+### String construction
+Because log statements are intended for release binaries too, we should ensure that we can cheaply run the log statements without doing any more work than necessary when logging is disabled. For this reason I have also added format strings log statements:
+```C++
+Logger::Warn(db, "look at my pretty log: '%s'", some_string);
+```
+ and callback based log statements:
+```C++
+Logger::Info(db, [](){
+	return SomeExpensiveStringConstructionFunction();
+});
+```
+
+### Enabling logging
+Logging is disabled by default, but can be enabled using
+```SQL
+set enable_logging=true;
+set logging_level='warn';
+```
+
+### Log types
+Log entries have a type that is currently set to "default" everywhere. However you can specify a custom type to be set using:
+
+```C++
+Logger::Info("my_log_type", client_context, "this goes to the client_context local logger");
+```
+
+these types can be used to filter using an inclusion list:
+```SQL
+set enable_logging=true;
+set enabled_loggers='my_log_type1,my_log_type2'
+set logging_mode='enable_selected'
+```
+
+or an exclusions list:
+```SQL
+set disable_logging=true;
+set disabled_loggers='my_log_type1,my_log_type2'
+set logging_mode='disable_selected'
+```
+
+### Log output
+In the current draft state the log entries are written to a ColumnDataCollection stored in the LogManager in the Databaseinstance. We should however be able to switch between that, writing to stdout directly, and appending to a file.
+
+## Implementation
+The main driver behind this implementation is that log settings should be configurable at runtime. The consequence of this is that we need to take special care to avoid needing to lock some global state or check atomics on every log statement. This is achieved by caching the logging configuration at various points.
+
+### 3 Layers of logging
+Currently, there are 3 places where loggers are stored:
+- In the LogManager (which lives in the DatabaseInstance)
+	- uses atomics to check if logging is enabled
+- In the ClientContext 
+	- uses const values to check if logging is enabled
+	- refreshed on every QueryStart and QueryEnd
+- In the ThreadContext
+	- uses const values to check if logging is enabled
+
+Besides caching the logging config, these loggers can also store additional context information such as the thread_id and the transaction_id.
+
+Also, the logger in the ThreadContext, is thread-local, which we can use later to optimize performance since it can buffer log entries in a thread-local cache, wheres the higher level loggers require a global lock for writing log entries.
+
+## Performance
+I've added some benchmarks that are also added to the regression tester to ensure we aren't introducing any measurable slowdown by leaving in log statements in release binaries. The most important benchmarks are `benchmark/micro/logger/disabled/*.benchmark` since these measure the overhead of a Log statement when logging is disabled. The results on my M1 Max macbook pro are:
+
+|                                    name                                    |       result       | relative_to_reference |
+|----------------------------------------------------------------------------|-------------------:|----------------------:|
+| benchmark/micro/logger/disabled/logging_disabled_global.benchmark          | 0.926281          | 2.210263585898307     |
+| benchmark/micro/logger/disabled/logging_disabled_reference.benchmark       | 0.419082          | 1.0                   |
+| benchmark/micro/logger/disabled/logging_disabled_client_context.benchmark  | 0.60807 | 1.4509584768216974    |
+| benchmark/micro/logger/disabled/logging_disabled_thread_local.benchmark    | 0.60227 | 1.4371349159686324    |
+| benchmark/micro/logger/disabled/logging_disabled_file_opener.benchmark     | 0.64255 | 1.533238872811405     |
+
+In these benchmarks, a single-threaded table function is called which runs a `range()` table function that generates a single INT column with values from 0 to 50000000 in steps of 1. In the inner loop of this range function, the logger is called once for each tuple. The for the `logging_disabled_reference`  benchmark, the log statement is not called at all serving as a reference for the other benchmarks. The results show that the Log call is cheap, but also not free when logging is disabled. Furthermore, we can see that the global logger is the most expensive, which makes sense as it needs to use atomics instead of const values. The FileOpener logger is also slightly more expensive which is caused by one extra pointer that needs to be followed for checking if logging is enabled.
+
+The conclusion here is that the Log calls are very cheap and can be left in the code basically everywhere except for the performance critical tight inner loops. 
+
+## Log Type naming convention
+Log entries can contain a `log_type`. I propose the following namespaced naming scheme for the log types to keep them sane:
+`<codebase>.<NameSpaceName>.<NameSpaceName>...<TypeName>`
+
+for `<codebase>`, this will be any of:
+- `duckdb` for logs coming from duckdb itself
+- `<extension_name>` for logs coming from extensions
+- `duckdb-<client>` for logs coming from duckdb client code (python, node, etc)
+
+For example, I have currently added:
+`duckdb.ClientContext.BeginQuery`, `duckdb.FileSystem.LocalFileSystem.OpenFile`, `duckdb.Extensions.ExtensionLoaded`, and `duckdb.Extensions.ExtensionAutoLoaded`
+
+## Remaining work
+There's a few things still remaining, though these may potentially be split across follow up PRs:
+- Make LogStorage pluggable for extensions
+- determine guidelines for default logging behaviour in duckdb/duckdb and core extensions
+- add C API calls 
+
+### Prefix matching Log Types
+Currently the log types are added to a set and then (inefficiently) string matched when the LogMode is set to `DISABLE_SELECTED` or `ENABLE_SELECTED`. However, with namespaced log type names, what we would actually like is to be able to do prefix matching. For example in:
+```SQL
+set enabled_loggers='duckdb.FileSystem,httpfs.FileSystem,duckdb.Extensions'
+set logging_mode='enable_selected'
+```
+we would like to have DuckDB log all entries with log types that start with one of these prefixes.
+
+there are basically 2 ways I see of doing this. 1 is to use a trie, perhaps using our own ART. I have discussed this with @taniabogatsch and we have concluded that we would need to make some changes to the ART to make it lightweight enough to fulfil this task. The other approach would be to create some sort of mapping where log types are pre-registered and then passed to the log calls as numericals. The latter would be the fastest for sure, but would also require registering log types separately and keeping some sort of state 

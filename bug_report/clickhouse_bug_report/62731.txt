@@ -1,0 +1,222 @@
+ID: 62731
+Title: ALTER TABLE UPDATE fails with SIZES_OF_ARRAYS_DONT_MATCH when using MATERIALIZED Nested Columns
+Description:
+### Description
+
+It seems as though it is not possible to execute updates on nested columns, when one of the nested columns is materialized.
+This used to be possible in earlier clickhouse versions, it is unclear to me whether this is a regression or a tunable behaviour.
+
+### Expected Behaviour
+
+<details>
+  <summary>On ClickHouse version <code>21.3.13.9</code> , it seems to <a href="https://fiddle.clickhouse.com/8d4de394-8c77-4b25-bb09-72fdbb3006e1">behave as expected</a></summary>
+
+  ### Queries
+  ```sql
+  SET asterisk_include_materialized_columns = 1 ;
+  
+  CREATE TABLE elements
+  (
+      `date` Date,
+      `id` UInt32,
+      `nested.key` Array(String),
+      `nested.value` Array(String),
+      `nested.key_hashed` Array(UInt64) MATERIALIZED arrayMap(key -> sipHash64(key), nested.key)
+  )
+  ENGINE = Memory ;
+  
+  
+  INSERT INTO elements (date,id,`nested.key`,`nested.value`) VALUES ('2023-02-14', 5555, ['hello', 'moto'],['chocolatine', 'croissant']);
+  
+  
+  SELECT * FROM elements ;
+  
+  ALTER TABLE elements
+  UPDATE 
+  
+      `nested.key` = arrayFilter(
+          (c, k, v) -> NOT (match(k, '.*') AND match(v, 'chocolatine')),
+          `nested.key`, `nested.key`, `nested.value`
+      ),
+      
+      `nested.value` = arrayFilter(
+          (c, k, v) -> NOT (match(k, '.*') AND match(v, 'chocolatine')),
+          `nested.value`, `nested.key`, `nested.value`
+      )
+      
+  WHERE id = 5555 AND date = '2023-02-14' AND 1=1
+  SETTINGS mutations_sync = 1 ; 
+  
+  SELECT * FROM elements ;
+  ```
+  
+  ### Output
+    
+  ```
+  2023-02-14	5555	['hello','moto']	['chocolatine','croissant']	[10142490492830962361,3159487597665552601]
+  2023-02-14	5555	['moto']	['croissant']	[3159487597665552601]
+  ```
+
+</details>
+
+### Broken Behaviour
+
+<details>
+  <summary>On ClickHouse version <code>23.12.4.15</code> , it seems to <a href="https://fiddle.clickhouse.com/dd7e8d38-b7c4-4441-96bc-f456812a1b32">break on an exception on nested array size validation</a></summary>
+
+  ### Queries
+  ```sql
+  SET asterisk_include_materialized_columns = 1 ;
+  
+  CREATE TABLE elements
+  (
+      `date` Date,
+      `id` UInt32,
+      `nested.key` Array(String),
+      `nested.value` Array(String),
+      `nested.key_hashed` Array(UInt64) MATERIALIZED arrayMap(key -> sipHash64(key), nested.key)
+  )
+  ENGINE = Memory ;
+  
+  
+  INSERT INTO elements (date,id,`nested.key`,`nested.value`) VALUES ('2023-02-14', 5555, ['hello', 'moto'],['chocolatine', 'croissant']);
+  
+  
+  SELECT * FROM elements ;
+  
+  ALTER TABLE elements
+  UPDATE 
+  
+      `nested.key` = arrayFilter(
+          (c, k, v) -> NOT (match(k, '.*') AND match(v, 'chocolatine')),
+          `nested.key`, `nested.key`, `nested.value`
+      ),
+      
+      `nested.value` = arrayFilter(
+          (c, k, v) -> NOT (match(k, '.*') AND match(v, 'chocolatine')),
+          `nested.value`, `nested.key`, `nested.value`
+      )
+      
+  WHERE id = 5555 AND date = '2023-02-14' AND 1=1
+  SETTINGS mutations_sync = 1 ; 
+  
+  SELECT * FROM elements ;
+  ```
+  
+  ### Output
+    
+  ```
+  2023-02-14	5555	['hello','moto']	['chocolatine','croissant']	[10142490492830962361,3159487597665552601]
+  
+  Received exception from server (version 23.12.4):
+  Code: 190. DB::Exception: Received from localhost:9000. DB::Exception: Elements '' and 'nested.value' of Nested data structure (Array columns) have different array sizes (1 and 2 respectively) on row 0: while executing 'FUNCTION and(and(equals(id, 5555), equals(date, '2023-02-14'), equals(1, 1)) : 8, validateNestedArraySizes(and(equals(id, 5555), equals(date, '2023-02-14'), equals(1, 1)), arrayFilter(lambda(tuple(c, k, v), not(and(match(k, '.*'), match(v, 'chocolatine')))), nested.value, nested.key, nested.value), nested.value) :: 0) -> and(and(equals(id, 5555), equals(date, '2023-02-14'), equals(1, 1)), validateNestedArraySizes(and(equals(id, 5555), equals(date, '2023-02-14'), equals(1, 1)), arrayFilter(lambda(tuple(c, k, v), not(and(match(k, '.*'), match(v, 'chocolatine')))), nested.value, nested.key, nested.value), nested.value)) UInt8 : 5'. (SIZES_OF_ARRAYS_DONT_MATCH)
+  (query: ALTER TABLE elements
+  UPDATE 
+  
+      `nested.key` = arrayFilter(
+          (c, k, v) -> NOT (match(k, '.*') AND match(v, 'chocolatine')),
+          `nested.key`, `nested.key`, `nested.value`
+      ),
+      
+      `nested.value` = arrayFilter(
+          (c, k, v) -> NOT (match(k, '.*') AND match(v, 'chocolatine')),
+          `nested.value`, `nested.key`, `nested.value`
+      )
+      
+  WHERE id = 5555 AND date = '2023-02-14' AND 1=1
+  SETTINGS mutations_sync = 1 ; )
+  ```
+
+</details>
+
+### Error Message
+
+<details>
+  <summary>From the Query Log</summary>
+  
+  #### Usual Exception
+  
+  ```
+  Code: 341. DB::Exception: Exception happened during execution of mutation '0000000287' with part '20231116_0_98982_762_98983' reason: 'Code: 190. DB::Exception: Elements '' and 'dynamic_vars_string_in_session.key' of Nested data structure (Array columns) have different array sizes (1 and 2 respectively) on row 10: while executing 'FUNCTION and(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')) : 7, validateNestedArraySizes(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')), arrayFilter(lambda(tuple(c, k, v), not(and(match(k, '.*'), match(v, '.*CS_ANONYMIZED_PII.*')))), dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.value), dynamic_vars_string_in_session.key) :: 8) -> and(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')), validateNestedArraySizes(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')), arrayFilter(lambda(tuple(c, k, v), not(and(match(k, '.*'), match(v, '.*CS_ANONYMIZED_PII.*')))), dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.value), dynamic_vars_string_in_session.key)) UInt8 : 11'. (SIZES_OF_ARRAYS_DONT_MATCH) (version 23.12.4.15 (official build))'. This error maybe retryable or not. In case of unretryable error, mutation can be killed with KILL MUTATION query. (UNFINISHED) (version 23.12.4.15 (official build))
+  ```
+  
+  #### Usual Stack Trace
+    
+  ```
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c6d1c3b in /usr/bin/clickhouse
+1. DB::Exception::Exception<char const*, String, String&, String&>(int, FormatStringHelperImpl<std::type_identity<char const*>::type, std::type_identity<String>::type, std::type_identity<String&>::type, std::type_identity<String&>::type>, char const*&&, String&&, String&, String&) @ 0x0000000012271ab5 in /usr/bin/clickhouse
+2. DB::checkMutationStatus(std::optional<DB::MergeTreeMutationStatus>&, std::set<String, std::less<String>, std::allocator<String>> const&) @ 0x0000000012271976 in /usr/bin/clickhouse
+3. DB::StorageReplicatedMergeTree::waitMutationToFinishOnReplicas(std::vector<String, std::allocator<String>> const&, String const&) const @ 0x0000000011c2be3b in /usr/bin/clickhouse
+4. DB::StorageReplicatedMergeTree::waitMutation(String const&, unsigned long) const @ 0x0000000011ccdf96 in /usr/bin/clickhouse
+5. DB::StorageReplicatedMergeTree::mutate(DB::MutationCommands const&, std::shared_ptr<DB::Context const>) @ 0x0000000011cf6721 in /usr/bin/clickhouse
+6. DB::InterpreterAlterQuery::executeToTable(DB::ASTAlterQuery const&) @ 0x0000000011183cfe in /usr/bin/clickhouse
+7. DB::InterpreterAlterQuery::execute() @ 0x0000000011180bd1 in /usr/bin/clickhouse
+8. DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x00000000117269a2 in /usr/bin/clickhouse
+9. DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x000000001172059a in /usr/bin/clickhouse
+10. DB::TCPHandler::runImpl() @ 0x0000000012674a69 in /usr/bin/clickhouse
+11. DB::TCPHandler::run() @ 0x000000001268c5b9 in /usr/bin/clickhouse
+12. Poco::Net::TCPServerConnection::start() @ 0x00000000150f5332 in /usr/bin/clickhouse
+13. Poco::Net::TCPServerDispatcher::run() @ 0x00000000150f6131 in /usr/bin/clickhouse
+14. Poco::PooledThread::run() @ 0x00000000151ed347 in /usr/bin/clickhouse
+15. Poco::ThreadImpl::runnableEntry(void*) @ 0x00000000151eb93c in /usr/bin/clickhouse
+16. start_thread @ 0x000000000000744b in /usr/lib64/libpthread-2.26.so
+17. clone @ 0x00000000000ef52f in /usr/lib64/libc-2.26.so
+  ```
+  
+</details>
+
+<details>
+  <summary>From the System Logs</summary>
+  
+  #### Typical Associated Error Log
+  
+  ```
+5372 MergeTreeBackgroundExecutor - 2024.04.17 14:39:49.130772 [ 5956 ] {} <Error> MergeTreeBackgroundExecutor: Exception while executing background task {ac7b966d-5ecc-4b2f-9a19-6e7026673094::20231116_0_98982_762_98984}: Code: 190. DB::Exception: Elements '' and 'dynamic_vars_string_in_session.key' of Nested data structure (Array columns) have different array sizes (1 and 2 respectively) on row 10: while executing 'FUNCTION and(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')) : 7, validateNestedArraySizes(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')), arrayFilter(lambda(tuple(c, k, v), not(and(match(k, '.*'), match(v, '.*CS_ANONYMIZED_PII.*')))), dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.value), dynamic_vars_string_in_session.key) :: 8) -> and(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')), validateNestedArraySizes(and(and(equals(project_id, 2346), equals(session_date, '2023-11-16'), equals(1, 1)), equals(_partition_id, '20231116')), arrayFilter(lambda(tuple(c, k, v), not(and(match(k, '.*'), match(v, '.*CS_ANONYMIZED_PII.*')))), dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.key, dynamic_vars_string_in_session.value), dynamic_vars_string_in_session.key)) UInt8 : 11'. (SIZES_OF_ARRAYS_DONT_MATCH)
+  ```
+  
+  #### Typical Associated Stack Trace
+    
+  ```
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c6d1c3b in /usr/bin/clickhouse
+1. DB::Exception::Exception<String const&, String const&, unsigned long&, unsigned long&, unsigned long&>(int, FormatStringHelperImpl<std::type_identity<String const&>::type, std::type_identity<String const&>::type, std::type_identity<unsigned long&>::type, std::type_identity<unsigned long&>::type, std::type_identity<unsigned long&>::type>, String const&, String const&, unsigned long&, unsigned long&, unsigned long&) @ 0x000000000bd39643 in /usr/bin/clickhouse
+2. DB::FunctionValidateNestedArraySizes::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000bd3953a in /usr/bin/clickhouse
+3. DB::FunctionToExecutableFunctionAdaptor::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000716890e in /usr/bin/clickhouse
+4. DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fc0585e in /usr/bin/clickhouse
+5. DB::IExecutableFunction::executeWithoutSparseColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fc063de in /usr/bin/clickhouse
+6. DB::IExecutableFunction::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fc07989 in /usr/bin/clickhouse
+7. DB::IFunctionBase::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x0000000007167a6d in /usr/bin/clickhouse
+8. DB::ColumnFunction::reduce() const @ 0x000000001185b1dc in /usr/bin/clickhouse
+9. DB::maskedExecute(DB::ColumnWithTypeAndName&, DB::PODArray<char8_t, 4096ul, Allocator<false, false>, 63ul, 64ul> const&, DB::MaskInfo const&) @ 0x0000000011a27862 in /usr/bin/clickhouse
+10. DB::FunctionsLogicalDetail::FunctionAnyArityLogical<DB::FunctionsLogicalDetail::AndImpl, DB::NameAnd>::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x00000000108c017e in /usr/bin/clickhouse
+11. DB::FunctionToExecutableFunctionAdaptor::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000716890e in /usr/bin/clickhouse
+12. DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fc0585e in /usr/bin/clickhouse
+13. DB::IExecutableFunction::executeWithoutSparseColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fc063de in /usr/bin/clickhouse
+14. DB::IExecutableFunction::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fc07989 in /usr/bin/clickhouse
+15. DB::ExpressionActions::execute(DB::Block&, unsigned long&, bool) const @ 0x0000000010a7a3d9 in /usr/bin/clickhouse
+16. DB::ExpressionTransform::transform(DB::Chunk&) @ 0x000000001296a793 in /usr/bin/clickhouse
+17. DB::ISimpleTransform::transform(DB::Chunk&, DB::Chunk&) @ 0x000000000e622bf0 in /usr/bin/clickhouse
+18. DB::ISimpleTransform::work() @ 0x00000000126cf9d2 in /usr/bin/clickhouse
+19. DB::ExecutionThreadContext::executeTask() @ 0x00000000126eb5ba in /usr/bin/clickhouse
+20. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x00000000126e1ff0 in /usr/bin/clickhouse
+21. DB::PipelineExecutor::executeStep(std::atomic<bool>*) @ 0x00000000126e17a8 in /usr/bin/clickhouse
+22. DB::PullingPipelineExecutor::pull(DB::Chunk&) @ 0x00000000126efeb7 in /usr/bin/clickhouse
+23. DB::PullingPipelineExecutor::pull(DB::Block&) @ 0x00000000126f0073 in /usr/bin/clickhouse
+24. DB::PartMergerWriter::mutateOriginalPartAndPrepareProjections() @ 0x000000001231dae3 in /usr/bin/clickhouse
+25. DB::MutateSomePartColumnsTask::executeStep() @ 0x000000001233f98e in /usr/bin/clickhouse
+26. DB::MutateTask::execute() @ 0x0000000012320ac1 in /usr/bin/clickhouse
+27. DB::ReplicatedMergeMutateTaskBase::executeStep() @ 0x000000001237dc47 in /usr/bin/clickhouse
+28. DB::MergeTreeBackgroundExecutor<DB::DynamicRuntimeQueue>::threadFunction() @ 0x00000000120d49c4 in /usr/bin/clickhouse
+29. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0x000000000c7b9944 in /usr/bin/clickhouse
+30. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000c7bd19c in /usr/bin/clickhouse
+31. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000c7bbf98 in /usr/bin/clickhouse
+ (version 23.12.4.15 (official build))
+  ```
+  
+</details>
+
+### Additional context
+
+➡️  **We believe this to be a possible regression ? Please confirm or deny 🙏** 
+
+If this behaviour is related to a setting that was introduced between these version, we'd be happy to hear about it 🙂 
+And/or if this new behaviour is actually wanted, could you please advise on how to side-step it ? 

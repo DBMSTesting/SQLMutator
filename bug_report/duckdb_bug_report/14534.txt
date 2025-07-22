@@ -1,0 +1,146 @@
+ID: 14534
+Title: Copying a table schema to another table schema does not copy CHECK, DEFAULT or GENERATED ALWAYS
+Description:
+### What happens?
+
+When copying the schema structure of one table to another it does not copy the entire schema structure as expected. See [CREATE TABLE](https://duckdb.org/docs/sql/statements/create_table) example `Copy the schema of t2 to t1:`. The following are not copied:
+
+1. CHECK constraints
+2. DEFAULT values
+3. GENERATED ALWAYS statements
+
+The latter is problematic since you cannot `ALTER TABLE ALTER COLUMN` and set a `GENERATED ALWAYS` statement as in:
+
+```sql
+ALTER TABLE dataset ALTER COLUMN record_type SET GENERATED ALWAYS AS ( upper( left( record_data, 2 ) ) ) VIRTUAL ;
+```
+
+which produces the error:
+
+```txt
+Parser Error: syntax error at or near "AS"
+LINE 1: ...OLUMN record_type SET GENERATED ALWAYS AS ( upper( left( record_data, 2 ) ) ) ...
+                                                  ^
+```
+
+which looks like the parser understands the `GENERATED ALWAYS` part, so maybe there is some other alternate syntax to do this or it's partially implemented.
+
+
+### To Reproduce
+
+`test.sql`
+
+```sql
+DROP TABLE IF EXISTS dataset_template ;
+
+CREATE OR REPLACE SEQUENCE dataset_line START WITH 1 INCREMENT BY 1 MINVALUE 1 ;
+CREATE OR REPLACE SEQUENCE record_group START WITH 1 INCREMENT BY 1 MINVALUE 1 ;
+
+CREATE TABLE dataset_template
+  (
+    filename       VARCHAR   NOT NULL DEFAULT getvariable( 'dataset_document' ),
+    record_line    UINTEGER  NOT NULL DEFAULT nextval( 'dataset_line' ),
+    record_offset  UINTEGER  NULL,
+    record_group   UINTEGER  NOT NULL DEFAULT 0 CHECK ( record_group < 10 ),
+    record_type    VARCHAR   GENERATED ALWAYS AS ( upper( left( record_data, 2 ) ) ),
+    record_data    VARCHAR   NULL
+  )
+;
+
+CREATE OR REPLACE TABLE dataset AS FROM dataset_template LIMIT 0 ;
+
+SELECT
+  table_catalog,
+  table_schema,
+  table_name,
+  column_name,
+  data_type,
+  column_default
+FROM
+  information_schema.columns
+WHERE
+    ( table_name = 'dataset_template' OR table_name = 'dataset' ) AND
+    ( column_name = 'filename' OR column_name = 'record_line' OR column_name = 'record_type' )
+;
+
+SELECT
+  table_name,
+  constraint_name,
+  constraint_type
+FROM
+  information_schema.table_constraints
+;
+```
+
+You can see from the `information_schema.columns` table that `column_default` contains `NULL` for the `dataset` table.
+
+```txt
+┌───────────────┬──────────────┬──────────────────┬─────────────┬───────────┬──────────────────────────────────────────┐
+│ table_catalog │ table_schema │    table_name    │ column_name │ data_type │              column_default              │
+│    varchar    │   varchar    │     varchar      │   varchar   │  varchar  │                 varchar                  │
+├───────────────┼──────────────┼──────────────────┼─────────────┼───────────┼──────────────────────────────────────────┤
+│ test          │ main         │ dataset_template │ filename    │ VARCHAR   │ getvariable('dataset_document')          │
+│ test          │ main         │ dataset          │ filename    │ VARCHAR   │                                          │
+│ test          │ main         │ dataset_template │ record_line │ UINTEGER  │ nextval('dataset_line')                  │
+│ test          │ main         │ dataset          │ record_line │ UINTEGER  │                                          │
+│ test          │ main         │ dataset_template │ record_type │ VARCHAR   │ CAST(upper("left"(record_data, 2)) AS .  │
+│ test          │ main         │ dataset          │ record_type │ VARCHAR   │                                          │
+└───────────────┴──────────────┴──────────────────┴─────────────┴───────────┴──────────────────────────────────────────┘
+```
+
+You can see from the `information_schema.table_constraints` table that there are no `CHECK` constraints for the `dataset` table.
+
+```txt
+┌──────────────────┬────────────────────────────────────────┬─────────────────┐
+│    table_name    │            constraint_name             │ constraint_type │
+│     varchar      │                varchar                 │     varchar     │
+├──────────────────┼────────────────────────────────────────┼─────────────────┤
+│ dataset_template │ dataset_template_filename_not_null     │ CHECK           │
+│ dataset_template │ dataset_template_record_line_not_null  │ CHECK           │
+│ dataset_template │ dataset_template_record_group_not_null │ CHECK           │
+│ dataset_template │ dataset_template_record_group_check    │ CHECK           │
+└──────────────────┴────────────────────────────────────────┴─────────────────┘
+```
+
+BTW, how do you get the actual text of the `CHECK` constraint, I didn't see a column in the `information_schema.table_constraints` table that represented it?
+
+
+### OS:
+
+Windows 10 Version 10.0.19045 Build 19045
+
+### DuckDB Version:
+
+v1.1.1
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+Dell OptiPlex 5090, I7-10700 @ 2.90GHz, 8 cores, 16 threads, 32GB memory
+
+### Full Name:
+
+Andrew Houghton
+
+### Affiliation:
+
+Akkodis
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

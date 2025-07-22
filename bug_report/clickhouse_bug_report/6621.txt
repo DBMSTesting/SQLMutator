@@ -1,0 +1,101 @@
+ID: 6621
+Title: ошибка при выборке Size of filter doesn't match size of column, а при попытке клонирования таблицы Cannot read out of marks range
+Description:
+Сегодня совершенно на ровном месте стали получать ошибку `Size of filter doesn't match size of column` или `Not found column … in block`. Это было на версии 19.6.2.11. Апдейт до 19.13.3.26 не помог. Ошибка возникает спорадически, т.е. можно отправить один и тот же запрос 10 раз, и 7 раз будут с ошибкой, а 3 — ок. 
+
+При попытке перелить данные из проблемной таблицы в новую через INSERT… SELECT, в какой-то момент получаем `Cannot read out of marks range`, и судя по гуглу я единственный с такой ошибкой. 
+
+Сейчас займусь восстановлением таблицы из бэкапа, хотя совершенно не представляю что могло привести к её повреждению, но на всякий случай, ниже запросы и логи происходящего.
+
+**How to reproduce**
+19.6.2.11 и 19.13.3.26
+
+```sql
+CREATE TABLE table_name
+(
+	campaign_id UInt32,
+	click_time UInt32,
+	click_ip UInt32,
+	in_time UInt32,
+	user_id UInt64,
+	date Date,
+	is_sale UInt8,
+	is_bookmark UInt8,
+	tag_id UInt16,
+	country_code String,
+	accept_language String,
+	user_agent String,
+	connection_type String,
+	browser_string String,
+	browser_version String,
+	os_string String,
+	os_version String,
+	device_string String,
+	is_mobile UInt8,
+	is_tablet UInt8
+)
+ENGINE = ReplacingMergeTree(date, (campaign_id, click_time, click_ip), 8192);
+
+```
+
+Запрос, хотя мне кажется дело просто в повреждении данных
+(он — часть большего запроса, но проблема именно в этом куске как мне кажется)
+
+```sql
+ SELECT
+                user_id
+            FROM table_name
+            PREWHERE (campaign_id > 123) AND (is_bookmark = 0)
+            GROUP BY user_id
+``` 
+
+**Error message and/or stacktrace**
+2019.08.23 07:19:48.644209 [ 46 ] {b1599fb2-b6c2-4ad9-a640-9c784f26ee95} <Error> HTTPHandler: Code: 9, e.displayText() = DB::Exception: Size of filter doesn't match size of column., Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x30) [0x7f6b5f0]
+1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x25) [0x3c46865]
+2. /usr/bin/clickhouse-server(DB::ColumnVector<unsigned int>::filter(DB::PODArray<unsigned char, 4096ul, AllocatorWithHint<false, AllocatorHints::DefaultHint, 67108864ul>, 15ul, 16ul> const&, long) const+0x63b) [0x6f17f6b]
+3. /usr/bin/clickhouse-server(DB::MergeTreeRangeReader::filterBlock(DB::Block&, DB::PODArray<unsigned char, 4096ul, AllocatorWithHint<false, AllocatorHints::DefaultHint, 67108864ul>, 15ul, 16ul> const&) const+0xc0) [0x7581930]
+4. /usr/bin/clickhouse-server(DB::MergeTreeRangeReader::read(unsigned long, std::vector<DB::MarkRange, std::allocator<DB::MarkRange> >&)+0x5cc) [0x758448c]
+5. /usr/bin/clickhouse-server(DB::MergeTreeBaseSelectBlockInputStream::readFromPart()+0x803) [0x7553983]
+6. /usr/bin/clickhouse-server(DB::MergeTreeBaseSelectBlockInputStream::readImpl()+0xb5) [0x7554da5]
+7. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x6c160a7]
+8. /usr/bin/clickhouse-server(DB::FilterBlockInputStream::readImpl()+0xc6) [0x7328716]
+9. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x6c160a7]
+10. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2f) [0x732768f]
+11. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x6c160a7]
+12. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x3e2) [0x7354ee2]
+13. /usr/bin/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::*)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream:
+:Handler>*, std::shared_ptr<DB::ThreadGroupStatus>, unsigned long&>(void (DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::*&&)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Han
+dler>*&&, std::shared_ptr<DB::ThreadGroupStatus>&&, unsigned long&)::{lambda()#1}::operator()() const+0x7d) [0x7355aad]
+14. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1a6) [0x3c760f6]
+15. /usr/bin/clickhouse-server() [0xba3e1a0]
+16. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f594dd506db]
+17. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7f594d4d788f]
+ (version 19.13.3.26 (official build))
+
+———-
+## Cannot read out of marks range. 
+
+2019.08.23 08:21:18.618545 [ 45 ] {546546c4-5268-45d3-a2ac-06c6baf7d24c} <Error> executeQuery: Code: 49, e.displayText() = DB::Exception: Cannot read out of marks range. (version 19.13.3.26 (official build)) (from [::1]:36782) (in query: INSERT INTO table_name_new SELECT * FROM table_name), Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x30) [0x7f6b5f0]
+1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x25) [0x3c46865]
+2. /usr/bin/clickhouse-server() [0x3a6ee31]
+3. /usr/bin/clickhouse-server(DB::MergeTreeRangeReader::startReadingChain(unsigned long, std::vector<DB::MarkRange, std::allocator<DB::MarkRange> >&)+0xb5) [0x7582d05]
+4. /usr/bin/clickhouse-server(DB::MergeTreeRangeReader::read(unsigned long, std::vector<DB::MarkRange, std::allocator<DB::MarkRange> >&)+0x859) [0x7584719]
+5. /usr/bin/clickhouse-server(DB::MergeTreeBaseSelectBlockInputStream::readFromPart()+0x803) [0x7553983]
+6. /usr/bin/clickhouse-server(DB::MergeTreeBaseSelectBlockInputStream::readImpl()+0xb5) [0x7554da5]
+7. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x6c160a7]
+8. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2f) [0x732768f]
+9. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x6c160a7]
+10. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2f) [0x732768f]
+11. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x6c160a7]
+12. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::loop(unsigned long)+0x162) [0x6d7dd42]
+13. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x245) [0x6d7e405]
+14. /usr/bin/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*, std::shared_ptr<DB::ThreadGroupStatus>, unsigned long&>(void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*&&)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*&&, std::shared_ptr<DB::ThreadGroupStatus>&&, unsigned long&)::{lambda()#1}::operator()() const+0x7d) [0x6d7ed7d]
+15. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1a6) [0x3c760f6]
+16. /usr/bin/clickhouse-server() [0xba3e1a0]
+17. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f594dd506db]
+18. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7f594d4d788f]
+

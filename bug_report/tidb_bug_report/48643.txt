@@ -1,0 +1,113 @@
+ID: 48643
+Title: the final count aggregation has changed as sum and cause incorrect result.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+special version in v7.1.2
+```
+drop table if exists t, tp;
+create table t
+(pk1 varchar(128),
+ pk2 varchar(128),
+ pk3 varchar(128),
+ data varchar(128),
+ primary key (pk1, pk2, pk3));insert into t values (UUID(), UUID(), uuid(), uuid()), (uuid(), uuid(), uuid(), uuid());
+insert into t select uuid(), uuid(), uuid(), uuid() from t, t t2, t t3, t t4;
+insert into t select t.pk1, uuid(), uuid(), uuid() from t, t t2, t t3, t t4;select count(*) from t;
+select count(distinct pk1) from t;
+select pk1, count(*) from t group by pk1 order by count(*) limit 10;#alter table t partition by key (a) partitions 128;
+create table tp
+(pk1 varchar(128),
+ pk2 varchar(128),
+ pk3 varchar(128),
+ data varchar(128),
+ primary key (pk1, pk2, pk3))
+partition by key(pk1) partitions 128;insert into tp select * from t;select count(*) from tp;
+select count(distinct pk1) from tp;
+select pk1, count(*) from tp group by pk1 order by count(*) limit 10;
+```
+
+
+### 2. What did you expect to see? (Required)
+```
+MySQL [test]> select pk1, count(*) from tp group by pk1 order by count(*) limit 10;
++--------------------------------------+----------+
+| pk1                                  | count(*) |
++--------------------------------------+----------+
+| 0958df6f-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df7d-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df8a-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df7c-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df66-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df7e-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df80-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df7b-8447-11ee-ae98-047c16110c2e |     5833 |
+| 09589533-8447-11ee-ae98-047c16110c2e |     5833 |
+| 0958df76-8447-11ee-ae98-047c16110c2e |     5833 |
++--------------------------------------+----------+
+10 rows in set, 1 warning (0.027 sec)
+
+MySQL [test]> explain select pk1, count(*) from tp group by pk1 order by count(*) limit 10;
++----------------------------------------+-----------+-----------+--------------------------+------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                     | estRows   | task      | access object            | operator info                                                                                                                            |
++----------------------------------------+-----------+-----------+--------------------------+------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_266                         | 10.00     | root      |                          | test.tp.pk1, Column#5                                                                                                                    |
+| └─TopN_269                             | 10.00     | root      |                          | Column#5, offset:0, count:10                                                                                                             |
+|   └─HashAgg_274                        | 880018.00 | root      |                          | group by:test.tp.pk1, funcs:count(Column#8)->Column#5, funcs:firstrow(Column#9)->test.tp.pk1                                             |
+|     └─PartitionUnion_275               | 880018.00 | root      |                          |                                                                                                                                          |
+|       ├─HashAgg_282                    | 8000.00   | root      |                          | group by:test.tp.pk1, funcs:count(Column#10)->Column#8, funcs:firstrow(test.tp.pk1)->Column#9, funcs:firstrow(test.tp.pk1)->test.tp.pk1  |
+|       │ └─TableReader_283              | 8000.00   | root      |                          | data:HashAgg_276                                                                                                                         |
+|       │   └─HashAgg_276                | 8000.00   | cop[tikv] |                          | group by:test.tp.pk1, funcs:count(1)->Column#10                                                                                          |
+|       │     └─TableFullScan_281        | 10000.00  | cop[tikv] | table:tp, partition:p0   | keep order:false, stats:pseudo                                                                                                           |
+|       ├─HashAgg_294                    | 8000.00   | root      |                          | group by:test.tp.pk1, funcs:count(Column#13)->Column#8, funcs:firstrow(test.tp.pk1)->Column#9, funcs:firstrow(test.tp.pk1)->test.tp.pk1  |
+|       │ └─TableReader_295              | 8000.00   | root      |                          | data:HashAgg_288                                                                                                                         |
+|       │   └─HashAgg_288                | 8000.00   | cop[tikv] |                          | group by:test.tp.pk1, funcs:count(1)->Column#13                                                                                          |
+|       │     └─TableFullScan_293        | 10000.00  | cop[tikv] | table:tp, partition:p1   | keep order:false, stats:pseudo                                                                                                           |
+|       ├─HashAgg_306                    | 8000.00   | root      |                          | group by:test.tp.pk1, funcs:count(Column#16)->Column#8, funcs:firstrow(test.tp.pk1)->Column#9, funcs:firstrow(test.tp.pk1)->test.tp.pk1  |
+```
+
+### 3. What did you see instead (Required)
+```
+MySQL [test]> select pk1, count(*) from tp group by pk1 order by count(*) limit 10;
++-----+----------+
+| pk1 | count(*) |
++-----+----------+
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
+| NULL |     NULL |
++-----+----------+
+10 rows in set, 1 warning (0.030 sec)
+
+MySQL [test]> explain select pk1, count(*) from tp group by pk1 order by count(*) limit 10;
++------------------------------------------+------------+-----------+--------------------------+------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                       | estRows    | task      | access object            | operator info                                                                                                                            |
++------------------------------------------+------------+-----------+--------------------------+------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_266                           | 10.00      | root      |                          | test.tp.pk1, Column#5                                                                                                                    |
+| └─TopN_269                               | 10.00      | root      |                          | Column#5, offset:0, count:10                                                                                                             |
+|   └─HashAgg_274                          | 1024000.00 | root      |                          | group by:Column#396, funcs:sum(Column#394)->Column#5, funcs:firstrow(Column#395)->test.tp.pk1                                            |
+|     └─Projection_1814                    | 1024000.00 | root      |                          | cast(Column#8, decimal(20,0) BINARY)->Column#394, Column#9, test.tp.pk1                                                                  |
+|       └─PartitionUnion_275               | 1024000.00 | root      |                          |                                                                                                                                          |
+|         ├─HashAgg_282                    | 8000.00    | root      |                          | group by:test.tp.pk1, funcs:count(Column#10)->Column#8, funcs:firstrow(test.tp.pk1)->Column#9, funcs:firstrow(test.tp.pk1)->test.tp.pk1  |
+|         │ └─TableReader_283              | 8000.00    | root      |                          | data:HashAgg_276                                                                                                                         |
+|         │   └─HashAgg_276                | 8000.00    | cop[tikv] |                          | group by:test.tp.pk1, funcs:count(1)->Column#10                                                                                          |
+|         │     └─TableFullScan_281        | 10000.00   | cop[tikv] | table:tp, partition:p0   | keep order:false, stats:pseudo                                                                                                           |
+|         ├─HashAgg_294                    | 8000.00    | root      |                          | group by:test.tp.pk1, funcs:count(Column#13)->Column#8, funcs:firstrow(test.tp.pk1)->Column#9, funcs:firstrow(test.tp.pk1)->test.tp.pk1  |
+|         │ └─TableReader_295              | 8000.00    | root      |                          | data:HashAgg_288                                                                                                                         |
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+only v7.1.2

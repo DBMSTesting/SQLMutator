@@ -1,0 +1,113 @@
+ID: 22158
+Title: Unexpected errors in read-only mode
+Description:
+**Describe the bug**
+When connecting via read-only user to clickhouse, unexpected exceptions are logged both by clickhouse-client and clickhouse-server.
+
+**Does it reproduce on recent release?**
+[The list of releases](https://github.com/ClickHouse/ClickHouse/blob/master/utils/list-versions/version_date.tsv)
+Reproduces on 21.3.3.14-lts
+
+**How to reproduce**
+To reproduce this issue, official RPMs may be used. It doesn't reproduce with docker image yandex/clickhouse-{client,server}
+* run fedora in docker:
+`$ docker run --privileged -ti registry.fedoraproject.org/fedora:rawhide /bin/bash`
+* install dependencies, wget and a text editor:
+` # dnf install initscripts wget nano`
+* download clickhouse 21.3.3.14 rpms and install it:
+```
+# cd /root
+# wget https://github.com/ClickHouse/ClickHouse/releases/download/v21.3.3.14-lts/clickhouse-client-21.3.3.14-2.noarch.rpm
+# wget https://github.com/ClickHouse/ClickHouse/releases/download/v21.3.3.14-lts/clickhouse-common-static-21.3.3.14-2.x86_64.rpm
+# wget https://github.com/ClickHouse/ClickHouse/releases/download/v21.3.3.14-lts/clickhouse-server-21.3.3.14-2.noarch.rpm
+# rpm -i -U -v -h clickhouse-client-21.3.3.14-2.noarch.rpm clickhouse-common-static-21.3.3.14-2.x86_64.rpm clickhouse-server-21.3.3.14-2.noarch.rpm
+```
+* uncomment `<access_management>1</access_management>` line in file `/etc/clickhouse-server/users.xml`
+* start clickhouse server:
+`/etc/init.d/clickhouse-server start`
+* connect to clickhouse server and create read-only user:
+```
+# clickhouse-client 
+ClickHouse client version 21.3.3.14 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 21.3.3 revision 54447.
+
+e9cae3b6abc2 :) create user readonlyuser identified with plaintext_password by 'password' settings profile 'readonly'
+
+CREATE USER readonlyuser IDENTIFIED WITH plaintext_password BY 'password' SETTINGS PROFILE readonly
+
+Query id: 32e34c2d-0b7d-4bb2-8806-abb5789d8a43
+
+Ok.
+
+0 rows in set. Elapsed: 0.003 sec. 
+
+e9cae3b6abc2 :) Bye.
+```
+* now connect as read-only user
+`clickhouse-client -u readonlyuser --ask-password`
+
+**Expected behavior**
+Expected that it works without any errors.
+
+**Error message and/or stacktrace**
+Error on client:
+```
+# clickhouse-client -u readonlyuser --ask-password
+ClickHouse client version 21.3.3.14 (official build).
+Password for user (readonlyuser): 
+Connecting to localhost:9000 as user readonlyuser.
+Connected to ClickHouse server version 21.3.3 revision 54447.
+
+e9cae3b6abc2 :) Cannot load data for command line suggestions: Code: 164, e.displayText() = DB::Exception: Received from localhost:9000. DB::Exception: Cannot modify 'system_events_show_zero_values' setting in readonly mode. (version 21.3.3.14 (official build))
+```
+
+Error on server (`/var/log/clickhouse-server/clickhouse-server.err.log`):
+```
+2021.03.26 09:45:58.976489 [ 259 ] {} <Error> TCPHandler: Code: 164, e.displayText() = DB::Exception: Cannot modify 'system_events_show_zero_values' setting in readonly mode, Stack trace:
+
+0. DB::SettingsConstraints::checkImpl(DB::Settings const&, DB::SettingChange&, DB::SettingsConstraints::ReactionOnViolation) const @ 0xe6d2170 in /usr/bin/clickhouse
+1. DB::SettingsConstraints::check(DB::Settings const&, DB::SettingsChanges&) const @ 0xe6d2b20 in /usr/bin/clickhouse
+2. DB::TCPHandler::receiveQuery() @ 0xf8c916b in /usr/bin/clickhouse
+3. DB::TCPHandler::receivePacket() @ 0xf8bfbb7 in /usr/bin/clickhouse
+4. DB::TCPHandler::runImpl() @ 0xf8b83b2 in /usr/bin/clickhouse
+5. DB::TCPHandler::run() @ 0xf8cad69 in /usr/bin/clickhouse
+6. Poco::Net::TCPServerConnection::start() @ 0x11f7d83f in /usr/bin/clickhouse
+7. Poco::Net::TCPServerDispatcher::run() @ 0x11f7f251 in /usr/bin/clickhouse
+8. Poco::PooledThread::run() @ 0x120b5979 in /usr/bin/clickhouse
+9. Poco::ThreadImpl::runnableEntry(void*) @ 0x120b17da in /usr/bin/clickhouse
+10. start_thread @ 0x91c9 in /usr/lib64/libpthread-2.33.9000.so
+11. clone @ 0x100463 in /usr/lib64/libc-2.33.9000.so
+
+2021.03.26 09:45:58.978054 [ 259 ] {} <Error> TCPHandler: Code: 261, e.displayText() = DB::Exception: Unknown BlockInfo field number: 227213735, Stack trace:
+
+0. DB::BlockInfo::read(DB::ReadBuffer&) @ 0xe8a6658 in /usr/bin/clickhouse
+1. DB::NativeBlockInputStream::readImpl() @ 0xefdd853 in /usr/bin/clickhouse
+2. DB::IBlockInputStream::read() @ 0xe8ab0a5 in /usr/bin/clickhouse
+3. DB::TCPHandler::receiveUnexpectedData() @ 0xf8c9c35 in /usr/bin/clickhouse
+4. DB::TCPHandler::receivePacket() @ 0xf8bfd36 in /usr/bin/clickhouse
+5. DB::TCPHandler::runImpl() @ 0xf8b83b2 in /usr/bin/clickhouse
+6. DB::TCPHandler::run() @ 0xf8cad69 in /usr/bin/clickhouse
+7. Poco::Net::TCPServerConnection::start() @ 0x11f7d83f in /usr/bin/clickhouse
+8. Poco::Net::TCPServerDispatcher::run() @ 0x11f7f251 in /usr/bin/clickhouse
+9. Poco::PooledThread::run() @ 0x120b5979 in /usr/bin/clickhouse
+10. Poco::ThreadImpl::runnableEntry(void*) @ 0x120b17da in /usr/bin/clickhouse
+11. start_thread @ 0x91c9 in /usr/lib64/libpthread-2.33.9000.so
+12. clone @ 0x100463 in /usr/lib64/libc-2.33.9000.so
+
+2021.03.26 09:45:58.978523 [ 259 ] {} <Error> ServerErrorHandler: Code: 99, e.displayText() = DB::Exception: Unknown packet 11861 from client, Stack trace (when copying this message, always include the lines below):
+
+0. DB::TCPHandler::receivePacket() @ 0xf8bfcfc in /usr/bin/clickhouse
+1. DB::TCPHandler::runImpl() @ 0xf8b83b2 in /usr/bin/clickhouse
+2. DB::TCPHandler::run() @ 0xf8cad69 in /usr/bin/clickhouse
+3. Poco::Net::TCPServerConnection::start() @ 0x11f7d83f in /usr/bin/clickhouse
+4. Poco::Net::TCPServerDispatcher::run() @ 0x11f7f251 in /usr/bin/clickhouse
+5. Poco::PooledThread::run() @ 0x120b5979 in /usr/bin/clickhouse
+6. Poco::ThreadImpl::runnableEntry(void*) @ 0x120b17da in /usr/bin/clickhouse
+7. start_thread @ 0x91c9 in /usr/lib64/libpthread-2.33.9000.so
+8. clone @ 0x100463 in /usr/lib64/libc-2.33.9000.so
+ (version 21.3.3.14 (official build))
+```
+
+**Additional context**
+As stated before, it reproduces with official RPMs but doesn't reproduce with yandex/clickhouse-{client,server} docker images.

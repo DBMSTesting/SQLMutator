@@ -1,0 +1,68 @@
+ID: 11135
+Title: Ambiguous column error for remote() tables
+Description:
+
+**Describe the issue**
+
+There is ambiguous column error on version 20.3.8.53 for distributed table. The same sql run correct on version 19.14.7.15.
+
+**How to reproduce**
+To simplify the reproducing steps, I use remote query on two hosts to substitute the query on distributed table.
+
+1. prepare table and data on host1 and host2
+
+`create table test.fact (id1 Int64, id2 Int64, value Int64) ENGINE = MergeTree() ORDER BY id1;`
+`create table test.dimension (id1 Int64, name String) ENGINE = MergeTree() ORDER BY id1;`
+`insert into test.fact values (1,2,10),(2,2,10),(3,3,10),(4,3,10);`
+`insert into test.dimension values (1,'name_1'),(2,'name_1'),(3,'name_3'),(4, 'name_4');`
+
+2. run sql on both host1 and host2 is correct
+`SELECT 
+    f.id1 AS ID, 
+    d.name AS Name, 
+    sum(f.value)
+FROM test.fact AS f
+LEFT JOIN test.dimension AS d ON f.id1 = d.id1
+WHERE f.id1 = f.id2
+GROUP BY 
+    ID, 
+    Name`
+
+Result
+
+┌─ID─┬─Name───┬─sum(value)─┐
+│  2 │ name_1 │         10 │
+│  3 │ name_3 │         10 │
+└────┴────────┴────────────┘
+
+3. But, run the sql based on two remote hosts is not correct. Run on host1, reports error on host2. Run on host2, report error on host1.
+`SELECT 
+    f.id1 AS ID, 
+    d.name AS Name, 
+    sum(f.value)
+FROM remote('{{host1}},{{host2}}', test.fact, 'default', '') AS f
+LEFT JOIN test.dimension AS d ON f.id1 = d.id1
+WHERE f.id1 = f.id2
+GROUP BY 
+    ID, 
+    Name`
+
+Report error
+
+`↖ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) Received exception from server (version 20.3.8):
+Code: 352. DB::Exception: Received from localhost:9000. DB::Exception: Received from {host2}:9000. DB::Exception: Ambiguous column 'id1'. 
+`
+
+* Which ClickHouse server versions are incompatible
+The same sql run correct on version 19.14.7.15, but fail on version 20.3.8.53. On version 20.3.8.53, it reports  "DB::Exception: Ambiguous column***"
+
+* Which interface to use, if matters
+
+clickhouse-client
+
+
+**Additional context**
+We are planing to upgrade clickhouse version from 19.14.7.15. to 20.3.8.53. 
+So, we do function regression for the new version 20.3.8.53. We unfortunately found that our widely used sql pattern, as described above, is not supported on the new version.
+
+*This issue is quite emergent on our side. Looking forward to your reply. Thanks!*

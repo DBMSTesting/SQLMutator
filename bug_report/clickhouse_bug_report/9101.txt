@@ -1,0 +1,51 @@
+ID: 9101
+Title: Distributed tables: user accessing the local shard is always the querying user, regardless of the user specified in the cluster definition.
+Description:
+In a `Distributed` table, the user used to access the local shard (i.e. the shard on which the query is running) is always the querying user, regardless of the user specified in the cluster definition.
+
+Background. I have a cluster with a database with tables holding a variety of raw and aggregated data. I wanted to created a user with restricted access to only some of the tables, and no straightforward means of discovery of the existence of the other tables. The solution I came up with was to create a separate database for restricted tables and a separate cluster definition for restricted tables. The restricted cluster definition defines access to the cluster using a user with rights to the main database. The separate database contains `Distributed` tables only, using the restricted cluster definition, and referencing shards in the primary database. So, `config.xml` contains:
+
+```
+<remote_servers>
+  <main_cluster>
+    <shard><replica><host>host1><user>normal</user></shard>
+    <shard><replica><host>host2><user>normal</user></shard>
+  </main_cluster>
+  <restricted_cluster>
+    <shard><replica><host>host1><user>normal</user></shard>
+    <shard><replica><host>host2><user>normal</user></shard>
+  </restricted_cluster>
+</remote_servers>
+```
+ 
+and `users.xml`:
+
+```
+<users>
+  <normal>...</normal>
+  <restricted>..<allow_databases><database>restricted</database></allow_databases></restricted>
+</users>
+```
+
+Tables:
+
+```
+CREATE DATABASE main;
+CREATE TABLE main.PrivateTableShard(...) ENGINE=MergeTree(...);
+CREATE TABLE main.PublicTableShard(...) ENGINE=MergeTree(...);
+CREATE TABLE mainPrivateTable(...) ENGINE=Distributed(main_cluster, main, PrivateTableShard,...);
+CREATE TABLE main.PublicTable(...) ENGINE=Distributed(main_cluster, main, PublicTableShard,...);
+
+CREATE DATABASE restricted;
+CREATE TABLE restricted.PublicTable(...) ENGINE=Distributed(restricted_cluster, main, PublicTableShard,...);
+```
+
+On my local test system, this worked. The restricted user could only see `PublicTable`, and could query it. Move it onto our staging setup, and it fails. Queries by the restricted user fail:
+
+```
+DB::Exception: Access denied to database main for user restricted.
+```
+
+It turns out that the reason this worked on the test system is that on that system (Ubuntu Xenial) the hostname given in the restricted cluster definition appears in `/etc/hosts` as 127.0.1.1. The `Distributed` code path checks whether a shard being accessed is the local machine and if so, rather than doing a remote connect with the user listed in the cluster definition, it proceeds immediately with the querying user. The check for the local machine checks to see whether the address given matches the first address on any local network interface. On the staging system, the local hostname resolves as the primary address on a network interface, so the query proceeds as a local, uses the querying user, and so fails. On my test system, the local hostname resolves as 127.0.1.1. This does not match 127.0.0.1, the query goes ahead as remote, and so uses the user listed in the cluster definition, not the user submitting the query.
+
+The underlying issue here, I think, is the same as in #8863, namely there is inconsistency in user for `Distributed` table access to the underlying tables.

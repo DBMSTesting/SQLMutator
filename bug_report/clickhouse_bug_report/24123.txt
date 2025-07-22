@@ -1,0 +1,71 @@
+ID: 24123
+Title: Missing columns exception when joining Distributed Materialized View
+Description:
+**Describe the bug**
+Using column from right side of join where left side is Distributed Materialized View in select clause returns 'Missing columns' exception;
+The column can be used in where condition without a problem.
+
+**Does it reproduce on recent release?**
+Yes
+
+**How to reproduce**
+* Which ClickHouse server version to use: 21.4.6 revision 54447
+* `CREATE TABLE` statements for all tables involved
+
+```
+create table test.test_shard ON CLUSTER '{cluster}' (k UInt64, v UInt64) ENGINE ReplicatedMergeTree() ORDER BY (k)
+create table test.test_local ON CLUSTER '{cluster}' (k UInt64, v UInt64) ENGINE MergeTree() ORDER BY (k)
+
+create materialized view test.test_distributed ON CLUSTER '{cluster}' engine  Distributed('{cluster}', 'test', 'test_shard', k)   as select k,v from test.test_source
+
+create table test.test_source ON CLUSTER '{cluster}' (k UInt64, v UInt64) ENGINE MergeTree() ORDER BY (k)
+```
+
+Join between Distributed Materialized View and MergeTree is not working
+
+```
+select * from test.test_distributed td asof join test.test_local tl on td.k = tl.k and td.v < tl.v;
+```
+Error:
+```
+Received exception from server (version 21.4.6):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: Missing columns: 'tl.v' 'tl.k' while processing query: 'SELECT k, v, tl.k, tl.v FROM test.test_distributed AS td', required columns: 'k' 'v' 'tl.k' 'tl.v' 'k' 'v' 'tl.k' 'tl.v'.
+```
+Join with one Shard is working
+```
+select * from test.test_shard td asof join test.test_local tl on td.k = tl.k and td.v < tl.v;
+```
+
+Full exception
+```
+2021.05.14 11:02:12.054811 [ 168 ] {4b3406f9-72c5-497c-b97b-6f13e3f59633} <Error> TCPHandler: Code: 47, e.displayText() = DB::Exception: Missing columns: 'tl.v' 'tl.k' while processing query: 'SELECT k, v, tl.k, tl.v FROM test.test_distributed AS td', required columns: 'k' 'v' 'tl.k' 'tl.v' 'k' 'v' 'tl.k' 'tl.v', Stack trace:
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x87f714a in /usr/bin/clickhouse
+1. DB::TreeRewriterResult::collectUsedColumns(std::__1::shared_ptr<DB::IAST> const&, bool) @ 0xf6d0a90 in /usr/bin/clickhouse
+2. DB::TreeRewriter::analyzeSelect(std::__1::shared_ptr<DB::IAST>&, DB::TreeRewriterResult&&, DB::SelectQueryOptions const&, std::__1::vector<DB::TableWithColumnNamesAndTypes, std::__1::allocator<DB::TableWithColumnNamesAndTypes> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::TableJoin>) const @ 0xf6d72e4 in /usr/bin/clickhouse
+3. ? @ 0xf268c4e in /usr/bin/clickhouse
+4. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&) @ 0xf264e32 in /usr/bin/clickhouse
+5. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, DB::SelectQueryOptions const&) @ 0xf267584 in /usr/bin/clickhouse
+6. DB::getHeaderForProcessingStage(DB::IStorage const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum) @ 0xf7458d6 in /usr/bin/clickhouse
+7. DB::StorageMaterializedView::read(DB::QueryPlan&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xf983b69 in /usr/bin/clickhouse
+8. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&) @ 0xf276e2e in /usr/bin/clickhouse
+9. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>) @ 0xf26c581 in /usr/bin/clickhouse
+10. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf26b39b in /usr/bin/clickhouse
+11. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf592583 in /usr/bin/clickhouse
+12. DB::InterpreterSelectWithUnionQuery::execute() @ 0xf59370e in /usr/bin/clickhouse
+13. ? @ 0xf7356e2 in /usr/bin/clickhouse
+14. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0xf734023 in /usr/bin/clickhouse
+15. DB::TCPHandler::runImpl() @ 0xfeebdcd in /usr/bin/clickhouse
+16. DB::TCPHandler::run() @ 0xfefe399 in /usr/bin/clickhouse
+17. Poco::Net::TCPServerConnection::start() @ 0x125b865f in /usr/bin/clickhouse
+18. Poco::Net::TCPServerDispatcher::run() @ 0x125ba071 in /usr/bin/clickhouse
+19. Poco::PooledThread::run() @ 0x126f0799 in /usr/bin/clickhouse
+20. Poco::ThreadImpl::runnableEntry(void*) @ 0x126ec5fa in /usr/bin/clickhouse
+21. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+22. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+
+``` 
+
+What can I do ?
+
+

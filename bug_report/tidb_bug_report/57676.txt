@@ -1,0 +1,61 @@
+ID: 57676
+Title: unexpected jsonTable version after DumpHistoricalStatsBySnapshot
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Enable the failpoint and run this test.
+``` 
+func TestAssertHistoricalStatsAfterAlterTable(t *testing.T) {
+	failpoint.Enable("github.com/pingcap/tidb/pkg/domain/sendHistoricalStats", "return(true)")
+	defer failpoint.Disable("github.com/pingcap/tidb/pkg/domain/sendHistoricalStats")
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_historical_stats = 1")
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int, b varchar(10),c int, KEY `idx` (`c`))")
+	tk.MustExec("analyze table test.t")
+	is := dom.InfoSchema()
+	tableInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	// dump historical stats
+	h := dom.StatsHandle()
+	hsWorker := dom.GetHistoricalStatsWorker()
+	tblID := hsWorker.GetOneHistoricalStatsTable()
+	err = hsWorker.DumpHistoricalStats(tblID, h)
+	require.Nil(t, err)
+
+	time.Sleep(1 * time.Second)
+	snapshot := oracle.GoTimeToTS(time.Now())
+	jsTable, _, err := h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
+	require.NoError(t, err)
+	require.NotNil(t, jsTable)
+	require.NotEqual(t, jsTable.Version, uint64(0))
+}
+```
+
+change the ```create table``` statment as 
+
+```
+create table t(a int, b varchar(10),c int, KEY `idx` (`c`)) partition by hash (a) partitions 16
+```
+
+### 2. What did you expect to see? (Required)
+Test passes.
+
+### 3. What did you see instead (Required)
+```
+require.NotEqual(t, jsTable.Version, uint64(0))
+``` 
+failed.
+
+
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

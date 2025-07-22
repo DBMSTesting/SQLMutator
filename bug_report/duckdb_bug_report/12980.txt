@@ -1,0 +1,61 @@
+ID: 12980
+Title: Use jaro winkler similarity for finding similar entries in catalog
+Description:
+
+When a catalog entry is not found, we try to helpfully offer a recommended alternative, e.g.:
+
+```sql
+D select arg_mi(42,84);
+-- Catalog Error: Scalar Function with name arg_mi does not exist!
+-- Did you mean "arg_min"?
+-- LINE 1: select arg_mi(42,84);
+--                ^
+```
+
+This currently uses the [levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance) on candidate catalog entries. While this works reasonably well, the levenshtein distance has a shortcoming in that it does not really work well on entries that have different lengths - as the edit distance metric used penalizes extra characters in the same manner as *different* characters. As a result, strings of similar length are almost always shown over what we would consider "more similar" strings.
+
+For example, in the current release:
+
+```sql
+D select jaro_winkler('a', 'b');
+-- Catalog Error: Scalar Function with name jaro_winkler does not exist!
+-- Did you mean "arg_min"?
+-- LINE 1: select jaro_winkler('a', 'b');
+--                ^
+```
+
+Most likely the user meant either the functions `jaro_winkler_similarity`, or `jaro_similarity`. However, the levenshtein metric considers the more similarity sized `arg_min` as more similar:
+
+```sql
+D select levenshtein('jaro_winkler', 'arg_min') as levenshtein;
+┌─────────────┐
+│ levenshtein │
+│    int64    │
+├─────────────┤
+│           7 │
+└─────────────┘
+D select levenshtein('jaro_winkler', 'jaro_similarity') as levenshtein;
+┌─────────────┐
+│ levenshtein │
+│    int64    │
+├─────────────┤
+│           7 │
+└─────────────┘
+D select levenshtein('jaro_winkler', 'jaro_winkler_similarity') as levenshtein;
+┌─────────────┐
+│ levenshtein │
+│    int64    │
+├─────────────┤
+│          11 │
+└─────────────┘
+```
+
+The [jaro-winkler similarity](https://en.wikipedia.org/wiki/Jaro–Winkler_distance) is instead designed towards preferring matching prefixes, which makes the matches much more natural. Here's some examples of previous and new suggestions:
+
+
+| Query  | Old Suggestion | New Suggestion  |
+|--------|----------------|-----------------|
+| lea    | era            | least           |
+| jaro   | bar            | jaro_similarity |
+| hist   | list           | histogram       |
+| to_min | min            | to_minutes      |

@@ -1,0 +1,98 @@
+ID: 10955
+Title: MAX_EXECUTION_TIME behavior differences from MySQL
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+MAX_EXECUTION_TIME was recently added in https://github.com/pingcap/tidb/issues/7008
+I noticed a few behavior differences from MySQL.
+
+2. What did you expect to see?
+
+TiDB supports `set max_execution_time=1000;`, but does not support using this as a hint. This is important for languages such as Go, where connection pools (unless using a transaction) may share connections between gorountines. Thus, setting a session var is unreliable:
+
+```
+tidb> select /*+ MAX_EXECUTION_TIME(1000) */ SLEEP(5);
++----------+
+| SLEEP(5) |
++----------+
+|        0 |
++----------+
+1 row in set (5.00 sec)
+
+mysql80> select /*+ MAX_EXECUTION_TIME(1000) */ SLEEP(5);
++----------+
+| SLEEP(5) |
++----------+
+|        1 |
++----------+
+1 row in set (1.00 sec)
+```
+
+The second issue is that when interrupting a sleep'ed query, MySQL will just have the sleep function return 1. TiDB instead returns an error:
+
+```
+tidb> set max_execution_time=100;
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> SELECT SLEEP(10);
+ERROR 1317 (70100): Query execution was interrupted
+
+mysql80> set max_execution_time=100;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql80> select sleep(10);
++-----------+
+| sleep(10) |
++-----------+
+|         1 |
++-----------+
+1 row in set (0.10 sec)
+```
+
+A third issue is that the setting the global var did not work as expected:
+```
+morgo@ryzen:~/go/src/github.com/pingcap/tidb$ mysql -e 'set global max_execution_time=100'
+morgo@ryzen:~/go/src/github.com/pingcap/tidb$ time mysql -e 'select sleep(10)'
++-----------+
+| sleep(10) |
++-----------+
+|         0 |
++-----------+
+
+real    0m10.010s
+user    0m0.005s
+sys     0m0.000s
+
+(Creating a new connection does show max_execution_time as 100, but this is not taking effect.)
+```
+
+A fourth issue is that the sleep function does not seem to cancel/interrupt. The query still runs for 60 seconds, even though it is only supposed to run for 100ms (this is different from 3rd issue, note the error message):
+
+```
+morgo@ryzen:~/go/src/github.com/pingcap/tidb$ time mysql -e 'set max_execution_time=100;select sleep(60)'
+ERROR 1317 (70100) at line 1: Query execution was interrupted
+
+real    1m0.010s
+user    0m0.005s
+sys     0m0.000s
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v3.0.0-rc.1-240-gcf5f42b8e
+Git Commit Hash: cf5f42b8ece0fad2b3f93c6753747b392f33f4c8
+Git Branch: master
+UTC Build Time: 2019-06-26 03:16:26
+GoVersion: go version go1.12.1 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

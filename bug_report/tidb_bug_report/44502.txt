@@ -1,0 +1,124 @@
+ID: 44502
+Title: internal sql related to stats block building new connection
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+When building new connection, it needs to get `h.mu.Lock`, which is not reasonable.
+```
+goroutine 6473293526 [semacquire]:
+sync.runtime_SemacquireMutex(0xd0?, 0xb?, 0x20300b?)
+        /usr/local/go/src/runtime/sema.go:77 +0x25
+sync.(*Mutex).lockSlow(0xc0007a8140)
+        /usr/local/go/src/sync/mutex.go:171 +0x165
+sync.(*Mutex).Lock(...)
+        /usr/local/go/src/sync/mutex.go:90
+sync.(*RWMutex).Lock(0xc0880f1202?)
+        /usr/local/go/src/sync/rwmutex.go:147 +0x36
+github.com/pingcap/tidb/statistics/handle.(*Handle).NewSessionStatsCollector(0xc0007a8140)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/handle/update.go:237 +0x3b
+github.com/pingcap/tidb/session.CreateSessionWithOpt({0x4fdf670, 0xc000a78780}, 0xc04daea580?)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:3051 +0x1e5
+github.com/pingcap/tidb/session.CreateSession(...)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:3025
+github.com/pingcap/tidb/server.(*TiDBDriver).OpenCtx(0xc03079b080?, 0x0?, 0x55339a8?, 0x2e, {0x32f8b69?, 0xc039c5aae0?}, 0xc025ef1810?, 0x0?)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/driver_tidb.go:196 +0x47
+github.com/pingcap/tidb/server.(*clientConn).openSession(0xc0510bea80)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:801 +0x119
+github.com/pingcap/tidb/server.(*clientConn).writeInitialHandshake(0xc0510bea80, {0x4fb5c30, 0xc0771cecf0})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:404 +0x54a
+github.com/pingcap/tidb/server.(*clientConn).handshake(0xc0510bea80, {0x4fb5c30, 0xc0771cecf0})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:284 +0x46
+github.com/pingcap/tidb/server.(*Server).onConn(0xc00794a900, 0xc0510bea80)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:563 +0x428
+created by github.com/pingcap/tidb/server.(*Server).startNetworkListener
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:482 +0x5ca
+```
+`h.mu` may be held when executing some internal sql related to stats, such as `dumpTableStatCountToKV`.
+```
+goroutine 566 [select]:
+github.com/tikv/client-go/v2/internal/client.sendBatchRequest({0x4fb5c30?, 0xc07fcb6e10}, {0xc08b752400, 0x38}, {0x0, 0x0}, 0xc00054ad00, 0xc04c6dc9f0, 0xc058e64bc0?)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/client/client_batch.go:786 +0x79a
+github.com/tikv/client-go/v2/internal/client.(*RPCClient).sendRequest(0xc000efa930, {0x4fb5c30, 0xc07fcb6e10}, {0xc08b752400, 0x38}, 0xc02166be40, 0x10000c0203158d8?)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/client/client.go:497 +0x605
+github.com/tikv/client-go/v2/internal/client.(*RPCClient).SendRequest(0xc007b3e000?, {0x4fb5c30, 0xc07fcb6e10}, {0xc08b752400, 0x38}, 0xc03773fcb0?, 0x18?)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/client/client.go:540 +0x78
+github.com/tikv/client-go/v2/internal/client.interceptedClient.SendRequest.func1({0xc08b752400?, 0xc08b752400?}, 0x38?)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/client/client_interceptor.go:39 +0x45
+github.com/pingcap/tidb/util/topsql/stmtstats.(*KvExecCounter).RPCInterceptor.func1.1({0xc08b752400?, 0x38?}, 0x76f6788?)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/topsql/stmtstats/kv_exec_count.go:57 +0x6d
+github.com/tikv/client-go/v2/internal/client.interceptedClient.SendRequest({{0x4fafc20?, 0xc000efa930?}}, {0x4fb5c30, 0xc07fcb6e10}, {0xc08b752400, 0x38}, 0x63102d0?, 0x6fc23ac00)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/client/client_interceptor.go:40 +0x142
+github.com/tikv/client-go/v2/internal/client.reqCollapse.SendRequest({{0x4fb3c10?, 0xc000a72520?}}, {0x4fb5c30, 0xc07fcb6e10}, {0xc08b752400, 0x38}, 0xc020315a78?, 0x17b9af7?)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/client/client_collapse.go:74 +0xd6
+github.com/tikv/client-go/v2/internal/locate.(*RegionRequestSender).sendReqToRegion(0xc020316ad0, 0xc05845fb00, 0xc071aaf110, 0xc02166be40, 0xc0203161f0?)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/locate/region_request.go:1190 +0x894
+github.com/tikv/client-go/v2/internal/locate.(*RegionRequestSender).SendReqCtx(0xc020316ad0, 0xc05845fb00, 0xc02166be40, {0x25b777, 0xb, 0x42ff}, 0x6fc23ac00, 0x0, {0x0, 0x0, ...})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/locate/region_request.go:1023 +0x1274
+github.com/tikv/client-go/v2/internal/locate.(*RegionRequestSender).SendReq(...)
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/internal/locate/region_request.go:233
+github.com/tikv/client-go/v2/txnkv/transaction.actionPrewrite.handleSingleBatch({0x0?}, 0xc07c739520, 0xc05845fb00, {{0x25b777, 0xb, 0x42ff}, {0x4fd5df8, 0xc07d81aba0}, 0x1})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/prewrite.go:264 +0xc45
+github.com/tikv/client-go/v2/txnkv/transaction.(*twoPhaseCommitter).doActionOnBatches(0xc07c739520, 0xc05845fb00, {0x4fb3d30?, 0x7451d60}, {0xc04c1cf0e0?, 0x1, 0xc020316fa0?})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/2pc.go:1035 +0x329
+github.com/tikv/client-go/v2/txnkv/transaction.(*twoPhaseCommitter).doActionOnGroupMutations(0xc07c739520, 0xc05845fb00, {0x4fb3d30, 0x7451d60?}, {0xc04c1cf0b0, 0x1, 0x0?})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/2pc.go:1016 +0xfa7
+github.com/tikv/client-go/v2/txnkv/transaction.(*twoPhaseCommitter).doActionOnMutations(0xc07c739520, 0xc07fcb6e10?, {0x4fb3d30?, 0x7451d60}, {0x4fd5df8, 0xc01f1fee40})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/2pc.go:787 +0xc7
+github.com/tikv/client-go/v2/txnkv/transaction.(*twoPhaseCommitter).prewriteMutations(0xc07c739520?, 0xc05845fb00, {0x4fd5df8, 0xc01f1fee40})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/prewrite.go:438 +0x225
+github.com/tikv/client-go/v2/txnkv/transaction.(*twoPhaseCommitter).execute(0xc07c739520, {0x4fb5c30?, 0xc07fcb6e10})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/2pc.go:1480 +0x56e
+github.com/tikv/client-go/v2/txnkv/transaction.(*KVTxn).Commit(0xc075dcf8c0, {0x4fb5c30, 0xc07fcb6db0?})
+        /go/pkg/mod/github.com/tikv/client-go/v2@v2.0.3/txnkv/transaction/txn.go:502 +0xf05
+github.com/pingcap/tidb/store/driver/txn.(*tikvTxn).Commit(0xc068e48de0, {0x4fb5c30?, 0xc07fcb6db0?})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/store/driver/txn/txn_driver.go:80 +0x2e
+github.com/pingcap/tidb/session.(*LazyTxn).Commit(0xc00144c510, {0x4fb5c30, 0xc07fcb6db0})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/txn.go:408 +0x477
+github.com/pingcap/tidb/session.(*session).commitTxnWithTemporaryData(0x4fb5c30?, {0x4fb5c30?, 0xc07fcb6db0?}, {0x4ff73e0?, 0xc00144c510?})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:840 +0x1b5
+github.com/pingcap/tidb/session.(*session).doCommit(0xc00144c500, {0x4fb5c30, 0xc07fcb6d50})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:726 +0xd78
+github.com/pingcap/tidb/session.(*session).doCommitWithRetry(0xc00144c500, {0x4fb5c30, 0xc07fcb6d50})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:972 +0x2c9
+github.com/pingcap/tidb/session.(*session).CommitTxn(0xc00144c500, {0x4fb5c30, 0xc07fcb6c30})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:1102 +0x227
+github.com/pingcap/tidb/session.autoCommitAfterStmt({0x4fb5c30?, 0xc07fcb6c30?}, 0xc00144c500, {0x0?, 0x0?}, {0x4fc77c0?, 0xc07bcdcb40})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/tidb.go:283 +0x40c
+github.com/pingcap/tidb/session.finishStmt({0x4fb5c30, 0xc07fcb6c30}, 0xc00144c500, {0x0, 0x0}, {0x4fc77c0, 0xc07bcdcb40?})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/tidb.go:249 +0x25f
+github.com/pingcap/tidb/session.runStmt({0x4fb5c30, 0xc07fcb6c30}, 0xc00144c500, {0x4fc77c0, 0xc07bcdcb40?})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:2368 +0x80c
+github.com/pingcap/tidb/session.(*session).ExecuteStmt(0xc00144c500, {0x4fb5c30, 0xc04c1ceba0}, {0x4fcdcb8?, 0xc003d17040})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:2213 +0xaed
+github.com/pingcap/tidb/session.(*session).ExecuteInternal(0xc00144c500, {0x4fb5c30, 0xc04c1ceba0}, {0x4834545, 0x6}, {0x0, 0x0, 0x0})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:1674 +0x3f2
+github.com/pingcap/tidb/statistics/handle.finishTransaction({0x4fb5c30?, 0xc04c1ceba0?}, {0x7fa0f80dc558?, 0xc00144c500?}, {0x0?, 0x0?})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/handle/ddl.go:340 +0xb5
+github.com/pingcap/tidb/statistics/handle.(*Handle).dumpTableStatCountToKV.func2()
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/handle/update.go:542 +0x39
+github.com/pingcap/tidb/statistics/handle.(*Handle).dumpTableStatCountToKV(0xc0007a8140, 0x142e, {0x24, 0x24, 0xc04be0c870, {0x0, 0x0, 0x0}, 0x0})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/handle/update.go:586 +0x51a
+github.com/pingcap/tidb/statistics/handle.(*Handle).DumpStatsDeltaToKV(0xc0007a8140, 0x0)
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/statistics/handle/update.go:500 +0x2f2
+github.com/pingcap/tidb/domain.(*Domain).updateStatsWorker(0xc000a0e900, {0x5024898?, 0xc00144c500?}, {0x4fd5b88, 0xc0017050e0})
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/domain/domain.go:1969 +0x61a
+github.com/pingcap/tidb/domain.(*Domain).UpdateTableStatsLoop.func1()
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/domain/domain.go:1833 +0x2d
+github.com/pingcap/tidb/util.(*WaitGroupWrapper).Run.func1()
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/wait_group_wrapper.go:33 +0x5a
+created by github.com/pingcap/tidb/util.(*WaitGroupWrapper).Run
+        /home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/wait_group_wrapper.go:31 +0x85
+```
+
+### 2. What did you expect to see? (Required)
+Internal sql related to stats should not block building new connection
+
+### 3. What did you see instead (Required)
+Internal sql related to stats blocks building new connection.
+
+### 4. What is your TiDB version? (Required)
+v6.5.0, master
+

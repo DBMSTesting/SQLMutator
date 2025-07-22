@@ -1,0 +1,84 @@
+ID: 6994
+Title: Segfault joining table with stale VIEW schema (wrong Nullability)
+Description:
+(you don't have to strictly follow this form)
+
+**Describe the bug or unexpected behaviour**
+Executing select that joins two distributed tables:
+
+`select * FROM database.table_a any left join database.table_b using customerId, A_Dn_Sem, A_Up_Sem where customerId = '0/1/2_3.4.5.6'`
+
+brings server down with the following in the log:
+
+```
+2019.09.19 14:11:07.797211 [ 89 ] {} <Error> BaseDaemon: ########################################
+2019.09.19 14:11:07.797994 [ 89 ] {} <Error> BaseDaemon: (version 19.13.3.26) (from thread 55) Received signal Segmentation fault (11).
+2019.09.19 14:11:07.798043 [ 89 ] {} <Error> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+2019.09.19 14:11:07.860442 [ 89 ] {} <Error> BaseDaemon: 0. clickhouse-server(StackTrace::StackTrace(ucontext const&)+0x30) [0x6f29000]
+1. clickhouse-server() [0x327ebf5]
+2. /lib64/libpthread.so.0(+0xf5d0) [0x7fcb053085d0]
+3. clickhouse-server(DB::ColumnVector<double>::insertFrom(DB::IColumn const&, unsigned long)+0x1c) [0x32712dc]
+4. clickhouse-server(DB::ColumnNullable::insertFrom(DB::IColumn const&, unsigned long)+0x27) [0x5f0c877]
+5. clickhouse-server() [0x5e14586]
+6. clickhouse-server(void DB::Join::joinBlockImpl<(DB::ASTTableJoin::Kind)1, (DB::ASTTableJoin::Strictness)1, DB::Join::MapsTemplate<DB::JoinStuff::WithFlags<DB::RowRef, false> > >(DB::Block&, std::vector<std::string, std::allocator<std::string> > const&, DB::NamesAndTypesList const&, DB::Block const&, DB::Join::MapsTemplate<DB::JoinStuff::WithFlags<DB::RowRef, false> > const&) const+0xbe2) [0x5e1e2c2]
+7. clickhouse-server(DB::Join::joinBlock(DB::Block&, std::vector<std::string, std::allocator<std::string> > const&, DB::NamesAndTypesList const&) const+0x198) [0x5de60b8]
+8. clickhouse-server(DB::ExpressionAction::execute(DB::Block&, bool) const+0xa05) [0x650d695]
+9. clickhouse-server(DB::ExpressionActions::execute(DB::Block&, bool) const+0x6e) [0x650ee7e]
+10. clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x35) [0x63b4f25]
+11. clickhouse-server(DB::IBlockInputStream::read()+0x238) [0x5c53388]
+12. clickhouse-server(DB::FilterBlockInputStream::readImpl()+0xa2) [0x63b6352]
+13. clickhouse-server(DB::IBlockInputStream::read()+0x238) [0x5c53388]
+14. clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x1a) [0x63b4f0a]
+15. clickhouse-server(DB::IBlockInputStream::read()+0x238) [0x5c53388]
+16. clickhouse-server(DB::CreatingSetsBlockInputStream::readImpl()+0xc1) [0x639fc91]
+17. clickhouse-server(DB::IBlockInputStream::read()+0x238) [0x5c53388]
+18. clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x1a) [0x63b4f0a]
+19. clickhouse-server(DB::IBlockInputStream::read()+0x238) [0x5c53388]
+20. clickhouse-server(DB::AsynchronousBlockInputStream::calculate()+0x44) [0x5c4b714]
+21. clickhouse-server() [0x5c4bc1a]
+22. clickhouse-server(ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::_List_iterator<ThreadFromGlobalPool>)+0x1b8) [0x3194018]
+23. clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}>(void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}&&)::{lambda()#1}::operator()() const+0x28) [0x31945f8]
+24. clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1b8) [0x3191c88]
+25. clickhouse-server() [0x76cc0ff]
+26. /lib64/libpthread.so.0(+0x7dd5) [0x7fcb05300dd5]
+27. /lib64/libc.so.6(clone+0x6d) [0x7fcb04d27ead]
+```
+
+**How to reproduce**
+
+We have 10 nodes and 5 shards. Node 1 is replicated on node2, node3 on node4, and so on.
+What is funny, if I execute select on node8, it works, but if I execute the select on any other node it brings the server down. I can bring even node7 down which is replica of node 8.
+I can reproduce the error at will on each node except node 8.
+
+* Which ClickHouse server version to use
+
+We noticed the problem on (altinity) server version 19.13.2.19-1, but after the upgrade to 19.13.3.26-1 the problem remains.
+
+* Non-default settings, if any
+
+```
+name                                    |value      |changed|description                                                                                                               |
+----------------------------------------|-----------|-------|--------------------------------------------------------------------------------------------------------------------------|
+extremes                                |0          |      1|"Calculate minimums and maximums of the result columns. They can be output in JSON-formats."                              |
+use_uncompressed_cache                  |0          |      1|"Whether to use the cache of uncompressed blocks."                                                                        |
+load_balancing                          |random     |      1|"Which replicas (among healthy replicas) to preferably send a query to (on the first attempt) for distributed processing."|
+distributed_aggregation_memory_efficient|1          |      1|"Is the memory-saving mode of distributed aggregation enabled."                                                           |
+distributed_product_mode                |global     |      1|"How are distributed subqueries performed inside IN or JOIN sections?"                                                    |
+max_bytes_before_external_group_by      |5000000000 |      1|""                                                                                                                        |
+max_result_rows                         |200        |      1|"Limit on result size in rows. Also checked for intermediate data sent from remote servers."                              |
+result_overflow_mode                    |break      |      1|"What to do when the limit is exceeded."                                                                                  |
+max_memory_usage                        |10000000000|      1|"Maximum memory usage for processing of single query. Zero means unlimited."                                              |
+```
+
+* Queries to run that lead to unexpected result
+
+In the first step.
+
+**Expected behavior**
+Query should work on all nodes.
+
+**Error message and/or stacktrace**
+In the first step.
+
+**Additional context**
+-

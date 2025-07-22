@@ -1,0 +1,126 @@
+ID: 23602
+Title: Incompatible casting of hexadecimal literals
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+drop table if exists t1;
+create table t1(
+    id bigint unsigned
+);
+CREATE INDEX id ON t1(id);
+EXPLAIN SELECT * FROM t1 WHERE id between x'e0' and x'e1';
+SHOW WARNINGS;
+EXPLAIN SELECT * FROM t1 WHERE id between 224 and 225;
+SHOW WARNINGS;
+```
+
+### 2. What did you expect to see? (Required)
+
+MySQL successfully casts the hexadecimal notation strings to integers and is able to use the index. TiDB fails to cast them correctly and instead performs a table scan.
+
+```
+mysql> drop table if exists t1;
+Query OK, 0 rows affected (0.003 sec)
+
+mysql> create table t1(
+    ->     id bigint unsigned
+    -> );
+Query OK, 0 rows affected (0.007 sec)
+
+mysql> CREATE INDEX id ON t1(id);
+Query OK, 0 rows affected (0.007 sec)
+
+mysql> EXPLAIN SELECT * FROM t1 WHERE id between x'e0' and x'e1';
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+| id | select_type | table | partitions | type  | possible_keys | key  | key_len | ref  | rows | filtered | Extra                    |
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+|  1 | SIMPLE      | t1    | NULL       | index | id            | id   | 9       | NULL |    1 |   100.00 | Using where; Using index |
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+1 row in set, 1 warning (0.000 sec)
+
+mysql> SHOW WARNINGS;
++-------+------+--------------------------------------------------------------------------------------------------------------+
+| Level | Code | Message                                                                                                      |
++-------+------+--------------------------------------------------------------------------------------------------------------+
+| Note  | 1003 | /* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` where (`test`.`t1`.`id` between 224 and 225) |
++-------+------+--------------------------------------------------------------------------------------------------------------+
+1 row in set (0.000 sec)
+
+mysql> EXPLAIN SELECT * FROM t1 WHERE id between 224 and 225;
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+| id | select_type | table | partitions | type  | possible_keys | key  | key_len | ref  | rows | filtered | Extra                    |
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+|  1 | SIMPLE      | t1    | NULL       | index | id            | id   | 9       | NULL |    1 |   100.00 | Using where; Using index |
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+1 row in set, 1 warning (0.000 sec)
+
+mysql> SHOW WARNINGS;
++-------+------+--------------------------------------------------------------------------------------------------------------+
+| Level | Code | Message                                                                                                      |
++-------+------+--------------------------------------------------------------------------------------------------------------+
+| Note  | 1003 | /* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` where (`test`.`t1`.`id` between 224 and 225) |
++-------+------+--------------------------------------------------------------------------------------------------------------+
+1 row in set (0.000 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+tidb> drop table if exists t1;
+Query OK, 0 rows affected (0.193 sec)
+
+tidb> create table t1(
+    ->     id bigint unsigned
+    -> );
+Query OK, 0 rows affected (0.071 sec)
+
+tidb> CREATE INDEX id ON t1(id);
+Query OK, 0 rows affected (2.773 sec)
+
+tidb> EXPLAIN SELECT * FROM t1 WHERE id between x'e0' and x'e1';
++-------------------------+----------+-----------+---------------+------------------------------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                                        |
++-------------------------+----------+-----------+---------------+------------------------------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                                                     |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | ge(cast(test.t1.id, double UNSIGNED BINARY), 224), le(cast(test.t1.id, double UNSIGNED BINARY), 225) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                                       |
++-------------------------+----------+-----------+---------------+------------------------------------------------------------------------------------------------------+
+3 rows in set (0.001 sec)
+
+tidb> SHOW WARNINGS;
+Empty set (0.000 sec)
+
+tidb> EXPLAIN SELECT * FROM t1 WHERE id between 224 and 225;
++------------------------+---------+-----------+------------------------+-------------------------------------------------+
+| id                     | estRows | task      | access object          | operator info                                   |
++------------------------+---------+-----------+------------------------+-------------------------------------------------+
+SHOW WARNINGS;| IndexReader_6          | 250.00  | root      |                        | index:IndexRangeScan_5                          |
+| └─IndexRangeScan_5     | 250.00  | cop[tikv] | table:t1, index:id(id) | range:[224,225], keep order:false, stats:pseudo |
++------------------------+---------+-----------+------------------------+-------------------------------------------------+
+2 rows in set (0.001 sec)
+
+tidb> SHOW WARNINGS;
+Empty set (0.000 sec)
+```
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v4.0.0-beta.2-2460-g40b92181d-dirty
+Edition: Community
+Git Commit Hash: 40b92181d092437996760f1f092ddf5b1da24d1b
+Git Branch: HEAD
+UTC Build Time: 2021-03-25 19:55:14
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.002 sec)
+```

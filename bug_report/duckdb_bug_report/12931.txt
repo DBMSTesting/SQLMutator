@@ -1,0 +1,45 @@
+ID: 12931
+Title: `TemporaryMemoryManager` improvements
+Description:
+First off, I'd like to apologize for this messy PR. It started off by improving `TemporaryMemoryManager, ' but I ended up profiling out-of-core joins and improving anything that showed up in profiling that shouldn't be there.
+
+The new `TemporaryMemoryManager` changes allow small operators that can fit in memory to get a larger reservation based on a cost model. This improves the performance of large out-of-core query plans containing small and large joins (`ComputeOptimalReservation`). I've changed the reservation behavior of the hash join and hash aggregation operators to accommodate this. I've also added another event to pipelines (`PrepareFinalize`), which runs after the pipeline event and before finalizing the pipeline. In this event, operators (mostly joins) can communicate with the `TemporaryMemoryManager` one last time. This allows us to more accurately distribute memory across simultaneously active joins right before the probe pipeline starts. I've verified that this improves the performance of running TPC-H at SF100 with a 1 GB memory limit (mostly Q18 and Q21 are affected).
+
+I've also changed jemalloc so it compiles on Linux with clang.
+
+From profiling, I've improved the performance of:
+1. `RowMatcher` (template `ValidityMask` if all valid)
+2. `PartitionedColumnData` (add `fixed_size_map_t` like in `PartitionedTupleData`)
+3. Scatter/Gather in `TupleDataCollection` (use `FastMemcpy` - improves performance on MacOS specifically)
+4. `StringVector::AddString` (use `.get()->` instead of `->` on a `shared_ptr` because we know it's valid)
+5. Use `unsafe_unique_ptr`/`unsafe_unique_array` in some places (also because we know it's valid)
+6. Remove 0-initialization from `make_(unsafe_)uniq_array`
+
+This last point needs some more explanation. We were initializing these arrays like this by default:
+```c++
+	return unique_ptr<DATA_TYPE[], std::default_delete<DATA_TYPE>, true>(new DATA_TYPE[n]());
+```
+Note the `()` at the end. This causes the default constructor to be called on values. This started to appear in profiling, which we don't want, as we don't rely on 0-initialization. We just overwrite it.
+
+Or so I thought. I removed the `()` and found many bugs, mostly related to fixed-size lists (internally, the `ARRAY` type) but also a few others. Identifying these bugs was cumbersome as they showed up much later than the array's initialization in completely different code paths. I think I've fixed all of the bugs in the CI now.
+
+I've changed the array initialization to this now:
+```c++
+	if (std::is_pod<DATA_TYPE>()) {
+		// we don't want to call the initializer on plain-old-data
+		return unique_ptr<DATA_TYPE[], std::default_delete<DATA_TYPE>, true>(new DATA_TYPE[n]);
+	} else {
+		return unique_ptr<DATA_TYPE[], std::default_delete<DATA_TYPE>, true>(new DATA_TYPE[n]());
+	}
+```
+The `std::is_pod` check is some defensive programming. I'm not sure if it's strictly required.
+
+Improving the code that showed up in profiling improves our performance in the regression test runner by a few percentage points.
+
+I'm sending this PR now because it is becoming harder to maintain (it touches quite a few files).
+
+I've noticed locally when running `unittest` that this test is failing:
+```
+test/sql/copy/parquet/parquet_5209.test
+```
+However, I've tried running the same test on the `main` branch, and it fails there too.

@@ -1,0 +1,50 @@
+ID: 7382
+Title: Materialized View unable to SELECT data mixed with null on Nullable fields
+Description:
+(you don't have to strictly follow this form)
+
+**Describe the bug or unexpected behaviour**
+A clear and concise description of what works not as it is supposed to.
+
+**How to reproduce**
+
+Version: Server: 19.5.3
+```
+CREATE TABLE test.btest1 (`a` String, `b` Nullable(String)) ENGINE = MergeTree ORDER BY a SETTINGS index_granularity = 8192
+CREATE TABLE test.btest2 (`a` String, `d` Nullable(DateTime('UTC'))) ENGINE = MergeTree ORDER BY a SETTINGS index_granularity = 8192 
+CREATE MATERIALIZED VIEW test.bmv TO test.btest2 (`a` String, `d` Nullable(DateTime('UTC'))) AS SELECT a, if(isNull(b), NULL, toDateTime(toDateTime(substring(b, 1, 19), 'UTC'))) AS d FROM test.btest1
+
+insert into btest1 (a, b)  values ('a', '2019-10-06T00:00:00.000Z')
+Ok.
+
+SELECT *
+FROM btest2
+
+┌─a─┬───────────────────d─┐
+│ a │ 2019-10-06 00:00:00 │
+└───┴─────────────────────┘
+
+insert into btest1 (a, b)  values ('a', null)
+Received exception from server (version 19.5.4):
+Code: 41. DB::Exception: Received from clickhouse:9000. DB::Exception: Cannot parse datetime: Cannot parse DateTime('UTC') from String: while pushing to view test.bmv.
+
+
+SELECT 
+    b, 
+    isNull(b), 
+    if(isNull(b), NULL, toDateTime(substring(b, 1, 19), 'UTC'))
+FROM btest1
+
+┌─b────────────────────────┬─isNull(b)─┬─if(isNull(b), NULL, toDateTime(substring(b, 1, 19), 'UTC'))─┐
+│ 2019-10-06T00:00:00.000Z │         0 │                                         2019-10-06 00:00:00 │
+└──────────────────────────┴───────────┴─────────────────────────────────────────────────────────────┘
+↓ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) Received exception from server (version 19.5.4):
+Code: 41. DB::Exception: Received from clickhouse:9000. DB::Exception: Cannot parse datetime: Cannot parse DateTime('UTC') from String. 
+
+1 rows in set. Elapsed: 0.007 sec. 
+```
+
+Defining `btest1.b` as `DEFAULT NULL` shows the same problem. 
+
+**Expected behavior**
+Since both source table (btest1.b) and destination table (btest2.d) are nullable, and the mv `bmv` checks for null value coming in with an `if`, the function should return null and place it into the `btest2.d` field. The SELECT last shown should print both lines, the second one with `null` in the third column.

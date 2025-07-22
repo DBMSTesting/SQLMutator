@@ -1,0 +1,92 @@
+ID: 6813
+Title: Empty result with row level security and Distributed engine
+Description:
+A subrequest on a Distributed table with a row level security filter gives an empty result.
+
+Tested with 19.13.3.26 (Docker)
+
+```
+cat <<EOF > /etc/clickhouse-server/users.d/test.xml
+<?xml version="1.0"?>
+<yandex>
+    <users>
+        <d1>
+            <password></password>
+
+            <networks replace="replace">
+                <ip>::/0</ip>
+            </networks>
+
+            <profile>default</profile>
+            <quota>default</quota>
+
+            <allow_databases>
+                <database>default</database>
+            </allow_databases>
+
+            <databases>
+                <default>
+                    <test>
+                        <filter>domain = 'd1'</filter>
+                    </test>
+                    <test2>
+                        <filter>domain = 'd1'</filter>
+                    </test2>
+                    <test_distrib>
+                        <filter>domain = 'd1'</filter>
+                    </test_distrib>
+                    <test2_distrib>
+                        <filter>domain = 'd1'</filter>
+                    </test2_distrib>
+                </default>
+            </databases>
+        </d1>
+    </users>
+</yandex>
+EOF
+
+create table test(domain String, date_time DateTime, `str` String) ENGINE=MergeTree partition by toStartOfDay(date_time) order by (domain,date_time);
+create table test2(domain String, date_time DateTime, `str` String) ENGINE=MergeTree partition by toStartOfDay(date_time) order by (domain,date_time);
+
+create table test_distrib ENGINE=Distributed('test_shard_localhost','default','test') as select * from test limit 0;
+create table test2_distrib ENGINE=Distributed('test_shard_localhost','default','test2') as select * from test2 limit 0;
+
+insert into test values('d1',now(),'str1'),('d2',now(),'str2');
+insert into test2 values('d1',now(),'str1'),('d2',now(),'str2');
+```
+
+With user 'default':
+```
+select * from test where str in (select str from test2);
+┌─domain─┬───────────date_time─┬─str──┐
+│ d1     │ 2019-09-04 09:59:54 │ str1 │
+│ d2     │ 2019-09-04 09:59:54 │ str2 │
+└────────┴─────────────────────┴──────┘
+
+select * from test_distrib where str in (select str from test2_distrib);
+┌─domain─┬───────────date_time─┬─str──┐
+│ d1     │ 2019-09-04 09:59:54 │ str1 │
+│ d2     │ 2019-09-04 09:59:54 │ str2 │
+└────────┴─────────────────────┴──────┘
+```
+
+With user 'd1':
+```
+select * from test where str in (select str from test2);
+┌─domain─┬───────────date_time─┬─str──┐
+│ d1     │ 2019-09-04 09:59:54 │ str1 │
+└────────┴─────────────────────┴──────┘
+
+select * from test_distrib where str in (select str from test2_distrib);
+0 rows in set. 
+
+select str from test_distrib
+┌─str──┐
+│ str1 │
+└──────┘
+
+select str from test2_distrib
+┌─str──┐
+│ str1 │
+└──────┘
+```

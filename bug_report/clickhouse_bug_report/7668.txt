@@ -1,0 +1,58 @@
+ID: 7668
+Title: "Maximum parse depth exceeded" after upgrading from 19.10 to 19.11
+Description:
+I'm not sure if this is a bug or intended behavior, from what I was able to investigate it was introduced in https://github.com/ClickHouse/ClickHouse/pull/6433 as a security bugfix, however I'm not quite sure if it's working as expected...
+
+**Describe the bug or unexpected behaviour**
+
+In ClickHouse **19.10** (and below) queries using roughly the following format (I've simplified it as much as I could) worked fine:
+
+```
+SELECT 
+    arraySort(arrayMap((x, y) -> (x, y), groupArray(event_index), groupArray(url))) AS events, 
+    arrayFilter(event -> (event.1 = step2.1 - 1), events)[1] AS step1, 
+    arrayFilter(event -> (event.1 = step3.1 - 1), events)[1] AS step2, 
+    arrayFilter(event -> (event.1 = step4.1 - 1), events)[1] AS step3, 
+    arrayFilter(event -> (event.1 = step5.1 - 1), events)[1] AS step4, 
+    arrayFilter(event -> (event.1 = step6.1 - 1), events)[1] AS step5, 
+    arrayFilter(event -> (event.2 LIKE '%foo%'), events)[1] AS step6
+FROM data
+GROUP BY session_id
+```
+
+In ClickHouse **19.11** (and above) the same query throws an exception:
+
+    Received exception from server (version 19.11.13):                                                                        
+    Code: 306. DB::Exception: Received from localhost:9000. DB::Exception: Received from clickhouse-cluster-3:9000. DB::Exception: Maximum parse depth exceeded.  
+
+**How to reproduce**
+* This only happens on ClickHouse >=19.11
+* Native interface, but probably does not matter
+* Default settings, cluster with 2 shards and ReplicatedMergeTrees (2 servers in each shard) + Distributed tables
+
+```
+CREATE TABLE data_shard (
+    server_date Date,
+    session_id UInt64,
+    event_index UInt16,
+    url String
+) ENGINE = ReplicatedMergeTree('/clickhouse/tables/default/{shard}/data', '{replica}') PARTITION BY toYYYYMM(server_date) ORDER BY (server_date, session_id) SETTINGS index_granularity = 8192;
+
+CREATE TABLE data (
+    server_date Date,
+    session_id UInt64,
+    event_index UInt16,
+    url String
+) ENGINE = Distributed(analytics, default, data_shard, rand());
+```
+**Expected behavior**
+
+I would except the query to return results as it did in ClickHouse 19.10 and below.
+
+**Error message and/or stacktrace**
+
+    Received exception from server (version 19.11.13):                                                                        
+    Code: 306. DB::Exception: Received from localhost:9000. DB::Exception: Received from clickhouse-cluster-3:9000. DB::Exception: Maximum parse depth exceeded.  
+
+
+Oddly enough, I was unable to reproduce this issue on a single-server setup, which seems weird considering that it's a parsing exception :confused: 

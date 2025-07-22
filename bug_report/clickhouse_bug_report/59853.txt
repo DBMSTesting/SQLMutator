@@ -1,0 +1,61 @@
+ID: 59853
+Title: Insert with `JSONColumnsWithMetadata` format via HTTP crashes ClickHouse server
+Description:
+Initially reported here: https://github.com/ClickHouse/clickhouse-js/issues/226
+Affected versions: verified crash on at least 23.11 and 24.1 in Docker.
+
+To reproduce:
+
+1. Create a table
+```sql
+CREATE TABLE IF NOT EXISTS titles_embeddings(
+    source_site LowCardinality(String),
+    forum_id LowCardinality(String),
+    post_id String,
+    title String,
+    suggested_user_id Int32,
+    embedding Array(Float64)
+) ENGINE = ReplacingMergeTree() ORDER BY (source_site, forum_id)
+```
+2. Send an INSERT statement via curl
+```sh
+echo -ne '{"meta":[{"name":"title","type":"String"},{"name":"post_id","type":"String"},{"name":"forum_id","type":"String"},{"name":"source_site","type":"String"},{"name":"embedding","type":"Array(Float64)"}],"data":{"title":["post title"],"post_id":["12345"],"forum_id":["forum2"],"source_site":["site.com"],"embedding":[[1.1,2.2,3.3]]}}\n' | curl 'http://localhost:8123/?query=INSERT%20INTO%20titles_embeddings%20FORMAT%20JSONColumnsWithMetadata' --data-binary @-
+```
+3. See the following in the server log:
+```
+2024.02.11 10:44:35.542558 [ 45 ] {a52e852f-aa04-4803-baa7-675d4dbb7057} <Debug> executeQuery: (from 172.27.0.1:37042) INSERT INTO titles_embeddings (source_site,forum_id,post_id,title,embedding) FORMAT JSONColumnsWithMetadata  (stage: Complete)
+2024.02.11 10:44:35.545929 [ 712 ] {} <Fatal> BaseDaemon: ########## Short fault info ############
+2024.02.11 10:44:35.545953 [ 712 ] {} <Fatal> BaseDaemon: (version 23.11.1.2711 (official build), build id: C607B991623D3FAB7FC1EB24A1567BDE1F7BD7AD, git hash: 05bc8ef1e02b9c7332f08091775b255d191341bf) (from thread 45) Received signal 11
+2024.02.11 10:44:35.545966 [ 712 ] {} <Fatal> BaseDaemon: Signal description: Segmentation fault
+2024.02.11 10:44:35.545973 [ 712 ] {} <Fatal> BaseDaemon: Address: 0x20. Access: read. Address not mapped to object.
+2024.02.11 10:44:35.545981 [ 712 ] {} <Fatal> BaseDaemon: Stack trace: 0x000000000e45b057 0x00000000123b6e7c 0x00000000123bd5d9 0x00000000123b8d6e 0x0000000012289b35 0x0000000012289583 0x00000000122a117a 0x0000000012297e90 0x0000000012297120 0x0000000012295972 0x000000001133071b 0x00000000121d436a 0x00000000121d8fc4 0x00000000122506d2 0x0000000014c6fc52 0x0000000014c70a51 0x0000000014d678e7 0x0000000014d65edc 0x00007efc09359609 0x00007efc0927e133
+2024.02.11 10:44:35.545989 [ 712 ] {} <Fatal> BaseDaemon: ########################################
+2024.02.11 10:44:35.545997 [ 712 ] {} <Fatal> BaseDaemon: (version 23.11.1.2711 (official build), build id: C607B991623D3FAB7FC1EB24A1567BDE1F7BD7AD, git hash: 05bc8ef1e02b9c7332f08091775b255d191341bf) (from thread 45) (query_id: a52e852f-aa04-4803-baa7-675d4dbb7057) (query: INSERT INTO titles_embeddings (source_site,forum_id,post_id,title,embedding) FORMAT JSONColumnsWithMetadata
+) Received signal Segmentation fault (11)
+2024.02.11 10:44:35.546011 [ 712 ] {} <Fatal> BaseDaemon: Address: 0x20. Access: read. Address not mapped to object.
+2024.02.11 10:44:35.546017 [ 712 ] {} <Fatal> BaseDaemon: Stack trace: 0x000000000e45b057 0x00000000123b6e7c 0x00000000123bd5d9 0x00000000123b8d6e 0x0000000012289b35 0x0000000012289583 0x00000000122a117a 0x0000000012297e90 0x0000000012297120 0x0000000012295972 0x000000001133071b 0x00000000121d436a 0x00000000121d8fc4 0x00000000122506d2 0x0000000014c6fc52 0x0000000014c70a51 0x0000000014d678e7 0x0000000014d65edc 0x00007efc09359609 0x00007efc0927e133
+2024.02.11 10:44:35.546296 [ 712 ] {} <Fatal> BaseDaemon: 2. std::__hash_const_iterator<std::__hash_node<std::__hash_value_type<String, unsigned long>, void*>*> std::__hash_table<std::__hash_value_type<String, unsigned long>, std::__unordered_map_hasher<String, std::__hash_value_type<String, unsigned long>, std::hash<String>, std::equal_to<String>, true>, std::__unordered_map_equal<String, std::__hash_value_type<String, unsigned long>, std::equal_to<String>, std::hash<String>, true>, std::allocator<std::__hash_value_type<String, unsigned long>>>::find<String>(String const&) const @ 0x000000000e45b057 in /usr/bin/clickhouse
+2024.02.11 10:44:35.546521 [ 712 ] {} <Fatal> BaseDaemon: 3. DB::JSONUtils::validateMetadataByHeader(DB::NamesAndTypesList const&, DB::Block const&) @ 0x00000000123b6e7c in /usr/bin/clickhouse
+2024.02.11 10:44:35.546746 [ 712 ] {} <Fatal> BaseDaemon: 4. DB::JSONColumnsWithMetadataReader::readChunkStart() @ 0x00000000123bd5d9 in /usr/bin/clickhouse
+2024.02.11 10:44:35.546961 [ 712 ] {} <Fatal> BaseDaemon: 5. DB::JSONColumnsBlockInputFormatBase::generate() @ 0x00000000123b8d6e in /usr/bin/clickhouse
+2024.02.11 10:44:35.546970 [ 712 ] {} <Fatal> BaseDaemon: 6. DB::ISource::tryGenerate() @ 0x0000000012289b35 in /usr/bin/clickhouse
+2024.02.11 10:44:35.547187 [ 712 ] {} <Fatal> BaseDaemon: 7. DB::ISource::work() @ 0x0000000012289583 in /usr/bin/clickhouse
+2024.02.11 10:44:35.547195 [ 712 ] {} <Fatal> BaseDaemon: 8. DB::ExecutionThreadContext::executeTask() @ 0x00000000122a117a in /usr/bin/clickhouse
+2024.02.11 10:44:35.547413 [ 712 ] {} <Fatal> BaseDaemon: 9. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012297e90 in /usr/bin/clickhouse
+2024.02.11 10:44:35.547658 [ 712 ] {} <Fatal> BaseDaemon: 10. DB::PipelineExecutor::execute(unsigned long, bool) @ 0x0000000012297120 in /usr/bin/clickhouse
+2024.02.11 10:44:35.547667 [ 712 ] {} <Fatal> BaseDaemon: 11. DB::CompletedPipelineExecutor::execute() @ 0x0000000012295972 in /usr/bin/clickhouse
+2024.02.11 10:44:35.547887 [ 712 ] {} <Fatal> BaseDaemon: 12. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, std::shared_ptr<DB::Context>, std::function<void (DB::QueryResultDetails const&)>, DB::QueryFlags, std::optional<DB::FormatSettings> const&, std::function<void (DB::IOutputFormat&)>) @ 0x000000001133071b in /usr/bin/clickhouse
+2024.02.11 10:44:35.548114 [ 712 ] {} <Fatal> BaseDaemon: 13. DB::HTTPHandler::processQuery(DB::HTTPServerRequest&, DB::HTMLForm&, DB::HTTPServerResponse&, DB::HTTPHandler::Output&, std::optional<DB::CurrentThread::QueryScope>&) @ 0x00000000121d436a in /usr/bin/clickhouse
+2024.02.11 10:44:35.548350 [ 712 ] {} <Fatal> BaseDaemon: 14. DB::HTTPHandler::handleRequest(DB::HTTPServerRequest&, DB::HTTPServerResponse&) @ 0x00000000121d8fc4 in /usr/bin/clickhouse
+2024.02.11 10:44:35.548592 [ 712 ] {} <Fatal> BaseDaemon: 15. DB::HTTPServerConnection::run() @ 0x00000000122506d2 in /usr/bin/clickhouse
+2024.02.11 10:44:35.548603 [ 712 ] {} <Fatal> BaseDaemon: 16. Poco::Net::TCPServerConnection::start() @ 0x0000000014c6fc52 in /usr/bin/clickhouse
+2024.02.11 10:44:35.548610 [ 712 ] {} <Fatal> BaseDaemon: 17. Poco::Net::TCPServerDispatcher::run() @ 0x0000000014c70a51 in /usr/bin/clickhouse
+2024.02.11 10:44:35.548617 [ 712 ] {} <Fatal> BaseDaemon: 18. Poco::PooledThread::run() @ 0x0000000014d678e7 in /usr/bin/clickhouse
+2024.02.11 10:44:35.548836 [ 712 ] {} <Fatal> BaseDaemon: 19. Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000014d65edc in /usr/bin/clickhouse
+2024.02.11 10:44:35.548845 [ 712 ] {} <Fatal> BaseDaemon: 20. ? @ 0x00007efc09359609 in ?
+2024.02.11 10:44:35.548849 [ 712 ] {} <Fatal> BaseDaemon: 21. ? @ 0x00007efc0927e133 in ?
+2024.02.11 10:44:35.627885 [ 712 ] {} <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 407BFCBD6FDD409E3B38D2FAC9282A24)
+2024.02.11 10:44:35.627913 [ 712 ] {} <Information> SentryWriter: Not sending crash report
+2024.02.11 10:44:35.627917 [ 712 ] {} <Fatal> BaseDaemon: Report this error to https://github.com/ClickHouse/ClickHouse/issues
+2024.02.11 10:44:35.627979 [ 712 ] {} <Fatal> BaseDaemon: Changed settings: load_balancing = 'random'
+```

@@ -1,0 +1,55 @@
+ID: 9850
+Title: Excessive memory consumption on `MATERIALIZE INDEX` query.
+Description:
+Table schema:
+
+```
+CREATE TABLE mt5.ticks  ON CLUSTER '{cluster}' (
+  id_broker UInt8          CODEC(T64,LZ4) ,
+  id_symbol UInt32         CODEC(T64,LZ4) ,
+  dt_evt DateTime64(6, 'UTC')  CODEC(DoubleDelta,LZ4)   ,
+  vl_bid Decimal64(5)   CODEC(Gorilla,LZ4) ,
+  vl_ask Decimal64(5)   CODEC(Gorilla,LZ4) ,
+  vl_lst Decimal64(5)   CODEC(Gorilla,LZ4) ,
+  vl_vol Int64          CODEC(Gorilla,LZ4) ,
+  tp_flg UInt16         CODEC(T64,LZ4),
+dt_m01 DateTime('UTC') materialized        toStartOfMinute(dt_evt                    )  CODEC(DoubleDelta,LZ4)   ,
+dt_m02 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 02 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_m03 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 03 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_m04 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 04 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_m05 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 05 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_m06 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 06 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_m10 DateTime('UTC') materialized    toStartOfTenMinutes(dt_evt                    )  CODEC(DoubleDelta,LZ4)   ,
+dt_m12 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 12 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_m15 DateTime('UTC') materialized toStartOfFifteenMinutes(dt_evt                   )  CODEC(DoubleDelta,LZ4)   ,
+dt_m30 DateTime('UTC') materialized      toStartOfInterval(dt_evt, INTERVAL 30 minute)  CODEC(DoubleDelta,LZ4)   ,
+dt_h01 DateTime('UTC') materialized          toStartOfHour(dt_evt                    )  CODEC(DoubleDelta,LZ4)   ,
+dt_day DateTime('UTC') materialized                 toDate(dt_evt                    )  CODEC(DoubleDelta,LZ4)   ,
+dt_mon DateTime('UTC') materialized         toStartOfMonth(dt_evt                    )  CODEC(DoubleDelta,LZ4)   ,
+vl_price   Decimal64(5) materialized  if(vl_bid  <> 0, vl_bid          , if(vl_ask <> 0, vl_ask, if(vl_lst <> 0, vl_lst,  toDecimal64(0,5) ))) CODEC(Gorilla,LZ4) ,
+mn_price   Decimal64(5) materialized if(vl_price = 0, toDecimal64(0,5), divide((vl_bid+vl_ask+vl_lst), if(vl_price = 0, 1, if(vl_bid  = 0,0,1)+ if(vl_ask  = 0,0,1)+ if(vl_lst = 0,0,1)))) CODEC(Gorilla,LZ4) ,
+vl_spread  Decimal64(5) materialized if(vl_price = 0, toDecimal64(0,5), if(vl_ask > 0 and vl_bid > 0 and vl_ask >= vl_bid,  minus(vl_ask,  vl_bid),  abs(minus(vl_price, mn_price)))) CODEC(Gorilla,LZ4) ,
+vl_volume  Int64 materialized if(vl_price = 0, toInt64(0)      , if(bitTest(tp_flg,5) or bitTest(tp_flg,6), vl_vol, toInt64(0) )) CODEC(Gorilla,LZ4) ,
+tp_flg_bid   alias bitTest(tp_flg, 1),
+tp_flg_ask   alias bitTest(tp_flg, 2),
+tp_flg_lst   alias bitTest(tp_flg, 3),
+tp_flg_vol   alias bitTest(tp_flg, 4),
+tp_flg_buy   alias bitTest(tp_flg, 5),
+tp_flg_sel   alias bitTest(tp_flg, 6),
+tp_flg_quote alias if(bitTest(tp_flg, 1)+bitTest(tp_flg, 2)>0,1,0),
+tp_flg_trans alias if(bitTest(tp_flg, 5)+bitTest(tp_flg, 6)>0,1,0),
+  INDEX mmx (dt_evt, dt_m01, dt_m02, dt_m03, dt_m04, dt_m05, dt_m06, dt_m10, dt_m12, dt_m15, dt_m30,
+             dt_h01, dt_day, dt_mon) TYPE minmax GRANULARITY 1,
+  INDEX set (id_broker, id_symbol  ) TYPE set(0) GRANULARITY 1
+) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/mt5.ticks', '{replica}')
+  PARTITION BY (toYYYYMM(dt_evt), id_broker)
+      order by (id_broker, id_symbol, dt_evt) SETTINGS storage_policy = 'spool_and_rpool_gp';
+```
+
+Query:
+```
+alter table mt5.ticks add INDEX id_symbol_set (id_broker, id_symbol  ) TYPE set(0) GRANULARITY 1;
+alter table mt5.ticks materialize INDEX id_symbol_set ;
+```
+After some time OOM happens.
+

@@ -1,0 +1,42 @@
+ID: 45297
+Title: store: the peer id mismatch is not handled
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+Consider such a case:
+1.  region_id = 0
+There's a region with initial peers "1, 2, 3", and later region configuration has changed, for example:
+```
+1, 2, 3                    conf change => 1 2 3(Removed) 4(Added)
+1, 2, 3(Removed), 4(Added) conf change => 1 2 5(Added) 4(Removed)
+```
+
+2. The region cache is not refreshed in time, so peer information whose `store_id` is 3, `region_id` is 0 and`peer_id` is 3 still exists.
+3. `AccessFollower` is used by the replica selector to decide the target peer for example when stale read is used.
+4. If the leader is transferred to peer `5` and stale read retry happens.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+The region cache is refreshed as expected.
+
+### 3. What did you see instead (Required)
+After `RegionError` is received by the `kv-client`, the bottom retry keeps happening and there's no chance to rerefresh to invalidate the region cache, thus there are quite a lot of retry and keep encountering `peer is mismatch` region errors.
+
+The cause is possibly that:
+1. The `peer id mismatch` is [not processed]( https://github.com/tikv/client-go/blob/5fde3098f9183d22507dbd16597ff5a5d7f84390/internal/locate/region_request.go#L1645-L1648), the replica selector would always retry.
+2. The [scope fixing PR](https://github.com/pingcap/tidb/pull/43553) make the leader only selection take effect.
+3. Once the `leaderOnly` flag is set, all the [checks are bypassed](https://github.com/tikv/client-go/blob/5fde3098f9183d22507dbd16597ff5a5d7f84390/internal/locate/region_request.go#L554-L576) so the `const maxReplicaAttempt = 10` dose not work either.
+
+
+To fix this issue, it's needed to:
+1. Process the `peer id mismatch` error properly and ensure the region cache is invalidated.
+2. When `leaderOnly` flag is set, ensure the necessary limit takes effect for example the `const maxReplicaAttempt = 10`. Acually this part code is complex and need careful handling.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+v6.5.3

@@ -1,0 +1,136 @@
+ID: 13613
+Title: ClickHouse server fail after restart, Can't load table with `field String DEFAULT dictGet(...)` in table definition
+Description:
+**Describe the bug**
+Create table which have `field_name String DEFAULT dictGet(...)` can't attach after server restart
+
+**How to reproduce**
+```
+git clone https://gist.github.com/2d6ced1980689703b033ab192a14a233.git ./fail
+cd ./fail
+docker-compose run clickhouse
+```
+
+* Which ClickHouse server version to use
+20.6 from docker
+
+* `CREATE TABLE` statements for all tables involved
+```sql
+CREATE DICTIONARY IF NOT EXISTS default.dict (
+	key String, value String
+)
+PRIMARY KEY "key"
+LAYOUT(COMPLEX_KEY_HASHED())
+SOURCE(FILE(path '/var/lib/clickhouse/user_files/dict.txt' format 'TabSeparated'))
+LIFETIME(MIN 300 MAX 600);
+
+CREATE TABLE IF NOT EXISTS default.table
+(
+    site_id      UInt32,
+    stamp        LowCardinality(Nullable(String)),
+    md_ad_format String DEFAULT dictGet('default.dict', 'value', tuple(coalesce(stamp, '')))
+) ENGINE MergeTree()
+ORDER BY tuple();
+```
+
+* Queries to run that lead to unexpected result
+
+queries run successfully when run `/docker-entrypoint-initdb.d/init_schema.sql`
+![image](https://user-images.githubusercontent.com/105560/89900190-d5986f80-dbfc-11ea-8a61-575d8a0dec79.png)
+
+but failed after restart clickhouse-server
+![image](https://user-images.githubusercontent.com/105560/89900586-5f483d00-dbfd-11ea-8da7-0766b9d98db9.png)
+
+
+**Expected behavior**
+restart server successfully
+
+**Error message and/or stacktrace**
+```
+2020.08.11 12:29:05.843468 [ 1 ] {} <Error> Application: Caught exception while loading metadata: Code: 36, e.displayText() = DB::Exception: external dictionary 'default.dict' not found: default expression and column type are incompatible.: Cannot attach table `default`.`table` from metadata file /var/lib/clickhouse/metadata/default/table.sql from query ATTACH TABLE table (`site_id` UInt32, `stamp` LowCardinality(Nullable(String)), `md_ad_format` LowCardinality(String) DEFAULT if(dictGet('default.dict', 'value', tuple(coalesce(stamp, ''))) > 0, replaceAll(decodeURLComponent(extractAll(extract(coalesce(stamp, ''), '.*_MB:(.*)'), '\\[([^\\[\\]]*)\\]')[dictGet('default.dict', 'value', tuple(stamp))]), '+', ' '), '')) ENGINE = MergeTree() ORDER BY tuple() SETTINGS index_granularity = 8192, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x12405650 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xa2423fd in /usr/bin/clickhouse
+2. ? @ 0xf01d271 in /usr/bin/clickhouse
+3. std::__1::shared_ptr<DB::IExternalLoadable const> DB::ExternalLoader::load<std::__1::shared_ptr<DB::IExternalLoadable const>, void>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xf028323 in /usr/bin/clickhouse
+4. DB::FunctionDictHelper::getDictionary(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0xb0722b1 in /usr/bin/clickhouse
+5. DB::FunctionDictGetNoType::getReturnTypeImpl(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0xb07453a in /usr/bin/clickhouse
+6. DB::DefaultOverloadResolver::getReturnType(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0xae446a5 in /usr/bin/clickhouse
+7. DB::FunctionOverloadResolverAdaptor::getReturnTypeWithoutLowCardinality(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0xae6bdfd in /usr/bin/clickhouse
+8. DB::FunctionOverloadResolverAdaptor::getReturnType(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0xae6c1f5 in /usr/bin/clickhouse
+9. DB::ExpressionActions::addImpl(DB::ExpressionAction, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0xf1b538c in /usr/bin/clickhouse
+10. DB::ExpressionActions::add(DB::ExpressionAction const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0xf1b562d in /usr/bin/clickhouse
+11. DB::ScopeStack::addAction(DB::ExpressionAction const&) @ 0xf25a6ad in /usr/bin/clickhouse
+12. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xf264310 in /usr/bin/clickhouse
+13. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xf262d63 in /usr/bin/clickhouse
+14. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xf262d63 in /usr/bin/clickhouse
+15. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xf262d63 in /usr/bin/clickhouse
+16. ? @ 0xf241e19 in /usr/bin/clickhouse
+17. DB::ExpressionAnalyzer::getActions(bool, bool) @ 0xf2451f7 in /usr/bin/clickhouse
+18. DB::validateColumnsDefaultsAndGetSampleBlock(std::__1::shared_ptr<DB::IAST>, DB::NamesAndTypesList const&, DB::Context const&) @ 0xf60d108 in /usr/bin/clickhouse
+19. DB::InterpreterCreateQuery::getColumnsDescription(DB::ASTExpressionList const&, DB::Context const&, bool) @ 0xf134316 in /usr/bin/clickhouse
+20. DB::createTableFromAST(DB::ASTCreateQuery, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool) @ 0xf00ad2d in /usr/bin/clickhouse
+21. ? @ 0xeffd6c8 in /usr/bin/clickhouse
+22. ? @ 0xeffe082 in /usr/bin/clickhouse
+23. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0xa271a57 in /usr/bin/clickhouse
+24. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() const @ 0xa2721ca in /usr/bin/clickhouse
+25. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xa270f67 in /usr/bin/clickhouse
+26. ? @ 0xa26f4a3 in /usr/bin/clickhouse
+27. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+28. clone @ 0x122103 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 20.6.3.28 (official build))
+```
+
+**Additional context**
+on production stateful server works simple workaround
+```
+mv /var/lib/clickhouse/metadata/default/table.sql /tmp/table.sql
+systemctl restart clickhouse-server
+clickhouse-client --database=default < /tmp/table.sql
+```
+
+also, after restore
+```sql
+SELECT toTypeName(dictGet('default.dict', 'value', tuple(coalesce(stamp, '')))) FROM default.table LIMIT 1
+```
+show
+```
+String
+```
+
+Affected for 20.1 with a different error message
+```
+2020.08.11 13:18:01.946409 [ 1 ] {} <Error> Application: Caught exception while loading metadata: Code: 36, e.displayText() = DB::Exception: external dictionary 'default.dict' not found: Cannot attach table '`table`' from query ATTACH TABLE table (`site_id` UInt32, `stamp` LowCardinality(Nullable(String)), `md_ad_format` String DEFAULT CAST(dictGet('default.dict', 'value', tuple(coalesce(stamp, ''))), 'String')) ENGINE = MergeTree() ORDER BY tuple() SETTINGS index_granularity = 8192, Stack trace (when copying this message, always include the lines below):
+
+0. 0x102b97a0 Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+1. 0x8e885cd DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+2. 0xcf09c99 ?  in /usr/bin/clickhouse
+3. 0xcf14f63 std::__1::shared_ptr<DB::IExternalLoadable const> DB::ExternalLoader::load<std::__1::shared_ptr<DB::IExternalLoadable const>, void>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const  in /usr/bin/clickhouse
+4. 0x92e8933 DB::FunctionDictGetNoType::getReturnTypeImpl(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const  in /usr/bin/clickhouse
+5. 0x90f7825 DB::DefaultOverloadResolver::getReturnType(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const  in /usr/bin/clickhouse
+6. 0x911a9fa DB::FunctionOverloadResolverAdaptor::getReturnTypeWithoutLowCardinality(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const  in /usr/bin/clickhouse
+7. 0x911adf2 DB::FunctionOverloadResolverAdaptor::getReturnType(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const  in /usr/bin/clickhouse
+8. 0x912117c DB::FunctionOverloadResolverAdaptor::build(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const  in /usr/bin/clickhouse
+9. 0xcf6a86e DB::ExpressionActions::addImpl(DB::ExpressionAction, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&)  in /usr/bin/clickhouse
+10. 0xcf6aa7d DB::ExpressionActions::add(DB::ExpressionAction const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&)  in /usr/bin/clickhouse
+11. 0xcf4d821 DB::ScopeStack::addAction(DB::ExpressionAction const&)  in /usr/bin/clickhouse
+12. 0xcf533c2 DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&)  in /usr/bin/clickhouse
+13. 0xcf521b6 DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&)  in /usr/bin/clickhouse
+14. 0xcf521b6 DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&)  in /usr/bin/clickhouse
+15. 0xcf3f5a9 DB::InDepthNodeVisitor<DB::ActionsMatcher, true, std::__1::shared_ptr<DB::IAST> const>::visit(std::__1::shared_ptr<DB::IAST> const&)  in /usr/bin/clickhouse
+16. 0xcf34bb3 ?  in /usr/bin/clickhouse
+17. 0xcf36ee5 DB::ExpressionAnalyzer::getActions(bool, bool)  in /usr/bin/clickhouse
+18. 0xcf25d2b DB::InterpreterCreateQuery::getColumnsDescription(DB::ASTExpressionList const&, DB::Context const&)  in /usr/bin/clickhouse
+19. 0xcfb7592 DB::createTableFromAST(DB::ASTCreateQuery, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool)  in /usr/bin/clickhouse
+20. 0xcfad8b5 ?  in /usr/bin/clickhouse
+21. 0xcfae00b ?  in /usr/bin/clickhouse
+22. 0x8eaca87 ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>)  in /usr/bin/clickhouse
+23. 0x8ead0e8 ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() const  in /usr/bin/clickhouse
+24. 0x8eabf97 ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>)  in /usr/bin/clickhouse
+25. 0x8eaa3a3 ?  in /usr/bin/clickhouse
+26. 0x76db start_thread  in /lib/x86_64-linux-gnu/libpthread-2.27.so
+27. 0x12188f clone  in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.1.16.120 (official build))
+```
+
+Affected to 20.3 and 20.4

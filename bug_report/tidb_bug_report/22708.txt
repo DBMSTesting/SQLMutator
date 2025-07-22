@@ -1,0 +1,48 @@
+ID: 22708
+Title: write conflict when create index on partition table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+CREATE TABLE `t` (
+  `a` bigint(20) NOT NULL /*T![auto_rand] AUTO_RANDOM(5) */,
+  PRIMARY KEY (`a`),
+  KEY `idx` (`a`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+PARTITION BY HASH( `a` )
+PARTITIONS 20;
+
+shell:
+cat 1.sql
+INSERT INTO `t` VALUES ();
+
+mysqlslap --query=1.sql -uroot -h127.0.0.1 -P4000 -c 100 --number-of-queries=10000000 --create-schema=test --commit=1
+
+alter table t add index idx(a);
+```
+
+
+### 2. What did you expect to see? (Required)
+No error in tidb.log
+### 3. What did you see instead (Required)
+[ERROR] [ddl_worker.go:158] ["[ddl] handle DDL job failed"] [worker="worker 4, tp add index"] [error="[kv:9007]Write conflict, txnStartTS=422642994193104901, conflictStartTS=422642995477610509, conflictCommitTS=422642995477610510, key={metaKey=true, key=DDLJobReorg, field=\u0000\u0000\u0000\u0000\u0000\u0000\ufffdf} primary=[]byte{0x6d, 0x44, 0x44, 0x4c, 0x4a, 0x6f, 0x62, 0x41, 0x64, 0xff, 0x64, 0x49, 0x64, 0x78, 0x4c, 0x69, 0x73, 0x74, 0xff, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf7, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x6c, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0} [try again later]"]
+
+Analyze:
+In addTableIndex:
+![image](https://user-images.githubusercontent.com/17380469/114869087-2cf47c80-9e29-11eb-8b16-24b8d8c70c78.png)
+updateReorgInfo would call UpdateDDLReorgHandle() and write the meta key `mDDLJobReorgKey`
+
+Meanwhile,  the background goroutine runReorgJob() would call UpdateDDLReorgStartHandle() and write the meta key `mDDLJobReorgKey`.
+
+So there will be a write conflict on the meta key.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+4.0.9, 5.0.0 rc

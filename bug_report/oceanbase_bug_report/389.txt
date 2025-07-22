@@ -1,0 +1,132 @@
+ID: 389
+Title: fix foreign key bug
+Description:
+<!--
+Thank you for contributing to **OceanBase**! Please read the [CONTRIBUTING](https://github.com/oceanbase/oceanbase/blob/master/CONTRIBUTING.md) document **BEFORE** filing this PR.
+-->
+
+### What changes were proposed in this pull request?
+使用alter table语句创建外键的操作不具备原子性，它会先创建一个临时外键来保证新增数据一定要符合外键约束，然后再检查旧数据的合法性，如果不合法就回滚临时外键，否则就修改临时外键的状态，将其设置为本应该创建的外键的状态。如果在创建临时外键后，外键创建完成前，obs发生了宕机，就有可能在内部表中记录了不应该存在的临时外键的信息。
+
+因此，该pr新增了一个内部表__all_creating_foreign_key来记录创建中的外键的信息（使用alter table语句创建），包括租户id、外键id、外键的子表的id、创建外键的obs的ip及端口、创建外键的时间。此外，该pr还新增了一个后台线程定时查询__all_creating_foreign_key表，每当发现某个外键创建的时间要早于创建它的obs的启动时间，就认为obs发生了宕机，该线程将对这一类外键进行回滚。
+<!--
+Please clarify what changes you are proposing. The purpose of this section is to outline the changes and how this PR fixes the issue. 
+If possible, please consider writing useful notes for better and faster reviews in your PR. See the examples below.
+  1. If you refactor some codes with changing classes, showing the class hierarchy will help reviewers.
+  2. If you fix some nGQL features, you can provide some references.
+  3. If there is design documentation, please add the link.
+  4. If there is a discussion in the mailing list, please add the link.
+-->
+
+
+### Why are the changes needed?
+
+<!--
+Please clarify why the changes are needed. For instance,
+  1. If you propose a new API, clarify the use case for a new API.
+  2. If you fix a bug, you can clarify why it is a bug.
+-->
+
+
+### Will break the compatibility? How if so?
+
+
+<!--
+Please label `alert/break' if so, such as
+  1. nGQL grammar changes;
+  2. RPC protocol can't be compatible with previous, refer to https://diwakergupta.github.io/thrift-missing-guide/#_versioning_compatibility;
+  3. Storage format; etc.
+-->
+
+
+### Does this PR introduce any user-facing change?
+
+<!--
+If yes, please clarify the previous behavior and the change this PR proposes - provide the console output, description and/or an example to show the behavior difference if possible.
+If no, write 'No'.
+-->
+
+
+### How was this patch tested?
+
+<!--
+If tests were added, say they were added here. Please make sure to add some test cases that check the changes thoroughly including negative and positive cases if possible.
+If it was tested in a way different from regular unit tests, please clarify how you tested step by step, ideally copy and paste-able, so that other reviewers can test and check, and descendants can verify in the future.
+If tests were not added, please describe why they were not added and/or why it was difficult to add.
+-->
+该pr设置了一个EventTable::EN_CHECK_FOREIGN_KEY_VALIDYTY_FAILED，如果激活该event，并注入除OB_ERR_ORPHANED_CHILD_RECORD_EXISTS以外的错误码时，在使用alter table创建外键的时候，将会在检查完数据合法性后，结束外键的创建，不进行临时外键的回滚或修改，即__all_foreign_key表中存在临时外键的信息，__all_creating_foreign_key表中也存有该外键的信息，表示该外键正在进行创建，以此来代替外键长期处于数据合法性检测的行为。
+为了方便测试，以下结果将后台线程的启动间隔时间设置为1分钟。
+
+测试结果：
+- 检测创建外键时，obs发生了故障，永久下线：
+1. 创建两张表，激活EN_CHECK_FOREIGN_KEY_VALIDYTY_FAILED，然后使用alter table创建一个外键，在__all_foreign_key和__all_creating_foreign_key中同时生成数据
+
+![image](https://user-images.githubusercontent.com/30400994/136953822-0e23ab82-600c-4bd0-95b6-cd23810d3a28.png)
+
+![image](https://user-images.githubusercontent.com/30400994/136954347-a1b9eae4-434e-4847-a832-f582815924e0.png)
+
+2. 连接到另一台obs上，通过命令alter system delete server删除创建外键的obs，表示该obs发生了宕机，永久下线。此时外键并未被回滚
+
+![image](https://user-images.githubusercontent.com/30400994/136954833-f649acbd-1b44-4f52-ade4-f10ab210e811.png)
+
+3. 等待一分钟后，外键发生回滚
+
+![image](https://user-images.githubusercontent.com/30400994/136955034-fa8baa38-7ce5-41cc-b610-cf091a280207.png)
+
+- 检测创建外键，obs出现了问题，但立刻重启：
+1. 创建两张表，激活EN_CHECK_FOREIGN_KEY_VALIDYTY_FAILED，然后使用alter table创建一个外键，此时服务器状态为active，外键信息也正常记录
+
+![image](https://user-images.githubusercontent.com/30400994/136955602-d2b1fce1-fa20-4aca-8297-780bf22625a7.png)
+
+![image](https://user-images.githubusercontent.com/30400994/136955616-b2fa73c5-9c57-4baa-be80-1bb68d2a7222.png)
+
+2. 使用kill结束obs进程，服务器状态变为inactive，外键显示正在创建中
+
+![image](https://user-images.githubusercontent.com/30400994/136955742-678ed948-d520-4445-97de-8e19ec50e771.png)
+
+![image](https://user-images.githubusercontent.com/30400994/136955786-dd1adcb1-0e70-421e-b620-6573c7451bf6.png)
+
+3. 重新启动ob，obs状态变为active
+
+![image](https://user-images.githubusercontent.com/30400994/136955886-4a86ccd9-c3d9-48c2-93a2-d29b06e5cc6e.png)
+
+4. 等待一分钟后，外键发生回滚
+
+![image](https://user-images.githubusercontent.com/30400994/136956019-c621b458-c756-480c-bf10-13831b66e0c5.png)
+
+- 用户手动删除临时外键：
+1. 创建两张表，激活event，使用alter table add constraint创建外键
+
+![image](https://user-images.githubusercontent.com/30400994/136956293-01b8ad42-f544-48bd-8fa2-91cc8947efc1.png)
+
+2. 使用alter table drop foreign key删除外键，__all_foreign_key和__all_creating_foreign_key都删除成功
+
+![image](https://user-images.githubusercontent.com/30400994/136956341-66540f7d-0090-447e-bfa4-3b90b1e8b18d.png)
+
+- 用户将正在创建外键的表删除：
+1.创建两张表，激活event，使用alter table add constraint创建外键
+
+![image](https://user-images.githubusercontent.com/30400994/136956497-d17f74f9-5451-4114-bc40-fecb931c01f1.png)
+
+2.删除表，__all_foreign_key和__all_creating_foreign_key都删除成功
+
+![image](https://user-images.githubusercontent.com/30400994/136956610-47ef0dfb-451e-45d8-8971-dd8e972fe60f.png)
+
+- 用户正常插入外键：
+1. create table时创建外键，创建成功后，__all_creating_foreign_key不存在信息
+
+![image](https://user-images.githubusercontent.com/30400994/136956817-b46fdb4f-6291-4abe-8907-0e47f00dab4e.png)
+
+2. 使用alter table创建外键，创建成功后，__all_creating_foreign_key不存在信息
+
+![image](https://user-images.githubusercontent.com/30400994/136956946-cace7d81-2101-4f89-8bb3-9e74d697f0fd.png)
+
+![image](https://user-images.githubusercontent.com/30400994/136956968-476df85c-0126-43d1-bd30-d9ed22b44753.png)
+
+
+### Checklist
+<!--Tick the checkbox(es) below to choose what you have done.-->
+
+- [ ] I've run the tests to see all new and existing tests pass.
+- [ ] If this Pull Request resolves an issue, I linked to the issue in the text above.
+- [ ] I've informed the technical writer about the documentation change if necessary.

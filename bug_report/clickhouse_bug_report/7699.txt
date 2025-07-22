@@ -1,0 +1,99 @@
+ID: 7699
+Title: mutation hang
+Description:
+**Describe the bug or unexpected behaviour**
+I noticed `ALTER TABLE UPDATE` hang on every node of a four-node ClickHouse cluster.
+
+**How to reproduce**
+* Which ClickHouse server version to use
+19.15.3.6-stable
+* Which interface to use, if matters
+CLI
+* Non-default settings, if any
+* `CREATE TABLE` statements for all tables involved
+```
+CREATE TABLE cdp_idmapping_archive_delta ON CLUSTER XXX (
+    from_mid String,
+    to_mid String,
+    from_mid_seq UInt32,
+    to_mid_seq UInt32,
+    create_time DateTime
+) engine=ReplacingMergeTree(create_time)
+PARTITION BY substring(from_mid, 1, 1)                                                                                                                        
+ORDER BY (from_mid);
+
+CREATE TABLE dist_cdp_idmapping_archive_delta ON CLUSTER XXX AS cdp_idmapping_archive_delta ENGINE = Distributed(XXX, default, cdp_idmapping_archive_delta);
+
+CREATE TABLE cdp_idmapping_archive_delta_kv ON CLUSTER XXX AS cdp_idmapping_archive_delta ENGINE = Join(ANY, LEFT, from_mid) SETTINGS join_any_take_last_row = 1
+
+```
+* Queries to run that lead to unexpected result
+
+```
+SELECT count() FROM cdp_idmapping_archive_delta_kv;
+┌─count()─┐
+│   74261 │
+└─────────┘
+
+-- I executed following mutation on everay node. 
+ALTER TABLE default.cdp_orders UPDATE mid=joinGet('cdp_idmapping_archive_delta_kv', 'to_mid', mid), mid_seq=joinGet('cdp_idmapping_archive_delta_kv', 'to_mid_seq', mid) WHERE mid IN (SELECT from_mid FROM cdp_idmapping_archive_delta_kv);
+
+-- And I got the following error log on every node.
+2019.11.09 13:39:51.891033 [ 238 ] {cd3147a5-517e-4f99-9563-2ae8e44933ca} <Information> default.cdp_orders_flink: Added mutation: mutation_10641.txt
+2019.11.09 13:39:51.891322 [ 238 ] {cd3147a5-517e-4f99-9563-2ae8e44933ca} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2019.11.09 13:39:51.891535 [ 238 ] {cd3147a5-517e-4f99-9563-2ae8e44933ca} <Debug> MemoryTracker: Peak memory usage (total): 0.00 B.
+2019.11.09 13:39:51.891652 [ 238 ] {cd3147a5-517e-4f99-9563-2ae8e44933ca} <Information> TCPHandler: Processed in 0.098 sec.
+2019.11.09 13:39:52.811305 [ 18 ] {} <Error> void DB::BackgroundProcessingPool::threadFunction(): Code: 81, e.displayText() = DB::Exception: Default database 
+is not selected, Stack trace:
+
+0. 0x5559d23f75a0 StackTrace::StackTrace() /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Common/StackTrace.cpp:228
+1. 0x5559d23f7375 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /bigdata/zhichyu/1/Cli
+ckHouse/obj-x86_64-linux-gnu/../dbms/src/Common/Exception.h:27
+2. 0x5559d21d56f9 DB::resolveDatabase(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char,
+ std::char_traits<char>, std::allocator<char> > const&) [clone .cold] /usr/include/c++/9/bits/basic_string.h:222
+3. 0x5559d55da10a DB::Context::getTableImpl(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string
+<char, std::char_traits<char>, std::allocator<char> > const&, DB::Exception*) const /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Interpreter
+s/Context.cpp:951
+4. 0x5559d55da5c1 DB::Context::getTable(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<cha
+r, std::char_traits<char>, std::allocator<char> > const&) const /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Interpreters/Context.cpp:924
+5. 0x5559d27e3bc7 DB::getJoin(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName> > const&, DB::Context const&) /usr/lib/debug/us
+r/bin/clickhouse
+6. 0x5559d27e4797 DB::FunctionBuilderJoinGet::getReturnTypeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName> > const&) con
+st /usr/lib/debug/usr/bin/clickhouse
+7. 0x5559d5457ec6 DB::FunctionBuilderImpl::getReturnTypeWithoutLowCardinality(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>
+ > const&) const /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Functions/IFunction.cpp:516
+8. 0x5559d5458a9b DB::FunctionBuilderImpl::getReturnType(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName> > const&) const /big
+data/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Functions/IFunction.cpp:620
+9. 0x5559d2600aac DB::FunctionBuilderImpl::build(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName> > const&) const /bigdata/zhi
+chyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Functions/IFunction.h:270
+10. 0x5559d5d5b8f4 DB::ExpressionActions::addImpl(DB::ExpressionAction, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<ch
+ar> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >&) /usr/include/c++/9/bits/shared_ptr_base.h:1177
+11. 0x5559d5d5ba43 DB::ExpressionActions::add(DB::ExpressionAction const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator
+<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >&) /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-
+gnu/../dbms/src/Interpreters/ExpressionActions.cpp:664
+12. 0x5559d5e8b6b2 DB::ScopeStack::addAction(DB::ExpressionAction const&) /usr/include/c++/9/bits/stl_iterator.h:807
+13. 0x5559d5e90252 DB::ActionsMatcher::visit(DB::ASTFunction const&, std::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Interpreters/ActionsVisitor.cpp:524
+14. 0x5559d5e8fa60 DB::ActionsMatcher::visit(DB::ASTFunction const&, std::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) /usr/include/c++/9/bits/basic_string.h:451
+15. 0x5559d5e8fa60 DB::ActionsMatcher::visit(DB::ASTFunction const&, std::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) /usr/include/c++/9/bits/basic_string.h:451
+16. 0x5559d5d6fdc0 DB::InDepthNodeVisitorTemplate<DB::ActionsMatcher, true, std::shared_ptr<DB::IAST> const>::visit(std::shared_ptr<DB::IAST> const&) /usr/include/c++/9/bits/shared_ptr_base.h:1021
+17. 0x5559d5d68761 DB::ExpressionAnalyzer::getRootActions(std::shared_ptr<DB::IAST> const&, bool, std::shared_ptr<DB::ExpressionActions>&, bool) [clone .constprop.1] /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Interpreters/ActionsVisitor.h:99
+18. 0x5559d5d6a526 DB::ExpressionAnalyzer::appendExpression(DB::ExpressionActionsChain&, std::shared_ptr<DB::IAST> const&, bool) /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Interpreters/ExpressionAnalyzer.cpp:774
+19. 0x5559d5d9c75d DB::MutationsInterpreter::prepareInterpreterSelectQuery(std::vector<DB::MutationsInterpreter::Stage, std::allocator<DB::MutationsInterpreter::Stage> >&, bool) /usr/include/c++/9/bits/hashtable_policy.h:299
+20. 0x5559d5d9e4a0 DB::MutationsInterpreter::prepare(bool) /usr/include/c++/9/bits/unordered_set.h:97
+21. 0x5559d5d9fa31 DB::MutationsInterpreter::evaluateCommandsSize() /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Interpreters/MutationsInterpreter.cpp:506
+22. 0x5559d587e733 DB::StorageMergeTree::tryMutatePart() /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Storages/StorageMergeTree.cpp:689
+23. 0x5559d587f04b DB::StorageMergeTree::mergeMutateTask() /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Storages/StorageMergeTree.cpp:775
+24. 0x5559d590c934 DB::BackgroundProcessingPool::threadFunction() /usr/include/c++/9/bits/std_function.h:690
+25. 0x5559d590d2aa ThreadFromGlobalPool::ThreadFromGlobalPool<DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::{lambda()#1}>(DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::{lambda()#1}&&)::{lambda()#1}::operator()() const /bigdata/zhichyu/1/ClickHouse/obj-x86_64-linux-gnu/../dbms/src/Common/ThreadPool.h:150
+26. 0x5559d244056c ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/include/c++/9/bits/atomic_base.h:551
+27. 0x5559d6f352d0 execute_native_thread_routine /usr/lib/debug/usr/bin/clickhouse
+28. 0x7fbd0b753dd5 start_thread /usr/lib64/libpthread-2.17.so
+29. 0x7fbd0b070ead __clone /usr/lib64/libc-2.17.so
+ (version 19.15.3.6)
+
+```
+
+Restart clickhouse-server didn't help.
+
+FYI. The table name `cdp_orders_flink` in log `default.cdp_orders_flink: Added mutation: mutation_10641.txt` is the old name before a `RENAME` operation days ago. However I failed to reproduce the mutation hang issue with renaming a table back and forth. 
+

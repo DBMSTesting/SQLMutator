@@ -1,0 +1,84 @@
+ID: 11572
+Title: Output of TreeExecutor is not sorted after OPTIMIZE FINAL DEDUPLICATE
+Description:
+**Describe the bug**
+I got the exception after trying to DEDUPLICATE mv. It worked on 20.3
+
+>OPTIMIZE TABLE targeting_service_mv.ts_last_active_wallet FINAL DEDUPLICATE;
+
+ru.yandex.clickhouse.except.ClickHouseException: ClickHouse exception, code: 365, host: 168.63.64.61, port: 8123; Code: 365, e.displayText() = DB::Exception: Output of TreeExecutor is not sorted (version 20.4.4.18 (official build))
+
+It works w/o DEDUPLICATE. And does what it intended to do, delete old records with earlier last_active
+
+**How to reproduce**
+Clickhouse-server 20.4.4.18
+
+```
+CREATE TABLE queues.client_event (
+    `event` LowCardinality(String),
+    `created_at` DateTime, 
+    `wallet_uid` String,
+    `device_id` String,    
+    `message_id` String,
+)
+ENGINE = ReplacingMergeTree() PARTITION BY toYYYYMM(created_at)
+ORDER BY (event, created_at, cityHash64(device_id, message_id))
+SETTINGS index_granularity = 8192
+```
+
+```
+CREATE MATERIALIZED VIEW targeting_service_mv.ts_last_active_wallet
+ENGINE = ReplacingMergeTree(last_active)
+ORDER BY (wallet_uid)
+POPULATE
+AS 
+SELECT
+    wallet_uid, toDate(created_at) as last_active
+FROM queues.client_event
+WHERE 
+event IN ('MW: Home', 'LoyaltyCard: Home', 'MW: Launch', 'MW: First-Launch', 'MW: Loading: Shown')
+and wallet_uid != '';
+```
+
+After creation I have inserted 12mln records in butches of 50k. Like that
+```
+insert into targeting_service_mv.ts_last_active_wallet (wallet_uid, last_active) values (....)
+```
+
+**Expected behavior**
+OPTIMIZE executes w/o exceptions, table re merges (records with same wallet_uid but earlier last_active was deleted)
+
+**Error message and/or stacktrace**
+
+```
+ru.yandex.clickhouse.except.ClickHouseException: ClickHouse exception, code: 365, host: 168.63.64.61, port: 8123; Code: 365, e.displayText() = DB::Exception: Output of TreeExecutor is not sorted (version 20.4.4.18 (official build))
+
+	at ru.yandex.clickhouse.except.ClickHouseExceptionSpecifier.specify(ClickHouseExceptionSpecifier.java:58)
+	at ru.yandex.clickhouse.except.ClickHouseExceptionSpecifier.specify(ClickHouseExceptionSpecifier.java:28)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.checkForErrorAndThrow(ClickHouseStatementImpl.java:875)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.getInputStream(ClickHouseStatementImpl.java:616)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:117)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:100)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:95)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:90)
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.execute(ClickHouseStatementImpl.java:226)
+	at org.apache.commons.dbcp2.DelegatingStatement.execute(DelegatingStatement.java:291)
+	at org.apache.commons.dbcp2.DelegatingStatement.execute(DelegatingStatement.java:291)
+	at org.apache.zeppelin.jdbc.JDBCInterpreter.executeSql(JDBCInterpreter.java:736)
+	at org.apache.zeppelin.jdbc.JDBCInterpreter.interpret(JDBCInterpreter.java:819)
+	at org.apache.zeppelin.interpreter.LazyOpenInterpreter.interpret(LazyOpenInterpreter.java:103)
+	at org.apache.zeppelin.interpreter.remote.RemoteInterpreterServer$InterpretJob.jobRun(RemoteInterpreterServer.java:632)
+	at org.apache.zeppelin.scheduler.Job.run(Job.java:188)
+	at org.apache.zeppelin.scheduler.ParallelScheduler$JobRunner.run(ParallelScheduler.java:162)
+	at java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:511)
+	at java.util.concurrent.FutureTask.run(FutureTask.java:266)
+	at java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.access$201(ScheduledThreadPoolExecutor.java:180)
+	at java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:293)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+	at java.lang.Thread.run(Thread.java:748)
+Caused by: java.lang.Throwable: Code: 365, e.displayText() = DB::Exception: Output of TreeExecutor is not sorted (version 20.4.4.18 (official build))
+
+	at ru.yandex.clickhouse.except.ClickHouseExceptionSpecifier.specify(ClickHouseExceptionSpecifier.java:53)
+	... 23 more
+```

@@ -1,0 +1,61 @@
+ID: 18971
+Title: parallel_distributed_insert_select + insert_distributed_sync = deadlocks table with Log engine
+Description:
+Easily reproduced with sample from `01099_parallel_distributed_insert_select.sql` test:
+
+    SET insert_distributed_sync = 1;
+    SET parallel_distributed_insert_select=1;
+
+    CREATE TABLE local_01099_a (number UInt64) ENGINE = Log;
+    CREATE TABLE local_01099_b (number UInt64) ENGINE = Log;
+    CREATE TABLE distributed_01099_a AS local_01099_a ENGINE = Distributed('test_cluster_two_shards_localhost', currentDatabase(), local_01099_a, rand());
+    CREATE TABLE distributed_01099_b AS local_01099_b ENGINE = Distributed('test_cluster_two_shards_localhost', currentDatabase(), local_01099_b, rand());
+
+    INSERT INTO local_01099_a SELECT number from system.numbers limit 3;
+    INSERT INTO distributed_01099_b SELECT * from distributed_01099_a;
+
+    SELECT number, count(number) FROM local_01099_b group by number order by number;
+
+Where the cluster is:
+
+```
+        <test_cluster_two_shards_localhost>
+            <shard>
+                <replica>
+                    <host>localhost</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>localhost</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </test_cluster_two_shards_localhost>
+```
+
+The lock timeouts with stacktrace:
+
+```
+2021.01.12 14:58:03.464213 [ 45247 ] {e1670ec8-72a2-4a03-af6a-9cf82ad95356} <Error> TCPHandler: Code: 159, e.displayText() = DB::Exception: Received from 127.0.0.1:9000. DB::Exception: Lock timeout exceeded. Stack trace:
+
+0. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/exception:133: std::exception::capture() @ 0xe4bd8 in /home/ilezhankin/gh/ch/build/programs/local/libclickhouse-local-libd.so
+1. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/exception:111: std::exception::exception() @ 0x1ce132 in /home/ilezhankin/gh/ch/build/contrib/poco-cmake/Foundation/lib_poco_foundationd.so
+2. /home/ilezhankin/gh/ch/build/../contrib/poco/Foundation/src/Exception.cpp:28: Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1c2e63 in /home/ilezhankin/gh/ch/build/contrib/poco-cmake/Foundation/lib_poco_foundationd.so
+3. /home/ilezhankin/gh/ch/build/../src/Common/Exception.cpp:55: DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x27896a in /home/ilezhankin/gh/ch/build/src/libclickhouse_common_iod.so
+4. /home/ilezhankin/gh/ch/build/../src/Storages/StorageLog.cpp:521: DB::StorageLog::loadMarks(std::__1::chrono::duration<long long, std::__1::ratio<1l, 1l> >) @ 0x731226 in /home/ilezhankin/gh/ch/build/src/libclickhouse_storagesd.so
+5. /home/ilezhankin/gh/ch/build/../src/Storages/StorageLog.cpp:683: DB::StorageLog::write(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::Context const&) @ 0x732a6b in /home/ilezhankin/gh/ch/build/src/libclickhouse_storagesd.so
+6. /home/ilezhankin/gh/ch/build/../src/DataStreams/PushingToViewsBlockOutputStream.cpp:128: DB::PushingToViewsBlockOutputStream::PushingToViewsBlockOutputStream(std::__1::shared_ptr<DB::IStorage> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::Context const&, std::__1::shared_ptr<DB::IAST> const&, bool) @ 0x297fdf in /home/ilezhankin/gh/ch/build/src/libclickhouse_datastreamsd.so
+7. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/memory:887: void std::__1::allocator<DB::PushingToViewsBlockOutputStream>::construct<DB::PushingToViewsBlockOutputStream, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&>(DB::PushingToViewsBlockOutputStream*, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&) @ 0x1bcc611 in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+8. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/__memory/allocator_traits.h:521: void std::__1::allocator_traits<std::__1::allocator<DB::PushingToViewsBlockOutputStream> >::__construct<DB::PushingToViewsBlockOutputStream, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&>(std::__1::integral_constant<bool, true>, std::__1::allocator<DB::PushingToViewsBlockOutputStream>&, DB::PushingToViewsBlockOutputStream*, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&) @ 0x1bcc56c in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+9. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/__memory/allocator_traits.h:482: void std::__1::allocator_traits<std::__1::allocator<DB::PushingToViewsBlockOutputStream> >::construct<DB::PushingToViewsBlockOutputStream, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&>(std::__1::allocator<DB::PushingToViewsBlockOutputStream>&, DB::PushingToViewsBlockOutputStream*, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&) @ 0x1bcc30c in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+10. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/memory:2594: std::__1::__shared_ptr_emplace<DB::PushingToViewsBlockOutputStream, std::__1::allocator<DB::PushingToViewsBlockOutputStream> >::__shared_ptr_emplace<std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&>(std::__1::allocator<DB::PushingToViewsBlockOutputStream>, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&) @ 0x1bcbfad in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+11. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/memory:3360: std::__1::shared_ptr<DB::PushingToViewsBlockOutputStream> std::__1::allocate_shared<DB::PushingToViewsBlockOutputStream, std::__1::allocator<DB::PushingToViewsBlockOutputStream>, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&, void>(std::__1::allocator<DB::PushingToViewsBlockOutputStream> const&, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&) @ 0x1bcbd8a in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+12. /home/ilezhankin/gh/ch/build/../contrib/libcxx/include/memory:3369: std::__1::shared_ptr<DB::PushingToViewsBlockOutputStream> std::__1::make_shared<DB::PushingToViewsBlockOutputStream, std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&, void>(std::__1::shared_ptr<DB::IStorage>&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::Context const&, std::__1::shared_ptr<DB::IAST>&, bool const&) @ 0x1bc3335 in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+13. /home/ilezhankin/gh/ch/build/../src/Interpreters/InterpreterInsertQuery.cpp:333: DB::InterpreterInsertQuery::execute() @ 0x1bbf7dc in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+14. /home/ilezhankin/gh/ch/build/../src/Interpreters/executeQuery.cpp:525: DB::executeQueryImpl(char const*, char const*, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, DB::ReadBuffer*) @ 0x1e7dae6 in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+15. /home/ilezhankin/gh/ch/build/../src/Interpreters/executeQuery.cpp:868: DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0x1e7c2aa in /home/ilezhankin/gh/ch/build/src/libclickhouse_interpretersd.so
+```
+
+If engine is substituted to anything else (e.g. Memory) then everything works fine - at least there is no deadlock.

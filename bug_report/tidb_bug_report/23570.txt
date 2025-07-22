@@ -1,0 +1,73 @@
+ID: 23570
+Title: planner: hints don't work in some batch/point get cases
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+## Development Task
+```
+CREATE TABLE `t` (
+  `a` int(11) DEFAULT NULL,
+  `b` int(11) DEFAULT NULL,
+  `c` int(11) DEFAULT NULL,
+  `d` int(11) DEFAULT NULL,
+  UNIQUE KEY `abc` (`a`,`b`,`c`)
+)
+========================================================================
+============================= the first case =================================
+========================================================================
+mysql> explain select * from t where a=1 and b =1 and c=1;
++-------------+---------+------+-----------------------------+---------------+
+| id          | estRows | task | access object               | operator info |
++-------------+---------+------+-----------------------------+---------------+
+| Point_Get_1 | 1.00    | root | table:t, index:abc(a, b, c) |               |
++-------------+---------+------+-----------------------------+---------------+
+
+mysql> explain select * from t ignore index(abc) where a=1 and b =1 and c=1;
++-------------+---------+------+-----------------------------+---------------+
+| id          | estRows | task | access object               | operator info |
++-------------+---------+------+-----------------------------+---------------+
+| Point_Get_1 | 1.00    | root | table:t, index:abc(a, b, c) |               |
++-------------+---------+------+-----------------------------+---------------+
+
+========================================================================
+============================= the second case ===============================
+========================================================================
+mysql> explain select * from t where a=1 and (b>=1 and b<=1) and c=1;
++-------------+---------+------+-----------------------------+---------------+
+| id          | estRows | task | access object               | operator info |
++-------------+---------+------+-----------------------------+---------------+
+| Point_Get_5 | 1.00    | root | table:t, index:abc(a, b, c) |               |
++-------------+---------+------+-----------------------------+---------------+
+1 row in set (0.00 sec)
+
+mysql> explain select * from t ignore index(abc) where a=1 and (b>=1 and b<=1) and c=1;
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------------+
+| id                      | estRows | task      | access object | operator info                                                      |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                                                   |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.a, 1), eq(test.t.c, 1), ge(test.t.b, 1), le(test.t.b, 1) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false, stats:pseudo                                     |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------------+
+3 rows in set (0.00 sec)
+```
+As you see above, the `ignore hint` doesn't work in the first case but can control the second.
+
+
+
+### 2. What did you expect to see? (Required)
+Both cases can be controlled by the hint.
+
+### 3. What did you see instead (Required)
+Only the second case can.
+
+### 4. What is your TiDB version? (Required)
+`5.7.25-TiDB-v4.0.0-beta.2-2438-g906828b15-dirty`
+
+### 5. Root cause  analysis
+The root cause is that TiDB handles `point/batch get` plans in two places.
+The first is in `TryFastPlan` which is in front of logical optimization, so all `point/batch get` plans handled in this place cannot be controlled by hints.
+The second is in `DataSource.convertToPointGet` which is a step of physical optimization, so hints can work there.

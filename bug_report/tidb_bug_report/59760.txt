@@ -1,0 +1,93 @@
+ID: 59760
+Title: Optimizer decides to use tiflash even it takes to fullscan 200 billion rows instead of 40k
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+
+simple select * from table order by primary key
+```sql
+...
+PRIMARY KEY (transaction_time, transaction_lt, transaction_hash, is_out,
+                 index_in_transaction)
+```
+
+
+```sql
+SELECT *
+FROM `transaction_messages`
+WHERE (`transaction_messages`.`transaction_account_workchain`,
+       `transaction_messages`.`transaction_account_address`) NOT IN
+      ((-1, 33333333333333333333333333333333))
+ORDER BY `transaction_messages`.`transaction_time` DESC,
+         `transaction_messages`.`transaction_lt` DESC,
+         `transaction_messages`.`transaction_hash` DESC,
+         `transaction_messages`.`is_out` DESC,
+         `transaction_messages`.`index_in_transaction` DESC
+LIMIT 6;
+```
+
+
+Without `SET @@session.tidb_isolation_read_engines = 'tikv';`
+ it issues full scan on tiflash
+
+```
+TopN_10,6.00,root,"","database.transaction_messages.transaction_time:desc, database.transaction_messages.transaction_lt:desc, database.transaction_messages.transaction_hash:desc, database.transaction_messages.is_out:desc, database.transaction_messages.index_in_transaction:desc, offset:0, count:6"
+└─TableReader_22,6.00,root,"","MppVersion: 2, data:ExchangeSender_21"
+  └─ExchangeSender_21,6.00,mpp[tiflash],"",ExchangeType: PassThrough
+    └─TopN_20,6.00,mpp[tiflash],"","database.transaction_messages.transaction_time:desc, database.transaction_messages.transaction_lt:desc, database.transaction_messages.transaction_hash:desc, database.transaction_messages.is_out:desc, database.transaction_messages.index_in_transaction:desc, offset:0, count:6"
+      └─Selection_19,2454380061.37,mpp[tiflash],"","or(ne(database.transaction_messages.transaction_account_workchain, -1), ne(cast(database.transaction_messages.transaction_account_address, double BINARY), 3.3333333333333334e+31))"
+        └─TableFullScan_18,2454504748.00,mpp[tiflash],table:transaction_messages,"pushed down filter:empty, keep order:false"
+```
+with `SET @@session.tidb_isolation_read_engines = 'tikv';`
+
+```
+Limit_11,6.00,root,"","offset:0, count:6"
+└─TableReader_20,6.00,root,"",data:Limit_19
+  └─Limit_19,6.00,cop[tikv],"","offset:0, count:6"
+    └─Selection_18,6.00,cop[tikv],"","or(ne(database.transaction_messages.transaction_account_workchain, -1), ne(cast(database.transaction_messages.transaction_account_address, double BINARY), 3.3333333333333334e+31))"
+      └─TableFullScan_17,12585.52,cop[tikv],table:transaction_messages,"keep order:true, desc"
+```
+
+Also, even it issues read to tiflash, should not tiflash store data ordered by primary key? 
+
+
+explain analyze:
+```TopN_10,6.00,6,root,,"time:4m49.7s, loops:2, RU:13590227.980962","database.transaction_messages.transaction_time:desc, database.transaction_messages.transaction_lt:desc, database.transaction_messages.transaction_hash:desc, database.transaction_messages.is_out:desc, database.transaction_messages.index_in_transaction:desc, offset:0, count:6",4.41 KB,0 Bytes
+└─TableReader_22,6.00,378,root,,"time:4m49.7s, loops:3, cop_task: {num: 65, max: 0s, min: 0s, avg: 0s, p95: 0s, copr_cache_hit_ratio: 0.00}","MppVersion: 2, data:ExchangeSender_21",2.53 KB,N/A
+  └─ExchangeSender_21,6.00,378,mpp[tiflash],,"tiflash_task:{proc max:4m49.6s, min:20s, avg: 2m34.8s, p80:4m49.6s, p95:4m49.6s, iters:63, tasks:2, threads:63}",ExchangeType: PassThrough,N/A,N/A
+    └─TopN_20,6.00,378,mpp[tiflash],,"tiflash_task:{proc max:4m49.6s, min:20s, avg: 2m34.8s, p80:4m49.6s, p95:4m49.6s, iters:63, tasks:2, threads:63}","database.transaction_messages.transaction_time:desc, database.transaction_messages.transaction_lt:desc, database.transaction_messages.transaction_hash:desc, database.transaction_messages.is_out:desc, database.transaction_messages.index_in_transaction:desc, offset:0, count:6",N/A,N/A
+      └─Selection_19,2459693457.44,2459494010,mpp[tiflash],,"tiflash_task:{proc max:4m33.6s, min:17.7s, avg: 2m25.7s, p80:4m33.6s, p95:4m33.6s, iters:58362, tasks:2, threads:63}","or(ne(database.transaction_messages.transaction_account_workchain, -1), ne(cast(database.transaction_messages.transaction_account_address, double BINARY), 3.3333333333333334e+31))",N/A,N/A
+        └─TableFullScan_18,2459818414.00,2459896020,mpp[tiflash],table:transaction_messages,"tiflash_task:{proc max:3m40.6s, min:8.96s, avg: 1m54.8s, p80:3m40.6s, p95:3m40.6s, iters:58362, tasks:2, threads:63}, tiflash_wait: {pipeline_queue_wait: 145477ms}, tiflash_scan:{mvcc_input_rows:1607369673, mvcc_input_bytes:160736967300, mvcc_output_rows:1607366173, lm_skip_rows:0, local_regions:4114, remote_regions:13, tot_learner_read:248ms, region_balance:{instance_num: 2, max/min: 3533/581=6.080895}, delta_rows:22660945, delta_bytes:8517556034, segments:2792, stale_read_regions:0, tot_build_snapshot:44ms, tot_build_bitmap:1624847ms, tot_build_inputstream:1677161ms, min_local_stream:7629ms, max_local_stream:220239ms, min_remote_stream:1630ms, max_remote_stream:6521ms, dtfile:{data_scanned_rows:2458061300, data_skipped_rows:22008429, mvcc_scanned_rows:1609353115, mvcc_skipped_rows:105056169, lm_filter_scanned_rows:0, lm_filter_skipped_rows:0, tot_rs_index_check:4711ms, tot_read:4668290ms}}","pushed down filter:empty, keep order:false",N/A,N/A
+
+Limit_11,6.00,6,root,,"time:702.7µs, loops:2, RU:11.266055","offset:0, count:6",N/A,N/A
+└─TableReader_20,6.00,6,root,,"time:698.8µs, loops:1, cop_task: {num: 1, max: 588.9µs, proc_keys: 32, tot_proc: 314.2µs, tot_wait: 23.9µs, copr_cache_hit_ratio: 0.00, build_task_duration: 2.21ms, max_distsql_concurrency: 15}, rpc_info:{Cop:{num_rpc:1, total_time:579.6µs}}",data:Limit_19,41.2 KB,N/A
+  └─Limit_19,6.00,6,cop[tikv],,"tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 32, total_process_keys_size: 10688, total_keys: 33, get_snapshot_time: 5.74µs, rocksdb: {delete_skipped_count: 5, key_skipped_count: 42, block: {cache_hit_count: 16, read_count: 5, read_byte: 90.9 KB, read_time: 36.9µs}}}, time_detail: {total_process_time: 314.2µs, total_wait_time: 23.9µs, tikv_wall_time: 448.8µs}","offset:0, count:6",N/A,N/A
+    └─Selection_18,6.00,32,cop[tikv],,"tikv_task:{time:0s, loops:1}","or(ne(database.transaction_messages.transaction_account_workchain, -1), ne(cast(database.transaction_messages.transaction_account_address, double BINARY), 3.3333333333333334e+31))",N/A,N/A
+      └─TableFullScan_17,12585.52,32,cop[tikv],table:transaction_messages,"tikv_task:{time:0s, loops:1}","keep order:true, desc",N/A,N/A
+```
+
+several mcs vs 4 minutes.
+
+
+### 2. What did you expect to see? (Required)
+Optimizer selects 2 plan because  12585 << 2458037711.
+
+
+### 4. What is your TiDB version? (Required)
+```
+"Release Version: v8.5.0
+Edition: Community
+Git Commit Hash: d13e52ed6e22cc5789bed7c64c861578cd2ed55b
+Git Branch: HEAD
+UTC Build Time: 2024-12-18 02:26:06
+GoVersion: go1.23.3
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv"
+```
+
+

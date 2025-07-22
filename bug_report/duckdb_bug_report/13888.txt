@@ -1,0 +1,174 @@
+ID: 13888
+Title: Serialized struct_pack() doesn't reference bound column alias names correctly
+Description:
+### What happens?
+
+I'm using DuckDB version 1.1.0.
+
+I think this might be a bug, I'm working with a table returning function that can do complex filter pushdown, and I'm serializing the `TableFilterSet` passed using the `Serialize()` method provided by the class into JSON.
+
+For this SQL:
+
+```sql
+create table example_table (column1 varchar);
+select * from example_table where {'value1': column1 } = {'value1': 'hello world'};
+```
+    
+This is the serialized filter:
+
+```json
+{
+    "expression_class": "BOUND_COMPARISON",
+    "type": "COMPARE_EQUAL",
+    "left": {
+        "expression_class": "BOUND_FUNCTION",
+        "type": "BOUND_FUNCTION",
+        "return_type": {
+            "id": "STRUCT",
+            "type_info": {
+                "type": "STRUCT_TYPE_INFO",
+                "child_types": [{"first": "value1", "second": {"id": "VARCHAR"}}],
+            },
+        },
+        "children": [
+            {
+                "expression_class": "BOUND_COLUMN_REF",
+                "type": "BOUND_COLUMN_REF",
+                "alias": "value1",  # <--- I think this should be column1
+                "return_type": {"id": "VARCHAR"},
+                "binding": {"column_index": 1},
+            }
+        ],
+        "name": "struct_pack",
+        "has_serialize": true,
+        "function_data": {
+            "variable_return_type": {
+                "id": "STRUCT",
+                "type_info": {
+                    "type": "STRUCT_TYPE_INFO",
+                    "child_types": [{"first": "value1", "second": {"id": "VARCHAR"}}],
+                },
+            }
+        },
+        "is_operator": false,
+    },
+    "right": {
+        "expression_class": "BOUND_CONSTANT",
+        "type": "VALUE_CONSTANT",
+        "value": {
+            "type": {
+                "id": "STRUCT",
+                "type_info": {
+                    "type": "STRUCT_TYPE_INFO",
+                    "child_types": [{"first": "value1", "second": {"id": "VARCHAR"}}],
+                },
+            },
+            "is_null": false,
+            "value": {"children": [{"type": {"id": "VARCHAR"}, "is_null": false, "value": "hello world"}]},
+        },
+    },
+}
+```
+
+In the `BOUND_COLUMN_REF` the alias seems to be set to "value1" which is the name in the struct, not the actual name of the column providing that value from the bound table.
+
+Here is an example for:
+
+```sql
+select * from example_table where column1 = 'hello world';
+```
+
+```json
+{
+    "expression_class": "BOUND_COMPARISON",
+    "type": "COMPARE_EQUAL",
+    "left": {
+        "expression_class": "BOUND_COLUMN_REF",
+        "type": "BOUND_COLUMN_REF",
+        "alias": "column1",
+        "return_type": {"id": "VARCHAR"},
+        "binding": {"column_index": 1},
+    },
+    "right": {
+        "expression_class": "BOUND_CONSTANT",
+        "type": "VALUE_CONSTANT",
+        "value": {"type": {"id": "VARCHAR"}, "is_null": false, "value": "hello world"},
+    },
+}
+```
+
+Expanding on this bug by adding a second column, then setting a static value for one of the bound columns actually trips up the serialization a bit more.
+
+```sql
+create table example_table (column1 varchar, column2 varchar);
+select * from example_table where {'value1': column1 , 'value2': column2} = {'value1': 'hello world', 'value2': 'good morning'} and column2 = 'good morning';
+```
+
+Yields this behavior where the second bound couldn't actually doesn't include a column index or an alias.
+
+```json
+[...]
+"children": [
+    {
+        "expression_class": "BOUND_COLUMN_REF",
+        "type": "BOUND_COLUMN_REF",
+        "alias": "value1",
+        "return_type": {"id": "VARCHAR"},
+        "binding": {"column_index": 1},
+    },
+    {
+        "expression_class": "BOUND_COLUMN_REF",
+        "type": "BOUND_COLUMN_REF",
+        "alias": "value2",
+        "return_type": {"id": "VARCHAR"},
+    },
+],
+[...]
+```
+
+
+I think the columns should be properly referenced by name in the alias columns and if you have a `BOUND_COLUMN_REF` you should always have a column index.
+
+### To Reproduce
+
+See above.
+
+### OS:
+
+Mac OS X
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+C++
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Rusty Conover
+
+### Affiliation:
+
+self
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - Other reason (please specify in the issue body)
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,104 @@
+ID: 24259
+Title: panic when reading a partition table by IndexLookUpJoin with IndexReader
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+See the test case below:
+```
+func (s *testSuite5) TestPartitionTableIndexJoinAndIndexReader(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
+	tk := testkit.NewTestKit(c, s.store)
+	tk.MustExec("use test")
+	tk.MustExec("set @@tidb_partition_prune_mode='dynamic'")
+	tk.MustExec(`create table t (a int, b int, key(a))
+	partition by range (a) (
+		partition p1 values less than (100),
+		partition p2 values less than (200),
+		partition p3 values less than (300),
+		partition p4 values less than (400),
+		partition p5 values less than (500),
+		partition p6 values less than (600))`)
+	tk.MustExec("create table tnormal (a int, b int, key(a), key(b))")
+	nRows := 512
+	values := make([]string, 0, nRows)
+	for i := 0; i < nRows; i++ {
+		values = append(values, fmt.Sprintf("(%v, %v)", rand.Intn(nRows), rand.Intn(nRows)))
+	}
+	tk.MustExec(fmt.Sprintf("insert into t values %v", strings.Join(values, ", ")))
+	tk.MustExec(fmt.Sprintf("insert into tnormal values %v", strings.Join(values, ", ")))
+
+	randRange := func() (int, int) {
+		a, b := rand.Intn(nRows), rand.Intn(nRows)
+		if a > b {
+			return b, a
+		}
+		return a, b
+	}
+	for i := 0; i < nRows; i++ {
+		lb, rb := randRange()
+		cond := fmt.Sprintf("(t2.b between %v and %v)", lb, rb)
+		result := tk.MustQuery("select t1.a from tnormal t1, tnormal t2 where t1.a=t2.b and " + cond).Sort().Rows()
+		fmt.Println(">>>>>>> ", "select /*+ TIDB_INLJ(t1, t2) */ t1.a from t t1, t t2 where t1.a=t2.b and "+cond)
+		tk.MustQuery("select /*+ TIDB_INLJ(t1, t2) */ t1.a from t t1, t t2 where t1.a=t2.b and " + cond).Sort().Check(result)
+	}
+}
+```
+
+### 2. What did you expect to see? (Required)
+The test can pass.
+
+### 3. What did you see instead (Required)
+```
+...     "interface conversion: interface {} is nil, not *ast.SelectField\n" +
+...     "github.com/pingcap/tidb/executor.(*innerWorker).run.func1\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:454\n" +
+...     "runtime.gopanic\n" +
+...     "\t/Users/zhangyuanjia/Workspace/goroot/go1.13/src/runtime/panic.go:679\n" +
+...     "runtime.panicdottypeE\n" +
+...     "\t/Users/zhangyuanjia/Workspace/goroot/go1.13/src/runtime/iface.go:255\n" +
+...     "github.com/pingcap/parser.yyParse\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/pkg/mod/github.com/pingcap/parser@v0.0.0-20210330190622-f959a136fc19/parser.go:13853\n" +
+...     "github.com/pingcap/parser.(*Parser).Parse\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/pkg/mod/github.com/pingcap/parser@v0.0.0-20210330190622-f959a136fc19/yy_parser.go:152\n" +
+...     "github.com/pingcap/tidb/session.(*session).ParseSQL\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/session/session.go:1091\n" +
+...     "github.com/pingcap/tidb/expression.ParseSimpleExprsWithNames\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/expression/simple_rewriter.go:88\n" +
+...     "github.com/pingcap/tidb/planner/core.makePartitionByFnCol\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/planner/core/rule_partition_processor.go:793\n" +
+...     "github.com/pingcap/tidb/planner/core.(*partitionProcessor).pruneRangePartition\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/planner/core/rule_partition_processor.go:745\n" +
+...     "github.com/pingcap/tidb/planner/core.PartitionPruning\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/planner/core/partition_prune.go:40\n" +
+...     "github.com/pingcap/tidb/executor.partitionPruning\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/builder.go:3989\n" +
+...     "github.com/pingcap/tidb/executor.prunePartitionForInnerExecutor\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/builder.go:2780\n" +
+...     "github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildIndexReaderForIndexJoin\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/builder.go:3479\n" +
+...     "github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/builder.go:3211\n" +
+...     "github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/builder.go:3202\n" +
+...     "github.com/pingcap/tidb/executor.(*innerWorker).fetchInnerResults\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:647\n" +
+...     "github.com/pingcap/tidb/executor.(*innerWorker).handleTask\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:491\n" +
+...     "github.com/pingcap/tidb/executor.(*innerWorker).run\n" +
+...     "\t/Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:469\n" +
+...     "runtime.goexit\n" +
+...     "\t/Users/zhangyuanjia/Workspace/goroot/go1.13/src/runtime/asm_amd64.s:1357"
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+commit 39762c9d1942478fc8e3fb8e4ad2629fb130c151 (HEAD -> master, origin/master, origin/HEAD)
+Author: Shirly <wuxuelian@pingcap.com>
+Date:   Fri Apr 23 10:41:54 2021 +0800
+```

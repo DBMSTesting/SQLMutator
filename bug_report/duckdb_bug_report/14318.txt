@@ -1,0 +1,78 @@
+ID: 14318
+Title: [Parquet] Allow opt-in prefetch metadata optimistically read in 1 request
+Description:
+Currently to read parquet metadata we issue 2 separate reads to the underlying filesystem.
+First to read `[size-8, size)`, second to read `[size-8-metadata_len, size-8)`.
+`metadata_len` is known only after the first read, so this is optimal in number of bytes read.
+
+What if the goal would be optimizing number of reads?
+The ranges are consecutive, so with an oracle we could read `[size-8-metadata_len, size)` in one go.
+
+We miss the oracle, but the second best thing is optimistically read `[size-X, size)`.
+When `metadata_len + 8 <= X`, we are done, otherwise a second read needs to be issued.
+
+Here we provide users with a prefetch_metadata_bytes option to configure what behaviour they prefer.
+0 -> no optimisitic prefetch, always 2 reads
+X -> X+8 bytes are optimistically prefetched, this might result in a single read of lenght X+8, or 2 reads of total lenght X+8 + metadata_len
+
+Tradeoffs if prefetch_metadata_bytes is provided are as follow:
+
+| X  |  bytes first read | bytes second read | num reads | total number of bytes |
+|----|-------------------|-------------------|-----------|-----------------------|
+| 0  |  8  | metadata_len | 2 | 8 + metadata_len |
+| 4088 (assume >= metadata_len) | 4096 | - | 1 | 4096 |
+| 4088 (if < metadata_len) | 4096 | metadata_len | 2 | 4096 + metadata_len |
+
+```
+SET prefetch_metadata_bytes=0;
+--- no prefetch in place  <---- the default
+SET prefetch_metadata_bytes=10000;
+--- 10000 + 8 bytes fetched on the first request
+SET prefetch_metadata_bytes=4088;
+--- 4088 + 8 = 4096 bytes fetched on the first request
+```
+
+Default is still kept at 0, that means that if setting is not touched exact same behaviour of now is kept, but users or API have a way to experiment with the setting.
+
+---
+
+Optimal value of the setting will vary a lot between configurations given it's a tradeoff between latency, bandwidth, and to some degree expected distribution of the length of parquet metadata. A description of some values of the bandwidth-delay product are https://en.wikipedia.org/wiki/Bandwidth-delay_product.
+I measured some parquet files I had at hand, and 4088 seems to cover most hive partitioned files I had at hand, but I have not (yet) found proper data on what's the distribution here.
+
+To me 4K looks to be a OK-ish default, but for now this is prosed as opt-in only, so default is 0.
+
+----
+
+Then I performed some benchmarks, conducted on the work MacOs machine via executing
+```sql
+SET prefetch_metadata_bytes=4088;
+FROM parquet_metadata('s3://duckdb-blobs/*.parquet');
+```
+on a loop (counting startup and all), using hyperfine switching between defaults.
+```
+Benchmark 1: ./build/release/duckdb -c "SET prefetch_metadata_bytes=0; FROM parquet_metadata(\"s3://duckdb-blobs/*.parquet\");"
+  Time (mean ± σ):      2.716 s ±  0.124 s    [User: 0.909 s, System: 0.022 s]
+  Range (min … max):    2.579 s …  2.967 s    10 runs
+
+Benchmark 2: ./build/release/duckdb -c "SET prefetch_metadata_bytes=1000; FROM parquet_metadata(\"s3://duckdb-blobs/*.parquet\");"
+  Time (mean ± σ):      2.483 s ±  0.086 s    [User: 0.814 s, System: 0.022 s]
+  Range (min … max):    2.347 s …  2.607 s    10 runs
+
+Benchmark 3: ./build/release/duckdb -c "SET prefetch_metadata_bytes=4088; FROM parquet_metadata(\"s3://duckdb-blobs/*.parquet\");"
+  Time (mean ± σ):      2.224 s ±  0.046 s    [User: 0.337 s, System: 0.021 s]
+  Range (min … max):    2.142 s …  2.271 s    10 runs
+
+Benchmark 4: ./build/release/duckdb -c "SET prefetch_metadata_bytes=18000; FROM parquet_metadata(\"s3://duckdb-blobs/*.parquet\");"
+  Time (mean ± σ):      2.216 s ±  0.114 s    [User: 0.450 s, System: 0.022 s]
+  Range (min … max):    2.063 s …  2.459 s    10 runs
+
+Benchmark 5: ./build/release/duckdb -c "SET prefetch_metadata_bytes=100000; FROM parquet_metadata(\"s3://duckdb-blobs/*.parquet\");"
+  Time (mean ± σ):      2.864 s ±  0.074 s    [User: 0.220 s, System: 0.026 s]
+  Range (min … max):    2.778 s …  2.974 s    10 runs
+```
+
+This seems to confirm the intuition that 4K is about right.
+
+The behaviour is the same between local and remote data. This is expected to be noticeable only over the network, on the same machine its likely negligible either way.
+
+Note that an optimisation on this, that is avoiding re-reading overlapping ranges, is left for the next iteration, since I haven't found a unintrusive way to make it happen. Once that's implemented, possibly via BufferedFileHandles in duckdb, the 2-request path should improve a bit.

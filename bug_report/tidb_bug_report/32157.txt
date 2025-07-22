@@ -1,0 +1,112 @@
+ID: 32157
+Title: Aggregation push down to cop conflicts with cached table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+CREATE TABLE `xxx` (
+  `process_code` varchar(8) NOT NULL,
+  `ctrl_class` varchar(2) NOT NULL,
+  `ctrl_type` varchar(1) NOT NULL,
+  `oper_no` varchar(12) DEFAULT NULL,
+  `modify_date` datetime DEFAULT NULL,
+  `d_c_flag` varchar(2) NOT NULL,
+  PRIMARY KEY (`process_code`,`ctrl_class`,`d_c_flag`) /*T![clustered_index] NONCLUSTERED */
+);
+
+alter table xxx cache;
+
+mysql> select * from xxx;
++--------------+------------+-----------+---------+---------------------+----------+
+| process_code | ctrl_class | ctrl_type | oper_no | modify_date         | d_c_flag |
++--------------+------------+-----------+---------+---------------------+----------+
+| GDEP0071     | 05         | 1         | 100000  | 2016-06-29 00:00:00 | C        |
+| GDEP0071     | 05         | 0         | 0000    | 2016-06-01 00:00:00 | D        |
++--------------+------------+-----------+---------+---------------------+----------+
+2 rows in set (0.00 sec)
+
+mysql> explain  select /*+AGG_TO_COP()*/ count(*) from xxx ignore index(primary) where process_code = 'GDEP0071';
++-----------------------------+---------+-----------+---------------+---------------------------------------+
+| id                          | estRows | task      | access object | operator info                         |
++-----------------------------+---------+-----------+---------------+---------------------------------------+
+| StreamAgg_13                | 1.00    | root      |               | funcs:count(Column#10)->Column#8      |
+| └─TableReader_14            | 1.00    | root      |               | data:StreamAgg_8                      |
+|   └─StreamAgg_8             | 1.00    | cop[tikv] |               | funcs:count(1)->Column#10             |
+|     └─Selection_10          | 0.00    | cop[tikv] |               | eq(test.xxx.process_code, "GDEP0071") |
+|       └─TableFullScan_9     | 2.00    | cop[tikv] | table:xxx     | keep order:false, stats:pseudo        |
++-----------------------------+---------+-----------+---------------+---------------------------------------+
+5 rows in set (0.00 sec)
+```
+
+Execute the query several time:
+
+```
+select /*+AGG_TO_COP()*/ count(*) from xxx ignore index(primary) where process_code = 'GDEP0071';
+```
+
+### 2. What did you expect to see? (Required)
+
+No error
+
+### 3. What did you see instead (Required)
+
+Query fail...
+
+```
+[stack="goroutine 115837 [running]:
+github.com/pingcap/tidb/server.(*clientConn).Run.func1(0x454d4f0, 0xc010eaf020, 0xc00fb8f900)
+	/home/genius/project/src/github.com/pingcap/tidb/server/conn.go:1029 +0xf5
+panic(0x3d7e340, 0xc011341350)
+	/home/genius/project/go/src/runtime/panic.go:965 +0x1b9
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec.func1(0xc00ffd9520, 0xc00fdce710, 0xc00fdce6f0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/adapter.go:362 +0x4d4
+panic(0x3d7e340, 0xc011341350)
+	/home/genius/project/go/src/runtime/panic.go:965 +0x1b9
+github.com/pingcap/tidb/util/chunk.setMutRowBytes(...)
+	/home/genius/project/src/github.com/pingcap/tidb/util/chunk/mutrow.go:336
+github.com/pingcap/tidb/util/chunk.MutRow.SetDatum(0xc0100225f0, 0x0, 0x0, 0x5, 0x0, 0xc0113aefa0, 0xb, 0xc01134133a, 0x8, 0x8, ...)
+	/home/genius/project/src/github.com/pingcap/tidb/util/chunk/mutrow.go:306 +0x769
+github.com/pingcap/tidb/util/chunk.MutRow.SetDatums(0xc0100225f0, 0x0, 0xc0100226e0, 0x1, 0x1)
+	/home/genius/project/src/github.com/pingcap/tidb/util/chunk/mutrow.go:289 +0x105
+github.com/pingcap/tidb/executor.(*memTableReader).getMemRows.func1(0xc01001f0e4, 0x13, 0x13, 0xc010030038, 0x32, 0x32, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/mem_reader.go:226 +0x105
+github.com/pingcap/tidb/executor.iterTxnMemBuffer(0x45c5268, 0xc00fb1b600, 0x458c298, 0xc0007347d0, 0xc010753590, 0x1, 0x1, 0xc00fdce348, 0xc00ffd2990, 0xc0107535c0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/mem_reader.go:387 +0x1d5
+github.com/pingcap/tidb/executor.(*memTableReader).getMemRows(0xc010babc20, 0xc01000a9c0, 0xc010babc20, 0xc00fb1b610, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/mem_reader.go:220 +0xdd
+github.com/pingcap/tidb/executor.(*UnionScanExec).open(0xc000d74a80, 0x454d4f0, 0xc0107533b0, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/union_scan.go:101 +0x50c
+github.com/pingcap/tidb/executor.(*UnionScanExec).Open(0xc000d74a80, 0x454d4f0, 0xc0107533b0, 0xc0107533b0, 0x30)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/union_scan.go:71 +0x8d
+github.com/pingcap/tidb/executor.(*baseExecutor).Open(0xc01030af00, 0x454d4f0, 0xc0107533b0, 0x30, 0xc0107533b0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/executor.go:184 +0x7a
+github.com/pingcap/tidb/executor.(*StreamAggExec).Open(0xc01030af00, 0x454d4f0, 0xc0107533b0, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/aggregate.go:1241 +0x77
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec(0xc00ffd9520, 0x454d4f0, 0xc0107533b0, 0x0, 0x0, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/executor/adapter.go:407 +0x3b9
+github.com/pingcap/tidb/session.runStmt(0x454d4f0, 0xc010752990, 0xc00fb1b600, 0x4564560, 0xc00ffd9520, 0x0, 0x0, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/session/session.go:1880 +0x37f
+github.com/pingcap/tidb/session.(*session).ExecuteStmt(0xc00fb1b600, 0x454d4f0, 0xc010752990, 0x4573390, 0xc010209c20, 0x0, 0x0, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/session/session.go:1757 +0xb0b
+github.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt(0xc010eafb30, 0x454d4f0, 0xc010752990, 0x4573390, 0xc010209c20, 0xc00ff46c00, 0x454d4f0, 0xc010752990, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/server/driver_tidb.go:220 +0x6b
+github.com/pingcap/tidb/server.(*clientConn).handleStmt(0xc00fb8f900, 0x454d448, 0xc010752990, 0x4573390, 0xc010209c20, 0x62cc530, 0x0, 0x0, 0x1, 0x0, ...)
+	/home/genius/project/src/github.com/pingcap/tidb/server/conn.go:1977 +0x1d1
+github.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc00fb8f900, 0x454d448, 0xc0102a1140, 0xc0005b5201, 0x71, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/server/conn.go:1846 +0x498
+github.com/pingcap/tidb/server.(*clientConn).dispatch(0xc00fb8f900, 0x454d448, 0xc0102a1140, 0xc0005b5200, 0x72, 0x71, 0x0, 0x0)
+	/home/genius/project/src/github.com/pingcap/tidb/server/conn.go:1341 +0xaef
+github.com/pingcap/tidb/server.(*clientConn).Run(0xc00fb8f900, 0x454d4f0, 0x"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+developing, found in https://github.com/pingcap/tidb/pull/32139

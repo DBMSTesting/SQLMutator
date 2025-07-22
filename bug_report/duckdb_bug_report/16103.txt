@@ -1,0 +1,177 @@
+ID: 16103
+Title: Pivot not supported with ADBC
+Description:
+### What happens?
+
+Hello duckdb team,
+
+I'm using the ADBC implementation of duckb with go.
+Everything works but PIVOT is not supported by ADBC, it seems to be detected as a multiple statements.
+I shared the code I used.
+
+Also is the ADBC part will be deprecated in the next version ?
+
+Thanks.
+
+### To Reproduce
+
+
+
+```
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/apache/arrow-adbc/go/adbc/drivermgr"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/goccy/go-json"
+)
+
+func main() {
+	fmt.Println("adbc")
+	if err := runAdbc(); err != nil {
+		fmt.Println(err)
+		return
+	}
+}
+
+func runAdbc() error {
+	var drv drivermgr.Driver
+	db, err := drv.NewDatabase(map[string]string{
+		"driver":     "libduckdb.dylib",
+		"entrypoint": "duckdb_adbc_init",
+		"path":       ":memory:",
+	})
+	if err != nil {
+		return err
+	}
+
+	cnxn, err := db.Open(context.Background())
+	if err != nil {
+		return err
+	}
+	defer cnxn.Close()
+
+	stmt, err := cnxn.NewStatement()
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	if err := stmt.SetSqlQuery(`CREATE TABLE flights AS FROM 'https://duckdb.org/data/flights.csv';`); err != nil {
+		return err
+	}
+
+	r, rowsAffected, err := stmt.ExecuteQuery(context.Background())
+	if err != nil {
+		return err
+	}
+
+	if err := stmt.SetSqlQuery(`SELECT count(1) FROM flights`); err != nil {
+		return err
+	}
+
+	r, rowsAffected, err = stmt.ExecuteQuery(context.Background())
+	if err != nil {
+		return err
+	}
+	defer r.Release()
+
+	result := make([]arrow.Record, 0, rowsAffected)
+	for r.Next() {
+		rec := r.Record()
+		rec.Retain()
+		result = append(result, rec)
+	}
+	r.Release()
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(string(data))
+	fmt.Println(rowsAffected)
+
+	q_pivot := `PIVOT flights
+  ON UniqueCarrier
+  USING COUNT(1)
+  GROUP BY OriginCityName;`
+
+	if err := stmt.SetSqlQuery(q_pivot); err != nil {
+		return err
+	}
+
+	r, rowsAffected, err = stmt.ExecuteQuery(context.Background())
+	if err != nil {
+		return err
+	}
+	defer r.Release()
+
+	resultp := make([]arrow.Record, 0, rowsAffected)
+	for r.Next() {
+		rec := r.Record()
+		rec.Retain()
+		result = append(resultp, rec)
+	}
+	r.Release()
+	datap, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(string(datap))
+	fmt.Println(rowsAffected)
+
+	return nil
+}
+```
+
+Results 
+
+```
+adbc
+[[{"count(1)":3}]]
+0
+Internal: Invalid Input Error: Cannot prepare multiple statements at once!
+```
+
+### OS:
+
+aarch64
+
+### DuckDB Version:
+
+1.2.0
+
+### DuckDB Client:
+
+ADBC (golang)
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Nabil Servais
+
+### Affiliation:
+
+gnop
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

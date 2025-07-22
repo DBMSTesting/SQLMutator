@@ -1,0 +1,129 @@
+ID: 43892
+Title: Row written into wrong new partition during add/coalesce hash/key partition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Easiest with this golang test:
+```go
+func TestAddKeyPartitionStates(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	dbName := "partSchemaVer"
+	tk.MustExec("create database " + dbName)
+	tk.MustExec("use " + dbName)
+	tk.MustExec(`set @@global.tidb_enable_metadata_lock = ON`)
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustExec("use " + dbName)
+	tk3 := testkit.NewTestKit(t, store)
+	tk3.MustExec("use " + dbName)
+	tk4 := testkit.NewTestKit(t, store)
+	tk4.MustExec("use " + dbName)
+	tk.MustExec(`create table t (a int primary key, b varchar(255), key (b)) partition by hash (a) partitions 3`)
+	tk.MustExec(`insert into t values (1, "1")`)
+	tk.MustExec(`analyze table t`)
+	tk.MustExec("BEGIN")
+	tk.MustQuery(`select * from t`).Check(testkit.Rows("1 1"))
+	tk.MustExec(`insert into t values (2, "2")`)
+	syncChan := make(chan bool)
+	go func() {
+		tk2.MustExec(`alter table t add partition partitions 1`)
+		syncChan <- true
+	}()
+	waitFor := func(i int, s string) {
+		for true {
+			res := tk4.MustQuery(`admin show ddl jobs where db_name = '` + strings.ToLower(dbName) + `' and table_name = 't' and job_type like 'alter table%'`).Rows()
+			if len(res) == 1 && res[0][i] == s {
+				break
+			} else {
+				gotime.Sleep(10 * gotime.Millisecond)
+			}
+		}
+	}
+	waitFor(4, "delete only")
+	tk3.MustExec(`BEGIN`)
+	tk3.MustQuery(`select * from t`).Sort().Check(testkit.Rows("1 1"))
+	tk3.MustExec(`insert into t values (3,"3")`)
+
+	tk.MustExec(`COMMIT`)
+	waitFor(4, "write only")
+	tk.MustExec(`BEGIN`)
+	tk.MustQuery(`select * from t`).Sort().Check(testkit.Rows("1 1", "2 2"))
+	tk.MustExec(`insert into t values (4,"4")`)
+
+	tk3.MustExec(`COMMIT`)
+	waitFor(4, "write reorganization")
+	tk3.MustExec(`BEGIN`)
+	tk3.MustQuery(`show create table t`).Check(testkit.Rows("" +
+		"t CREATE TABLE `t` (\n" +
+		"  `a` int(11) NOT NULL,\n" +
+		"  `b` varchar(255) DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */,\n" +
+		"  KEY `b` (`b`)\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin\n" +
+		"PARTITION BY HASH (`a`) PARTITIONS 3"))
+	tk3.MustQuery(`select * from t`).Sort().Check(testkit.Rows("1 1", "2 2", "3 3"))
+	tk3.MustExec(`insert into t values (5,"5")`)
+
+	tk.MustExec(`COMMIT`)
+	waitFor(4, "delete reorganization")
+	tk.MustExec(`BEGIN`)
+	tk.MustQuery(`show create table t`).Check(testkit.Rows("" +
+		"t CREATE TABLE `t` (\n" +
+		"  `a` int(11) NOT NULL,\n" +
+		"  `b` varchar(255) DEFAULT NULL,\n" +
+		"  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */,\n" +
+		"  KEY `b` (`b`)\n" +
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin\n" +
+		"PARTITION BY HASH (`a`) PARTITIONS 4"))
+	tk.MustQuery(`select * from t`).Sort().Check(testkit.Rows("1 1", "2 2", "3 3", "4 4"))
+	tk.MustExec(`insert into t values (6,"6")`)
+
+	tk3.MustExec(`COMMIT`)
+	tk.MustExec(`COMMIT`)
+	<-syncChan
+	tk.MustQuery(`select * from t`).Sort().Check(testkit.Rows("1 1", "2 2", "3 3", "4 4", "5 5", "6 6"))
+}
+```
+
+### 2. What did you expect to see? (Required)
+Test passing
+
+### 3. What did you see instead (Required)
+Error:
+```
+        	Error:      	Not equal: 
+        	            	expected: "[1 1]\n[2 2]\n[3 3]\n[4 4]\n"
+        	            	actual  : "[1 1]\n[2 2]\n[3 3]\n[4 4]\n[4 4]\n"
+        	            	
+        	            	Diff:
+        	            	--- Expected
+        	            	+++ Actual
+        	            	@@ -4,2 +4,3 @@
+        	            	 [4 4]
+        	            	+[4 4]
+```
+I.e. duplicated row, since during double write, before the reorganization has copied all existing rows, the record has been written to the wrong new partition (based on the old number of partitions), resulting in a misplaced row in the new partition p1 which is not matching the reorg which will read the same row from the old partition p1 and write to the new partition p0, resulting in a duplicated row (including duplicated pk value!).
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v7.2.0-alpha-187-g44222226d0
+Edition: Community
+Git Commit Hash: 44222226d0161bb97afdcb474367b9a57b711bbc
+Git Branch: master
+UTC Build Time: 2023-05-16 22:10:05
+GoVersion: go1.20.4
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: unistore
+1 row in set (0.00 sec)
+```
+

@@ -1,0 +1,82 @@
+ID: 8979
+Title: Missing data parts after restoring it from older CH version onto newer 
+Description:
+In order to perform CH upgrade from version  to `19.16.10.44` we followed the following steps:
+- we spawned entirely new cluster `v19.16.10.44`
+- we created tables (tables as in prod)
+- restored data from s3 (previously backed up from prod in a NATIVE format - copy of all the parts) - copied into detached folder and then attach accordingly
+- restart all nodes in order to apply setting `enable_mixed_granularity_parts` for MergeTree Engine
+
+After restart we've noticed the following logs:
+```DB::Exception: No <column>.mrk file checksum for column <column> in part .../20190201_1_1_0/```
+Followed by: ```Considering to remove broken part .../20190201_1_1_0 because it's impossible to repair ```
+
+And eventually, after some time:
+``` 
+2020.01.30 16:49:41.760398 [ 31 ] {} <Warning> (ReplicatedMergeTreePartCheckThread): Checking part 20190201_1_1_0
+2020.01.30 16:49:41.760904 [ 31 ] {} <Warning> (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20190201_1_1_0.
+2020.01.30 16:49:41.775452 [ 31 ] {} <Error> (ReplicatedMergeTreePartCheckThread): No replica has part covering 20190201_1_1_0 and a merge is impossible: we didn't find smaller parts with either the same min block or the same max block.
+2020.01.30 16:49:41.777693 [ 31 ] {} <Error> (ReplicatedMergeTreePartCheckThread): Part 20190201_1_1_0 is lost forever.
+```
+
+That resulted in lost partitions.
+
+Tables on production are using `ReplicatedCollapsingMergeTree` engine. They were create on version `19.4.1.1`. After some times we altered them in order to add some columns. It seems that parts that do not contain added columns are being `lost forever`.
+
+
+Table DDL
+```
+CREATE TABLE table_name ON CLUSTER '{cluster_name}'
+(
+  sign Int8, --field needed for the CollapsingMergeTree
+  
+  date Date,
+  id1 UInt32,
+  id2 UInt64,
+  screen_height UInt16,
+  screen_width UInt16,
+  session_number_of_views UInt16, 
+  session_duration_msec UInt32, 
+  language LowCardinality(String),
+  city LowCardinality(String),
+  country_code LowCardinality(String),
+  nested_thingy Nested 
+  (
+    key String,
+    value String
+  ),
+  version LowCardinality(String),
+  browser_name LowCardinality(String), 
+  browser_major_version UInt16,
+  browser_version LowCardinality(String),
+  platform_name LowCardinality(String),
+  platform_version LowCardinality(String),
+  referer_url String,
+  custom_vars_session Nested
+  ab_test_info Nested
+  (
+    abtest_id UInt32, 
+    abtest_version UInt16
+  ),
+  external Nested
+  (
+    id String,
+    hashed_id UInt64,
+    provider UInt8
+  ),
+  has_playback_recorded UInt8, 
+  density Float32,
+  session_connectivity_types UInt8,
+  os_version UInt64,
+  sdk_build_number UInt64,
+  manufacturer LowCardinality(String),
+  model LowCardinality(String),
+  precomputed_random Int32, 
+) ENGINE = ReplicatedCollapsingMergeTree('/{cluster_name}-{env}/tables/shard{shard}/table_name', '{replica}', sign)
+PARTITION BY (date)
+ORDER BY (...)
+SAMPLE BY id
+SETTINGS index_granularity=16834
+;
+
+```

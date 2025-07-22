@@ -1,0 +1,113 @@
+ID: 31641
+Title: Time truncation and rounding inconsistency with MySQL
+Description:
+## Bug Report
+This report is related to [issue(#29406)](https://github.com/pingcap/tidb/issues/29406).
+Currently, `TIME_TRUNCATE_FRACTIONAL` sql mode is not supported in TiDB. But, it behaves as if it enabled in some cases, which is inconsistent with MySQL behavior.
+It looks desirable to provide user sql mode option to decide truncation or round so as to get an expected result user prefer.  
+
+### 1. Minimal reproduce step
+```sql
+-- Testing time truncation
+DROP TABLE IF EXISTS t1;
+SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
+CREATE TABLE t1 (a TIME(6));
+INSERT INTO t1 VALUES ('00:00:00.111111 xxx');
+SELECT * FROM t1;
+SET sql_mode = default;
+DROP TABLE t1;
+
+-- Testing rounding from TIME(N) to INT
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t2 (a INT, b TIME(6));
+INSERT INTO t2 (b) VALUES ('10:10:10.500000');
+INSERT INTO t2 (b) VALUES ('10:10:10.499999');
+INSERT INTO t2 (b) VALUES ('-10:10:59.500000');
+INSERT INTO t2 (b) VALUES ('-10:10:10.500000');
+UPDATE t2 SET a=b;
+SELECT * FROM t2;
+DROP TABLE t2;
+
+-- Testing rounding with CAST 
+DROP TABLE IF EXISTS t3;
+CREATE TABLE t3(a TIME(6));
+INSERT INTO t3 VALUES ('10:10:10.999996');
+INSERT INTO t3 VALUES ('10:10:10.999995');
+INSERT INTO t3 VALUES ('10:10:10.999994');
+UPDATE t3 SET a=-a;
+SELECT a, CAST(a AS TIME(5)) FROM t3;
+DROP TABLE t3;
+```
+
+### 2/3. What did you expect to see? What did you see instead 
+Testing time truncation
+```sql
+mysql> SELECT * FROM t1;
++-----------------+
+| a               |
++-----------------+
+| 00:00:00.111111 |
++-----------------+
+
+tidb> SELECT * FROM t1;
++-----------------+
+| a               |
++-----------------+
+| 00:00:00.000000 |
++-----------------+
+```
+Testing rounding from TIME(N) to INT --> In negative cases, the results are different.
+```sql
+mysql> SELECT * FROM t2;
++---------+------------------+
+| a       | b                |
++---------+------------------+
+|  101011 | 10:10:10.500000  |
+|  101010 | 10:10:10.499999  |
+| -101100 | -10:10:59.500000 |
+| -101011 | -10:10:10.500000 |
++---------+------------------+
+
+tidb> SELECT * FROM t2;
++---------+------------------+
+| a       | b                |
++---------+------------------+
+|  101011 | 10:10:10.500000  |
+|  101010 | 10:10:10.499999  |
+| -101059 | -10:10:59.500000 |
+| -101010 | -10:10:10.500000 |
++---------+------------------+
+```
+ Testing rounding with CAST 
+```sql
+mysql> SELECT a, CAST(a AS TIME(5)) FROM t3;
++------------------+--------------------+
+| a                | CAST(a AS TIME(5)) |
++------------------+--------------------+
+| -10:10:10.999996 | -10:10:11.00000    |
+| -10:10:10.999995 | -10:10:11.00000    |
+| -10:10:10.999994 | -10:10:10.99999    |
++------------------+--------------------+
+
+tidb> SELECT a, CAST(a AS TIME(5)) FROM t3;
++------------------+--------------------+
+| a                | CAST(a AS TIME(5)) |
++------------------+--------------------+
+| -10:10:10.999996 | -10:10:11.00000    |
+| -10:10:10.999995 | -10:10:10.99999    |  
+| -10:10:10.999994 | -10:10:10.99999    |
++------------------+--------------------+
+```
+
+### 4. What is your TiDB version?
+```sql
+tidb_version(): Release Version: v5.5.0-alpha-105-gaabd4e04d
+Edition: Community
+Git Commit Hash: aabd4e04d994eb91663abaa80865daec4cf970a6
+Git Branch: master
+UTC Build Time: 2022-01-13 05:36:36
+GoVersion: go1.17.2
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

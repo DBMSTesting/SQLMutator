@@ -1,0 +1,46 @@
+ID: 21831
+Title: ThreadPool hanging forever in wait() 
+Description:
+We have some queries running forever, that are blocked on ThreadPool destruction, for instance : 
+```
+#0  futex_wait_cancelable (private=0, expected=0, futex_word=0x7f837199a86c) at ../sysdeps/unix/sysv/linux/futex-internal.h:88
+#1  __pthread_cond_wait_common (abstime=0x0, mutex=0x7f837199a818, cond=0x7f837199a840) at pthread_cond_wait.c:502
+frame 6 
+#2  __pthread_cond_wait (cond=0x7f837199a840, mutex=0x7f837199a818) at pthread_cond_wait.c:655
+#3  0x000000000881e4ab in std::__1::__libcpp_condvar_wait (__cv=0x7f837199a840, __m=0x7f837199a818) at ../contrib/libcxx/include/__threading_support:436
+#4  std::__1::condition_variable::wait (this=0x7f837199a840, lk=...) at ../contrib/libcxx/src/condition_variable.cpp:44
+#5  std::__1::condition_variable::wait<ThreadPoolImpl<ThreadFromGlobalPool>::wait()::{lambda()#1}>(std::__1::unique_lock<std::__1::mutex>&, ThreadPoolImpl<ThreadFromGlobalPool>::wait()::{lambda()#1}) (this=0x7f837199a840, __lk=..., __pred=...) at ../contrib/libcxx/include/__mutex_base:406
+#6  ThreadPoolImpl<ThreadFromGlobalPool>::wait (this=0x7f837199a818) at ../src/Common/ThreadPool.cpp:168
+#7  0x000000000f671069 in DB::IBackgroundJobExecutor::finish (this=<optimized out>) at ../src/Storages/MergeTree/BackgroundJobsExecutor.cpp:172
+#8  0x000000000f4ab53f in DB::StorageMergeTree::shutdown (this=0x7f80b1271a00) at ../src/Storages/StorageMergeTree.cpp:151
+#9  0x000000000ed84663 in DB::InterpreterDropQuery::executeToTableImpl (this=0x7fa41c80fd60, query=..., db=..., uuid_to_wait=...)
+    at ../src/Interpreters/InterpreterDropQuery.cpp:163
+#10 0x000000000ed83106 in DB::InterpreterDropQuery::executeToTable (this=0x80, query=...) at ../src/Interpreters/InterpreterDropQuery.cpp:87
+#11 0x000000000ed82c09 in DB::InterpreterDropQuery::execute (this=0x7fa41c80fd60) at ../src/Interpreters/InterpreterDropQuery.cpp:59
+#12 0x000000000f278ff2 in DB::executeQueryImpl (begin=<optimized out>, end=<optimized out>, context=..., internal=false, stage=<optimized out>, 
+    has_query_tail=<optimized out>, istr=<optimized out>) at ../src/Interpreters/executeQuery.cpp:541
+#13 0x000000000f27c6e2 in DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>) (istr=..., ostr=..., allow_into_outfile=<optimized out>, context=..., set_result_details=...) at ../src/Interpreters/executeQuery.cpp:977
+#14 0x000000000f928384 in DB::HTTPHandler::processQuery (this=0x7f86804c1bc0, context=..., request=..., params=..., response=..., used_output=..., 
+    query_scope=...) at ../src/Server/HTTPHandler.cpp:635
+#15 0x000000000f92c391 in DB::HTTPHandler::handleRequest (this=0x7f86804c1bc0, request=..., response=...) at ../src/Server/HTTPHandler.cpp:760
+#16 0x0000000011ef38b5 in Poco::Net::HTTPServerConnection::run (this=0x7f84c08df220) at ../contrib/poco/Net/src/HTTPServerConnection.cpp:89
+#17 0x0000000011f295ef in Poco::Net::TCPServerConnection::start (this=0x7f837199a86c) at ../contrib/poco/Net/src/TCPServerConnection.cpp:43
+#18 0x0000000011f2b001 in Poco::Net::TCPServerDispatcher::run (this=0x7fa437e04800) at ../contrib/poco/Net/src/TCPServerDispatcher.cpp:112
+#19 0x00000000120620a9 in Poco::PooledThread::run (this=0x7f84df11a100) at ../contrib/poco/Foundation/src/ThreadPool.cpp:199
+#20 0x000000001205df0a in Poco::ThreadImpl::runnableEntry (pThread=<optimized out>) at ../contrib/poco/Foundation/src/Thread_POSIX.cpp:345
+#21 0x00007fa487b06fa3 in start_thread (arg=<optimized out>) at pthread_create.c:486
+#22 0x00007fa487a374cf in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+```
+
+scheduled_jobs is 1, queue_size is also 1,but it seems there is no thread to dequeue tasks.  We also encountered issues with globalthreadpool filling very high, and number of Active threads in global thread pool being signifancly (10-20 times) bigger than LocalThreads. 
+
+```
+│ GlobalThread                            │         2876 │ Number of threads in global thread pool.                                                                                                                                                                                              │
+│ GlobalThreadActive                      │         2319 │ Number of threads in global thread pool running a task.                                                                                                                                                                               │
+│ LocalThread                             │            7 │ Number of threads in local thread pools. Should be similar to GlobalThreadActive.                                                                                                                                                     │
+│ LocalThreadActive                       │            7 │ Number of threads in local thread pools running a task.    
+```
+
+                                          
+I'm suspicious about what happens when the scheduled task raises on exception and shutdown_on_exception is false : 
+https://github.com/ClickHouse/ClickHouse/blob/4165a58ce46b7a00217f870ce11d3534af2ebdea/src/Common/ThreadPool.cpp#L248 is the 'return' part correct here? what is cleaning up the thread ?

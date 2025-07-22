@@ -1,0 +1,136 @@
+ID: 14764
+Title: Queries do not use compound indices
+Description:
+### What happens?
+
+[Compound indices are supported](https://duckdb.org/docs/sql/statements/create_index.html#create-index), but it doesn't seem to be possible to write a query that leverages a compound index.
+
+See the code example below for a situation where a query fails to use a compound index, but a functionally equivalent query successfully uses a single-column index. Although the example does not include query times, the single-column index version completes in a much shorter time.
+
+### To Reproduce
+
+```python
+import duckdb
+import pandas as pd
+
+rows = []
+for i in range(1000):
+    for j in range(1000):
+        rows.append({"i": str(i), "j": str(j), "i_j": f"{i}_{j}"})
+data = pd.DataFrame(rows)
+
+con = duckdb.connect()
+con.sql("CREATE TABLE data AS SELECT * FROM data")
+con.sql("CREATE INDEX data_compound_idx ON data (i, j)")
+con.sql("CREATE INDEX data_concat_idx ON data (i_j)")
+con.sql("PRAGMA explain_output = 'optimized_only'")
+
+compound_result = con.sql(
+    "EXPLAIN SELECT i, j FROM data WHERE i = '567' AND j = '345'"
+).fetchone()
+print("Compound Explain:")
+print(compound_result[1])
+
+concat_result = con.sql(
+    "EXPLAIN SELECT i, j FROM data WHERE i_j = '567_345'"
+).fetchone()
+print("Concat Explain:")
+print(concat_result[1])
+
+```
+
+<details>
+  <summary>Output</summary>
+
+```
+Compound Explain:
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        Expressions:       │
+│             i             │
+│             j             │
+│                           │
+│         ~1095 Rows        │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│          SEQ_SCAN         │
+│    ────────────────────   │
+│          Filters:         │
+│ j='345' AND j IS NOT NULL │
+│ i='567' AND i IS NOT NULL │
+│                           │
+│            data           │
+│                           │
+│         ~1095 Rows        │
+└───────────────────────────┘
+
+Concat Explain:
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        Expressions:       │
+│             i             │
+│             j             │
+│                           │
+│        ~200000 Rows       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│        Expressions:       │
+│     (i_j = '567_345')     │
+│                           │
+│        ~200000 Rows       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         INDEX_SCAN        │
+│    ────────────────────   │
+│            data           │
+│                           │
+│       ~1000000 Rows       │
+└───────────────────────────┘
+```
+</details>
+
+Note how the compound-index query uses a sequential scan, while the concat-index query uses an index scan. This issue persisted no matter what `range`s I used for table creation.
+
+### OS:
+
+Ubuntu 22.04
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Adam Viola
+
+### Affiliation:
+
+CoVar
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

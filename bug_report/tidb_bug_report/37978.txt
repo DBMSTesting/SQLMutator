@@ -1,0 +1,123 @@
+ID: 37978
+Title: Users can lock unpermitted tables.
+Description:
+## Bug Report
+
+(Thanks for developing the interesting database. At first, I'm not familiar with TiDB. So, please let me know if I misunderstood something.)
+
+When  I test with TiDB v6.1.1, I found users can lock unpermitted tables.
+Though I couldn't find the document of `LOCK TABLES`, the [PR](https://github.com/pingcap/tidb/pull/10343) said the following. 
+
+> You must have the LOCK TABLES privilege, and the SELECT privilege for each table to be locked.
+
+And [mysql 5.7](https://dev.mysql.com/doc/refman/5.7/en/lock-tables.html) also says so.
+
+> You must have the [LOCK TABLES](https://dev.mysql.com/doc/refman/5.7/en/privileges-provided.html#priv_lock-tables) privilege, and the [SELECT](https://dev.mysql.com/doc/refman/5.7/en/privileges-provided.html#priv_select) privilege for each object to be locked.
+
+The behavior seems not to be expected.
+
+### 1. Minimal reproduce step 
+
+* tested version
+  * `enable-table-lock` is enabled.  
+```
+ MySQL [mysql]> select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                       |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v6.1.1
+Edition: Community
+Git Commit Hash: 5263a0abda61f102122735049fd0dfadc7b7f8b2
+Git Branch: heads/refs/tags/v6.1.1
+UTC Build Time: 2022-08-25 10:42:41
+GoVersion: go1.18.5
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+MySQL [mysql]> SHOW CONFIG WHERE name = 'enable-table-lock';
++------+----------------+-------------------+-------+
+| Type | Instance       | Name              | Value |
++------+----------------+-------------------+-------+
+| tidb | localhost:4000 | enable-table-lock | true  |
++------+----------------+-------------------+-------+
+```
+
+(1) create tables and users as root user
+
+```
+# mysql -h 127.0.0.1 -u root -P 4000 mysql
+MySQL [mysql]> CREATE DATABASE test_db;
+MySQL [mysql]> CREATE TABLE `test_db`.`test_tbl` (id INT);
+MySQL [mysql]> CREATE USER test_user IDENTIFIED BY 'pass';
+```
+
+(2) lock tables as non-permitted user
+
+```
+# mysql -h 127.0.0.1 -u test_user -ppass -P 4000
+MySQL [(none)]> SELECT * FROM `test_db`.`test_tbl`;   -- the user doesn't have SELECT privilege.
+ERROR 1142 (42000): SELECT command denied to user 'test_user'@'%' for table 'test_tbl'
+
+MySQL [(none)]> LOCK TABLE `test_db`.`test_tbl` WRITE;  -- *NO ERROR*
+Query OK, 0 rows affected (0.33 sec)
+
+MySQL [(none)]> SHOW PROCESSLIST;   -- check my process
++--------------------+-----------+-----------------+------+---------+------+------------+------------------+
+| Id                 | User      | Host            | db   | Command | Time | State      | Info             |
++--------------------+-----------+-----------------+------+---------+------+------------+------------------+
+| 456323713806107523 | test_user | 127.0.0.1:43338 | NULL | Query   |    0 | autocommit | SHOW PROCESSLIST |
++--------------------+-----------+-----------------+------+---------+------+------------+------------------+
+```
+
+(3) check the table is locked or not.
+
+```
+# mysql -h 127.0.0.1 -u root -P 4000 mysql
+MySQL [mysql]> INSERT INTO `test_db`.`test_tbl` VALUES (1);  -- The table is locked by unpermitted user.
+ERROR 8020 (HY000): Table 'test_tbl' was locked in WRITE by server: 579ffe1b-6b7f-45cd-b499-44e0003202ec_session: 456323713806107523
+```
+
+### 2. What did you expect to see? (Required)
+
+I expected the permission error happens like MySQL when executing (2) procedure. The following is MySQL's error message.
+
+```
+mysql> SELECT version();
++-----------+
+| version() |
++-----------+
+| 5.7.39    |
++-----------+
+1 row in set (0.07 sec)
+
+mysql> LOCK TABLE `test_db`.`test_tbl` WRITE;
+ERROR 1044 (42000): Access denied for user 'test_user'@'%' to database 'test_db'
+```
+
+### 3. What did you see instead (Required)
+
+No error occurred and the user can get the lock of the unpermitted table.
+
+### 4. What is your TiDB version? (Required)
+
+```
+ MySQL [mysql]> select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                       |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v6.1.1
+Edition: Community
+Git Commit Hash: 5263a0abda61f102122735049fd0dfadc7b7f8b2
+Git Branch: heads/refs/tags/v6.1.1
+UTC Build Time: 2022-08-25 10:42:41
+GoVersion: go1.18.5
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+

@@ -1,0 +1,21 @@
+ID: 64451
+Title: `test_query_is_canceled_with_inf_retries` flaks due to miss implementation for cancelation logic
+Description:
+Some time `test_checking_s3_blobs_paranoid/test.py::test_query_is_canceled_with_inf_retries` flaks.
+Lile this:
+https://s3.amazonaws.com/clickhouse-test-reports/0/ae4d3f97ae6345b81efba270602522755d575940/integration_tests__aarch64__%5B5_6%5D.html
+
+What test do:
+- set up a faulty disk which closes incoming confections as `Connection refused` 
+- fire `INSERT` request which write data to that disk with infinite retries
+- after some time test fires `KILL QUERY` to make sure that such `INSERT` requests are killable
+
+The test fails because `KILL QUERY` requests fails with exceptions from `INSERT` request. That is not expected. `KILL QUERY` is supposed just kill other query and does not inherit its exceptions.
+
+That happens on a race condition.
+If `INSERT` had a chance to met the upload limits and stoped uploading on `WriteBufferFromS3::nextImpl()::writeMultipartUpload()::writePart()::task_tracker->add()::waitTilInflightShrink().`
+Than `INSERT` observes exception when it is killed. Because infinite retries stop when they see the cancelation flag and as a result the last exception is throw. That is correct.
+What is not correct that `KILL QUERY` calls `process_list.sendCancelToQuery():: elem->cancelQuery(kill)::executors_snapshot->cancel()::graph->cancel()::processor->cancel()::onCancel()` and method `IProcessor::onCancel()` has inapprpriate implementation.
+
+For `StorageS3Sink::onCancel()` `finalize()` is called which rethrow all occured exception to the `KILL QUERY`.
+For `MergeTreeSink::onCancel()` nothing is called at all which is kinda OK, but it produces a lot of warning/errors logs because we destroy unfinished write buffer after that without exception context. It would be more neat if explicit cancel is called for write buffer here.

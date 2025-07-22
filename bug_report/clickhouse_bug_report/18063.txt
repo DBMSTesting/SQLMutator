@@ -1,0 +1,67 @@
+ID: 18063
+Title: SEGFAULT and wrong result while querying MV with mismatched Decimal Types.
+Description:
+**How to reproduce**
+Clickhouse version 20.12.3.3, 20.13.1.5365
+
+```
+CREATE TABLE default.test_table
+(
+    `key` UInt32,
+    `value` Decimal(16, 6)
+)
+ENGINE = SummingMergeTree()
+PARTITION BY tuple()
+ORDER BY key
+SETTINGS index_granularity = 8192
+
+
+INSERT INTO test_table  SELECT *, toDecimal64(number,6) as val FROM numbers(32000000);
+
+
+CREATE MATERIALIZED VIEW default.test_mv TO default.test_table
+(
+    `number` UInt64,
+    `value` Decimal(38, 6)
+) AS
+SELECT
+    number,
+    sum(number) AS value
+FROM
+(
+    SELECT
+        *,
+        toDecimal64(number, 6) AS val
+    FROM system.numbers
+)
+GROUP BY number
+
+SELECT sum(value)　FROM test_mv;
+┌──────────────────────────────sum(value)─┐
+│ 20169775271081582806606521273206.229723 │
+└─────────────────────────────────────────┘
+SELECT sum(value)　FROM test_mv;
+┌───────────────────────────────sum(value)─┐
+│ -99821308067231861049021501577149.641700 │
+└──────────────────────────────────────────┘
+
+
+echo "SELECT sum(value)　FROM test_mv;" | clickhouse-benchmark -c 10;
+
+2020.12.14 15:09:00.632224 [ 167 ] {} <Fatal> BaseDaemon: ########################################
+2020.12.14 15:09:00.666960 [ 167 ] {} <Fatal> BaseDaemon: (version 20.12.3.3 (official build), build id: 046AC38B14F316A5) (from thread 155) (query_id: d6cf2cb2-fa08-457d-8730-71c4fbc08060) Received signal Segmentation fault (11)
+2020.12.14 15:09:00.667040 [ 167 ] {} <Fatal> BaseDaemon: Address: 0x7f2855817000 Access: read. Attempted access has violated the permissions assigned to the memory area.
+2020.12.14 15:09:00.667092 [ 167 ] {} <Fatal> BaseDaemon: Stack trace: 0x8c30221 0xdc8edca 0xdc907f2 0xe799c56 0xe79710b 0xe64239c 0xe63f4c7 0xe644475 0x7d1baad 0x7d1f5d3 0x7f2859033609 0x7f2858f49293
+2020.12.14 15:09:00.667200 [ 167 ] {} <Fatal> BaseDaemon: 2. void DB::AggregateFunctionSumData<DB::Decimal<__int128> >::addMany<DB::Decimal<__int128> >(DB::Decimal<__int128> const*, unsigned long) @ 0x8c30221 in /usr/bin/clickhouse
+2020.12.14 15:09:00.667270 [ 167 ] {} <Fatal> BaseDaemon: 3. DB::Aggregator::executeWithoutKeyImpl(char*&, unsigned long, DB::Aggregator::AggregateFunctionInstruction*, DB::Arena*) @ 0xdc8edca in /usr/bin/clickhouse
+2020.12.14 15:09:00.667329 [ 167 ] {} <Fatal> BaseDaemon: 4. DB::Aggregator::executeOnBlock(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >, unsigned long, DB::AggregatedDataVariants&, std::__1::vector<DB::IColumn const*, std::__1::allocator<DB::IColumn const*> >&, std::__1::vector<std::__1::vector<DB::IColumn const*, std::__1::allocator<DB::IColumn const*> >, std::__1::allocator<std::__1::vector<DB::IColumn const*, std::__1::allocator<DB::IColumn const*> > > >&, bool&) @ 0xdc907f2 in /usr/bin/clickhouse
+2020.12.14 15:09:00.667396 [ 167 ] {} <Fatal> BaseDaemon: 5. DB::AggregatingTransform::consume(DB::Chunk) @ 0xe799c56 in /usr/bin/clickhouse
+2020.12.14 15:09:00.667493 [ 167 ] {} <Fatal> BaseDaemon: 6. DB::AggregatingTransform::work() @ 0xe79710b in /usr/bin/clickhouse
+2020.12.14 15:09:00.667549 [ 167 ] {} <Fatal> BaseDaemon: 7. ? @ 0xe64239c in /usr/bin/clickhouse
+2020.12.14 15:09:00.667613 [ 167 ] {} <Fatal> BaseDaemon: 8. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xe63f4c7 in /usr/bin/clickhouse
+2020.12.14 15:09:00.667660 [ 167 ] {} <Fatal> BaseDaemon: 9. ? @ 0xe644475 in /usr/bin/clickhouse
+2020.12.14 15:09:00.667727 [ 167 ] {} <Fatal> BaseDaemon: 10. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7d1baad in /usr/bin/clickhouse
+2020.12.14 15:09:00.667784 [ 167 ] {} <Fatal> BaseDaemon: 11. ? @ 0x7d1f5d3 in /usr/bin/clickhouse
+2020.12.14 15:09:00.667846 [ 167 ] {} <Fatal> BaseDaemon: 12. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+2020.12.14 15:09:00.667909 [ 167 ] {} <Fatal> BaseDaemon: 13. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+

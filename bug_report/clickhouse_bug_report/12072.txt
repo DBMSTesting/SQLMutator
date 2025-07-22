@@ -1,0 +1,79 @@
+ID: 12072
+Title: Cannot insert to distributed tables with materialized columns as expected.
+Description:
+When I try to insert to a distributed table with materialized columns defined, but without inserting data to those materialized columns, clickhouse complains that my data doesn't match the structure of the table.
+
+**How to reproduce**
+server version 19.15.3
+
+```
+CREATE TABLE IF NOT EXISTS default.shard_request_records ON CLUSTER DistributedReplicationCluster (
+    access_time DateTime,
+    access_date Date materialized toDate(access_time),
+    server_id String,
+    server_hostname String,
+    client_hostname String,
+    username String,
+    request_id String,
+    session_id String,
+    request_body_mimetype String,
+    request_method String,
+    request_path String,
+    request_body String,
+    result_body_mimetype String,
+    result_code Int16,
+    calculation_duration_ms Int64,
+    delivery_duration_ms Int64,
+    request_duration_ms Int64 materialized if(not delivery_duration_ms=-1 and not calculation_duration_ms=-1, delivery_duration_ms + calculation_duration_ms, -1),
+    finish_time DateTime materialized if(not request_duration_ms=-1, access_time + (INTERVAL round(request_duration_ms/1000.0) SECOND), toDateTime('1970-01-01 00:00:00')),
+    error_json String,
+    error_id Int64 materialized visitParamExtractInt(error_json, 'id'),
+    error_type String materialized visitParamExtractString(error_json, 'rafalError'),
+    error_message String materialized visitParamExtractString(error_json, 'message'),
+    ver UInt64
+) ENGINE = ReplicatedReplacingMergeTree('{zoo_prefix}/tables/{shard}/shard_request_records', '{host}', ver)
+Partition By toDate(access_time) Order by (access_time, request_id, session_id)
+TTL access_time + INTERVAL 1 DAY;
+
+CREATE TABLE if not exists default.buffer_request_records ON CLUSTER DistributedReplicationCluster as default.shard_request_records
+    ENGINE = Buffer(default, shard_request_records, 8, 2, 30, 200, 1000, 262144, 1572864);
+
+Create TABLE if not exists default.dist_request_records ON CLUSTER DistributedReplicationCluster
+(
+    access_time DateTime,
+    access_date Date materialized toDate(access_time),
+    server_id String,
+    server_hostname String,
+    client_hostname String,
+    username String,
+    request_id String,
+    session_id String,
+    request_body_mimetype String,
+    request_method String,
+    request_path String,
+    request_body String,
+    result_body_mimetype String,
+    result_code Int16,
+    calculation_duration_ms Int64,
+    delivery_duration_ms Int64,
+    request_duration_ms Int64 materialized if(not delivery_duration_ms=-1 and not calculation_duration_ms=-1, delivery_duration_ms + calculation_duration_ms, -1),
+    finish_time DateTime materialized if(not request_duration_ms=-1, access_time + (INTERVAL round(request_duration_ms/1000.0) SECOND), toDateTime('1970-01-01 00:00:00')),
+    error_json String,
+    error_id Int64 materialized visitParamExtractInt(error_json, 'id'),
+    error_type String materialized visitParamExtractString(error_json, 'rafalError'),
+    error_message String materialized visitParamExtractString(error_json, 'message'),
+    ver UInt64
+) ENGINE = Distributed('DistributedReplicationCluster', '', buffer_request_records, sipHash64(request_id));
+```
+
+sample data to insert looks like `Insert into shard_request_records VALUES ('1970-01-01 00:00:00', '14472bca-242a-4cb4-9b21-60a7b54159a9', 'localhost', 'localhost', '', 'bd5f2a95-38cb-47d7-938a-f52434a510ef', '00000000-0000-0000-0000-000000000000', 'application/json', 'GET', '/ping', '', '', -1, -1, -1, '', 0)`
+
+**Expected behavior**
+The above query should work to insert data into dist_request_records but doesn't for some reason.
+
+**Error message and/or stacktrace**
+```
+Code: 171. DB::Exception: Received from localhost:9101. DB::Exception: Block structure mismatch in RemoteBlockOutputStream stream: different number of columns:
+access_time DateTime UInt32(size = 1), access_date Date UInt16(size = 1), server_id String String(size = 1), server_hostname String String(size = 1), client_hostname String String(size = 1), username String String(size = 1), request_id String String(size = 1), session_id String String(size = 1), request_body_mimetype String String(size = 1), request_method String String(size = 1), request_path String String(size = 1), request_body String String(size = 1), result_body_mimetype String String(size = 1), result_code Int16 Int16(size = 1), calculation_duration_ms Int64 Int64(size = 1), delivery_duration_ms Int64 Int64(size = 1), request_duration_ms Int64 Int64(size = 1), finish_time DateTime('Etc/UTC') UInt32(size = 1), error_json String String(size = 1), error_id Int64 Int64(size = 1), error_type String String(size = 1), error_message String String(size = 1), ver UInt64 UInt64(size = 1)
+access_time DateTime UInt32(size = 0), server_id String String(size = 0), server_hostname String String(size = 0), client_hostname String String(size = 0), username String String(size = 0), request_id String String(size = 0), session_id String String(size = 0), request_body_mimetype String String(size = 0), request_method String String(size = 0), request_path String String(size = 0), request_body String String(size = 0), result_body_mimetype String String(size = 0), result_code Int16 Int16(size = 0), calculation_duration_ms Int64 Int64(size = 0), delivery_duration_ms Int64 Int64(size = 0), error_json String String(size = 0), ver UInt64 UInt64(size = 0): Insertion status:
+```

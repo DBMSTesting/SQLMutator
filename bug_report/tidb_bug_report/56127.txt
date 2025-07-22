@@ -1,0 +1,106 @@
+ID: 56127
+Title: Dumpling will not retry upload to GCS if the server returned 503
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+(I used mitmproxy to inject the 503 error. For testing there should be some zero-external-dependency means to do so :thinking: Also I used a local [fake-gcs-server](https://github.com/fsouza/fake-gcs-server) serving HTTP to avoid distractions of installing the self-signed TLS CA.)
+
+1. Get [mitmproxy](https://docs.mitmproxy.org/)
+2. Prepare the following script, which will inject 503 for the first two requests to `*/o` (the URL for uploading objects to GCS)
+
+    ```py
+    # inject-503.py
+    from mitmproxy import http
+
+    class InjectErrorAddon:
+        def __init__(self):
+            self._counter = 0
+
+        def request(self, flow: http.HTTPFlow) -> None:
+            path = flow.request.path_components
+            if path and path[-1] == 'o':
+                self._counter += 1
+                if self._counter <= 2:
+                    flow.response = http.Response.make(503, '{}')
+
+    addons = [InjectErrorAddon()]
+    ```
+
+3. Run mitmproxy loaded with this script
+
+    ```sh
+    mitmproxy -s inject-503.py
+    ```
+
+4. Patch dumpling to use this proxy:
+
+    ```diff
+	diff --git a/dumpling/export/config.go b/dumpling/export/config.go
+	index 52337ec732..e960d13c7a 100644
+	--- a/dumpling/export/config.go
+	+++ b/dumpling/export/config.go
+	@@ -12,6 +12,8 @@ import (
+		"strings"
+		"text/template"
+		"time"
+	+	"net/http"
+	+	"net/url"
+	
+		"github.com/coreos/go-semver/semver"
+		"github.com/docker/go-units"
+	@@ -711,8 +713,19 @@ func (conf *Config) createExternalStorage(ctx context.Context) (storage.External
+			return nil, errors.Trace(err)
+		}
+	
+	+	tx := http.DefaultTransport.(*http.Transport)
+	+	tx.Proxy = func(req *http.Request) (*url.URL, error) {
+	+		return url.Parse("http://127.0.0.1:8080")
+	+	}
+	+
+		// TODO: support setting httpClient with certification later
+	-	return storage.New(ctx, b, &storage.ExternalStorageOptions{})
+	+	return storage.New(ctx, b, &storage.ExternalStorageOptions{
+	+		HTTPClient:    &http.Client{
+	+			Transport: tx,
+	+		},
+	+	})
+	}
+	
+	const (
+    ```
+
+5. Run dumpling.
+
+### 2. What did you expect to see? (Required)
+
+Given that we only inject 503 twice, Dumpling should be able to successfully upload the file on its 3rd try and the whole process succeed.
+
+Inside the mitmproxy console, we should be able to see two 503 responses like 
+
+```
+>>17:59:19 HTTP  POST  127.0.0.1  /upload/storage/v1/b/db-transfer/o?alt=json&name=dumpling%2Faaa.tab2_a.000000000.sql&prettyPrint=false&projection=full&uploadType=multipart    503                        2b  10ms 
+  17:59:19 HTTP  POST  127.0.0.1  /upload/storage/v1/b/db-transfer/o?alt=json&name=dumpling%2Faaa.tab2_b.000000000.sql&prettyPrint=false&projection=full&uploadType=multipart    503                        2b   9ms 
+  17:59:19 HTTP  POST  127.0.0.1  /upload/storage/v1/b/db-transfer/o?alt=json&name=dumpling%2Faaa.tab2_a.000000000.sql&prettyPrint=false&projection=full&uploadType=multipart    200    application/json  924b  15ms 
+  17:59:19 HTTP  POST  127.0.0.1  /upload/storage/v1/b/db-transfer/o?alt=json&name=dumpling%2Faaa.tab2_b.000000000.sql&prettyPrint=false&projection=full&uploadType=multipart    200    application/json  924b  13ms 
+  17:59:19 HTTP  POST  127.0.0.1  /upload/storage/v1/b/db-transfer/o?alt=json&name=dumpling%2Fmetadata&prettyPrint=false&projection=full&uploadType=multipart                    200    application/json  844b  13ms 
+```
+
+### 3. What did you see instead (Required)
+
+Dumpling failed without any retry, with logs like
+
+```
+[2024/09/18 17:57:19.643 +08:00] [WARN] [writer_util.go:514] ["fail to close file"] [path=gcs://db-transfer/dumpling/aaa.tab2_a.000000000.sql] [error="googleapi: got HTTP response code 503 with body: {}"] [errorVerbose="«snip»"]
+[2024/09/18 17:57:19.644 +08:00] [WARN] [writer_util.go:514] ["fail to close file"] [path=gcs://db-transfer/dumpling/aaa.tab2_b.000000000.sql] [error="context canceled"] [errorVerbose="«snip»"]
+...
+[2024/09/18 17:57:19.644 +08:00] [ERROR] [main.go:78] ["dump failed error stack info"] [error="googleapi: got HTTP response code 503 with body: {}"] [errorVerbose="«snip»"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+Dumpling v8.3.0
+

@@ -1,0 +1,86 @@
+ID: 14901
+Title: Update cardinality during limit pushdown
+Description:
+When a limit is pushed down a projection, the projection should adopt the cardinality of the limit.
+An example query where this is helpful:
+```
+create table tbl as select * from range(1,100) r(i);
+set explain_output='all';
+explain select i, i+1 from (from tbl limit 10);
+```
+
+Note that a physical plan _may_ have the correct projection cardinality (due to unrelated recursive EstimateCardinality calls later), but an optimized logical plan won't.
+
+Before:
+```
+┌─────────────────────────────┐
+│┌───────────────────────────┐│
+││  Optimized Logical Plan   ││
+│└───────────────────────────┘│
+└─────────────────────────────┘
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        Expressions:       │
+│             i             │
+│          (i + 1)          │
+│                           │
+│          ~10 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│       Expressions: i      │
+│                           │
+│          ~99 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           LIMIT           │
+│    ────────────────────   │
+│          ~10 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│          SEQ_SCAN         │
+│    ────────────────────   │
+│            tbl            │
+│                           │
+│          ~99 Rows         │
+└───────────────────────────┘
+```
+
+After:
+```
+┌─────────────────────────────┐
+│┌───────────────────────────┐│
+││  Optimized Logical Plan   ││
+│└───────────────────────────┘│
+└─────────────────────────────┘
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        Expressions:       │
+│             i             │
+│          (i + 1)          │
+│                           │
+│          ~10 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│       Expressions: i      │
+│                           │
+│          ~10 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           LIMIT           │
+│    ────────────────────   │
+│          ~10 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│          SEQ_SCAN         │
+│    ────────────────────   │
+│         Table: tbl        │
+│                           │
+│          ~99 Rows         │
+└───────────────────────────┘
+```

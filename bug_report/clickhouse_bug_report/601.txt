@@ -1,0 +1,44 @@
+ID: 601
+Title: PREWHERE optimization leads to segfault
+Description:
+Hi,
+Given the following SQL code:
+```ATTACH DATABASE IF NOT EXISTS zenly;
+
+ATTACH TABLE IF NOT EXISTS zenly.master ( __ts       Date, ts         DateTime, ts_end     DateTime, aa  DateTime, type     String, st  UInt16, user_uuid     String, tu   String, du   String, su  String, nn  String, nt  UInt16, nc    FixedString(2), w String, lt    Float64, lg    Float64, bb    Float64, sp  Float64, fr  UInt8, blvl UInt8, is_f  UInt8, is_charging    UInt8, ig       UInt8, gt     UInt16, success        UInt8, count          UInt64) ENGINE = MergeTree(__ts, (ts, user_uuid), halfMD5(user_uuid), 8192);
+
+ATTACH TABLE IF NOT EXISTS zenly.`.inner.vutc` (__ts Date, user_uuid String, is_f UInt8, count UInt64) ENGINE = SummingMergeTree(__ts, (user_uuid, __ts, is_f), 8192, count);
+
+ATTACH MATERIALIZED VIEW IF NOT EXISTS zenly.vutc ENGINE = SummingMergeTree(__ts, (user_uuid, __ts, is_f), 8192, count) POPULATE AS SELECT __ts, user_uuid, is_f, SUM(count) as count FROM zenly.master WHERE ts >= toDateTime(today()) AND type = 'xxxx' GROUP BY user_uuid, __ts, is_f;
+
+INSERT INTO zenly.master ( __ts, ts, ts_end, aa, type, st, user_uuid, tu, du, su, nn, nt, nc, w, lt, lg
+    , bb, sp, fr, blvl, is_f, is_charging, ig, gt, success, count) VALUES ( '2017-01-01', '2017-01-01 00:00:00', '2017-01-01 00:00:00', '2017-01-01 00:00:00', 'coucou', 0, 'bob', 'bob', 'bob', 'bob', 'net', 0, 'FR', 'aaa', 0.0, 0.0, 0.0, 0.0, 0, 100, 1, 1, 1, 1, 1, 1);
+```
+
+The output:
+```
+2017.03.16 11:39:44.008714 [ 2 ] <Debug> executeQuery: (from [::1]:35506) ATTACH MATERIALIZED VIEW IF NOT EXISTS zenly.vutc ENGINE = SummingMergeTree(__ts, (user_uuid, __ts, is_f), 8192, count) POPULATE AS SELECT __ts, user_uuid, is_f, SUM(count) as count FROM zenly.master WHERE ts >= toDateTime(today()) AND type = 'xxxx' GROUP BY user_uuid, __ts, is_f
+2017.03.16 11:39:44.017850 [ 2 ] <Debug> zenly.master (StorageMergeTree): MergeTreeWhereOptimizer: condition `ts >= toDateTime(today())` moved to PREWHERE
+2017.03.16 11:39:44.018861 [ 2 ] <Debug> zenly.master (SelectExecutor): Key condition: unknown, unknown, and
+2017.03.16 11:39:44.018872 [ 2 ] <Debug> zenly.master (SelectExecutor): Date condition: unknown, unknown, and
+2017.03.16 11:39:44.019089 [ 2 ] <Debug> zenly.master (SelectExecutor): Selected 0 parts by date, 0 parts by key, 0 marks to read from 0 ranges
+2017.03.16 11:39:44.019127 [ 2 ] <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2017.03.16 11:39:44.019552 [ 2 ] <Debug> executeQuery: Query pipeline:
+NullAndDoCopy
+ Null
+
+ 2017.03.16 11:39:44.019794 [ 2 ] <Debug> MemoryTracker: Peak memory usage (for query): 1.00 MiB.
+ 2017.03.16 11:39:44.019809 [ 2 ] <Debug> MemoryTracker: Peak memory usage (for user): 1.00 MiB.
+ 2017.03.16 11:39:44.019820 [ 2 ] <Debug> MemoryTracker: Peak memory usage (total): 1.00 MiB.
+ 2017.03.16 11:39:44.019844 [ 2 ] <Information> TCPHandler: Processed in 0.012 sec.
+ 2017.03.16 11:39:44.020611 [ 2 ] <Debug> executeQuery: (from [::1]:35506) INSERT INTO zenly.master ( __ts, ts, ts_end, aa, type, st, user_uuid, tu, du, su, nn, nt, nc, w, lt, lg     , bb, sp, fr, blvl, is_f, is_charging, ig, gt, success, count) VALUES
+```
+
+It leads to a segfault in `dbms/include/DB/Parsers/ASTExpressionList.h` because in the expression: `res->children.emplace_back(child->clone());` child is null.
+
+Debugging shows that the node being cloned is the `AND` function with the first child being null. Looking at the Optimizer code it seems to do the right thing removing the `and` however I'm not comfortable enough in the code base yet to figure out what it the problem.
+It works if I restart the server *BEFORE* the insert, therefor my guess would be that it is not the right node which is kept to work on after the optimization.
+
+When I've more time I'll try to dig up more but I'd appreciate any input :)
+
+Cheers,

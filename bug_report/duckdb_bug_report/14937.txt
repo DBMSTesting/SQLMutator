@@ -1,0 +1,132 @@
+ID: 14937
+Title: Unable to preserve Enum Category type when saving to parquet
+Description:
+### What happens?
+
+When saving table to _parquet_ - the `enum` datatype is not saved
+
+### To Reproduce
+
+```python
+import pandas as pd
+from enum import Enum
+import polars as pl
+from rich import print
+import duckdb
+
+
+# Example data
+class Status(Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    PENDING = "pending"
+
+
+df = pd.DataFrame(
+    {
+        "id": range(1, 4),
+        "category": pd.Categorical(["A", "B", "A"]),
+        "status": [Status.ACTIVE, Status.INACTIVE, Status.PENDING],
+        "priority": pd.Categorical(
+            ["High", "Low", "Medium"],
+            categories=["Low", "Medium", "High"],
+            ordered=True,
+        ),
+    }
+)
+
+df["status"] = pd.Categorical([s.value for s in df["status"]])
+
+df.to_parquet("data_with_categories.parquet")
+
+# Read back to verify
+df_validate_cat = pl.read_parquet("data_with_categories.parquet")
+print(f"{df_validate_cat.schema=}")
+```
+> df_validate_cat.schema=Schema({'id': Int64, 'category': Categorical(ordering='physical'), 'status': 
+Categorical(ordering='physical'), 'priority': Categorical(ordering='physical')})
+```
+
+# %% load data to duckdb - preserve categories
+con = duckdb.connect()
+print(con.execute("""select * from df""").df().dtypes)
+# %% Display schema
+con.execute("""CREATE OR REPLACE TABLE test_cat as (
+             select * from df
+)""")
+print(con.sql("""describe test_cat"""))
+```
+
+| column_name | column_type | null | key | default | extra |
+|------------|-------------|------|-----|---------|--------|
+| id | BIGINT | YES | NULL | NULL | NULL |
+| category | ENUM('A', 'B') | YES | NULL | NULL | NULL |
+| status | ENUM('active', 'inactive', 'pending') | YES | NULL | NULL | NULL |
+| priority | ENUM('Low', 'Medium', 'High') | YES | NULL | NULL | NULL |
+
+
+```
+# converting the table to a dataframe 
+con.sql("""select * from df""").pl().write_parquet('pl_cat.parquet')
+print(pl.read_parquet('pl_cat.parquet').schema)
+```
+> Schema({'id': Int64, 'category': Categorical(ordering='physical'), 'status': Categorical(ordering='physical'), 
+'priority': Categorical(ordering='physical')})
+
+```
+# %% export from duckdb fails to preserve categories
+path_to_file = "df_category_duck.parquet"
+con.execute(f"""
+   COPY (
+       SELECT * FROM df 
+   ) TO  {path_to_file} 
+    (FORMAT PARQUET,  OVERWRITE_OR_IGNORE)
+""")
+df_no_cat = pl.read_parquet(
+    f"{path_to_file}",
+)
+print(f"{df_no_cat.schema=}")
+```
+
+> df_no_cat.schema=Schema({'id': Int64, 'category': String, 'status': String, 'priority': String})
+
+
+### OS:
+
+Amazon Linux
+
+### DuckDB Version:
+
+duckdb>=1.1.3
+
+### DuckDB Client:
+
+python
+
+### Hardware:
+
+ec2 ml.r5.2xlarge
+
+### Full Name:
+
+Joseph Berry
+
+### Affiliation:
+
+Fairmatic
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

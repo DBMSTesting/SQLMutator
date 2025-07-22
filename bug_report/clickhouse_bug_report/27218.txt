@@ -1,0 +1,53 @@
+ID: 27218
+Title: Error when merge with materialized column which its source column has expired.
+Description:
+Here is my simplified table schema.
+ 
+create table IF NOT EXISTS prod.test_data
+(
+    Processdate Date,
+    EventDate Date,
+    ExperimentFlightId String TTL EventDate + toIntervalDay(3),
+    ExperimentFlightId_Array Array(String) MATERIALIZED splitByString(',', ExperimentFlightId)  TTL EventDate + toIntervalDay(3),
+)
+engine = ReplicatedMergeTree('/prod/shard-{shard}', '{host}')
+partition by (Processdate)
+SETTINGS index_granularity = 8192;
+
+It has many errors like below. Even ExperimentFlightId has the same TTL setting with ExperimentFlightId_Array. It seems every time when merging, it always tries to read the source column 'ExperimentFlightId'. **So for the materialized column, can we have a way to set TTL without effecting merging process?**
+ 
+2021.08.02 09:23:31.086865 [ 63723 ] {} <Error> prod.test_data: auto DB::StorageReplicatedMergeTree::processQueueEntry(ReplicatedMergeTreeQueue::SelectedEntryPtr)::(anonymous class)::operator()(DB::StorageReplicatedMergeTree::LogEntryPtr &) const: Code: 47, e.displayText() = DB::Exception: Missing columns: 'ExperimentFlightId' while processing query: '**CAST(splitByString(',', ExperimentFlightId), 'Array(String)') AS ExperimentFlightId_Array**', required columns: 'ExperimentFlightId' 'ExperimentFlightId': (while reading from part /mnt/data/prod/test_data/20210407-20210407-20210407-1-1_8_8_1/): While executing MergeTreeSequentialSource, Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x87f714a in /usr/bin/clickhouse
+1. DB::TreeRewriterResult::collectUsedColumns(std::__1::shared_ptr<DB::IAST> const&, bool) @ 0xf6d0a90 in /usr/bin/clickhouse
+2. DB::TreeRewriter::analyze(std::__1::shared_ptr<DB::IAST>&, DB::NamesAndTypesList const&, std::__1::shared_ptr<DB::IStorage const>, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, bool) const @ 0xf6d9bda in /usr/bin/clickhouse
+3. ? @ 0xf748a0c in /usr/bin/clickhouse
+4. DB::evaluateMissingDefaults(DB::Block const&, DB::NamesAndTypesList const&, DB::ColumnsDescription const&, DB::Context const&, bool) @ 0xf749351 in /usr/bin/clickhouse
+5. DB::IMergeTreeReader::evaluateMissingDefaults(DB::Block, std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0xfd1ec14 in /usr/bin/clickhouse
+6. DB::MergeTreeSequentialSource::generate() @ 0xfd3f78b in /usr/bin/clickhouse
+7. DB::ISource::tryGenerate() @ 0xff2bdb5 in /usr/bin/clickhouse
+8. DB::ISource::work() @ 0xff2b9aa in /usr/bin/clickhouse
+9. DB::SourceWithProgress::work() @ 0x100dd52a in /usr/bin/clickhouse
+10. ? @ 0xff6504d in /usr/bin/clickhouse
+11. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xff61d01 in /usr/bin/clickhouse
+12. DB::PipelineExecutor::executeStep(std::__1::atomic<bool>*) @ 0xff6074c in /usr/bin/clickhouse
+13. DB::PullingPipelineExecutor::pull(DB::Chunk&) @ 0xff6e07a in /usr/bin/clickhouse
+14. DB::PullingPipelineExecutor::pull(DB::Block&) @ 0xff6e270 in /usr/bin/clickhouse
+15. DB::PipelineExecutingBlockInputStream::readImpl() @ 0xff5c644 in /usr/bin/clickhouse
+16. DB::IBlockInputStream::read() @ 0xee8b8f5 in /usr/bin/clickhouse
+17. DB::ExpressionBlockInputStream::readImpl() @ 0xfc7a1c7 in /usr/bin/clickhouse
+18. DB::IBlockInputStream::read() @ 0xee8b8f5 in /usr/bin/clickhouse
+19. DB::MaterializingBlockInputStream::readImpl() @ 0xf250bcd in /usr/bin/clickhouse
+20. DB::IBlockInputStream::read() @ 0xee8b8f5 in /usr/bin/clickhouse
+21. DB::MergeTreeDataMergerMutator::mergePartsToTemporaryPart(DB::FutureMergedMutatedPart const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::BackgroundProcessListEntry<DB::MergeListElement, DB::MergeInfo>&, std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>&, long, DB::Context const&, std::__1::unique_ptr<DB::IReservation, std::__1::default_delete<DB::IReservation> > const&, bool, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xfc518ce in /usr/bin/clickhouse
+22. DB::StorageReplicatedMergeTree::tryExecuteMerge(DB::ReplicatedMergeTreeLogEntry const&) @ 0xf9f50d7 in /usr/bin/clickhouse
+23. DB::StorageReplicatedMergeTree::executeLogEntry(DB::ReplicatedMergeTreeLogEntry&) @ 0xf9e98bf in /usr/bin/clickhouse
+24. ? @ 0xfa6483f in /usr/bin/clickhouse
+25. DB::ReplicatedMergeTreeQueue::processEntry(std::__1::function<std::__1::shared_ptr<zkutil::ZooKeeper> ()>, std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&, std::__1::function<bool (std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&)>) @ 0xfdb6958 in /usr/bin/clickhouse
+26. DB::StorageReplicatedMergeTree::processQueueEntry(std::__1::shared_ptr<DB::ReplicatedMergeTreeQueue::SelectedEntry>) @ 0xfa1862d in /usr/bin/clickhouse
+27. ? @ 0xfb90b47 in /usr/bin/clickhouse
+28. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x8839d78 in /usr/bin/clickhouse
+29. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() @ 0x883bd3f in /usr/bin/clickhouse
+30. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x88372bf in /usr/bin/clickhouse
+31. ? @ 0x883ade3 in /usr/bin/clickhouse
+(version 21.4.6.55 (official build))

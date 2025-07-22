@@ -1,0 +1,58 @@
+ID: 49823
+Title: index buckets bound couldn't decode itself out with corresponding index column type.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+use test
+create table t(a datetime, b int, index ia(a,b));
+insert into t value('2023-12-27',1),(null, 2),('2023-12-28',3),(null,4);
+analyze table t with 0 topn;
+explain select * from t where a > 1;
+show stats_buckets where db_name = 'test';
+```
+AND mock the code in v6.5.4 showExec
+```
+// ValueToString converts a possible encoded value to a formatted string. If the value is encoded, then
+// idxCols equals to number of origin values, else idxCols is 0.
+func ValueToString(vars *variable.SessionVars, value *types.Datum, idxCols int, idxColumnTypes []byte) (string, error) {
+	if idxCols == 0 {
+		return value.ToString()
+	}
+	var loc *time.Location
+	if vars != nil {
+		loc = vars.Location()
+	}
+	// Ignore the error and treat remaining part that cannot decode successfully as bytes.
+	decodedVals, remained, err := codec.DecodeRange(value.GetBytes(), idxCols, idxColumnTypes, loc)
+	// Ignore err explicit to pass errcheck.
+        // mock the code here, rather than ignore it!!!
+	if err != nil {
+		panic(err.Error())
+	}
+	if len(remained) > 0 {
+		decodedVals = append(decodedVals, types.NewBytesDatum(remained))
+	}
+	str, err := types.DatumsToString(decodedVals, true)
+	return str, err
+}
+```
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+show stats_buckets where table_name =  'xxx' and column_name = 'xxx'\G
+
+
+### 3. What did you see instead (Required)
+show stats_buckets successfully
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+panic with recovery with msg: invalid encoded key flag 0
+

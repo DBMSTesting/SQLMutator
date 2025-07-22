@@ -1,0 +1,26 @@
+ID: 45077
+Title: Correct the row count used to calculate the index lookup index side cost when offset is large
+Description:
+## Enhancement
+As we know, in TiDB, if we are using `IndexLookUp` to access an index that satisfies the `ORDER BY` clause in the SQL, and there's also `OFFSET` and `LIMIT` specified in the SQL, we only need to read `LIMIT` rows of data from the table side instead of `OFFSET + LIMIT` rows, as denoted as `limit embedded` in the `execution info` of `IndexLookUp`.
+
+For example:
+```
+> explain analyze select * from t where a > 6 limit 1 offset 100;
++--------------------------------+---------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------------+---------+------+
+| id                             | estRows | actRows | task      | access object        | execution info                                                                                                                                                                                                                                                     | operator info                                  | memory  | disk |
++--------------------------------+---------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------------+---------+------+
+| IndexLookUp_17                 | 1.00    | 1       | root      |                      | time:3.77ms, loops:2, index_task: {total_time: 3ms, fetch_handle: 2.99ms, build: 5.15µs, wait: 7.55µs}, table_task: {total_time: 292µs, num: 1, concurrency: 5}, next: {wait_index: 3.36ms, wait_table_lookup_build: 53.9µs, wait_table_lookup_resp: 233.6µs}      | limit embedded(offset:100, count:1)            | 8.76 KB | N/A  |
+| ├─Limit_16(Build)              | 101.00  | 101     | cop[tikv] |                      | time:2.97ms, loops:1, cop_task: {num: 1, max: 2.65ms, proc_keys: 0, tot_proc: 2ms, rpc_num: 1, rpc_time: 2.54ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 1}, tikv_task:{time:2.45ms, loops:0}                                                             | offset:0, count:101                            | N/A     | N/A  |
+| │ └─IndexRangeScan_14          | 101.00  | 160     | cop[tikv] | table:t, index:ia(a) | tikv_task:{time:2.45ms, loops:0}                                                                                                                                                                                                                                   | range:(6,+inf], keep order:false, stats:pseudo | N/A     | N/A  |
+| └─TableRowIDScan_15(Probe)     | 1.00    | 1       | cop[tikv] | table:t              | time:214.7µs, loops:2, cop_task: {num: 1, max: 139µs, proc_keys: 0, rpc_num: 1, rpc_time: 112.4µs, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}, tikv_task:{time:98.1µs, loops:0}                                                                          | keep order:false, stats:pseudo                 | N/A     | N/A  |
++--------------------------------+---------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------------+---------+------+
+```
+
+However, when we are calculating the cost of `IndexLookUp`, we are using the row count from the index side, which is `OFFSET + LIMIT` as the row count:
+https://github.com/pingcap/tidb/blob/e94e5b2051a09d23c5ead28f77a6769e34c31289/planner/core/plan_cost_ver2.go#L242
+
+
+https://github.com/pingcap/tidb/blob/e94e5b2051a09d23c5ead28f77a6769e34c31289/planner/core/plan_cost_ver2.go#L268-L276
+
+When the `OFFSET` number is very large, the cost error would also be large.

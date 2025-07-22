@@ -1,0 +1,77 @@
+ID: 15690
+Title: executor: distinct error
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. What did you do?
+```
+diff --git a/sessionctx/variable/tidb_vars.go b/sessionctx/variable/tidb_vars.go
+
+-       DefInitChunkSize                   = 32
+-       DefMaxChunkSize                    = 1024
++       DefInitChunkSize                   = 2
++       DefMaxChunkSize                    = 2
+
+diff --git a/sessionctx/variable/varsutil.go b/sessionctx/variable/varsutil.go
+-       maxChunkSizeLowerBound = 32
++       maxChunkSizeLowerBound = 1
+
+```
+
+download the file with all DDLs 
+[randgen_index_merge_join.txt](https://github.com/pingcap/tidb/files/4381467/randgen_index_merge_join.txt)
+```
+source randgen_index_merge_join.txt
+set @@tidb_max_chunk_size=2;
+
+```
+```
+SELECT DISTINCT  table2 . `col_int_key` AS field1 FROM  P AS table1  RIGHT  JOIN P AS table2 ON  table1 . `pk` =  table2 . `pk`  WHERE table2 . `pk` <= table2 . `col_int`   ORDER BY field1  LIMIT 100 ;
+```
+
+### 2. What did you expect to see?
+```
++--------+
+| field1 |
++--------+
+|   NULL |
+|      0 |
+|      2 |
+|      4 |
+|      8 |
++--------+
+```
+
+### 3. What did you see instead?
+```
+mysql> SELECT DISTINCT  table2 . `col_int_key` AS field1 FROM  P AS table1  RIGHT  JOIN P AS table2 ON  table1 . `pk` =  table2 . `pk`  WHERE table2 . `pk` <= table2 . `col_int`   ORDER BY field1  LIMIT 100 ;
++--------+
+| field1 |
++--------+
+|   NULL |
+|      2 |
+|      4 |
+|      8 |
++--------+
+4 rows in set (0.00 sec)
+
+mysql> explain SELECT DISTINCT  table2 . `col_int_key` AS field1 FROM  P AS table1  RIGHT  JOIN P AS table2 ON  table1 . `pk` =  table2 . `pk`  WHERE table2 . `pk` <= table2 . `col_int`   ORDER BY field1  LIMIT 100 ;
++-----------------------------------+---------+-----------+----------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                | estRows | task      | access object                                | operator info                                                                                                                                   |
++-----------------------------------+---------+-----------+----------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------+
+| Limit_15                          | 5.76    | root      |                                              | offset:0, count:100                                                                                                                             |
+| └─StreamAgg_33                    | 5.76    | root      |                                              | group by:randgen_index_merge_join.p.col_int_key, funcs:firstrow(randgen_index_merge_join.p.col_int_key)->randgen_index_merge_join.p.col_int_key |
+|   └─IndexLookUp_37                | 7.20    | root      |                                              |                                                                                                                                                 |
+|     ├─IndexFullScan_34(Build)     | 9.00    | cop[tikv] | table:table2, index:col_int_key(col_int_key) | keep order:true, stats:pseudo                                                                                                                   |
+|     └─Selection_36(Probe)         | 7.20    | cop[tikv] |                                              | le(randgen_index_merge_join.p.pk, randgen_index_merge_join.p.col_int)                                                                           |
+|       └─TableRowIDScan_35         | 9.00    | cop[tikv] | table:table2                                 | keep order:false, stats:pseudo                                                                                                                  |
++-----------------------------------+---------+-----------+----------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------+
+6 rows in set (0.01 sec)
+
+mysql> 
+
+```
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+5.7.25-TiDB-v4.0.0-beta-523-g7eba696bb

@@ -1,0 +1,66 @@
+ID: 12574
+Title: Add support for `equi_width_bins` function to compute histogram boundaries
+Description:
+Follow-up from https://github.com/duckdb/duckdb/pull/12548
+
+This PR adds support for the `equi_width_bins` helper function that can be used to compute histogram boundaries.
+
+The function signature is as follows:
+
+```sql
+equi_width_bins(min, max  [BIGINT/DOUBLE/DATE], bin_count BIGINT, nice_rounding BOOL)
+```
+
+The function computes `bin_count` bins between `min` and `max`. If `nice_rounding` is set to true the bins generated will be "nice". That essentially means we will try to round the numbers in a way that is more appealing/easier to read. Below are some examples:
+
+```sql
+D SELECT equi_width_bins(min, max, 5, false) AS regular_bins, equi_width_bins(min, max, 5, true) AS nice_bins FROM (VALUES (0, 9347)) t(min, max);
+┌────────────────────────────────┬────────────────────────────────┐
+│          regular_bins          │           nice_bins            │
+│            int32[]             │            int32[]             │
+├────────────────────────────────┼────────────────────────────────┤
+│ [1869, 3738, 5608, 7477, 9347] │ [2200, 4000, 5800, 7600, 9400] │
+└────────────────────────────────┴────────────────────────────────┘
+D SELECT equi_width_bins(min, max, 5, false) AS regular_bins, equi_width_bins(min, max, 5, true) AS nice_bins FROM (VALUES (0.0, 0.7763::DOUBLE)) t(min, max);
+┌──────────────────────────────────────────────┬───────────────────────────────┐
+│                 regular_bins                 │           nice_bins           │
+│                   double[]                   │           double[]            │
+├──────────────────────────────────────────────┼───────────────────────────────┤
+│ [0.15526, 0.31052, 0.46578, 0.62104, 0.7763] │ [0.14, 0.3, 0.46, 0.62, 0.78] │
+└──────────────────────────────────────────────┴───────────────────────────────┘
+
+D SELECT equi_width_bins(min, max, 5, false) AS regular_bins, equi_width_bins(min, max, 5, true) AS nice_bins FROM (VALUES (date '1992-01-01', date '1999-01-01')) t(min, max);
+┌──────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────┐
+│                         regular_bins                         │                                nice_bins                                 │
+│                            date[]                            │                                  date[]                                  │
+├──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ [1993-05-26, 1994-10-19, 1996-03-14, 1997-08-07, 1999-01-01] │ [1992-05-01, 1993-09-01, 1995-01-01, 1996-05-01, 1997-09-01, 1999-01-01] │
+└──────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                regular_bins                                                                 │
+│                                                                 timestamp[]                                                                 │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ [1993-10-09 01:01:43.701317, 1995-02-13 13:39:53.279179, 1996-06-20 02:18:02.85704, 1997-10-25 14:56:12.434902, 1999-03-02 03:34:22.012764] │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+D SELECT equi_width_bins(min, max, 5, true) AS nice_bins FROM (VALUES (timestamp '1992-06-03 12:23:34.123456', timestamp '1999-03-02 03:34:22.012764')) t(min, max);
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                           nice_bins                                                            │
+│                                                          timestamp[]                                                           │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ [1992-08-01 00:00:00, 1993-12-01 00:00:00, 1995-04-01 00:00:00, 1996-08-01 00:00:00, 1997-12-01 00:00:00, 1999-04-01 00:00:00] │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The exact formula for what a nice number is depends on the data type:
+
+* For integer/double values, nice numbers are divisible by `2*10^p` or `5*10^p` where `p=floor(log10(n))`. In other words, for numbers in the range of `100..999`, nice numbers are divisible by either 20 or 50, i.e. 120 is a nice number, 115 is not (this was inspired by vega - https://github.com/vega/vega/blob/master/packages/vega-statistics/src/bin.js).
+* For dates/timestamps, nice numbers are either the first month, first day, or have zero in non-significant components, i.e. if the bin values are years apart we set the days to 1, hour to 0, month to 0, etc. On the other hand, if the bin values are shorter periods of time apart (e.g. hours or minutes) we try to either have whole minutes, whole hours, etc, or work with 15 minute/second increments.
+
+
+Together with the previously introduced binned histogram function, this allows you to relatively easily compute histograms without having to manually specify boundaries, e.g.:
+
+```sql
+SELECT histogram(l_orderkey, (SELECT equi_width_bins(MIN(l_orderkey), MAX(l_orderkey), 10, true) FROM lineitem)) FROM lineitem;
+```
+
+Stay tuned for some more friendly helper functions in a subsequent PR.

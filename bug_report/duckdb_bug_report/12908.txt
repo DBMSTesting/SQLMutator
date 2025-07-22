@@ -1,0 +1,46 @@
+ID: 12908
+Title: Pushdown table filters into probe based on min/max data found during hash build of hash joins
+Description:
+This PR extends the hash table build in `PhysicalHashJoin` to compute the `min` and `max` value of join keys - and then uses the generated `min/max` to dynamically generate table filters that are pushed into the probe side. This can greatly improve performance for selective joins.
+
+#### JoinFilterPushdownOptimizer
+
+The `JoinFilterPushdownOptimizer` is responsible for setting up the link between the `PhysicalComparisonJoin` (build) and the `PhysicalTableScan` (probe). Currently it has a number of limitations (that can likely be alleviated somewhat in the future):
+
+* Join filters are only generated for equality predicates (col1 = col2)
+* Join filters are only generated for `INNER`, `RIGHT`, `SEMI` and `RIGHT_SEMI` joins.
+* Join filters are only generated when the probe column is directly referenced (i.e. `col1 + 1 = col2` does not generate join filters)
+
+#### JoinFilterPushdownInfo
+
+The optimizer generates a `JoinFilterPushdownInfo` that contains the min/max aggregates to compute, as well as functions to set up the necessary state. The `DynamicTableFilterSet` is the link between the table scan and the join. The `JoinFilterPushdownInfo` then computes the `min/max` in parallel during the build, and in the `Finalize` uses the `min/max` to push the table filters into the `DynamicTableFilterSet`. In the table scan, we then access the `DynamicTableFilterSet` if available and use that to generate a new set of table filters. 
+
+#### UngroupedAggregateState
+
+In order to facilitate the computation of min/max, the relevant code to compute ungrouped aggregates is extracted from `PhysicalUngroupedAggregate` into the `UngroupedAggregateState` class, that is now also used in the `JoinFilterPushdown`.
+
+#### Benchmarks
+
+Below are some benchmarks on TPC-H SF15:
+
+```sql
+SELECT * FROM lineitem WHERE l_orderkey=(SELECT MAX(l_orderkey) FROM lineitem);
+```
+
+| v1.0  |  New  |
+|-------|-------|
+| 1.08s | 0.07s |
+
+```sql
+SELECT * FROM lineitem JOIN orders ON (l_orderkey=o_orderkey) WHERE o_totalprice >= 570000;
+```
+
+| v1.0  |  New  |
+|-------|-------|
+| 1.05s | 0.01s |
+
+
+#### Future Work
+
+* The generated filters are not yet pushed into the `MultiFileList` as that relies on the complex filter pushdown. As such, partitioned files are not yet pruned based on the generated filters. (CC @samansmink)
+* The filters generated in this manner are not necessary for correctness but only an optimization. There are situations where these filters can actually slow down execution. It could be beneficial from a performance perspective **not** to execute them and to e.g. only use them for zonemap pruning. This could e.g. be done adaptively in the scan, or based on some heuristics of selectivity.

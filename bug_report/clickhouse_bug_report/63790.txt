@@ -1,0 +1,44 @@
+ID: 63790
+Title: unknown table expression identifier for recursive CTE when base table is a remote table
+Description:
+https://fiddle.clickhouse.com/e6d65908-e28f-4b99-b090-2917999ea1a8
+
+```
+Received exception from server (version 24.4.1):
+Code: 60. DB::Exception: Received from localhost:9000. DB::Exception: Unknown table expression identifier 'search_tree' in scope SELECT __table1.id AS id, __table1.parent_id AS parent_id, arrayConcat(__table2.path, [__table1.id]) AS path, __table2.depth + 1 AS `plus(depth, 1)` FROM default.bug_repro_local AS __table1 ALL INNER JOIN search_tree AS __table2 ON __table1.parent_id = __table2.id: While executing RecursiveCTESource. (UNKNOWN_TABLE)
+```
+
+
+```sql
+CREATE TABLE bug_repro_local
+(
+    `id` String,
+    `parent_id` String
+)
+ENGINE = Memory;
+
+insert into bug_repro_local values ('a', '');
+insert into bug_repro_local values ('b', 'a');
+insert into bug_repro_local values ('c', 'a');
+
+-- local table, works
+WITH RECURSIVE search_tree AS (
+    SELECT id, parent_id, [parent_id] AS path, toUInt64(0) AS depth
+    FROM bug_repro_local
+    UNION ALL
+    SELECT t.id, t.parent_id, arrayConcat(path, [t.id]) as path, depth + 1
+    FROM bug_repro_local t, search_tree st
+    WHERE t.parent_id = st.id)
+SELECT * FROM search_tree;
+
+
+-- remote, fails
+WITH RECURSIVE search_tree AS (
+    SELECT id, parent_id, [parent_id] AS path, toUInt64(0) AS depth
+    FROM remote('127.0.0.{1,2}', default, bug_repro_local)
+    UNION ALL
+    SELECT t.id, t.parent_id, arrayConcat(path, [t.id]) as path, depth + 1
+    FROM remote('127.0.0.{1,2}', default, bug_repro_local) t, search_tree st
+    WHERE t.parent_id = st.id)
+SELECT * FROM search_tree;
+```

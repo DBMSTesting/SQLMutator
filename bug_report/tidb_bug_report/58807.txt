@@ -1,0 +1,44 @@
+ID: 58807
+Title: during add index on DXF, sst are ingested to L0, triggers ServerIsBusy and keeps failing/retrying
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+tried to reproduce it locally, but cannot reproduce right now, the env is:
+- 3pd 8c16g, 3 tidb 8c16g each with 50G disk, it's small, but it's enough to hold the target index which is around 8G; 3 tikv 8c32g
+- the table have about 200m rows, table structure similar to this
+```sql
+create table t(
+    a bigint,
+    b bigint,
+    c bigint,
+    d bigint,
+    e varchar(32),
+    .... more columns... total 41 columns, most are int/decimal types, some are varchar with a small length
+    primary key(a, b, c),
+    key(a, d, b)
+)
+```
+- add index with `alter table t add index idx_ade(a, d, e);`
+- the dxf task have 3 subtask, the second runs faster, so it ingest first(also the only one to ingest, as we use a distributed lock), and at the time of ingest, and when the subtask start ingest, seems all files are ingested to L0 directly, like below, so it triggers tikv's flow control, and report `ServerIsBusy too many sst files are ingesting`
+  - before ingest we can see TiKV have some files at L0, and from tikv log its range is from a small table-id to a large one, and it includes the table-id of target table, so overlaps with the index KV range too. not sure if it's related
+![Image](https://github.com/user-attachments/assets/c57e2c52-a7a7-4433-ab21-5eee93652ff6)
+- after TiKV compaction, the number of files in L0 decrease, so the second subtask continues, and success later
+![Image](https://github.com/user-attachments/assets/bdf0d1ca-72ae-46a4-94fc-fe4e25e2ae6f)
+- the first subtask success without ServerIsBusy for this subtask.
+- the third subtask is the last to ingest, and it keeps failed with `ServerIsBusy too many sst files are ingesting`, and from TiKV monitoring, it keeps ingest at L0, after the retry of local backend used up, DXF starts retry the whole subtask, but it never ends, and keeps reporting above error. the issue of unlimited retry of DXF is recored in here https://github.com/pingcap/tidb/issues/58814
+![Image](https://github.com/user-attachments/assets/d709720d-7388-4920-b07b-e53509e3afad)
+
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+8.1.1
+<!-- Paste the output of SELECT tidb_version() -->
+

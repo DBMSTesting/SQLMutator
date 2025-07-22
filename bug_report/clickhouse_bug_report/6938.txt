@@ -1,0 +1,86 @@
+ID: 6938
+Title: Sometimes inserting bitmap fails silently
+Description:
+**Describe the bug or unexpected behaviour**
+Given a table, construct bitmaps for columns of it, and insert those bitmaps into another table. 
+The inserting succeed for some columns, and fails silently for other columns.
+
+**How to reproduce**
+* Which ClickHouse server version to use
+v19.14.3.3-stable
+* Which interface to use, if matters
+CLI
+* Non-default settings, if any
+* `CREATE TABLE` statements for all tables involved
+```
+DROP TABLE cdp_tags;
+CREATE TABLE cdp_tags (
+    tag_id String,
+    mid_seqs AggregateFunction(groupBitmap, UInt32),
+    cardinality UInt32
+) engine=ReplacingMergeTree()
+ORDER BY (tag_id) SETTINGS index_granularity=1;
+
+```
+* Queries to run that lead to unexpected result
+```
+-- ok
+INSERT INTO cdp_tags SELECT concat('is_member_', toString(is_member)) AS tag_id, groupBitmapState(mid_seq) AS mid_seqs, bitmapCardinality(mid_seqs) AS cardinality FROM dist_cdp_cust_tag GROUP BY is_member;
+
+-- ok
+INSERT INTO cdp_tags SELECT concat('member_origin_channel_', toString(member_origin_channel)) AS tag_id, groupBitmapState(mid_seq) AS mid_seqs, bitmapCardinality(mid_seqs) AS cardinality FROM dist_cdp_cust_tag GROUP BY member_origin_channel;
+
+-- ok
+SELECT tag_id, bitmapCardinality(mid_seqs), cardinality FROM cdp_tags WHERE like(tag_id, 'is_member_%') ORDER BY cardinality DESC;
+-- show 0 rows without any error
+SELECT tag_id, bitmapCardinality(mid_seqs), cardinality FROM cdp_tags WHERE like(tag_id, 'member_origin_channel_%') ORDER BY cardinality DESC;
+
+```
+
+I also noticed that inserting constant bitmap always succeed. For example,
+```
+INSERT INTO cdp_tags SELECT concat('member_origin_channel_', toString(member_origin_channel)) AS tag_id, bitmapBuild(cast([3,19,47] as Array(UInt32))) AS mid_seqs, bitmapCardinality(mid_seqs) AS cardinality FROM dist_cdp_cust_tag GROUP BY member_origin_channel;
+
+-- show 1 row without any error
+SELECT tag_id, bitmapCardinality(mid_seqs), cardinality FROM cdp_tags WHERE like(tag_id, 'member_origin_channel_%') ORDER BY cardinality DESC;
+
+```
+
+**Expected behavior**
+Insertion shall succeed for any bitmap.
+
+**Additional context**
+I iterated 19.14 tags to check which one becomes bad. Here's the result:
+v19.13.3.26-stable			OK
+v19.14.1.1095-testing		OK
+v19.14.1.1104-testing		OK
+v19.14.1.1112-testing		NOK
+v19.14.1.1129-testing		NOK
+v19.14.1.1138-testing
+v19.14.1.1144-testing		
+v19.14.1.1163-testing
+v19.14.1.1171-testing		NOK
+v19.14.1.1175-testing
+v19.14.1.1176-testing
+v19.14.1.1177-testing
+v19.14.1.1180-testing
+v19.14.1.1184-testing
+v19.14.1.1190-testing
+v19.14.1.1196-testing
+v19.14.1.1203-testing		NOK
+v19.14.1.1205-testing
+v19.14.1.1219-testing
+v19.14.1.1225-testing
+v19.14.1.1229-testing
+v19.14.1.1233-testing
+v19.14.1.1235-testing
+v19.14.1.1238-testing
+v19.14.1.1246-testing
+v19.14.1.1254-testing
+v19.14.1.1259-testing
+v19.14.1.1266-testing
+v19.14.1.1270-testing
+v19.14.1.1274-prestable
+v19.14.2.2-prestable
+v19.14.3.3-stable			NOK
+

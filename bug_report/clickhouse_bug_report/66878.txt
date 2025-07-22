@@ -1,0 +1,143 @@
+ID: 66878
+Title: A query is too slow when using enable_analyzer=1 (by default)
+Description:
+**Describe the situation**
+The same query works differently with settings allow_experimental_analyzer=1 and 0.
+
+**How to reproduce**
+* Which ClickHouse server version to use
+ClickHouse version 24.3.5.46
+
+* `CREATE TABLE` statements for all tables involved
+
+The DDL of Distributed table:
+```sql
+create table dis_TABLEA
+( 
+    CTIME DateTime,
+    AAA   String,
+    BBB   Nullable(String),
+    CCC   Nullable(String),
+    DDD   Nullable(String),
+    EEE   Nullable(String),
+    FFF   Nullable(String),
+    GGG   Nullable(String),
+    HHH   Nullable(String),
+---Nearly 100 columns are Nullable String
+    DT    UInt32
+)
+    engine = Distributed('CLUSTERA', 'DATABASE', 'TABLEA', toUInt64OrZero('AAA'));
+```
+
+
+The DDL of the underlying base table:
+```
+create table TABLEA
+(
+    CTIME DateTime,
+    AAA   String,
+    BBB   Nullable(String),
+    CCC   Nullable(String),
+    DDD   Nullable(String),
+    EEE   Nullable(String),
+    FFF   Nullable(String),
+    GGG   Nullable(String),
+    HHH   Nullable(String),
+---Nearly 100 columns are Nullable String
+    DT    UInt32
+)
+    engine = MergeTree PARTITION BY toUInt32(DT / 7)
+        ORDER BY AAA
+        SETTINGS index_granularity = 8192;
+```
+
+
+* Queries to run that lead to slow performance
+
+```sql
+select count(1)
+from (select *
+      from (select toDateTime(CTIME) ,
+                   BBB,
+                   AAA,
+                   CCC,
+                   DDD,
+                   EEE,
+                   FFF,
+                   GGG,
+                   HHH,
+                   DT
+            from DATABASE.dis_TABLEA) t
+      WHERE "AAA" = '123456789') t1
+```
+
+**Expected performance**
+When allow_experimental_analyzer = 0, the query can finish in less than 3 seconds.When allow_experimental_analyzer = 1, the query will last for at least 5 minute. with the network load monitor, I can see that allow_experimental_analyzer = 1 causes too much network traffic, seems like that it's reading the whole table content.
+
+**Additional context**
+The explain with allow_experimental_analyzer = 0:
+
+```sql
+explain
+select count(1)
+from (select *
+      from (select toDateTime(CTIME) ,
+                   BBB,
+                   AAA,
+                   CCC,
+                   DDD,
+                   EEE,
+                   FFF,
+                   GGG,
+                   HHH,
+                   DT
+            from DATABASE.dis_TABLEA) t
+      WHERE "AAA" = '123456789') t1 SETTINGS allow_experimental_analyzer = 0;
+
+    ┌─explain───────────────────────────────────────────────────────────────┐
+ 1. │ Expression ((Projection + Before ORDER BY))                           │
+ 2. │   Aggregating                                                         │
+ 3. │     Union                                                             │
+ 4. │       Expression ((Before GROUP BY + (Projection + Before ORDER BY))) │
+ 5. │         Filter ((WHERE + (Projection + Before ORDER BY)))             │
+ 6. │           Filter (WHERE)                                              │
+ 7. │             ReadFromPreparedSource (Read from NullSource)             │
+ 8. │       Expression (( + ( + )))                                         │
+ 9. │         Filter                                                        │
+10. │           ReadFromRemote (Read from remote replica)                   │
+    └───────────────────────────────────────────────────────────────────────┘
+```
+
+The explain with allow_experimental_analyzer = 1:
+
+```sql
+explain
+select count(1)
+from (select *
+      from (select toDateTime(CTIME) ,
+                   BBB,
+                   AAA,
+                   CCC,
+                   DDD,
+                   EEE,
+                   FFF,
+                   GGG,
+                   HHH,
+                   dt
+            from DATABASE.dis_TABLEA) t
+      WHERE "AAA" = '123456789') t1 SETTINGS allow_experimental_analyzer = 1;
+
+
+
+   ┌─explain──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+1. │ Expression ((Project names + Projection))                                                                                                                                                                                                                │
+2. │   Aggregating                                                                                                                                                                                                                                            │
+3. │     Union                                                                                                                                                                                                                                                │
+4. │       Expression ((Before GROUP BY + (Change column names to column identifiers + (Project names + (Projection + (WHERE + (Change column names to column identifiers + (Project names + (Projection + Change column names to column identifiers))))))))) │
+5. │         Filter (((WHERE + (Change column names to column identifiers + (Project names + (Projection + Change column names to column identifiers)))))[split])                                                                                             │
+6. │           ReadFromPreparedSource (Read from NullSource)                                                                                                                                                                                                  │
+7. │       Expression (( + ( + ( + ))))                                                                                                                                                                                                                       │
+8. │         Filter (( + ))                                                                                                                                                                                                                                   │
+9. │           ReadFromRemote (Read from remote replica)                                                                                                                                                                                                      │
+   └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```

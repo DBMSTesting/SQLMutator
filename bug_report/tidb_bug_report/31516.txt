@@ -1,0 +1,120 @@
+ID: 31516
+Title: scalar subquery + union scan return error record
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+/* test */ /* init:01 */ drop table if exists t1, t2;
+/* test */ /* init:02 */ create table t1  (c_int int, c_str varchar(40), c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6)  , unique key(c_int)     , key(c_timestamp));
+/* test */ /* init:03 */ create table t2  (c_int int, c_str varchar(40), c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6), primary key (c_int)  , key(c_str) , key(c_decimal)  , key(c_timestamp)) partition by hash (c_int) partitions 4 ;
+/* test */ /* init:04 */ insert into t1 values (1, 'epic lamport', '2020-05-16 15:59:17', '2020-06-08 00:55:05', 69.828891, 8.031);
+/* test */ /* init:05 */ insert into t1 values (6, 'loving bhaskara', '2020-03-15 11:48:48', '2020-04-24 09:45:29', 14.838255, 5.533), (7, 'quirky zhukovsky', '2020-06-15 17:53:12', '2020-06-12 10:04:02', 5.835174, 9.762);
+/* test */ /* init:06 */ insert into t2 select * from t1 ;
+/* test */ /* t01:006 */ begin;
+/* test */ /* t01:009 */ update t1  set c_double = null where (c_int, c_str) in ((7, 'vigorous yonath'), (5, 'eloquent albattani'), (7, 'eloquent kalam'), (10, 'fervent liskov'), (7, 'sleepy hamilton'), (3, 'upbeat bhaskara')) order by c_int, c_str, c_decimal, c_double limit 1;
+select (select t2.c_double from t2 where t2.c_int = 6 order by t2.c_double limit 1) x from t1;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> select (select t2.c_double from t2 where t2.c_int = 6 order by t2.c_double limit 1) x from t1;
++-----------+
+| x         |
++-----------+
+| 14.838255 |
+| 14.838255 |
+| 14.838255 |
++-----------+
+3 rows in set (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> select (select t2.c_double from t2 where t2.c_int = 6 order by t2.c_double limit 1) x from t1;
++-----------+
+| x         |
++-----------+
+| 14.838255 |
+| 14.838255 |
+| 14.838255 |
+| 14.838255 |
++-----------+
+4 rows in set (0.00 sec)
+
+mysql> select * from t1;
++-------+------------------+---------------------+---------------------+-----------+-----------+
+| c_int | c_str            | c_datetime          | c_timestamp         | c_double  | c_decimal |
++-------+------------------+---------------------+---------------------+-----------+-----------+
+|     1 | epic lamport     | 2020-05-16 15:59:17 | 2020-06-08 00:55:05 | 69.828891 |  8.031000 |
+|     6 | loving bhaskara  | 2020-03-15 11:48:48 | 2020-04-24 09:45:29 | 14.838255 |  5.533000 |
+|     7 | quirky zhukovsky | 2020-06-15 17:53:12 | 2020-06-12 10:04:02 |  5.835174 |  9.762000 |
++-------+------------------+---------------------+---------------------+-----------+-----------+
+3 rows in set (0.01 sec)
+
+mysql> explain select * from t1;
++---------------------------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+
+| id                        | estRows | task      | access object | operator info                                                                                              |
++---------------------------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+
+| Projection_4              | 3.00    | root      |               | test.t1.c_int, test.t1.c_str, test.t1.c_datetime, test.t1.c_timestamp, test.t1.c_double, test.t1.c_decimal |
+| └─UnionScan_5             | 3.00    | root      |               |                                                                                                            |
+|   └─TableReader_7         | 3.00    | root      |               | data:TableFullScan_6                                                                                       |
+|     └─TableFullScan_6     | 3.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                                             |
++---------------------------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+
+mysql> select 1 from t1;         
++---+
+| 1 |
++---+
+| 1 |
+| 1 |
+| 1 |
+| 1 |
++---+
+4 rows in set (0.00 sec)
+
+mysql> select c_int from t1; 
++-------+
+| c_int |
++-------+
+|     1 |
+|     6 |
+|     7 |
+|     7 |
++-------+
+4 rows in set (0.01 sec)
+
+mysql> explain select c_int from t1;
++---------------------------+---------+-----------+------------------------------+--------------------------------+
+| id                        | estRows | task      | access object                | operator info                  |
++---------------------------+---------+-----------+------------------------------+--------------------------------+
+| Projection_4              | 3.00    | root      |                              | test.t1.c_int                  |
+| └─UnionScan_5             | 3.00    | root      |                              |                                |
+|   └─IndexReader_9         | 3.00    | root      |                              | index:IndexFullScan_8          |
+|     └─IndexFullScan_8     | 3.00    | cop[tikv] | table:t1, index:c_int(c_int) | keep order:false, stats:pseudo |
++---------------------------+---------+-----------+------------------------------+--------------------------------+
+4 rows in set (0.01 sec)
+
+mysql> admin check table t1;
+Query OK, 0 rows affected (0.06 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.0.0-nightly
+Edition: Community
+Git Commit Hash: 6416f8d601472892d245b950dfd5547e857a1a33
+Git Branch: heads/refs/tags/v5.0.0-nightly
+UTC Build Time: 2022-01-10 05:41:28
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

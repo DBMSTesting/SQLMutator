@@ -1,0 +1,36 @@
+ID: 36386
+Title: Wrong result when aggregating on volatile functions
+Description:
+## Bug Report
+
+```sql
+create table foo(a int, b int, c int, d int);
+insert into foo values(1,1,1,10),(2,2,2,2);
+insert into foo values(3,1,1,10),(3,2,2,2);
+
+explain select b*floor(2*rand()) as e,  count(d) from foo group by e;
++-----------------------------+---------+--------------+---------------+------------------------------------------------------------------------------------------------+
+| id                          | estRows | task         | access object | operator info                                                                                  |
++-----------------------------+---------+--------------+---------------+------------------------------------------------------------------------------------------------+
+| Projection_4                | 3.20    | root         |               | mul(cast(test.foo.b, double BINARY), floor(mul(2, rand())))->Column#7, Column#6                |
+| └─HashAgg_5                 | 3.20    | root         |               | group by:Column#11, funcs:count(Column#9)->Column#6, funcs:firstrow(Column#10)->test.foo.b     |
+|   └─Projection_15           | 4.00    | root         |               | test.foo.d, test.foo.b, mul(cast(test.foo.b, double BINARY), floor(mul(2, rand())))->Column#11 |
+|     └─TableReader_10        | 4.00    | root         |               | data:TableFullScan_9                                                                           |
+|       └─TableFullScan_9     | 4.00    | cop[tiflash] | table:foo     | keep order:false, stats:pseudo                                                                 |
++-----------------------------+---------+--------------+---------------+------------------------------------------------------------------------------------------------+
+5 rows in set, 4 warnings (0.00 sec)
+
+-- sometimes I see this kind of suspicious result
+select b*floor(2*rand()) as e,  count(d) from foo group by e;
++------+----------+
+| e    | count(d) |
++------+----------+
+|    2 |        1 |
+|    2 |        1 |
+|    0 |        2 |
++------+----------+
+3 rows in set (0.02 sec)
+```
+Shouldn't each aggregate key only appear once?
+
+I think the culprit may be we do the project again after the HashAgg. Each time rand() will generate different values.

@@ -1,0 +1,54 @@
+ID: 28493
+Title: from_unixtime(double)  pushed down to tiflash with invalid decimal
+Description:
+## Bug Report
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+create table tt (col_double double);
+alter table tt set tiflash replica 1;
+insert into tt values (1.1);
+set tidb_enforce_mpp=1;
+select from_unixtime(col_double) from tt;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
++---------------------------------------------------+
+| from_unixtime(cast(col_double as decimal(23, 6))) |
++---------------------------------------------------+
+| 1970-01-01 08:00:01.100000                        |
++---------------------------------------------------+
+```
+### 3. What did you see instead (Required)
+```sql
+ERROR 1105 (HY000): DB::TiFlashException: CAST function without valid field type
+```
+### 4. What is your TiDB version? (Required)
+v5.2.1
+<!-- Paste the output of SELECT tidb_version() -->
+
+this problem is due to that function from_unixtime(double) will  convert double to decimal(23, -1) implicitly when making plan,  in Tiflash decimal(23, -1) is considered illegal.
+
+I don't know that whether converting double to decimal(23, -1) implicitly  is expectable
+
+```go
+func WrapWithCastAsDecimal(ctx sessionctx.Context, expr Expression) Expression {
+   if expr.GetType().EvalType() == types.ETDecimal {
+      return expr
+   }
+   tp := types.NewFieldType(mysql.TypeNewDecimal)
+   // double type: expr.GetType().Flen = 23, expr.GetType().Decimal = -1
+   // make decimal flen = 23, decimal = -1
+   tp.Flen, tp.Decimal = expr.GetType().Flen, expr.GetType().Decimal
+   if expr.GetType().EvalType() == types.ETInt {
+      tp.Flen = mysql.MaxIntWidth
+   }
+   types.SetBinChsClnFlag(tp)
+   tp.Flag |= expr.GetType().Flag & mysql.UnsignedFlag
+   return BuildCastFunction(ctx, expr, tp)
+}
+```
+

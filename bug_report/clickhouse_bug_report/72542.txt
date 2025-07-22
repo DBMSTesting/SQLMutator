@@ -1,0 +1,63 @@
+ID: 72542
+Title: Raft communication issue between Keeper versions 24.8 and 24.9
+Description:
+**Describe what's wrong**
+
+When doing a rolling upgrade from 24.8.5.115 to 24.9.x (or higher) in a cluster of 3 Clickhouse Keeper instances, the first node to be upgraded to the new version (24.9.x) fails to rejoin the cluster, while logging errors about Raft CRC mismatches and "wrong version number (SSL routines)". See the error logs at the end of this issue. 
+
+We were able to reproduce this with all combinations of these versions:
+- v24.9.1.3278-stable, v24.9.2.42-stable, v24.9.3.128-stable, v24.10.3.21-stable, 24.11.1.2557 for the node that gets upgraded ("new version") 
+- v24.8.5.115-lts and v24.8.7.41-lts for the rest of the cluster ("old version")
+
+The issue can be reproduced with this [simple docker setup](https://github.com/IngaFeick/clickhouse_issue). 
+
+Raft config:
+```xml
+...
+      <raft_configuration>
+            <secure>true</secure>
+            <server>
+                <id>1</id>
+                <hostname>clickhouse-keeper1</hostname>
+                <port>9234</port>
+            </server>
+            <server>
+                <id>2</id>
+                <hostname>clickhouse-keeper2</hostname>
+                <port>9234</port>
+            </server>
+            <server>
+                <id>3</id>
+                <hostname>clickhouse-keeper3</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+...
+```
+The full configuration can be found in the [demo project](https://github.com/IngaFeick/clickhouse_issue/blob/test_setup/configs/keeper_config1.xml).
+
+**Does it reproduce on the most recent release?**
+
+Yes, we also tested this for version 24.11.1.2557 (for the upgrading node, against a 24.8 cluster). 
+
+**Expected behavior**
+
+We'd expect not to see the Raft issues logged and for the upgraded node to join the keeper cluster. 
+
+**Error message and/or stacktrace**
+
+On the node that has the new version (`clickhouse-keeper3` in the test project):
+```
+2024.11.27 09:46:51.624272 [ 1 ] {} <Information> Application: Starting ClickHouse Keeper 24.9.3.128 (revision: 54492, git hash: 9a816c73dd4eb5f2ff994b1d9a57c5829f3e4811, build id: A9A66E90E64E24ED57A14DD646BCCF42890A11ED)
+...
+2024.11.27 09:46:51.682274 [ 1 ] {} <Debug> KeeperDispatcher: Server initialized, waiting for quorum
+2024.11.27 09:46:52.983484 [ 47 ] {} <Error> RaftInstance: CRC mismatch: local calculation 80c715d9, from header 4e9b794d, message: &, message in bytes: 0x16 0x3 0x1 0x1 0x26 0x1 0x0 0x1 0x22 0x3 0x3 0x6a 0x73 0x9b 0x2b 0x45 0x1e 0xad 0xd2 0x34 0x7a 0x75 0x81 0x38 0xf8 0xf2 0xe7 0x3e 0xeb 0xe7 0xd3 0x2 0x4d 0x6c 0x10 0xbe 0x33 0xb9 0x84 0x82 0xf5 0x51 0xec 0x20 0xa2 0xf5 0x4d 0x79 0x9b 0x4e 0x16 0xb9 0x60 0x99 : received from socket ::ffff:172.23.0.14:40052
+...
+2024.11.27 09:48:12.248144 [ 43 ] {} <Error> RaftInstance: bad log data size in the header -1893392286, stop this session to protect further corruption
+```
+
+On the other nodes with the old versions (`clickhouse-keeper1` and `clickhouse-keeper2` in the test project): 
+```
+2024.11.27 12:14:02.894655 [ 44 ] {} <Error> RaftInstance: session 459 handshake with ::ffff:172.23.0.16:42346 failed: error 167772427, wrong version number (SSL routines)
+2024.11.27 12:14:02.975671 [ 53 ] {} <Error> RaftInstance: failed SSL handshake with peer 3, clickhouse-keeper3:9234, error 104, Connection reset by peer
+```

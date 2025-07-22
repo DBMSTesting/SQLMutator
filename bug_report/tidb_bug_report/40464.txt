@@ -1,0 +1,65 @@
+ID: 40464
+Title: data and index are inconsistent when creating unique index with tidb_ddl_enable_fast_reorg
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Here is the test case
+``` SQL
+func TestCreateUniqueIndexKeyExist(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int default 0, b int default 0)")
+	tk.MustExec("insert into t values (1, 1), (2, 2), (3, 3), (4, 4)")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	stateDeleteOnlySQLs := []string{"insert into t values (5, 5)"}
+
+	d := dom.DDL()
+	originalCallback := d.GetHook()
+	defer d.SetHook(originalCallback)
+	callback := &ddl.TestDDLCallback{}
+	onJobUpdatedExportedFunc := func(job *model.Job) {
+		if t.Failed() {
+			return
+		}
+		var err error
+		switch job.SchemaState {
+		case model.StateDeleteOnly:
+			for _, sql := range stateDeleteOnlySQLs {
+				_, err = tk1.Exec(sql)
+				assert.NoError(t, err)
+			}
+		case model.StateWriteOnly:
+			_, err = tk1.Exec("insert into t values (5, 7)")
+			assert.NoError(t, err)
+			_, err = tk1.Exec("delete from t where b = 7")
+			assert.NoError(t, err)
+		case model.StateWriteReorganization:
+		}
+	}
+	callback.OnJobUpdatedExported.Store(&onJobUpdatedExportedFunc)
+	d.SetHook(callback)
+	tk.MustExec("alter table t add unique index idx(a)")
+	tk.MustExec("admin check table t")
+}
+```
+
+### 2. What did you expect to see? (Required)
+test pass.
+### 3. What did you see instead (Required)
+```
+admin check table t, [], error stack [admin:8223]data inconsistency in table: t, index: idx, handle: 5, index-values:"" != record-values:"handle: 5, values: [KindInt64 5]"
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

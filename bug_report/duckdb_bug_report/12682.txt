@@ -1,0 +1,54 @@
+ID: 12682
+Title: C API extensions
+Description:
+This PR:
+- Reworks the DuckDB C API header `duckdb.h` to use code-generation
+- Adds a new C Extension API  based on a struct-of-functionpointers design similar to [sqlite](https://github.com/cloudmeter/sqlite/blob/master/sqlite3ext.h) 
+
+## Why?
+The C Extension API solves 3 major problems with extensions:
+
+### Linking DuckDB into every extension
+Currently every extension has a (part of) DuckDB linked into it statically. When an extension's init function is called, a pointer to the DuckDB instance is passed to the extension code. However, to interact with 
+this pointer to the instance in any meaningful way, requires to be able to call into DuckDB code. There are two ways this can be achieved when extending the C++ API: Firstly, by relying on the RTLD_GLOBAL flag. This flag
+can be set when dlopening binaries to ensure the dlopened extension can resolve its missing symbols against those in the parent process, i.e. DuckDB. Unfortunately we can't always control whether DuckDB itself is opened with RTLD global: this would require us to hack this into every client (because the default on MacOS is RTLD_LOCAL). The second way is what we currently do: statically link a copy of DuckDB into every extension. While this is super wasteful with regards to the binary size, it turns out to be quite effective in distributing extensions to many platforms.
+
+Now using the extension C API implementation described here, this problem would be circumvented completely: the extension can call into duckdb using only function pointers: no linking required there! This makes the extensions really small! for example the extension in my demo branch compiles to a 17K binary.
+
+### Rebuilding extensions for new DuckDB versions
+C++ API Extension are now tied tightly to the DuckDB version: Because we make no guarantees about C++ API stability and also because of how we link DuckDB into every extension binary, all extensions need to be recompiled for new versions of DuckDB. With C api extensions, this is no longer the case. We can simply build the extension once, and as long as DuckDB supports that version of the C API, the extension binary will be loadable.
+
+### Requiring C++ for writing your extensions
+Cleanly writing extensions in C, Rust, Go will be possible building on top of the C API. By using the "passing a c struct" method from SQLite, we remove the need to link with duckdb during build time whatsoever, making things much simpler, allowing extension to be created purely using the extension header file.
+
+## Implementation 
+### Overview
+The basic idea of this is that instead of relying on dynamic or static linking to call into DuckDB functions, the extension init function gets passed a struct containing all available functions. This would
+look a little like:
+
+```C++
+typedef struct {
+	// ...
+	idx_t (*duckdb_data_chunk_get_size)(duckdb_data_chunk chunk);
+	duckdb_vector (*duckdb_data_chunk_get_vector)(duckdb_data_chunk chunk, idx_t col_idx);
+	// ...
+} duckdb_ext_api_v1;
+```
+
+The code for a C Extension API based extension is very straightforward, due to some macros:
+
+```C++
+#include "duckdb_extension.h"
+
+DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection, duckdb_extension_info info, duckdb_extension_access *access) {
+    // Register extension stuff here
+}
+```
+Checkout the capi_demo extension added in this PR for an example.
+
+### Code generation
+I've split up the C API across two files:
+- `duckdb.h` is the original capi header file 
+- `duckdb_extension.h` is the header that extensions need to include, it contains the struct-of-function-pointers and typedefs to the original extension names.
+
+The code is generated from `json` files which are in `src/include/duckdb/main/capi/header_generation/`. There are 2 types of json files. **function definition files** define all possible functions that are in the C API. These can potentially be deprecated. **api definition files** contain the definition (and order) of the C API struct. 

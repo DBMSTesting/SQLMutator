@@ -1,0 +1,231 @@
+ID: 14584
+Title: Massive memory overhead for groupings with large cardinalities
+Description:
+### What happens?
+
+GROUP BY with large cardinalities (millions of groups) results in massive and unexpected memory overhead.
+
+Example query:
+
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+        copy (          select user_id_hash, count(*) as reqs from reader group by user_id_hash        ) to 's3://api-data/arrow-example3.parquet' (format parquet)     
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         HTTPFS HTTP Stats         ││
+││                                   ││
+││           in: 665 bytes           ││
+││            out: 2.8 GiB           ││
+││              #HEAD: 1             ││
+││              #GET: 0              ││
+││              #PUT: 39             ││
+││              #POST: 2             ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 750.75s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│               Optimizer: 0.0001s               │
+│┌──────────────────────────────────────────────┐│
+││        Build Side Probe Side: 0.0000s        ││
+││           Column Lifetime: 0.0000s           ││
+││           Common Aggregate: 0.0000s          ││
+││        Common Subexpressions: 0.0000s        ││
+││      Compressed Materialization: 0.0000s     ││
+││          Cte Filter Pusher: 0.0000s          ││
+││             Deliminator: 0.0000s             ││
+││           Duplicate Groups: 0.0000s          ││
+││         Expression Rewriter: 0.0000s         ││
+││              Extension: 0.0000s              ││
+││            Filter Pullup: 0.0000s            ││
+││           Filter Pushdown: 0.0000s           ││
+││              In Clause: 0.0000s              ││
+││         Join Filter Pushdown: 0.0000s        ││
+││              Join Order: 0.0000s             ││
+││            Limit Pushdown: 0.0000s           ││
+││           Materialized Cte: 0.0000s          ││
+││             Regex Range: 0.0000s             ││
+││            Reorder Filter: 0.0000s           ││
+││        Statistics Propagation: 0.0000s       ││
+││                Top N: 0.0000s                ││
+││           Unnest Rewriter: 0.0000s           ││
+││            Unused Columns: 0.0000s           ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│            Physical planner: 0.0001s           │
+│┌──────────────────────────────────────────────┐│
+││            Column Binding: 0.0000s           ││
+││             Create Plan: 0.0001s             ││
+││            Resolve Types: 0.0000s            ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│                 Planner: 0.375s                │
+│┌──────────────────────────────────────────────┐│
+││                Binding: 0.375s               ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│        COPY_TO_FILE       │
+│    ────────────────────   │
+│           1 Rows          │
+│          (18.57s)         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│         Groups: #0        │
+│                           │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│       318972068 Rows      │
+│         (1761.85s)        │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        user_id_hash       │
+│                           │
+│      9180444582 Rows      │
+│          (5.28s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│    Function: ARROW_SCAN   │
+│                           │
+│        Projections:       │
+│        user_id_hash       │
+│                           │
+│      9180444582 Rows      │
+│         (4060.83s)        │
+└───────────────────────────┘
+```
+
+Approximately 9 billion rows are aggregated into approximately 320 groups. Group key is a 64-bit integer, group value is a count.
+
+Expected memory usage under ideal conditions is (320e6 * 16) / (1024^3) =  approx. 4.5 gigabytes of memory.
+
+Meanwhile with a real query and `set memory_limit='50GB'` we see spill over on disk like this:
+```
+-rw-r--r-- 1 itkachev users 17660641280 Oct 28 11:54 duckdb_temp_storage-4.tmp
+-rw-r--r-- 1 itkachev users  7957381120 Oct 28 11:54 duckdb_temp_storage-3.tmp
+-rw-r--r-- 1 itkachev users   233046016 Oct 28 11:54 duckdb_temp_storage-0.tmp
+-rw-r--r-- 1 itkachev users  3174301696 Oct 28 11:54 duckdb_temp_storage-1.tmp
+-rw-r--r-- 1 itkachev users 32959627264 Oct 28 11:53 duckdb_temp_storage-5.tmp
+-rw-r--r-- 1 itkachev users  4346609664 Oct 28 11:47 duckdb_temp_storage-2.tmp
+```
+and a process resident size like this:
+```
+itkachev 1946259  213 18.9 62372220 49779508 pts/10 Sl+ 11:42  20:43 python3 arrow-example3.py
+```
+or about 121 gigabytes total memory use.
+That is an overhead of x27 or 2700%. (!!)
+
+
+### To Reproduce
+
+```python
+import duckdb
+import pyarrow
+import requests
+import random
+
+duckdb.sql("set threads=8")
+pyarrow.set_cpu_count(8)
+
+def my_process(reader):
+    duck = duckdb.connect()
+    duck.sql("set threads=8")
+    duck.sql("set memory_limit='50GB'")
+    duck.sql(f"set temp_directory='.tmp{random.randint(0,1e5)}'")
+    duck.sql("""
+    create or replace secret minio (
+       type s3,
+       endpoint 'dwh.lan:9900',
+       use_ssl false,
+       url_style 'path',
+       key_id '...',
+       secret '...'
+    )""")
+    duck.sql("PRAGMA enable_profiling");
+    duck.sql("SET profiling_mode = 'detailed'");
+    duck.sql("""
+       copy (
+         select user_id_hash, count(*) as reqs from reader group by user_id_hash
+       ) to 's3://api-data/arrow-example3.parquet' (format parquet)
+    """)
+    duckdb.sql("FROM duckdb_memory()");
+    duckdb.sql("FROM duckdb_temporary_files()");
+
+def query_clickhouse(query, processor, host='ch.lan', port=8123):
+    resp = requests.post(f"http://{host}:{port}/?output_format_arrow_compression_method=zstd",
+                         headers={'Accept-Encoding': 'identity'},
+                         data=query+" FORMAT ArrowStream",
+                         stream=True)
+    if resp.status_code >= 200 and resp.status_code < 300:
+        stream = pyarrow.ipc.open_stream(resp.raw)
+        processor(stream)
+    else:
+        raise Exception(f"Clickhouse request failed: {resp.status_code} : {resp.content.decode('utf-8')}")
+
+def main():
+    query = "select date, user_id_hash from data where date=today()-1 and what='rtb_imp'"
+    query_clickhouse(query, my_process)
+
+main()
+```
+
+
+### OS:
+
+Linux
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+aarch64 ARM Neoverse-N1 (128 cores)
+256Gb RAM
+
+### Full Name:
+
+Ivan Tkachev
+
+### Affiliation:
+
+Hyper AdTech
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot easily share my data sets due to their large size
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

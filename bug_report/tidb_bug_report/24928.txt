@@ -1,0 +1,180 @@
+ID: 24928
+Title: `str_to_date` is not compatible with MySQL under some input
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. "%D","%j","%U","%u","%V","%v","%W","%w","%X","%x","%%" are not supported by TiDB.
+  A related question from [asktug](https://asktug.com/t/topic/63329)
+  @tiancaiamao Have filed a PR for supporting "%X","%V","%W" in #21887, but it didn't get reviewed and merged
+2. (Fixed in #25386) <del>Some incompatible parsing result, I will list some examples in the following sections
+   * '%b'/'%M' should be case insensitive
+   * Parsing an empty string
+   * Parsing the day that does not exist in the real world
+   * Parsing the "Feb 29th" for leap year and non-leap year
+   * Parsing some input for "%r" and "%T"
+</del>
+
+### 1. Minimal reproduce step (Required)
+
+1. Deploy MySQL 5.7 and TiDB 5.0.0
+2. Insert some strings and parse those strings by `str_to_date`
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> select version();
++-------------------------+
+| version()               |
++-------------------------+
+| 5.7.33-0ubuntu0.16.04.1 |
++-------------------------+
+mysql> create table a (date char(30) COLLATE latin1_bin, format char(30) COLLATE latin1_bin not null);
+mysql> insert into a values ('31/may/2016 12:34:56.1234', "%d/%b/%Y %H:%i:%S.%f"),("30/april/2016 12:34:56.", "%d/%M/%Y %H:%i:%s.%f"),("30/Feb/2016 12:34:56.1234", "%d/%b/%Y %H:%i:%S.%f"),("31/April/2016 12:34:56.", "%d/%M/%Y %H:%i:%s.%f"),("29/Feb/2020 12:34:56.", "%d/%b/%Y %H:%i:%s.%f"),("29/Feb/2021 12:34:56.", "%d/%b/%Y %H:%i:%s.%f"),("01/Feb/2016 % 23:45:54", "%d/%b/%Y %% %H:%i:%S");
+mysql> set sql_mode='';
+mysql> select date, format, str_to_date(date, format) from a;
++---------------------------+----------------------+----------------------------+
+| date                      | format               | str_to_date(date, format)  |
++---------------------------+----------------------+----------------------------+
+| 31/may/2016 12:34:56.1234 | %d/%b/%Y %H:%i:%S.%f | 2016-05-31 12:34:56.123400 |
+| 30/april/2016 12:34:56.   | %d/%M/%Y %H:%i:%s.%f | 2016-04-30 12:34:56.000000 |
+| 30/Feb/2016 12:34:56.1234 | %d/%b/%Y %H:%i:%S.%f | 2016-02-30 12:34:56.123400 |
+| 31/April/2016 12:34:56.   | %d/%M/%Y %H:%i:%s.%f | 2016-04-31 12:34:56.000000 |
+| 29/Feb/2020 12:34:56.     | %d/%b/%Y %H:%i:%s.%f | 2020-02-29 12:34:56.000000 |
+| 29/Feb/2021 12:34:56.     | %d/%b/%Y %H:%i:%s.%f | 2021-02-29 12:34:56.000000 |
+| 01/Feb/2016 % 23:45:54    | %d/%b/%Y %% %H:%i:%S | NULL                       |
++---------------------------+----------------------+----------------------------+
+
+mysql> select str_to_date("", "");
++---------------------+
+| str_to_date("", "") |
++---------------------+
+| 0000-00-00          |
++---------------------+
+
+mysql> truncate a; -- test cases for %r
+mysql> insert into a values (" 04 :13:56 AM13/05/2019", "%r %d/%c/%Y"),("13:13:56 AM13/5/2019", "%r"),("00:13:56 AM13/05/2019", "%r"),("00:13:56 pM13/05/2019", "%r"),("12: 13:56 AM 13/05/2019", "%r%d/%c/%Y"),("12:13 :56 pm 13/05/2019", "%r %d/%c/%Y"),("11:13: 56pm 13/05/2019", "%r %d/%c/%Y"),("11:13:56a", "%r"),("11:13", "%r"),("11:", "%r"),("12", "%r");
+mysql> select date, format, str_to_date(date, format) from a;
++-------------------------+-------------+----------------------------+
+| date                    | format      | str_to_date(date, format)  |
++-------------------------+-------------+----------------------------+
+|  04 :13:56 AM13/05/2019 | %r %d/%c/%Y | 2019-05-13 04:13:56.000000 |
+| 13:13:56 AM13/5/2019    | %r          | NULL                       |
+| 00:13:56 AM13/05/2019   | %r          | NULL                       |
+| 00:13:56 pM13/05/2019   | %r          | NULL                       |
+| 12: 13:56 AM 13/05/2019 | %r%d/%c/%Y  | 2019-05-13 00:13:56.000000 |
+| 12:13 :56 pm 13/05/2019 | %r %d/%c/%Y | 2019-05-13 12:13:56.000000 |
+| 11:13: 56pm 13/05/2019  | %r %d/%c/%Y | 2019-05-13 23:13:56.000000 |
+| 11:13:56a               | %r          | NULL                       |
+| 11:13                   | %r          | 0000-00-00 11:13:00.000000 |
+| 11:                     | %r          | 0000-00-00 11:00:00.000000 |
+| 12                      | %r          | 0000-00-00 00:00:00.000000 |
++-------------------------+-------------+----------------------------+
+
+mysql> truncate a; -- test cases for %T
+mysql> insert into a values (" 4 :13:56 13/05/2019", "%T %d/%c/%Y"),("23: 13:56 13/05/2019", "%T%d/%c/%Y"),("12:13 :56 13/05/2019", "%T %d/%c/%Y"),("19:13: 56 13/05/2019", "%T %d/%c/%Y"),("21:13", "%T"),("21:", "%T");
+mysql> select date, format, str_to_date(date, format) from a;
++----------------------+-------------+----------------------------+
+| date                 | format      | str_to_date(date, format)  |
++----------------------+-------------+----------------------------+
+|  4 :13:56 13/05/2019 | %T %d/%c/%Y | 2019-05-13 04:13:56.000000 |
+| 23: 13:56 13/05/2019 | %T%d/%c/%Y  | 2019-05-13 23:13:56.000000 |
+| 12:13 :56 13/05/2019 | %T %d/%c/%Y | 2019-05-13 12:13:56.000000 |
+| 19:13: 56 13/05/2019 | %T %d/%c/%Y | 2019-05-13 19:13:56.000000 |
+| 21:13                | %T          | 0000-00-00 21:13:00.000000 |
+| 21:                  | %T          | 0000-00-00 21:00:00.000000 |
++----------------------+-------------+----------------------------+
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> select tidb_version();
++-------------------------------------------------------------------+
+| tidb_version()                                                    |
++-------------------------------------------------------------------+
+| Release Version: v5.0.0                                           |
+| Edition: Community                                                |
+| Git Commit Hash: bdac0885cd11bdf571aad9353bfc24e13554b91c         |
+| Git Branch: heads/refs/tags/v5.0.0                                |
+| UTC Build Time: 2021-04-06 16:36:29                               |
+| GoVersion: go1.13                                                 |
+| Race Enabled: false                                               |
+| TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306 |
+| Check Table Before Drop: false                                    |
++-------------------------------------------------------------------+
+mysql> create table a (date char(30) COLLATE latin1_bin, format char(30) COLLATE latin1_bin not null);
+mysql> insert into a values ('31/may/2016 12:34:56.1234', "%d/%b/%Y %H:%i:%S.%f"),("30/april/2016 12:34:56.", "%d/%M/%Y %H:%i:%s.%f"),("30/Feb/2016 12:34:56.1234", "%d/%b/%Y %H:%i:%S.%f"),("31/April/2016 12:34:56.", "%d/%M/%Y %H:%i:%s.%f"),("29/Feb/2020 12:34:56.", "%d/%b/%Y %H:%i:%s.%f"),("29/Feb/2021 12:34:56.", "%d/%b/%Y %H:%i:%s.%f"),("01/Feb/2016 % 23:45:54", "%d/%b/%Y %% %H:%i:%S");
+mysql> set sql_mode='';
+mysql> select date, format, str_to_date(date, format) from a;
++---------------------------+----------------------+----------------------------+
+| date                      | format               | str_to_date(date, format)  |
++---------------------------+----------------------+----------------------------+
+| 31/may/2016 12:34:56.1234 | %d/%b/%Y %H:%i:%S.%f | NULL                       |
+| 30/april/2016 12:34:56.   | %d/%M/%Y %H:%i:%s.%f | NULL                       |
+| 30/Feb/2016 12:34:56.1234 | %d/%b/%Y %H:%i:%S.%f | NULL                       |
+| 31/April/2016 12:34:56.   | %d/%M/%Y %H:%i:%s.%f | NULL                       |
+| 29/Feb/2020 12:34:56.     | %d/%b/%Y %H:%i:%s.%f | 2020-02-29 12:34:56.000000 |
+| 29/Feb/2021 12:34:56.     | %d/%b/%Y %H:%i:%s.%f | NULL                       |
+| 01/Feb/2016 % 23:45:54    | %d/%b/%Y %% %H:%i:%S | NULL                       |
++---------------------------+----------------------+----------------------------+
+
+mysql> select str_to_date("", "");
++---------------------+
+| str_to_date("", "") |
++---------------------+
+| 0000-00-00 00:00:00 |
++---------------------+
+
+mysql> truncate a; -- test cases for %r
+mysql> insert into a values (" 04 :13:56 AM13/05/2019", "%r %d/%c/%Y"),("13:13:56 AM13/5/2019", "%r"),("00:13:56 AM13/05/2019", "%r"),("00:13:56 pM13/05/2019", "%r"),("12: 13:56 AM 13/05/2019", "%r%d/%c/%Y"),("12:13 :56 pm 13/05/2019", "%r %d/%c/%Y"),("11:13: 56pm 13/05/2019", "%r %d/%c/%Y"),("11:13:56a", "%r"),("11:13", "%r"),("11:", "%r"),("12", "%r");
+mysql> select date, format, str_to_date(date, format) from a;
++-------------------------+-------------+---------------------------+
+| date                    | format      | str_to_date(date, format) |
++-------------------------+-------------+---------------------------+
+|  04 :13:56 AM13/05/2019 | %r %d/%c/%Y | NULL                      |
+| 13:13:56 AM13/5/2019    | %r          | NULL                      |
+| 00:13:56 AM13/05/2019   | %r          | NULL                      |
+| 00:13:56 pM13/05/2019   | %r          | NULL                      |
+| 12: 13:56 AM 13/05/2019 | %r%d/%c/%Y  | NULL                      |
+| 12:13 :56 pm 13/05/2019 | %r %d/%c/%Y | NULL                      |
+| 11:13: 56pm 13/05/2019  | %r %d/%c/%Y | NULL                      |
+| 11:13:56a               | %r          | NULL                      |
+| 11:13                   | %r          | NULL                      |
+| 11:                     | %r          | NULL                      |
+| 12                      | %r          | NULL                      |
++-------------------------+-------------+---------------------------+
+
+mysql> truncate a; -- test cases for %T
+mysql> select date, format, str_to_date(date, format) from a;
+mysql> insert into a values (" 4 :13:56 13/05/2019", "%T %d/%c/%Y"),("23: 13:56 13/05/2019", "%T%d/%c/%Y"),("12:13 :56 13/05/2019", "%T %d/%c/%Y"),("19:13: 56 13/05/2019", "%T %d/%c/%Y"),("21:13", "%T"),("21:", "%T");
+mysql> select date, format, str_to_date(date, format) from a;
++----------------------+-------------+---------------------------+
+| date                 | format      | str_to_date(date, format) |
++----------------------+-------------+---------------------------+
+|  4 :13:56 13/05/2019 | %T %d/%c/%Y | NULL                      |
+| 23: 13:56 13/05/2019 | %T%d/%c/%Y  | NULL                      |
+| 12:13 :56 13/05/2019 | %T %d/%c/%Y | NULL                      |
+| 19:13: 56 13/05/2019 | %T %d/%c/%Y | NULL                      |
+| 21:13                | %T          | NULL                      |
+| 21:                  | %T          | NULL                      |
++----------------------+-------------+---------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+```
+mysql> select tidb_version();
++-------------------------------------------------------------------+
+| tidb_version()                                                    |
++-------------------------------------------------------------------+
+| Release Version: v5.0.0                                           |
+| Edition: Community                                                |
+| Git Commit Hash: bdac0885cd11bdf571aad9353bfc24e13554b91c         |
+| Git Branch: heads/refs/tags/v5.0.0                                |
+| UTC Build Time: 2021-04-06 16:36:29                               |
+| GoVersion: go1.13                                                 |
+| Race Enabled: false                                               |
+| TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306 |
+| Check Table Before Drop: false                                    |
++-------------------------------------------------------------------+
+```

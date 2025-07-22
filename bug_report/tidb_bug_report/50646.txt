@@ -1,0 +1,83 @@
+ID: 50646
+Title: Global binding is not works for upper db schema name 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+drop database if exists TICASE;
+create database TICASE;
+use TICASE;
+delete from mysql.bind_info;
+drop table if exists t, t1;
+create table t(a int, b int, index idx(a));
+create table t1(a int, b int, index idx(a));
+insert into t values(1,1), (2,2), (3,3), (4, 4), (5,5);
+insert into t1 values(1,-1),(2,-2), (3,-3), (4,-4), (5, -5);
+create global binding for delete t, t1 from t use index(idx) join t1 use index(idx) on t.a=t1.a using delete /*+ merge_join(t) */ t, t1 from t use index(idx) join t1 use index(idx) on t.a=t1.a;
+explain delete /*+ inl_merge_join(t) */ t, t1 from t ignore index(idx) join t1 ignore index(idx) on t.a=t1.a;
+show global bindings;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+[12:07:31]TiDB root:ticase> explain delete /*+ inl_merge_join(t) */ t, t1 from t ignore index(idx) join t1 ignore index(idx) on t.a=t1.a;
++--------------------------------+----------+-----------+------------------------+--------------------------------------------------------+
+| id                             | estRows  | task      | access object          | operator info                                          |
++--------------------------------+----------+-----------+------------------------+--------------------------------------------------------+
+| Delete_6                       | N/A      | root      |                        | N/A                                                    |
+| └─MergeJoin_9                  | 12487.50 | root      |                        | inner join, left key:ticase.t.a, right key:ticase.t1.a |
+|   ├─IndexLookUp_16(Build)      | 9990.00  | root      |                        |                                                        |
+|   │ ├─IndexFullScan_14(Build)  | 9990.00  | cop[tikv] | table:t1, index:idx(a) | keep order:true, stats:pseudo                          |
+|   │ └─TableRowIDScan_15(Probe) | 9990.00  | cop[tikv] | table:t1               | keep order:false, stats:pseudo                         |
+|   └─IndexLookUp_13(Probe)      | 9990.00  | root      |                        |                                                        |
+|     ├─IndexFullScan_11(Build)  | 9990.00  | cop[tikv] | table:t, index:idx(a)  | keep order:true, stats:pseudo                          |
+|     └─TableRowIDScan_12(Probe) | 9990.00  | cop[tikv] | table:t                | keep order:false, stats:pseudo                         |
++--------------------------------+----------+-----------+------------------------+--------------------------------------------------------+
+```
+### 3. What did you see instead (Required)
+```sql
+[12:06:31]TiDB root:TICASE> explain delete /*+ inl_merge_join(t) */ t, t1 from t ignore index(idx) join t1 ignore index(idx) on t.a=t1.a;
++---------------------------+----------+-----------+---------------+-------------------------------------------------+
+| id                        | estRows  | task      | access object | operator info                                   |
++---------------------------+----------+-----------+---------------+-------------------------------------------------+
+| Delete_6                  | N/A      | root      |               | N/A                                             |
+| └─HashJoin_9              | 12487.50 | root      |               | inner join, equal:[eq(ticase.t.a, ticase.t1.a)] |
+|   ├─TableReader_16(Build) | 9990.00  | root      |               | data:Selection_15                               |
+|   │ └─Selection_15        | 9990.00  | cop[tikv] |               | not(isnull(ticase.t1.a))                        |
+|   │   └─TableFullScan_14  | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                  |
+|   └─TableReader_13(Probe) | 9990.00  | root      |               | data:Selection_12                               |
+|     └─Selection_12        | 9990.00  | cop[tikv] |               | not(isnull(ticase.t.a))                         |
+|       └─TableFullScan_11  | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                  |
++---------------------------+----------+-----------+---------------+-------------------------------------------------+
+8 rows in set
+Time: 0.004s
+[12:06:37]TiDB root:TICASE> show global bindings;
++------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+------------+---------+----------------------------+----------------------------+---------+-----------------+--------+------------------------------------------------------------------+-------------+
+| Original_sql                                                                                               | Bind_sql                                                                                                                                               | Default_db | Status  | Create_time                | Update_time                | Charset | Collation       | Source | Sql_digest                                                       | Plan_digest |
++------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+------------+---------+----------------------------+----------------------------+---------+-----------------+--------+------------------------------------------------------------------+-------------+
+| delete `ticase` . `t` , `ticase` . `t1` from `ticase` . `t` join `ticase` . `t1` on `t` . `a` = `t1` . `a` | DELETE /*+ merge_join(`t`)*/ `TICASE`.`t`,`TICASE`.`t1` FROM `TICASE`.`t` USE INDEX (`idx`) JOIN `TICASE`.`t1` USE INDEX (`idx`) ON `t`.`a` = `t1`.`a` | ticase     | enabled | 2024-01-23 12:06:21.463000 | 2024-01-23 12:06:21.463000 | utf8    | utf8_general_ci | manual | 326e329afee129e51dff32790dae1403e9ce7a03fb7ec97c49dd5f9a7f5fde38 |             |
++------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------+------------+---------+----------------------------+----------------------------+---------+-----------------+--------+------------------------------------------------------------------+-------------+
+```
+### 4. What is your TiDB version? (Required)
+```sql
+[12:07:55]TiDB root:ticase> select tidb_version();
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v7.6.0                                   |
+| Edition: Community                                        |
+| Git Commit Hash: 6701bf1527c7386a82396a1ecfb5322872daa2b3 |
+| Git Branch: heads/refs/tags/v7.6.0                        |
+| UTC Build Time: 2024-01-08 12:51:43                       |
+| GoVersion: go1.21.5                                       |
+| Race Enabled: false                                       |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

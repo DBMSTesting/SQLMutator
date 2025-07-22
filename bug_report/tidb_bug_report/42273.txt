@@ -1,0 +1,99 @@
+ID: 42273
+Title: RANGE COLUMNS partitioning pruning includes an impossible partition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+CREATE TABLE t
+(a tinyint unsigned,
+ b tinyint unsigned)
+PARTITION BY RANGE COLUMNS (a,b)
+(PARTITION p0 VALUES LESS THAN (10,255),
+ PARTITION p1 VALUES LESS THAN (11,MAXVALUE),
+ PARTITION p2 VALUES LESS THAN (MAXVALUE,1));
+explain select * from t where a = 11;
+analyze table t; -- Enables dynamic prune mode
+explain select * from t where a = 11;
+```
+
+### 2. What did you expect to see? (Required)
+Only partition p1 should be included, like MySQL:
+```
+mysql> CREATE TABLE t
+    -> (a tinyint unsigned,
+    ->  b tinyint unsigned)
+    -> PARTITION BY RANGE COLUMNS (a,b)
+    -> (PARTITION p0 VALUES LESS THAN (10,255),
+    ->  PARTITION p1 VALUES LESS THAN (11,MAXVALUE),
+    ->  PARTITION p2 VALUES LESS THAN (MAXVALUE,1));
+Query OK, 0 rows affected (0,03 sec)
+
+mysql> explain select * from t where a = 11;
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | t     | p1         | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | Using where |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0,00 sec)
+```
+
+### 3. What did you see instead (Required)
+Partition p2 is included, when it cannot hold any values where a = 11.
+
+```
+tidb> CREATE TABLE t
+    -> (a tinyint unsigned,
+    ->  b tinyint unsigned)
+    -> PARTITION BY RANGE COLUMNS (a,b)
+    -> (PARTITION p0 VALUES LESS THAN (10,255),
+    ->  PARTITION p1 VALUES LESS THAN (11,MAXVALUE),
+    ->  PARTITION p2 VALUES LESS THAN (MAXVALUE,1));
+Query OK, 0 rows affected (0.08 sec)
+
+tidb> explain select * from t where a = 11;
++-----------------------------+----------+-----------+-----------------------+--------------------------------+
+| id                          | estRows  | task      | access object         | operator info                  |
++-----------------------------+----------+-----------+-----------------------+--------------------------------+
+| PartitionUnion_8            | 20.00    | root      |                       |                                |
+| ├─TableReader_11        | 10.00    | root      |                       | data:Selection_10              |
+| │ └─Selection_10      | 10.00    | cop[tikv] |                       | eq(test.t.a, 11)               |
+| │   └─TableFullScan_9 | 10000.00 | cop[tikv] | table:t, partition:p1 | keep order:false, stats:pseudo |
+| └─TableReader_14        | 10.00    | root      |                       | data:Selection_13              |
+|   └─Selection_13        | 10.00    | cop[tikv] |                       | eq(test.t.a, 11)               |
+|     └─TableFullScan_12  | 10000.00 | cop[tikv] | table:t, partition:p2 | keep order:false, stats:pseudo |
++-----------------------------+----------+-----------+-----------------------+--------------------------------+
+7 rows in set, 1 warning (0.00 sec)
+
+tidb> analyze table t; -- Enables dynamic prune mode
+Query OK, 0 rows affected, 6 warnings (0.15 sec)
+
+tidb> explain select * from t where a = 11;
++-------------------------+----------+-----------+-----------------+--------------------------------+
+| id                      | estRows  | task      | access object   | operator info                  |
++-------------------------+----------+-----------+-----------------+--------------------------------+
+| TableReader_7           | 10.00    | root      | partition:p1,p2 | data:Selection_6               |
+| └─Selection_6       | 10.00    | cop[tikv] |                 | eq(test.t.a, 11)               |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t         | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+-----------------+--------------------------------+
+3 rows in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v6.6.0
+Edition: Community
+Git Commit Hash: f4ca0821fb96a2bdd37d2fb97eb26c07fc58d4e4
+Git Branch: heads/refs/tags/v6.6.0
+UTC Build Time: 2023-02-17 14:39:38
+GoVersion: go1.19.5
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv
+```

@@ -1,0 +1,100 @@
+ID: 14784
+Title: Status port does not work when cluster-TLS (SSL) is enabled
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+<details><summary>Start TiDB with cluster TLS:</summary>
+
+```sh
+#!/bin/sh
+set -eu
+export MSYS2_ARG_CONV_EXCL=\*
+
+# Generate certs
+
+cat - > ipsan.cnf <<EOF
+[dn]
+CN = localhost
+[req]
+distinguished_name = dn
+[EXT]
+subjectAltName = @alt_names
+keyUsage = digitalSignature
+extendedKeyUsage = clientAuth,serverAuth
+[alt_names]
+DNS.1 = localhost
+IP.1 = 127.0.0.1
+EOF
+
+openssl ecparam -out ca.key -name prime256v1 -genkey
+openssl req -new -batch -sha256 -subj '/CN=localhost' -key ca.key -out ca.csr
+openssl x509 -req -sha256 -days 2 -in ca.csr -signkey ca.key -out ca.pem 2> /dev/null
+
+openssl ecparam -out cluster.key -name prime256v1 -genkey
+openssl req -new -batch -sha256 -subj '/CN=localhost' -key cluster.key -out cluster.csr
+openssl x509 -req -sha256 -days 1 -extensions EXT -extfile ipsan.cnf -in cluster.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out cluster.pem 2> /dev/null
+
+# Start TiDB
+
+cat - > tidb-config.toml <<EOF
+host = "127.0.0.1"
+port = 4000
+[status]
+status-host = "127.0.0.1"
+status-port = 10080
+[security]
+cluster-ssl-ca = "ca.pem"
+cluster-ssl-cert = "cluster.pem"
+cluster-ssl-key = "cluster.key"
+EOF
+
+../bin/tidb-server --config tidb-config.toml
+```
+
+</details>
+
+Then try to connect to the status port
+
+```sh
+curl --cacert ca.pem 'https://127.0.0.1:10080/status'
+```
+
+2. What did you expect to see?
+
+JSON output like 
+
+```
+{"connections":0,"version":"5.7.25-TiDB-v4.0.0-beta-136-g8c804f40d","git_hash":"8c804f40dda5ef231a73f459ecd812fb135b9fba"}
+```
+
+3. What did you see instead?
+
+Connecting using HTTP/2 returned failure:
+
+```
+curl: (92) HTTP/2 stream 0 was not closed cleanly: INTERNAL_ERROR (err 2)
+```
+
+Furthermore, connecting using HTTP/1.1 does not succeed either, and the server is definitely serving HTTPS.
+
+```console
+$ curl --http1.1 --cacert ca.pem 'https://127.0.0.1:10080/status'
+curl: (1) Received HTTP/0.9 when not allowed
+
+$ curl --http0.9 --cacert ca.pem 'https://127.0.0.1:10080/status'
+curl: (92) HTTP/2 stream 0 was not closed cleanly: INTERNAL_ERROR (err 2)
+
+$ curl 'http://127.0.0.1:10080/status'
+Client sent an HTTP request to an HTTPS server.
+curl: (56) Recv failure: Connection was reset
+```
+
+Note that the gRPC server on the same port works correctly via TLS.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+master version

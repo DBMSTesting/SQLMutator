@@ -1,0 +1,118 @@
+ID: 13705
+Title: DuckDBPyConnection cannot be used to fetch rows of original query after connection is used for other executions
+Description:
+### What happens?
+
+I found a situation where I execute a query which will eventually be used to read rows from a table. Then, I execute some queries to get column information from `INFORMATION_SCHEMA` for that same table (using the same connection that was used for the original connection/cursor). Finally, I read the rows from the cursor, however, **unexpectedly there are no longer any rows to be found**... If I use the cursor to the the columns and types, all rows are returned as expected. However, this doesn't meet my needs because the DBAPI cursor types are insufficiently granular (See #10495).
+
+_I suspect some buffer reader/generator on the connection is being "clobbered" by the intermediary queries that are fired so that the original cursor object can no longer be used to fetch the expected rows._
+
+NOTE: I first observed this when using `sqlalchemy`, where `DuckDBPyConnection` represents the cursor on a `CursorResult` object.
+
+### To Reproduce
+
+```python
+import duckdb
+
+
+def setup(conn):
+    # Create table and insert data.
+    if not conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'test_table'").fetchone():
+        conn.execute("CREATE TABLE test_table (col1 INTEGER, col2 FLOAT)")
+        conn.execute("INSERT INTO test_table (col1, col2) VALUES (1, 2.0), (3, 4.0), (5, 6.0)")
+
+
+def metadata_from_query(conn, query: str) -> list:
+    conn.execute(f"CREATE TEMPORARY VIEW temp_view AS {query}")
+    # get column types from information schema
+    res = conn.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'temp_view'")
+    return res.fetchall()
+
+
+def metadata_from_table(conn, table_name: str) -> list:
+    res = conn.execute(
+        f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table_name}'",
+    )
+    return res.fetchall()
+
+
+def main():
+    with duckdb.connect("//tmp/test.duckdb") as conn:
+        setup(conn)
+
+    query = "SELECT * FROM test_table"
+
+    # Test 1 (SUCCESS): Execute the query, access the cursor description, then fetch all rows.
+    # EXPECTED: fetching rows from the originally executed query should return 3 rows.
+    # ACTUAL: fetching rows from the originally executed query returns 3 rows.
+    with duckdb.connect("//tmp/test.duckdb") as conn:
+        res = conn.execute(query)
+        metadata = res.description
+        print(metadata)
+        rows = res.fetchall()
+        print(rows)
+        assert len(rows) == 3, f"Expected 3 rows, got {len(rows)}"
+
+    # Test 2 (FAIL): Execute the query, create a temporary view (limit 0), query the view for column types, then fetch all rows from the original query
+    # EXPECTED: fetching rows from the originally executed query should return 3 rows.
+    # ACTUAL: fetching rows from the originally executed query returns 0 rows.
+    with duckdb.connect("//tmp/test.duckdb") as conn:
+        res = conn.execute(query)
+        metadata = metadata_from_query(conn, query)
+        print(metadata)
+        rows = res.fetchall()
+        print(rows)
+        assert len(rows) == 3, f"Expected 3 rows, got {len(rows)}"
+
+    # Test 3 (FAIL): Execute the query, query information_schema for column types, then fetch all rows from the original query
+    # EXPECTED: fetching rows from the originally executed query should return 3 rows.
+    # ACTUAL: fetching rows from the originally executed query returns 0 rows.
+    with duckdb.connect("//tmp/test.duckdb") as conn:
+        res = conn.execute(query)
+        metadata = metadata_from_table(conn, "test_table")
+        print(metadata)
+        rows = res.fetchall()
+        print(rows)
+        assert len(rows) == 3, f"Expected 3 rows, got {len(rows)}"
+
+
+if __name__ == "__main__":
+    main()
+
+```
+
+### OS:
+
+macOS, aarch64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python
+
+### Full Name:
+
+Tyler BoddySpargo
+
+### Affiliation:
+
+DataChat
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

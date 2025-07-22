@@ -1,0 +1,65 @@
+ID: 63319
+Title: `zlib deflate failed, output buffer too small` error when writing a Parquet + GZIP file into S3 using the S3 table function 
+Description:
+Some of our customers have gotten the following error while trying to write a GZIP-compressed Parquet file to S3 using the S3 table function:
+
+```
+Code: 1002. DB::Exception: Error while writing a table: IOError: zlib deflate failed, output buffer too small. () (version 24.2.1.2248 (official build))
+```
+
+Multiple runs of the same query still produce the error.
+
+**Does it reproduce on the most recent release?**
+
+Yes, tested in in 24.2.1 and 24.4.1 (latest docker container available) and it still happens
+
+**How to reproduce**
+
+```
+INSERT INTO FUNCTION s3('https://test-sinks.s3.eu-west-3.amazonaws.com/rep_deflate/myfile.parquet', 'REDACTED', 'REDACTED', 'Parquet')
+SETTINGS output_format_parquet_compression_method = 'gzip'
+SELECT *
+FROM generateRandom('a UInt64', 1, 1024, 2)
+LIMIT 100000
+```
+
+Will produce the following output:
+```
+Received exception from server (version 24.2.1):
+Code: 1002. DB::Exception: Received from localhost:9000. DB::Exception: Error while writing a table: IOError: zlib deflate failed, output buffer too small. ()
+```
+
+It seems that doesn't happen with all types and depends on the row size, see [this comment](https://github.com/ClickHouse/ClickHouse/issues/63319#issuecomment-2092534017) for more tests. Also it doesn't happen when using the custom encoder so it may be somehow tied to Arrow?
+
+**Expected behavior**
+
+Writing Parquet compressed with GZIP using the S3 table function works.
+
+**Error message and/or stacktrace**
+
+```
+exception:                             Code: 1002. DB::Exception: Error while writing a table: IOError: zlib deflate failed, output buffer too small. () (version 24.2.1.2248 (official build))
+stack_trace:                           0. ./build_docker/./src/Common/Exception.cpp:96: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000cf5565b
+1. DB::Exception::Exception<String>(int, FormatStringHelperImpl<std::type_identity<String>::type>, String&&) @ 0x00000000078c7743
+2. ./build_docker/./src/Processors/Formats/Impl/ParquetBlockOutputFormat.cpp:0: DB::ParquetBlockOutputFormat::writeRowGroup(std::vector<DB::Chunk, std::allocator<DB::Chunk>>) @ 0x00000000131c8b53
+3. ./build_docker/./src/Processors/Formats/Impl/ParquetBlockOutputFormat.cpp:0: DB::ParquetBlockOutputFormat::consume(DB::Chunk) @ 0x00000000131c4d88
+4. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:701: DB::IOutputFormat::write(DB::Block const&) @ 0x000000001303ebbf
+5. ./build_docker/./src/Storages/StorageS3.cpp:0: DB::StorageS3Sink::consume(DB::Chunk) @ 0x0000000012685b57
+6. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:701: DB::PartitionedSink::consume(DB::Chunk) @ 0x000000001236e7df
+7. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:701: DB::SinkToStorage::onConsume(DB::Chunk) @ 0x000000001336d802
+8. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:701: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::ExceptionKeepingTransform::work()::$_1, void ()>>(std::__function::__policy_storage const*) @ 0x000000001329dd2b
+9. ./contrib/llvm-project/libcxx/include/__functional/function.h:848: ? @ 0x000000001329da3c
+10. ./contrib/llvm-project/libcxx/include/__functional/function.h:818: ? @ 0x000000001329d113
+11. ./build_docker/./src/Processors/Executors/ExecutionThreadContext.cpp:0: DB::ExecutionThreadContext::executeTask() @ 0x0000000013031afa
+12. ./build_docker/./src/Processors/Executors/PipelineExecutor.cpp:273: DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000013028550
+13. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:833: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::PipelineExecutor::spawnThreads()::$_0, void ()>>(std::__function::__policy_storage const*) @ 0x0000000013029638
+14. ./base/base/../base/wide_integer_impl.h:810: ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0x000000000cff84e1
+15. ./build_docker/./src/Common/ThreadPool.cpp:0: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000cffbd1a
+16. ./base/base/../base/wide_integer_impl.h:810: void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000cffab1e
+17. ? @ 0x000071b496e94ac3
+18. ? @ 0x000071b496f26850
+```
+
+**Additional context**
+
+The error seems to be coming from zlib and there is very little information about it on the internet. Checking the code it seems that zlib does a wrong estimation of the buffer size to allocate? The only thing I've been able to find is this bug report from [Apache Arrow](https://github.com/apache/arrow/issues/2756) where the problem seems to be caused by an [older version of zlib](https://github.com/apache/arrow/issues/2756#issuecomment-429688129). Maybe it's a matter of upgrading?

@@ -1,0 +1,79 @@
+ID: 24512
+Title: The plan selected by optimizer has bigger estCost.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table t(a int);
+create index idx on t(a);
+alter table t set tiflash replica 1;
+
+mysql> explain format='verbose' select count(*) from t where a>1;
++-----------------------------+---------+-----------+-----------+-----------------------+------------------------------------------------+
+| id                          | estRows | estCost   | task      | access object         | operator info                                  |
++-----------------------------+---------+-----------+-----------+-----------------------+------------------------------------------------+
+| StreamAgg_30                | 1.00    | 155020.00 | root      |                       | funcs:count(Column#6)->Column#3                |
+| └─IndexReader_31            | 1.00    | 10335.21  | root      |                       | index:StreamAgg_10                             |
+|   └─StreamAgg_10            | 1.00    | 10338.21  | cop[tikv] |                       | funcs:count(1)->Column#6                       |
+|     └─IndexRangeScan_29     | 3333.33 | 145020.00 | cop[tikv] | table:t, index:idx(a) | range:(1,+inf], keep order:false, stats:pseudo |
++-----------------------------+---------+-----------+-----------+-----------------------+------------------------------------------------+
+4 rows in set (0.00 sec)
+mysql> explain format='verbose' select /*+ read_from_storage(tiflash[t]) */ count(*) from t where a>1;
++--------------------------------+----------+-----------+-------------------+---------------+---------------------------------+
+| id                             | estRows  | estCost   | task              | access object | operator info                   |
++--------------------------------+----------+-----------+-------------------+---------------+---------------------------------+
+| HashAgg_21                     | 1.00     | 12326.10  | root              |               | funcs:count(Column#5)->Column#3 |
+| └─TableReader_23               | 1.00     | 12292.50  | root              |               | data:ExchangeSender_22          |
+|   └─ExchangeSender_22          | 1.00     | 295020.00 | batchCop[tiflash] |               | ExchangeType: PassThrough       |
+|     └─HashAgg_9                | 1.00     | 295020.00 | batchCop[tiflash] |               | funcs:count(1)->Column#5        |
+|       └─Selection_20           | 3333.33  | 285020.00 | batchCop[tiflash] |               | gt(test.t.a, 1)                 |
+|         └─TableFullScan_19     | 10000.00 | 255020.00 | batchCop[tiflash] | table:t       | keep order:false, stats:pseudo  |
++--------------------------------+----------+-----------+-------------------+---------------+---------------------------------+
+6 rows in set (0.00 sec)
+mysql> explain format='verbose' select /*+ read_from_storage(tikv[t]) */ count(*) from t where a>1;
++-----------------------------+---------+-----------+-----------+-----------------------+------------------------------------------------+
+| id                          | estRows | estCost   | task      | access object         | operator info                                  |
++-----------------------------+---------+-----------+-----------+-----------------------+------------------------------------------------+
+| StreamAgg_18                | 1.00    | 155020.00 | root      |                       | funcs:count(Column#5)->Column#3                |
+| └─IndexReader_19            | 1.00    | 10335.21  | root      |                       | index:StreamAgg_10                             |
+|   └─StreamAgg_10            | 1.00    | 10338.21  | cop[tikv] |                       | funcs:count(1)->Column#5                       |
+|     └─IndexRangeScan_17     | 3333.33 | 145020.00 | cop[tikv] | table:t, index:idx(a) | range:(1,+inf], keep order:false, stats:pseudo |
++-----------------------------+---------+-----------+-----------+-----------------------+------------------------------------------------+
+4 rows in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+The query without hint selects a plan with a lower cost, or the selected plan has a lower estCost.
+
+### 3. What did you see instead (Required)
+
+The plan selected by optimizer has bigger estCost.
+
+### 4. What is your TiDB version? (Required)
+20210510 master nightly
+
+```sql
+mysql> select tidb_version();
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                                  |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v4.0.0-beta.2-2817-g075df515e-dirty
+Edition: Community
+Git Commit Hash: 075df515e4620255a423ab2a9d6b23ab3e4279a1
+Git Branch: master
+UTC Build Time: 2021-05-07 15:17:52
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+<!-- Paste the output of SELECT tidb_version() -->
+

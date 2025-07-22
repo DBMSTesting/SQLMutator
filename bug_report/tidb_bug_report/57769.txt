@@ -1,0 +1,50 @@
+ID: 57769
+Title: server: using of timestamps not allocated by PD for reads can break the cluster's linearizability constraints
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+tiup playground nightly --tiflash 0 --kv 1
+sysbench oltp_insert --config-file=sysbench.conf --tables=1 --table-size=10000 --threads=8 --auto-inc=false prepare
+sysbench oltp_insert --config-file=sysbench.conf --tables=1 --table-size=10000 --threads=8 --auto-inc=false run
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The async commit and 1pc protocol should work as expected.
+
+### 3. What did you see instead (Required)
+
+Many tidb logs like 
+```
+[2024/11/27 17:39:11.292 +08:00] [WARN] [prewrite.go:382] ["1pc failed and fallbacks to normal commit procedure"] [conn=1189085216] [session_alias=] [startTS=454217000877293798]  
+```
+tikv logs like
+```
+[2024/11/27 17:51:03.217 +08:00] [WARN] [[prewrite.rs:833](http://prewrite.rs:833/)] ["commit_ts is too large, fallback to normal 2PC"] [lock="Lock { lock_type: Put, primary_key: 7480000000000000715F6980000000000000010380000000000013B6037FFFFFFF9C28B6B1, start_ts: TimeStamp(454217187510452356), ttl: 3000, short_value: 30, for_update_ts: TimeStamp(0), txn_size: 2, min_commit_ts: TimeStamp(454217187510452357), use_async_commit: true, secondaries: [7480000000000000715F727FFFFFFF9C28B6B1], rollback_ts: [], last_change: Unknown, txn_source: 0, is_locked_with_conflict: false, generation: 0 }"] [max_commit_ts=454217188034740356] [min_commit_ts=9223372036854775808] [start_ts=454217187510452356] [key=7480000000000000FF715F698000000000FF0000010380000000FF000013B6037FFFFFFFFF9C28B6B1000000FC] [thread_id=47]
+```
+
+```
+min_commit_ts=9223372036854775808
+```
+and the `max_ts` in TiKV is pushed to an **invalid** value.
+
+
+The cause is the PR(https://github.com/pingcap/tidb/pull/56406/files#diff-45ad039a8b87835b475a52615355c444538d3a1f31a84d7b3ac94e15b1ce8721R1159), which uses the user specified timestamp `math.MaxInt64` to read directly with DAG interfaces.
+
+**Using non-transactional interfaces along with self-constructed timestamps for reads and writes is a very dangerous thing, it could break the linearzibility of the whole TiDB cluster.**
+Please ensure that data reads are performed using transaction interfaces or internal SQL statements to avoid manually constructing requests and specifying timestamps.
+
+For tidb and tikv, it's necessary to enhance checks for illegal timestamps. For cases where the timestamp might exceed the current maximum PD-allocated timestamp, checks and error reporting should be enhanced.
+
+### 4. What is your TiDB version? (Required)
+release-8.5 branch with `8e37df4224c1990a2c8e87646c75da01ea643b4b`
+
+<!-- Paste the output of SELECT tidb_version() -->
+

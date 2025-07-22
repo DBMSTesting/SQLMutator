@@ -1,0 +1,164 @@
+ID: 51387
+Title: global sql_mode NO_BACKSLASH_ESCAPES doesn't behave as expected
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+1. Exec the following statements in mysql terminal:
+```sql
+set sql_mode='NO_BACKSLASH_ESCAPES';
+CREATE TABLE `t1` (
+  `id` bigint(20) NOT NULL,
+  `a` text DEFAULT NULL,
+  `b` text GENERATED ALWAYS AS ((regexp_replace(`a`, _utf8mb4'^[1-9]\d{9,29}$', _utf8mb4'aaaaa'))) VIRTUAL,
+  `c` text DEFAULT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+set global sql_mode='NO_BACKSLASH_ESCAPES';
+```
+2. Run scripts:
+```bash
+mysql -uroot -h127.0.0.1 -uroot -E -e "insert into test.t1 (id, a, c) values(1, 'insert+select_sql_mode', 'ab\\\\c'); select * from test.t1; SELECT @@session.sql_mode;" -P4000
+
+mysql -uroot -h127.0.0.1 -uroot -E -e " SELECT @@session.sql_mode; insert into test.t1 (id, a, c) values(2, 'select_sql_mode+insert', 'ab\\\\c'); select * from test.t1;" -P4000
+```
+
+### 2. What did you expect to see? (Required)
+![image](https://github.com/pingcap/tidb/assets/61726649/dc0d3f6d-f8d8-4c2f-830c-1b969b32928c)
+
+
+### 3. What did you see instead (Required)
+![image](https://github.com/pingcap/tidb/assets/61726649/eafcc082-bda2-478b-9891-697388ccef7e)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+Release Version: v7.6.0
+Edition: Community
+Git Commit Hash: 52794d985ba6325d75a714d4eaa0838d59425eb6
+Git Branch: heads/refs/tags/v7.6.0
+UTC Build Time: 2024-01-22 14:20:42
+GoVersion: go1.21.5
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+```
+
+mysql client version:
+```
+mysql  Ver 15.1 Distrib 10.6.16-MariaDB, for debian-linux-gnu (x86_64) using  EditLine wrapper
+```
+
+### 5. Another issue
+With mysql driver in golang, we execute the following test:
+
+#### 5.1 Test DDLs
+```golang
+func TestMysqlDriverDDL(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ddl1 := `create table t1(id bigint primary key, a text, b text as ((regexp_replace(a, '^[1-9]\d{9,29}$', 'aaaaa'))), c text);`
+	ddl2 := `create table t2(id bigint primary key, a text, b text as ((regexp_replace(a, '^[1-9]\d{9,29}$', 'aaaaa'))), c text);`
+
+	db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:4000)/test")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// NO_BACKSLASH_ESCAPES=False, c is expected to be 'c\'.
+	tx, _ := db.Begin()
+	_, err = tx.ExecContext(ctx, "set sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE';")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, ddl1)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	// set NO_BACKSLASH_ESCAPES=True, c is expected to be 'c\\'.
+	tx, _ = db.Begin()
+	_, err = tx.ExecContext(ctx, "set sql_mode='NO_BACKSLASH_ESCAPES';")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, ddl2)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
+```
+the result is as expected: the table structure of t1 is incorrect because it treats `\` as an escape character. And the table structure of t1 is correct.
+
+```bash
+MySQL [test]> show create table t1;
++-------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                                                                                                                                                                                     |
++-------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t1    | CREATE TABLE `t1` (
+  `id` bigint(20) NOT NULL,
+  `a` text DEFAULT NULL,
+  `b` text GENERATED ALWAYS AS ((regexp_replace(`a`, _utf8mb4'^[1-9]d{9,29}$', _utf8mb4'aaaaa'))) VIRTUAL,
+  `c` text DEFAULT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin |
++-------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.001 sec)
+
+MySQL [test]> show create table t2;
++-------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                                                                                                                                                                                       |
++-------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t2    | CREATE TABLE `t2` (
+  `id` bigint(20) NOT NULL,
+  `a` text DEFAULT NULL,
+  `b` text GENERATED ALWAYS AS ((regexp_replace(`a`, _utf8mb4'^[1-9]\\d{9,29}$', _utf8mb4'aaaaa'))) VIRTUAL,
+  `c` text DEFAULT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin |
++-------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.001 sec)
+```
+
+#### 5.2 Test DMLs
+```golang
+func TestMysqlDriver(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cStr := `c\\`
+
+	db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:4000)/test")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// NO_BACKSLASH_ESCAPES=False, c is expected to be 'c\'.
+	tx, _ := db.Begin()
+	_, err = tx.ExecContext(ctx, "set sql_mode='STRICT_TRANS_TABLES,NO_ZERO_IN_DATE';")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "INSERT INTO t1 (id, a, c) values(?, ?, ?)", "1", "NO_BACKSLASH_ESCAPES=False", cStr)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	// set NO_BACKSLASH_ESCAPES=True, c is expected to be 'c\\'.
+	tx, _ = db.Begin()
+	_, err = tx.ExecContext(ctx, "set sql_mode='NO_BACKSLASH_ESCAPES';")
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, "INSERT INTO t1 (id, a, c) values(?, ?, ?)", "2", "NO_BACKSLASH_ESCAPES=True", cStr)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+}
+```
+
+**_And we got unexpected result in tidb:_**
+```bash
+MySQL [test]> select * from t1;
++----+----------------------------+----------------------------+------+
+| id | a                          | b                          | c    |
++----+----------------------------+----------------------------+------+
+|  1 | NO_BACKSLASH_ESCAPES=False | NO_BACKSLASH_ESCAPES=False | c\\  |
+|  2 | NO_BACKSLASH_ESCAPES=True  | NO_BACKSLASH_ESCAPES=True  | c\\  |
++----+----------------------------+----------------------------+------+
+2 rows in set (0.003 sec)
+```

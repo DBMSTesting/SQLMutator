@@ -1,0 +1,63 @@
+ID: 34647
+Title: Column compression broken few minutes after data inserted
+Description:
+Clickhouse version: 22.1.3.
+
+I'm creating and importing data to the new table based on join from two tables like this:
+`insert into my_database_{country_iso}.fulltext_new select keyword, stems, search_volumes.search_volume, difficulty, cpc, monthly_sv, peak_month, yoy_change, serp_features from my_database_{country_iso}.search_volumes as search_volumes final left any join my_database_{country_iso}.keyword_data using (keyword) SETTINGS join_use_nulls=1, join_any_take_last_row=1`
+
+Structure of the output table is 1:1 with selected columns:
+```
+  `keyword` String,
+  `stems` Array(String),
+  `search_volume` Int32,
+  `difficulty` Int8 Default -100,
+  `cpc` Float32,
+  `monthly_sv` String,
+  `peak_month` Date,
+  `yoy_change` Float32,
+  `serp_features` Array(String),
+```
+
+After importing those data everything works fine around 1 minute and after that (using the same select queries) I'm getting this error for some queries:
+```
+Received exception from server (version 22.1.3):
+Code: 271. DB::Exception: Received from localhost:9000. DB::Exception: Data compressed with different methods, given method byte 0x1b, previous method byte 0x82: (while reading column serp_features): (while reading from part /var/lib/clickhouse/store/f3d/f3d3328c-24b4-4f71-b40e-b2650ac5229e/all_1_34_2/ from mark 64722 with max_rows_to_read = 195): While executing MergeTreeReverse. (CANNOT_DECOMPRESS)
+```
+
+The SELECT is for example following:
+`select * from my_database_us.fulltext where hasAll(stems, ['something']) order by search_volume desc`
+
+What is stranger - the query seems to be working until I use ordering using the column search_volume but I totally don't know why because from the error log it seems like it has some problem with column serp_features. But what is strangest for me is that it works after importing. But just for few seconds/minutes and then start showing this error (even for the same queries like before).
+
+Full log:
+```
+2022.02.16 12:57:26.870809 [ 334594 ] {55202cee-124e-4626-a3b4-e31d5388e410} <Error> TCPHandler: Code: 271. DB::Exception: Data compressed with different methods, given method byte 0x1b, previous method byte 0x82: (while reading column serp_features): (while reading from part /var/lib/clickhouse/store/f3d/f3d3328c-24b4-4f71-b40e-b2650ac5229e/all_1_34_2/ from mark 64722 with max_rows_to_read = 195): While executing MergeTreeReverse. (CANNOT_DECOMPRESS), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xa82d07a in /usr/bin/clickhouse
+1. DB::CompressedReadBufferBase::readCompressedData(unsigned long&, unsigned long&, bool) @ 0x130929f8 in /usr/bin/clickhouse
+2. DB::CompressedReadBufferFromFile::nextImpl() @ 0x130940d5 in /usr/bin/clickhouse
+3. ? @ 0x1328c4c2 in /usr/bin/clickhouse
+4. DB::ISerialization::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::__1::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > >*) const @ 0x132536f5 in /usr/bin/clickhouse
+5. DB::SerializationArray::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::__1::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > >*) const @ 0x1325f4d1 in /usr/bin/clickhouse
+6. DB::MergeTreeReaderWide::readData(DB::NameAndTypePair const&, COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, bool, unsigned long, unsigned long, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > >&, bool) @ 0x143a5f0f in /usr/bin/clickhouse
+7. DB::MergeTreeReaderWide::readRows(unsigned long, unsigned long, bool, unsigned long, std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0x143a4e8b in /usr/bin/clickhouse
+8. DB::MergeTreeRangeReader::DelayedStream::finalize(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0x14b1fb8e in /usr/bin/clickhouse
+9. DB::MergeTreeRangeReader::continueReadingChain(DB::MergeTreeRangeReader::ReadResult&, unsigned long&) @ 0x14b23c79 in /usr/bin/clickhouse
+10. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0x14b22cd3 in /usr/bin/clickhouse
+11. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0x14b18c08 in /usr/bin/clickhouse
+12. DB::MergeTreeReverseSelectProcessor::readFromPart() @ 0x14b37485 in /usr/bin/clickhouse
+13. DB::MergeTreeBaseSelectProcessor::generate() @ 0x14b18480 in /usr/bin/clickhouse
+14. DB::ISource::tryGenerate() @ 0x148414b5 in /usr/bin/clickhouse
+15. DB::ISource::work() @ 0x1484107a in /usr/bin/clickhouse
+16. DB::SourceWithProgress::work() @ 0x14a8c662 in /usr/bin/clickhouse
+17. DB::ExecutionThreadContext::executeTask() @ 0x14860b23 in /usr/bin/clickhouse
+18. DB::PipelineExecutor::executeStepImpl(unsigned long, std::__1::atomic<bool>*) @ 0x1485539e in /usr/bin/clickhouse
+19. ? @ 0x14856b22 in /usr/bin/clickhouse
+20. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xa86f4b7 in /usr/bin/clickhouse
+21. ? @ 0xa872ebd in /usr/bin/clickhouse
+22. ? @ 0x7fef318ec609 in ?
+23. __clone @ 0x7fef31813293 in ?
+```
+
+It seems like some problem with column compression. But both tables use native compression (nothing special). Two input tables were created in different CH versions so if CH changed compression then it could be something with that but I don't think so.

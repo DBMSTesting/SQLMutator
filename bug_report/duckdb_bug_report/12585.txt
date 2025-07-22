@@ -1,0 +1,191 @@
+ID: 12585
+Title: IN/OR operator removes completely Parquet Filter Pushdown on other filters
+Description:
+### What happens?
+
+when using the IN / OR operator against a file parquet,
+all the other filters that can be push-down filtered onto the parquet file are discarded.
+
+This is very limiting in cases where you have some related columns and you want to conditionally select only
+a subset of all the rows that match a filter that can be filtered directly inside the parquet.
+
+the problem becomes visible on bigger datasets, that are hosted on a cloud environment.
+In my case, ~15 milion rows (all ordered) inside Azure blob storage.
+
+
+
+### To Reproduce
+
+running a query similar to:
+```
+SELECT *
+FROM read_parquet("azure://<secret_path>/*/*.parquet",  hive_partitioning = true)
+WHERE 
+    path1 = 7 AND
+    path2= 2047 AND
+    column1= 'k1'
+```
+the query takes less than 2 seconds, and all the filters are pushed to the parquet path.
+```
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze {redacted_query}
+     FROM
+			{redacted_parquet}
+	WHERE
+       path1 = 7 AND path2= 2047 -- these are hive_partitioned (file filter pushdown)
+	   AND column1= 'k1'
+ )
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         Total Time: 1.24s         ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌───────────────────────────┐
+│      RESULT_COLLECTOR     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        {redacted}         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│       READ_PARQUET        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        {redacted}         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│ Filters: column1=k1│
+│ AND column1 IS│
+│          NOT NULL         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│    File Filters: (CAST    │
+│(path1 AS INTEGER...  │
+│(path2 AS INTEGER)...  │
+│             )             │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         EC: 77060         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            898            │
+│          (1.76s)          │
+└───────────────────────────┘ 
+```
+
+adding a OR/IN makes the query very slow, and removes completely any possible filter pushdown that can be applied.
+```
+SELECT *
+FROM read_parquet("azure://<secret_path>/*/*.parquet",  hive_partitioning = true)
+WHERE 
+    path1 = 7 AND
+    path2= 2047 AND
+    column1 IN ('k1', 'k2')
+```
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze SELECT *
+     FROM (
+     SELECT {redacted_select}
+     FROM
+        {redacted_parquet 
+		 WHERE
+         path1 = 7 AND path2= 2047
+		 AND column1 IN ('K1, 'K2')
+ )
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││        Total Time: 251.70s        ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌───────────────────────────┐
+│      RESULT_COLLECTOR     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        {redacted}         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│           FILTER          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│((column1= 'K1'│
+│ ) OR ((column1= 'K│
+│2') AND (CAST(path1  │
+│ AS INTEGER) = 7) AND (CAST│
+│  (path2 AS INTEGER) = │
+│           2047)))         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        EC: 4623636        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            2192           │
+│          (0.33s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│       READ_PARQUET        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        {redacted}         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        EC: 23118180       │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          18226396         │
+│         (2010.30s)        │
+└───────────────────────────┘                             
+```
+
+### OS:
+
+x86 Win11 (even on Azure linux VMs)
+
+### DuckDB Version:
+
+0.10.3
+
+### DuckDB Client:
+
+Python, Node, Java (on DBeaver)
+
+### Full Name:
+
+Massimiliano Pizzotti
+
+### Affiliation:
+
+EssilorLuxottica
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

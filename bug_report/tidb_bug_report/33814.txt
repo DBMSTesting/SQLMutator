@@ -1,0 +1,71 @@
+ID: 33814
+Title: sometimes stale read will return wrong result when execute with binary proto
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+The below test case will fail
+
+```
+func TestPlanCacheWithStaleReadByBinaryProto(t *testing.T) {
+	store, _, clean := testkit.CreateMockStoreAndDomain(t)
+	defer clean()
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t1 (id int primary key, v int)")
+	tk.MustExec("insert into t1 values(1, 10)")
+	se := tk.Session()
+	time.Sleep(time.Millisecond * 100)
+	tk.MustExec("set @a=now(6)")
+	time.Sleep(time.Second)
+	tk.MustExec("update t1 set v=100 where id=1")
+
+	stmtID2, _, _, err := se.PrepareStmt("select * from t1 where id=1")
+	require.NoError(t, err)
+	for i := 0; i < 2; i++ {
+		rs, err := se.ExecutePreparedStmt(context.TODO(), stmtID2, nil)
+		require.NoError(t, err)
+		tk.ResultSetToResult(rs, fmt.Sprintf("%v", rs)).Check(testkit.Rows("1 100"))
+	}
+	tk.MustExec("set @@tx_read_ts=@a")
+	rs, err := se.ExecutePreparedStmt(context.TODO(), stmtID2, nil)
+	require.NoError(t, err)
+	// will fail
+	tk.ResultSetToResult(rs, fmt.Sprintf("%v", rs)).Check(testkit.Rows("1 10"))
+}
+```
+
+The fail message:
+
+```
+    result.go:50: 
+        	Error Trace:	result.go:50
+        	            				stale_txn_test.go:1377
+        	Error:      	Not equal: 
+        	            	expected: "[1 10]\n"
+        	            	actual  : "[1 100]\n"
+        	            	
+        	            	Diff:
+        	            	--- Expected
+        	            	+++ Actual
+        	            	@@ -1,2 +1,2 @@
+        	            	-[1 10]
+        	            	+[1 100]
+```
+
+### 2. What did you expect to see? (Required)
+
+ut succeed
+
+### 3. What did you see instead (Required)
+
+failed
+
+### 4. What is your TiDB version? (Required)
+
+master
+

@@ -1,0 +1,92 @@
+ID: 30400
+Title: DDL progress can be blocked due to high concurrency
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+The original scenario is using sysbench to create 10000 tables through a load balancer. In a cluster with more than 10 TiDB instances, it is super easy to reproduce.
+
+When the DDL job ID allocating transaction keeps rolling back because of the write conflict(like more than 100 times), an error is sent back from another goroutine. However, this error is not properly handled. To reproduce it locally, we need to inject a failpoint:
+```diff
++++ b/ddl/ddl_worker.go
+@@ -275,6 +275,8 @@ func (d *ddl) limitDDLJobs() {
+        }
+ }
+ 
++var firstTime = true
++
+ // addBatchDDLJobs gets global job IDs and puts the DDL jobs in the DDL queue.
+ func (d *ddl) addBatchDDLJobs(tasks []*limitJobTask) {
+        startTime := time.Now()
+@@ -300,6 +302,12 @@ func (d *ddl) addBatchDDLJobs(tasks []*limitJobTask) {
+                        if err = t.EnQueueDDLJob(job, jobListKey); err != nil {
+                                return errors.Trace(err)
+                        }
++                       failpoint.Inject("mockAddBatchDDLJobsErr", func(val failpoint.Value) {
++                               if val.(bool) && job.SchemaName == "boom" && firstTime {
++                                       firstTime = false
++                                       failpoint.Return(errors.Errorf("mockAddBatchDDLJobsErr"))
++                               }
++                       })
+                }
+                return nil
+        })
+
+```
+
+```sh
+make failpoint-enable
+make
+GO_FAILPOINTS="github.com/pingcap/tidb/ddl/mockAddBatchDDLJobsErr=return(true)" ./bin/tidb-server
+```
+
+```sql
+mysql> use test
+Database changed
+mysql> create database boom;
+-- no response
+^C^C -- query aborted
+^C^C -- query aborted
+^C^C -- query aborted
+-- cannot aborted
+```
+
+```
+[2021/12/03 18:11:17.822 +08:00] [INFO] [ddl_worker.go:318] ["[ddl] add DDL jobs"] ["batch count"=1] [jobs="ID:59, Type:create schema, State:none, SchemaState:queueing, SchemaID:58, TableID:0, RowCount:0, ArgLen:1, start time: 2021-12-03 18:11:17.821 +0800 CST, Err:<nil>, ErrCount:0, SnapshotVersion:0; "]
+[2021/12/03 18:11:17.822 +08:00] [INFO] [ddl.go:553] ["[ddl] start DDL job"] [job="ID:59, Type:create schema, State:none, SchemaState:queueing, SchemaID:58, TableID:0, RowCount:0, ArgLen:1, start time: 2021-12-03 18:11:17.821 +0800 CST, Err:<nil>, ErrCount:0, SnapshotVersion:0"] [query="create database boom"]
+```
+
+The connection is leaking.
+```
+[2021/12/03 18:15:15.903 +08:00] [ERROR] [http_status.go:465] ["http server error"] [error="http: Server closed"]
+[2021/12/03 18:15:15.905 +08:00] [ERROR] [http_status.go:460] ["grpc server error"] [error="mux: listener closed"]
+[2021/12/03 18:15:15.905 +08:00] [INFO] [server.go:732] ["[server] graceful shutdown."]
+[2021/12/03 18:15:15.905 +08:00] [INFO] [server.go:745] ["graceful shutdown..."] ["conn count"=1]
+```
+
+Fortunately, this does not affect the DDL/DML from another session.
+
+### 2. What did you expect to see? (Required)
+
+Query OK, 1 row affected (0.06 sec)
+
+### 3. What did you see instead (Required)
+
+It hangs constantly.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+commit a04601477600b6804d7a4a2bd31a923bed7817c7 (HEAD, upstream/master)
+Author: Song Gao <disxiaofei@163.com>
+Date:   Wed Dec 1 11:23:53 2021 +0800
+
+    planner: Add trace for proj elimination rule (#30275)
+```
+

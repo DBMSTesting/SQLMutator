@@ -1,0 +1,21 @@
+ID: 14057
+Title: Add `SMALLER_BINARY` flag to reduce binary size 
+Description:
+This PR adds the `SMALLER_BINARY` compilation flag that can be used to reduce the binary size. In many places in DuckDB, we generate code using templating to speed up execution, by e.g. providing specialized implementations for many different primitive types, or providing specialized implementations based on common compressed vector types. In many of these cases, we also have a generic fallback implementation that can be used (albeit with a small performance loss).  
+
+This PR hides many of these specialized implementations behind a `#ifndef DUCKDB_SMALL_BINARY` compilation flag. This allows builds where binary size is important choose to omit this extra generated code and always select the fallback implementation.
+
+The goal is to not sacrifice any functionality so that the versions are fully compatible - but to rather achieve the same functionality in less code. In many cases the [sort key functionality](https://github.com/duckdb/duckdb/pull/12520) can be used to relatively efficiently support operations on all types without adding specialized code for all types. Since we already have this code path to deal with arbitrary types, using it in all cases is in many cases as simple as pushing an `#ifdef` around the specialized implementations.
+
+This PR also has a side effect in that it improves testing of the fallback implementations - since the fallback implementation is now always used. In this process I already found two issues with the fallback implementation (one that is addressed in this PR, one that still needs to be addressed).
+
+This PR moves the following implementations behind the `DUCKDB_SMALL_BINARY` flag:
+
+* Specialized code for flat vectors in `UnaryExecutor/BinaryExecutor` and `DistinctFrom`
+* Specialized code for executing `BETWEEN` in the `WHERE` clause (`ExpressionExecutor::Select`)
+* Use fallback implementation for `binned_histogram`, `histogram`, `arg_min/arg_max`, `mode` aggregates
+* Removes all `window` functions - instead falling back to the regular aggregate implementations when these aggregates are used in window functions
+
+This has as effect that binary size is reduced by ~20%. We also add a CI run that runs all unit tests using the `SMALLER_BINARY` flag in the nightly CI. 
+
+The performance impact of the smaller binary is heavily workload dependent. For TPC-H, there is little performance impact. Simple aggregates have the potential to be more affected. For example - running an ungrouped `arg_min(BIGINT, BIGINT)` is slowed down by ~3x. Removing the specialized `window` functions might be even more impactful when they are used. That said, the significant decrease in binary size is likely worth it in the majority of cases.

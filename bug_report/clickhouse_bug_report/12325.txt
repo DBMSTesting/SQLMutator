@@ -1,0 +1,31 @@
+ID: 12325
+Title: Deadlock in system.text_log
+Description:
+**Describe the bug**
+We add a log message to the `system.text_log` table with mutex https://github.com/ClickHouse/ClickHouse/blob/master/base/loggers/OwnSplitChannel.cpp#L95-L97. But surprisingly in `log->add` method we also have logging: here https://github.com/ClickHouse/ClickHouse/blob/master/src/Interpreters/SystemLog.h#L253 or from memory tracker. This logging can lead to deadlock because the same thread will try to acquire the same mutex one more time. After this server became irresponsible.
+Example trace of such thread:
+```
+Thread 1235 (Thread 0x7f6d475fb700 (LWP 166244)):
+#0  0x00007f6d5e6f1f1c in __lll_lock_wait () from /lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x00007f6d5e6ed649 in _L_lock_909 () from /lib/x86_64-linux-gnu/libpthread.so.0
+#2  0x00007f6d5e6ed470 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libpthread.so.0
+#3  0x0000000011088d4d in std::__1::mutex::lock() ()
+#4  0x000000000917f521 in DB::OwnSplitChannel::logSplit(Poco::Message const&) ()
+#5  0x0000000009181443 in DB::OwnSplitChannel::log(Poco::Message const&) ()
+#6  0x0000000008f4f255 in MemoryTracker::alloc(long) ()
+#7  0x0000000008f4eec3 in MemoryTracker::alloc(long) ()
+#8  0x0000000008ef8cec in operator new(unsigned long) ()
+#9  0x000000001108dafc in std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >::basic_string(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) ()
+#10 0x00000000091828f1 in DB::SystemLog<DB::TextLogElement>::add(DB::TextLogElement const&) ()
+#11 0x000000000917f550 in DB::OwnSplitChannel::logSplit(Poco::Message const&) ()
+#12 0x0000000009181443 in DB::OwnSplitChannel::log(Poco::Message const&) ()
+#13 0x000000000dab5cef in DB::ReplicatedMergeTreeQueue::shouldExecuteLogEntry(DB::ReplicatedMergeTreeLogEntry const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, DB::MergeTreeDataMergerMutator&, DB::MergeTreeData&, std::__1::lock_guard<std::__1::mutex>&) const ()
+#14 0x000000000dabe6d7 in DB::ReplicatedMergeTreeQueue::selectEntryToProcess(DB::MergeTreeDataMergerMutator&, DB::MergeTreeData&) ()
+#15 0x000000000d728459 in DB::StorageReplicatedMergeTree::queueTask() ()
+#16 0x000000000d8878bb in DB::BackgroundProcessingPool::threadFunction() ()
+#17 0x000000000d8882b0 in ?? ()
+#18 0x0000000008f757e7 in ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) ()
+#19 0x0000000008f73c33 in ?? ()
+#20 0x00007f6d5e6eb184 in start_thread () from /lib/x86_64-linux-gnu/libpthread.so.0
+#21 0x00007f6d5ef0937d in clone () from /lib/x86_64-linux-gnu/libc.so.6
+```

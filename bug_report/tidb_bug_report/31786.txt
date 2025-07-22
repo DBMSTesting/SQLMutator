@@ -1,0 +1,132 @@
+ID: 31786
+Title: FROM_UNIXTIME(), UNIX_TIMESTAMP(), CONVERT_TZ do not handle 64-bit values correctly
+Description:
+## Bug Report
+The valid range of timestamp is 32 bit is '1970-01-01 00:00:01.000000' UTC to '2038-01-19 03:14:07.999999' UTC, which corresponds to Unix timestamp range 1 to 2147483647.
+But, TiDB returns an out of range value through rounding. 
+64-bit unix timestamp is supported in MySQL 8.0.28 but prior to MySQL 8.0.28, it is not supported. 
+
+### 1. Minimal reproduce step 
+```sql
+SET time_zone='+00:00';
+SELECT
+  FROM_UNIXTIME(2147483647) AS c1,
+  FROM_UNIXTIME(2147483648) AS c2,
+  FROM_UNIXTIME(2147483647.9999999) AS c3;
+
+SET time_zone=default;
+SELECT
+  FROM_UNIXTIME(2147483647) AS c1,  
+  FROM_UNIXTIME(2147483648) AS c2,
+  FROM_UNIXTIME(2147483647.9999999) AS c3;
+```
+### 2. What did you expect to see? 
+In MySQL8.0.25
+```
+mysql> SET time_zone='+00:00';
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> SELECT
+    ->   FROM_UNIXTIME(2147483647) AS c1,
+    ->   FROM_UNIXTIME(2147483648) AS c2,
+    ->   FROM_UNIXTIME(2147483647.9999999) AS c3;
++---------------------+------+------+
+| c1                  | c2   | c3   |
++---------------------+------+------+
+| 2038-01-19 03:14:07 | NULL | NULL |
++---------------------+------+------+
+1 row in set (0.00 sec)
+
+mysql> SET time_zone=default;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> SELECT
+    ->   FROM_UNIXTIME(2147483647) AS c1,
+    ->   FROM_UNIXTIME(2147483648) AS c2,
+    ->   FROM_UNIXTIME(2147483647.9999999) AS c3;
++---------------------+------+------+
+| c1                  | c2   | c3   |
++---------------------+------+------+
+| 2038-01-18 19:14:07 | NULL | NULL |
++---------------------+------+------+
+```
+In MySQL  8.0.28 
+```
+mysql> SET time_zone='+00:00';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> SELECT
+    ->   FROM_UNIXTIME(2147483647) AS c1,
+    ->   FROM_UNIXTIME(2147483648) AS c2,
+    ->   FROM_UNIXTIME(2147483647.9999999) AS c3;
++---------------------+---------------------+----------------------------+
+| c1                  | c2                  | c3                         |
++---------------------+---------------------+----------------------------+
+| 2038-01-19 03:14:07 | 2038-01-19 03:14:08 | 2038-01-19 03:14:08.000000 |
++---------------------+---------------------+----------------------------+
+1 row in set (0.01 sec)
+
+mysql> 
+mysql> SET time_zone=default;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> SELECT
+    ->   FROM_UNIXTIME(2147483647) AS c1,  
+    ->   FROM_UNIXTIME(2147483648) AS c2,
+    ->   FROM_UNIXTIME(2147483647.9999999) AS c3;
++---------------------+---------------------+----------------------------+
+| c1                  | c2                  | c3                         |
++---------------------+---------------------+----------------------------+
+| 2038-01-18 19:14:07 | 2038-01-18 19:14:08 | 2038-01-18 19:14:08.000000 |
++---------------------+---------------------+----------------------------+
+mysql> select version();
++-----------+
+| version() |
++-----------+
+| 8.0.28    |
++-----------+
+``` 
+
+### 3. What did you see instead 
+```
+tidb> SET time_zone='+00:00';
+Query OK, 0 rows affected (0.09 sec)
+
+tidb> SELECT
+    ->   FROM_UNIXTIME(2147483647) AS c1,
+    ->   FROM_UNIXTIME(2147483648) AS c2,
+    ->   FROM_UNIXTIME(2147483647.9999999) AS c3;
++---------------------+------+----------------------------+
+| c1                  | c2   | c3                         |
++---------------------+------+----------------------------+
+| 2038-01-19 03:14:07 | NULL | 2038-01-19 03:14:08.000000 |
++---------------------+------+----------------------------+
+1 row in set (0.04 sec)
+
+tidb> SET time_zone=default;
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> SELECT
+    ->   FROM_UNIXTIME(2147483647) AS c1,
+    ->   FROM_UNIXTIME(2147483648) AS c2,
+    ->   FROM_UNIXTIME(2147483647.9999999) AS c3;
++---------------------+------+----------------------------+
+| c1                  | c2   | c3                         |
++---------------------+------+----------------------------+
+| 2038-01-18 19:14:07 | NULL | 2038-01-18 19:14:08.000000 |
++---------------------+------+----------------------------+
+```
+
+### 4. What is your TiDB version? 
+
+```
+tidb_version(): Release Version: v5.5.0-alpha-105-gaabd4e04d
+Edition: Community
+Git Commit Hash: aabd4e04d994eb91663abaa80865daec4cf970a6
+Git Branch: master
+UTC Build Time: 2022-01-13 05:36:36
+GoVersion: go1.17.2
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

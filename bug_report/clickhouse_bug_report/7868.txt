@@ -1,0 +1,85 @@
+ID: 7868
+Title: Rename on Distributed Engine does not move data
+Description:
+(you don't have to strictly follow this form)
+
+**Describe the bug or unexpected behaviour**
+Rename query on Distributed table does not rename data directory. All data will be putted to old directory which lead to some side effects.
+
+
+**How to reproduce**
+* Which ClickHouse server version to use
+19.16.4.12
+
+```sql
+CREATE TABLE staging.test_shard ON CLUSTER cluster_name
+(
+  id String,
+  sid String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/staging/test_shard', '{replica}')
+PARTITION BY tuple()
+ORDER BY (id);
+
+CREATE TABLE staging.test_new ON CLUSTER cluster_name
+  AS staging.test_shard
+ENGINE = Distributed(cluster_name, staging, test_shard, rand());
+
+RENAME TABLE staging.test_new TO staging.test ON CLUSTER cluster_name;
+
+insert into test (id) values ('1');
+
+ALTER TABLE staging.test_shard ON CLUSTER cluster_name
+DROP COLUMN sid;
+ALTER TABLE staging.test_shard ON CLUSTER cluster_name
+	ADD COLUMN sid MATERIALIZED id;
+
+-- need to trigger temporary storage in distributed table
+insert into test (id) values ('2');
+insert into test (id) values ('3');
+
+-- we usually use this queries to atomic replace distributed table on whole cluster
+-- with same structure as shard
+CREATE TABLE staging.test_new ON CLUSTER cluster_name
+AS staging.test_shard
+ENGINE = Distributed(cluster_name, staging, test_shard, rand());
+RENAME TABLE staging.test TO staging.test_old, staging.test_new TO staging.test ON CLUSTER cluster_name;
+
+select count(*) from staging.test
+
+insert into test (id) values ('4');
+insert into test (id) values ('5');
+select count(*) from staging.test
+DROP TABLE staging.test_old ON CLUSTER cluster_name;
+```
+After this:
+in data directory:
+`test_new` exists; `test` does not exists.
+No new data in table `test_shard`.
+
+Only restart solve situation.
+
+**Expected behavior**
+Data directory should be renamed. All tem
+
+**Error message and/or stacktrace**
+```
+2019.11.20 18:21:59.809605 [ 167 ] {} <Error> test.Distributed.DirectoryMonitor: Code: 44, e.displayText() = DB::Exception: Received from clickhouse-03.infra.whi.sk:9440. DB::Exception: Cannot insert column sid, because it is MATERIALIZED column.. Stack trace:
+
+0. 0x55818beaaed0 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x55818beaaca5 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x55818bbd98e6 ? /usr/bin/clickhouse
+3. 0x55818f2038d1 DB::InterpreterInsertQuery::execute() /usr/bin/clickhouse
+4. 0x55818f34d946 ? /usr/bin/clickhouse
+5. 0x55818f34eb0e DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, bool) /usr/bin/clickhouse
+6. 0x55818bf330a4 DB::TCPHandler::runImpl() /usr/bin/clickhouse
+7. 0x55818bf33adb DB::TCPHandler::run() /usr/bin/clickhouse
+8. 0x55818fdcb240 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+9. 0x55818fdcb95d Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+10. 0x5581914a1b31 Poco::PooledThread::run() /usr/bin/clickhouse
+11. 0x55819149f8dc Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+12. 0x558191c11460 ? /usr/bin/clickhouse
+13. 0x7fea927066db start_thread /lib/x86_64-linux-gnu/libpthread-2.27.so
+14. 0x7fea9202388f clone /lib/x86_64-linux-gnu/libc-2.27.so
+, Stack trace:
+```

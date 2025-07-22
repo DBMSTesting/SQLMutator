@@ -1,0 +1,112 @@
+ID: 12182
+Title: TiDB chooses expensive index scan to compute aggregate function
+Description:
+## Description
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+```
+CREATE TABLE `trips` (
+  `trip_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `duration` int(11) NOT NULL,
+  `start_date` datetime DEFAULT NULL,
+  `end_date` datetime DEFAULT NULL,
+  `start_station_number` int(11) DEFAULT NULL,
+  `start_station` varchar(255) DEFAULT NULL,
+  `end_station_number` int(11) DEFAULT NULL,
+  `end_station` varchar(255) DEFAULT NULL,
+  `bike_number` varchar(255) DEFAULT NULL,
+  `member_type` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`trip_id`),
+  KEY `start_date` (`start_date`)
+);
+
+> select year(start_date), count(*) from trips group by year(start_date) order by year(start_date);
++------------------+----------+
+| year(start_date) | count(*) |
++------------------+----------+
+|             2010 |   115597 |
+|             2011 |  1226767 |
+|             2012 |  2028911 |
+|             2013 |  2555541 |
+|             2014 |  2913150 |
+|             2015 |  3185906 |
+|             2016 |  3333994 |
+|             2017 |  3757777 |
++------------------+----------+
+8 rows in set (4.299 sec)
+```
+
+2. What did you expect to see?
+
+TiDB should choose the most efficient query execution plan.
+
+3. What did you see instead?
+
+Using the index is about twice as expensive (time) as not using the index.
+
+```
+MySQL [bikeshare]> explain analyze select avg(duration) from trips where start_date>='2016-01-01' and start_date<'2017-01-01';
++------------------------+------------+------+--------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------+-----------------------+
+| id                     | count      | task | operator info                                                                                    | execution info                                                                                                                    | memory                |
++------------------------+------------+------+--------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------+-----------------------+
+| HashAgg_17             | 1.00       | root | funcs:avg(col_0, col_1)                                                                          | time:12.420937699s, loops:2, rows:1                                                                                               | N/A                   |
+| └─IndexLookUp_18       | 1.00       | root |                                                                                                  | time:12.42084001s, loops:2, rows:208, rpc max:1.208503906s, min:73.846829ms, avg:630.524263ms, p80:1.208503906s, p95:1.208503906s | 29.914422035217285 MB |
+|   ├─IndexScan_15       | 3314916.95 | cop  | table:trips, index:start_date, range:[2016-01-01 00:00:00,2017-01-01 00:00:00), keep order:false | proc max:1.12s, min:66ms, p80:1.12s, p95:1.12s, rows:3333994, iters:3278, tasks:5                                                 | N/A                   |
+|   └─HashAgg_7          | 1.00       | cop  | funcs:avg(bikeshare.trips.duration)                                                              | proc max:509ms, min:1ms, p80:385ms, p95:437ms, rows:208, iters:3359, tasks:208                                                    | N/A                   |
+|     └─TableScan_16     | 3314916.95 | cop  | table:trips, keep order:false                                                                    | proc max:502ms, min:1ms, p80:383ms, p95:435ms, rows:3333994, iters:3359, tasks:208                                                | N/A                   |
++------------------------+------------+------+--------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------+-----------------------+
+5 rows in set (12.422 sec)
+
+MySQL [bikeshare]> explain analyze select avg(duration) from trips where end_date>='2016-01-01' and end_date<'2017-01-01';
++--------------------------+-------------+------+--------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------+-----------+
+| id                       | count       | task | operator info                                                                                                      | execution info                                                                                                                   | memory    |
++--------------------------+-------------+------+--------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------+-----------+
+| StreamAgg_20             | 1.00        | root | funcs:avg(col_0, col_1)                                                                                            | time:6.790050909s, loops:2, rows:1                                                                                               | N/A       |
+| └─TableReader_21         | 1.00        | root | data:StreamAgg_9                                                                                                   | time:6.790027955s, loops:2, rows:40, rpc max:2.942514327s, min:58.199177ms, avg:2.266713173s, p80:2.782397362s, p95:2.935693247s | 325 Bytes |
+|   └─StreamAgg_9          | 1.00        | cop  | funcs:count(bikeshare.trips.duration), sum(bikeshare.trips.duration)                                               | proc max:1.592s, min:52ms, p80:1.406s, p95:1.534s, rows:40, iters:18688, tasks:40                                                | N/A       |
+|     └─Selection_19       | 3151061.35  | cop  | ge(bikeshare.trips.end_date, 2016-01-01 00:00:00.000000), lt(bikeshare.trips.end_date, 2017-01-01 00:00:00.000000) | proc max:1.591s, min:52ms, p80:1.389s, p95:1.533s, rows:3333999, iters:18688, tasks:40                                           | N/A       |
+|       └─TableScan_18     | 19117643.00 | cop  | table:trips, range:[-inf,+inf], keep order:false                                                                   | proc max:1.352s, min:45ms, p80:1.157s, p95:1.31s, rows:19117643, iters:18688, tasks:40                                           | N/A       |
++--------------------------+-------------+------+--------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------+-----------+
+5 rows in set (6.792 sec)
+
+MySQL [bikeshare]> explain analyze select avg(duration) from trips ignore index (start_date) where start_date>='2016-01-01' and start_date<'2017-01-01';
++--------------------------+-------------+------+------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------+-----------+
+| id                       | count       | task | operator info                                                                                                          | execution info                                                                                                                  | memory    |
++--------------------------+-------------+------+------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------+-----------+
+| StreamAgg_20             | 1.00        | root | funcs:avg(col_0, col_1)                                                                                                | time:5.495091118s, loops:2, rows:1                                                                                              | N/A       |
+| └─TableReader_21         | 1.00        | root | data:StreamAgg_9                                                                                                       | time:5.495053678s, loops:2, rows:40, rpc max:2.28223843s, min:699.051674ms, avg:1.830413328s, p80:2.20852196s, p95:2.262973383s | 325 Bytes |
+|   └─StreamAgg_9          | 1.00        | cop  | funcs:count(bikeshare.trips.duration), sum(bikeshare.trips.duration)                                                   | proc max:1.289s, min:45ms, p80:1.143s, p95:1.215s, rows:40, iters:18688, tasks:40                                               | N/A       |
+|     └─Selection_19       | 3314916.95  | cop  | ge(bikeshare.trips.start_date, 2016-01-01 00:00:00.000000), lt(bikeshare.trips.start_date, 2017-01-01 00:00:00.000000) | proc max:1.285s, min:45ms, p80:1.118s, p95:1.205s, rows:3333994, iters:18688, tasks:40                                          | N/A       |
+|       └─TableScan_18     | 19117643.00 | cop  | table:trips, range:[-inf,+inf], keep order:false                                                                       | proc max:1.102s, min:35ms, p80:924ms, p95:1.038s, rows:19117643, iters:18688, tasks:40                                          | N/A       |
++--------------------------+-------------+------+------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------+-----------+
+5 rows in set (5.497 sec)
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+tidb_version(): Release Version: v4.0.0-alpha-259-g0f5527476
+Git Commit Hash: 0f55274760064a2e5ceffbd492616c0ffba75643
+Git Branch: master
+UTC Build Time: 2019-09-12 08:06:06
+GoVersion: go version go1.13 darwin/amd64
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+## SIG slack channel
+
+ [#sig-planner](https://slack.tidb.io/invite?team=tidb-community&channel=sig-planner&ref=high-performance)
+
+## Score
+
+300
+
+## Mentor
+
+- @lzmhhh123

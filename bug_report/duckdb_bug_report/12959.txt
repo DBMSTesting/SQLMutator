@@ -1,0 +1,190 @@
+ID: 12959
+Title: Compatibility issues with the DataFrame.join method of the experimental Spark API
+Description:
+### What happens?
+
+I am developing an application based on Spark using their Python API. I am trying to change the code such that I can use either PySpark or DuckDB based on a startup parameter. DuckDB is significantly faster for most of my use cases, which will not surprise you.
+
+The DataFrame.join method of the experimental Spark API does not behave the same way as pyspark. Some of the examples in the `join` docstring do not work. Some issues appear to be bugs. Other issues appear to be due to not-yet-implemented functionality. There are multiple issues here and I suspect that I will find more. I did not find any Spark-related issues on GitHub. I'm starting with one issue to reduce paperwork. If you would prefer that I split them out, I can do that. I would also be willing to contribute fixes. This API will be hugely beneficial to me even in its current form.
+
+1. The docstring examples with `Row` create dataframes with generic column names, and so none of the join examples work.
+2. Joining two dataframes with `on` set to multiple columns does not work.
+3. Joining two dataframes on one common column with the form `df.join(df2, df.name == df2.name)` does not work.
+4. Sorting in descending order is advertised but is not available.
+5. The dataframe returned from a call to DataFrame.join returns a DataFrame whose `relation` object has an alias value of `relation`. The result is that if you try to join two dataframes that have been returned from previous joins, you get an error because the aliases are the same. A possible simple fix is to set the relation's alias with a random value before returning.
+6. When performing a join of two dataframes, you cannot use the form `df1.join(df2, on=df1[col1] == df2[col2])`. This is important because the column names may be stored in variables. A workaround is to use the somewhat clunky form `df1.join(df2, on=getattr(df1, col1) == getattr(df2, col2))`.
+
+
+### To Reproduce
+
+Global imports and settings:
+```
+from duckdb.experimental.spark.sql import DataFrame, SparkSession
+from duckdb.experimental.spark.sql.types import Row
+import duckdb.experimental.spark.sql.functions as F
+spark = SparkSession.builder.getOrCreate()
+df = spark.createDataFrame([(2, "Alice"), (5, "Bob")]).toDF("age", "name")
+df2 = spark.createDataFrame([Row(height=80, name="Tom"), Row(height=85, name="Bob")], ["height", "name"])
+df3 = spark.createDataFrame([Row(age=2, name="Alice"), Row(age=5, name="Bob")], ["age", "name"])
+df4 = spark.createDataFrame([(10, 80, "Alice"), (5, None, "Bob"), (None, None, "Tom"), (None, None, None)], ["age", "height", "name"])
+```
+1. Docstring examples with createDataFrame and Row do not create correct column names. This appears to be a bug in `createDataFrame`.
+```
+spark.createDataFrame([Row(height=80, name="Tom"), Row(height=85, name="Bob")]).columns
+```
+```
+['col0', 'col1']
+```
+The expected output is produced with this:
+```
+spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"]).columns
+```
+```
+['age', 'name']
+```
+
+2. Join on multiple columns fails.
+```
+df.join(df4, ['name', 'age'])
+```
+```
+BinderException                           Traceback (most recent call last)
+Cell In[10], line 1
+----> 1 df.join(df4, ['name', 'age'])
+
+File ~/python-envs/duckdb/env/lib/python3.11/site-packages/duckdb/experimental/spark/sql/dataframe.py:500, in DataFrame.join(self, other, on, how)
+    497         return mapped_type
+    499     how = map_to_recognized_jointype(how)
+--> 500     result = self.relation.join(other.relation, on, how)
+    501 return DataFrame(result, self.session)
+
+BinderException: Binder Error: Ambiguous reference to column name "name" (use: "unnamed_relation_4f21ec651727d1fa.name" or "unnamed_relation_87816dae0b1fa552.name")
+```
+
+3. Join on a common column fails. Maybe duplicate from 2 above.
+```
+df.join(df2, df.name == df2.name)
+```
+```
+BinderException                           Traceback (most recent call last)
+Cell In[11], line 1
+----> 1 df.join(df2, df.name == df2.name)
+
+File ~/python-envs/duckdb/env/lib/python3.11/site-packages/duckdb/experimental/spark/sql/dataframe.py:500, in DataFrame.join(self, other, on, how)
+    497         return mapped_type
+    499     how = map_to_recognized_jointype(how)
+--> 500     result = self.relation.join(other.relation, on, how)
+    501 return DataFrame(result, self.session)
+
+BinderException: Binder Error: Ambiguous reference to column name "name" (use: "unnamed_relation_f0439f793ab97781.name" or "unnamed_relation_87816dae0b1fa552.name")
+```
+
+4. The third docstring example says that you can sort in descending order, like `df.sort(desc("name"))`, but `desc` is not present in the `functions` module.
+```
+AttributeError: module 'duckdb.experimental.spark.sql.functions' has no attribute 'desc'
+```
+
+5. Cannot join dataframes returned from other joins.
+```
+df.join(df2, "name").relation.alias
+```
+```
+'relation'
+```
+This nonsensical query shows the error.
+```
+df.join(df2, "name").join(df.join(df2, "name"), "name").show()
+```
+```
+InvalidInputException                     Traceback (most recent call last)
+Cell In[14], line 1
+----> 1 df.join(df2, "name").join(df.join(df2, "name"), "name").show()
+
+File ~/python-envs/duckdb/env/lib/python3.11/site-packages/duckdb/experimental/spark/sql/dataframe.py:500, in DataFrame.join(self, other, on, how)
+    497         return mapped_type
+    499     how = map_to_recognized_jointype(how)
+--> 500     result = self.relation.join(other.relation, on, how)
+    501 return DataFrame(result, self.session)
+
+InvalidInputException: Invalid Input Error: Both relations have the same alias, please change the alias of one or both relations using 'rel = rel.set_alias(<new alias>)'
+```
+
+6. Cannot join dataframes with a column stored in a variable. This appears to be disabled intentionally.
+```
+column = "name"
+df.join(df2, df[column] == df2[column])
+```
+```
+AttributeError                            Traceback (most recent call last)
+Cell In[16], line 1
+----> 1 df.join(df2, df[column] == df2[column])
+
+File ~/python-envs/duckdb/env/lib/python3.11/site-packages/duckdb/experimental/spark/sql/dataframe.py:635, in DataFrame.__getitem__(self, item)
+    621 """Returns the column as a :class:`Column`.
+    622 
+    623 Examples
+   (...)
+    632 [Row(age=5, name='Bob')]
+    633 """
+    634 if isinstance(item, str):
+--> 635     return self.item
+    636 # elif isinstance(item, Column):
+    637 #    return self.filter(item)
+    638 # elif isinstance(item, (list, tuple)):
+   (...)
+    642 #    return Column(jc)
+    643 else:
+    644     raise TypeError("unexpected item type: %s" % type(item))
+
+File ~/python-envs/duckdb/env/lib/python3.11/site-packages/duckdb/experimental/spark/sql/dataframe.py:655, in DataFrame.__getattr__(self, name)
+    647 """Returns the :class:`Column` denoted by ``name``.
+    648 
+    649 Examples
+   (...)
+    652 [Row(age=2), Row(age=5)]
+    653 """
+    654 if name not in self.relation.columns:
+--> 655     raise AttributeError(
+    656         "'%s' object has no attribute '%s'" % (self.__class__.__name__, name)
+    657     )
+    658 return Column(duckdb.ColumnExpression(name))
+
+AttributeError: 'DataFrame' object has no attribute 'item'
+```
+
+
+### OS:
+
+MacOS aarch64
+
+### DuckDB Version:
+
+1.0
+
+### DuckDB Client:
+
+Python
+
+### Full Name:
+
+Daniel Thom
+
+### Affiliation:
+
+National Renewable Energy Laboratory (NREL)
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

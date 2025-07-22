@@ -1,0 +1,88 @@
+ID: 28198
+Title: ORDER BY does not work as expected with Merge engine
+Description:
+I have two tables something like the following (ClickHouse server version 20.8.7 revision 54438):
+
+```
+CREATE TABLE short (e UUID, t DateTime, ...24 additional columns...) ENGINE = MergeTree PARTITION BY e ORDER BY t TTL t + toIntervalDay(7)
+CREATE TABLE long (e UUID, t DateTime, ...24 additional columns...) ENGINE = MergeTree PARTITION BY (e, toStartOfMonth(t)) ORDER BY t TTL t + toIntervalDay(30)
+```
+
+The two tables are identical except for their partition and TTL expressions.  We generate a unified view of these two tables using the Merge engine:
+
+`CREATE TABLE merged (e UUID, t DateTime, ...24 additional columns...) ENGINE = Merge('db', 'short|long')`
+
+The problem is that when I query the merged table and order by t, the results are non-deterministic (and almost always wrong).  For example:
+
+```
+SELECT t
+FROM merged
+WHERE t > '2021-08-01 00:00:00'
+ORDER BY t ASC
+LIMIT 5
+
+Query id: e81738ae-8177-4f30-8a33-4b6fd1540f55
+
+┌───────────────────t─┐
+│ 2021-08-20 09:42:51 │
+│ 2021-08-20 09:43:53 │
+│ 2021-08-20 09:44:56 │
+│ 2021-08-20 09:45:59 │
+│ 2021-08-20 09:47:02 │
+└─────────────────────┘
+
+5 rows in set. Elapsed: 0.147 sec. Processed 132.74 thousand rows, 530.94 KB (903.28 thousand rows/s., 3.61 MB/s.)
+```
+
+Repeating the exact same query yields different results:
+
+```
+SELECT t
+FROM merged
+WHERE t > '2021-08-01 00:00:00'
+ORDER BY t ASC
+LIMIT 5
+
+Query id: 3bdf4d80-58b7-42f2-8dd3-85a61bc7e4a0
+
+┌───────────────────t─┐
+│ 2021-08-26 14:55:55 │
+│ 2021-08-26 14:55:55 │
+│ 2021-08-26 14:55:57 │
+│ 2021-08-26 14:56:00 │
+│ 2021-08-26 14:56:20 │
+└─────────────────────┘
+
+5 rows in set. Elapsed: 0.357 sec. Processed 1.82 thousand rows, 7.28 KB (5.09 thousand rows/s., 20.38 KB/s.)
+```
+
+The correct results can be seen with an expensive union query:
+
+```
+SELECT t
+FROM
+(
+    SELECT t
+    FROM short
+    UNION ALL
+    SELECT t
+    FROM long
+)
+WHERE t > '2021-08-01 00:00:00'
+ORDER BY t ASC
+LIMIT 5
+
+Query id: 2e1e2712-6025-4de5-9d82-34ac11ef4662
+
+┌───────────────────t─┐
+│ 2021-08-01 00:00:01 │
+│ 2021-08-01 00:00:01 │
+│ 2021-08-01 00:00:01 │
+│ 2021-08-01 00:00:02 │
+│ 2021-08-01 00:00:02 │
+└─────────────────────┘
+
+5 rows in set. Elapsed: 0.403 sec. Processed 42.56 million rows, 170.26 MB (105.55 million rows/s., 422.20 MB/s.)
+```
+
+I'm not sure what the secret sauce is to trigger this behaviour.  I tried reproducing it with a simpler set of tables but was unable to do so.  

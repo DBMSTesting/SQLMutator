@@ -1,0 +1,104 @@
+ID: 3840
+Title: Potential data loss - 18.14.18 -> 18.16.0 Changed behavior with Array(Tuple) columns
+Description:
+I have a table with an Array(Tuple(Date, UInt16)) column called _metrics. Noted after the upgrade to 18.16.0 that this table now had two columns - _metrics.1 Array(Date) and _metrics.2 Array(UInt16). I could no longer select on the _metrics column nor see any data from the _metrics.1 column (all arrays were empty).
+
+I can recreate the table using CREATE TABLE .. AS .. SELECT - this works as expected. Following a server restart however the table reverts to the above behaviour. Additionally creating the table using plain CREATE TABLE rather than CTAS converts Array(Tuple) columns to Array columns as above.
+
+Steps to reproduce:
+
+1. Changing column definition automatically:
+
+```
+clickhouse-demo :) create table tuple_test (id UInt64, val Array(Tuple(Date, UInt16))) engine = MergeTree order by (id);
+
+CREATE TABLE tuple_test
+(
+    id UInt64, 
+    val Array(Tuple(Date, UInt16))
+)
+ENGINE = MergeTree
+ORDER BY id
+
+Ok.
+
+0 rows in set. Elapsed: 0.003 sec. 
+
+clickhouse-demo :) desc tuple_test format PrettySpace;
+
+DESCRIBE TABLE tuple_test
+FORMAT PrettySpace
+
+name    type            default_type   default_expression   comment_expression
+
+id      UInt64                                                                
+val.1   Array(Date)                                                           
+val.2   Array(UInt16)                                                         
+
+3 rows in set. Elapsed: 0.002 sec. 
+```
+
+2. Potential data loss:
+
+```
+drop table if exists tuple_test;
+create table tuple_test engine = MergeTree order by tuple(id) as select 1 as id, [(toDate('2018-01-01'), 3),(toDate('2018-01-02'), 4)] as val;
+
+CREATE TABLE tuple_test
+ENGINE = MergeTree
+ORDER BY tuple(id) AS
+SELECT 
+    1 AS id, 
+    [(toDate('2018-01-01'), 3), (toDate('2018-01-02'), 4)] AS val
+
+Ok.
+
+0 rows in set. Elapsed: 0.005 sec. 
+
+clickhouse-demo :) desc tuple_test format TSV;
+
+DESCRIBE TABLE tuple_test
+FORMAT TSV
+
+id	UInt8			
+val	Array(Tuple(Date, UInt8))			
+
+2 rows in set. Elapsed: 0.001 sec. 
+
+clickhouse-demo :) select * from tuple_test format PrettySpace;
+
+SELECT *
+FROM tuple_test 
+FORMAT PrettySpace
+
+id   val                                
+
+ 1   [('2018-01-01',3),('2018-01-02',4)]
+
+1 rows in set. Elapsed: 0.002 sec. 
+
+## Restart server here
+
+clickhouse-demo :) desc tuple_test format TSV;
+
+DESCRIBE TABLE tuple_test
+FORMAT TSV
+
+id	UInt8			
+val.1	Array(Date)			
+val.2	Array(UInt8)			
+
+3 rows in set. Elapsed: 0.002 sec. 
+
+clickhouse-demo :) select * from tuple_test format PrettySpace;
+
+SELECT *
+FROM tuple_test 
+FORMAT PrettySpace
+
+id   val.1   val.2
+
+ 1   []      []   
+
+1 rows in set. Elapsed: 0.003 sec. 
+```

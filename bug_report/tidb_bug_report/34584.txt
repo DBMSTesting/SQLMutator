@@ -1,0 +1,67 @@
+ID: 34584
+Title: Planner inferred wrong return type for firstrow agg function
+Description:
+Smaller repo:
+```sql
+create table foo(a int, b int);
+insert into foo values(0, NULL);
+alter table foo set tiflash replica 1;
+
+
+create table bar(a double not null, b decimal(65,0)  not null);
+insert into bar values(0, 0);
+alter table bar set tiflash  replica 1;
+
+select * from foo where a=all(select a from bar where bar.b=foo.b);
+ERROR 1105 (HY000): other error for mpp stream: DB::Exception: Cannot convert NULL value to non-Nullable type
+
+select * from foo where a=all(select 1 from bar where bar.b=foo.b);
+ERROR 1105 (HY000): other error for mpp stream: DB::Exception: Cannot convert NULL value to non-Nullable type
+
+explain select * from foo where a=all(select a from bar where bar.b=foo.b);
++------------------------------------------+---------+--------------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                       | estRows | task         | access object | operator info                                                                                                                                                                                      |
++------------------------------------------+---------+--------------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_11                            | 1.00    | root         |               | test.foo.a, test.foo.b                                                                                                                                                                             |
+| └─Apply_13                               | 1.00    | root         |               | CARTESIAN inner join, other cond:or(and(le(Column#8, 1), and(eq(cast(test.foo.a, double BINARY), Column#7), if(ne(Column#9, 0), NULL, 1))), or(eq(Column#10, 0), if(isnull(test.foo.a), NULL, 0))) |
+|   ├─TableReader_15(Build)                | 1.00    | root         |               | data:TableFullScan_14                                                                                                                                                                              |
+|   │ └─TableFullScan_14                   | 1.00    | cop[tikv]    | table:foo     | keep order:false, stats:pseudo                                                                                                                                                                     |
+|   └─TableReader_34(Probe)                | 1.00    | root         |               | data:ExchangeSender_33                                                                                                                                                                             |
+|     └─ExchangeSender_33                  | 1.00    | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                          |
+|       └─Projection_29                    | 1.00    | mpp[tiflash] |               | Column#7, Column#8, Column#9, Column#10                                                                                                                                                            |
+|         └─HashAgg_30                     | 1.00    | mpp[tiflash] |               | funcs:firstrow(Column#13)->Column#7, funcs:count(distinct test.bar.a)->Column#8, funcs:sum(Column#14)->Column#9, funcs:sum(Column#15)->Column#10                                                   |
+|           └─ExchangeReceiver_32          | 1.00    | mpp[tiflash] |               |                                                                                                                                                                                                    |
+|             └─ExchangeSender_31          | 1.00    | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                          |
+|               └─HashAgg_19               | 1.00    | mpp[tiflash] |               | group by:test.bar.a, funcs:firstrow(test.bar.a)->Column#13, funcs:sum(0)->Column#14, funcs:count(1)->Column#15                                                                                     |
+|                 └─Selection_28           | 0.80    | mpp[tiflash] |               | eq(test.bar.b, cast(test.foo.b, decimal(20,0) BINARY))                                                                                                                                             |
+|                   └─TableFullScan_27     | 1.00    | mpp[tiflash] | table:bar     | keep order:false, stats:pseudo                                                                                                                                                                     |
++------------------------------------------+---------+--------------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+But in Tikv, it is getting expected result, same with MySQL:
+```sql
+mysql> set tidb_allow_mpp=0;
+Query OK, 0 rows affected (0.19 sec)
+
+mysql> select * from foo where a=all(select a from bar where bar.b=foo.b);
++------+------+
+| a    | b    |
++------+------+
+|    0 | NULL |
++------+------+
+1 row in set (0.19 sec)
+
+mysql> explain select * from foo where a=all(select a from bar where bar.b=foo.b);
++--------------------------------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                             | estRows | task      | access object | operator info                                                                                                                                                                                      |
++--------------------------------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_11                  | 1.00    | root      |               | test.foo.a, test.foo.b                                                                                                                                                                             |
+| └─Apply_13                     | 1.00    | root      |               | CARTESIAN inner join, other cond:or(and(le(Column#8, 1), and(eq(cast(test.foo.a, double BINARY), Column#7), if(ne(Column#9, 0), NULL, 1))), or(eq(Column#10, 0), if(isnull(test.foo.a), NULL, 0))) |
+|   ├─TableReader_15(Build)      | 1.00    | root      |               | data:TableFullScan_14                                                                                                                                                                              |
+|   │ └─TableFullScan_14         | 1.00    | cop[tikv] | table:foo     | keep order:false, stats:pseudo                                                                                                                                                                     |
+|   └─StreamAgg_19(Probe)        | 1.00    | root      |               | funcs:firstrow(test.bar.a)->Column#7, funcs:count(distinct test.bar.a)->Column#8, funcs:sum(0)->Column#9, funcs:count(1)->Column#10                                                                |
+|     └─TableReader_22           | 0.80    | root      |               | data:Selection_21                                                                                                                                                                                  |
+|       └─Selection_21           | 0.80    | cop[tikv] |               | eq(test.bar.b, cast(test.foo.b, decimal(20,0) BINARY))                                                                                                                                             |
+|         └─TableFullScan_20     | 1.00    | cop[tikv] | table:bar     | keep order:false, stats:pseudo                                                                                                                                                                     |
++--------------------------------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```

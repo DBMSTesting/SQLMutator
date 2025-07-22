@@ -1,0 +1,110 @@
+ID: 12684
+Title: insert with on conflict fails if column has index
+Description:
+### What happens?
+
+When performing an insert statement with explicit on conflict, error is returned if a column is indexed.  This happens with a regular index, not a unique index or constraint. The error reported incorrectly states there is a unique/primary key constraint on the column.
+
+If I use the insert or replace short-hand syntax, no error is returned, but no update is performed either.  So, the short hand does not perform exactly what the longer explicit version does as stated in the documentation for insert.
+
+### To Reproduce
+
+```sql
+CREATE TABLE kvp("key" VARCHAR PRIMARY KEY, "value" VARCHAR, expiration BIGINT, "cache" BOOLEAN);
+CREATE INDEX kve_idx ON kvp(expiration);
+```
+
+Given the schema for a table as shown above:
+
+```sql
+insert or replace into kvp values ('/key', 'value', 0, false);
+select * from kvp;
+```
+```
+┌─────────┬─────────┬────────────┬─────────┐
+│   key   │  value  │ expiration │  cache  │
+│ varchar │ varchar │   int64    │ boolean │
+├─────────┼─────────┼────────────┼─────────┤
+│ /key    │ value   │          0 │ false   │
+└─────────┴─────────┴────────────┴─────────┘
+```
+```sql
+insert or replace into kvp values ('/key', 'value', 10000000, false);
+select * from kvp;
+```
+```
+┌─────────┬─────────┬────────────┬─────────┐
+│   key   │  value  │ expiration │  cache  │
+│ varchar │ varchar │   int64    │ boolean │
+├─────────┼─────────┼────────────┼─────────┤
+│ /key    │ value   │          0 │ false   │
+└─────────┴─────────┴────────────┴─────────┘
+```
+
+The short hand syntax does not update the value of the `expiration` column.  I then tried the explicit syntax:
+
+```sql
+insert into kvp values ('/key', 'value', 10000000, false) on conflict do update set value=excluded.value, expiration=excluded.expiration, cache=excluded.cache;
+```
+```  
+Binder Error: Can not assign to column 'expiration' because it has a UNIQUE/PRIMARY KEY constraint
+```
+```sql
+.schema kvp
+CREATE INDEX kve_idx ON kvp(expiration);
+CREATE TABLE kvp("key" VARCHAR PRIMARY KEY, "value" VARCHAR, expiration BIGINT, "cache" BOOLEAN);
+drop index kve_idx;
+.schema kvp
+CREATE TABLE kvp("key" VARCHAR PRIMARY KEY, "value" VARCHAR, expiration BIGINT, "cache" BOOLEAN);
+```
+
+After dropping the index, the on conflict works as expected.
+
+```sql
+insert into kvp values ('/key', 'value', 10000000, false) on conflict do update set value=excluded.value, expiration=excluded.expiration, cache=excluded.cache;
+select * from kvp;
+```
+```
+┌─────────┬─────────┬────────────┬─────────┐
+│   key   │  value  │ expiration │  cache  │
+│ varchar │ varchar │   int64    │ boolean │
+├─────────┼─────────┼────────────┼─────────┤
+│ /key    │ value   │   10000000 │ false   │
+└─────────┴─────────┴────────────┴─────────┘
+```
+
+### OS:
+
+Mac OS X (23.5.0 Darwin Kernel Version 23.5.0: Wed May  1 20:14:38 PDT 2024; root:xnu-10063.121.3~5/RELEASE_ARM64_T6020 arm64)
+
+### DuckDB Version:
+
+v1.0.0 1f98600c2c
+
+### DuckDB Client:
+
+CLI and C++ code
+
+### Full Name:
+
+Rakesh Vidyadharan
+
+### Affiliation:
+
+Wire Pulse, Inc.
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

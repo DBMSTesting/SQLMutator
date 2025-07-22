@@ -1,0 +1,103 @@
+ID: 63859
+Title: DB::Exception: Invalid type for SerializationLowCardinality index column 
+Description:
+**Describe what's wrong**
+Locally querying a Map(LowCardinality(String), String) inside a Tuple throws a `DB::Exception: Invalid type for SerializationLowCardinality index column` exception. (`INCORRECT_DATA`)
+
+**Does it reproduce on the most recent release?**
+Reproducible in `24.5.1.1099`, `24.4.1.2088`, `23.8.14.6`
+- `24.5.1.1099`: https://fiddle.clickhouse.com/0634d11d-c185-42db-b0eb-47558dcf14ce
+- `24.4.1.2088`: https://fiddle.clickhouse.com/d503ebe3-cccf-46d2-8ff1-4626e941cb95
+- `23.8.14.6`: https://fiddle.clickhouse.com/4cb34d41-9e09-4c82-b13d-643bd6134481
+
+**How to reproduce**
+
+`clickhouse client --stacktrace --queries-file poc.sql`
+```sql
+CREATE OR REPLACE TABLE win_logs_poc
+(
+    event_id UInt32,
+    winlog Tuple
+    (
+        event_data Map(LowCardinality(String), String)
+    ) 
+)
+ENGINE = MergeTree
+ORDER BY event_id;
+
+INSERT INTO win_logs_poc
+SELECT * FROM url('https://gist.githubusercontent.com/zu3st/6a559ac3b7a3b7a0c02cd86ddcccfbd2/raw/5396d06184a794c248eaa6140cb67ca990461b25/win_logs_poc.parquet');
+
+
+SELECT * FROM win_logs_poc WHERE mapContains(winlog.event_data, 'not_existent_123') LIMIT 1;
+```
+
+Both changing `event_data` to `Map(String, String)` and moving `event_data` out of the `winlog Tuple` prevent the error from happening. The ingested URL contains 200K rows of random data and is publicly accessible.
+
+
+**Expected behavior**
+No exception should occur.
+
+**Error message and/or stacktrace**
+
+```
+Received exception from server (version 24.5.1):
+Code: 117. DB::Exception: Received from localhost:9000. DB::Exception: Invalid type for SerializationLowCardinality index column.: (while reading column winlog): (while reading from part ./store/176/1767a123-fe51-4ce8-9be3-c9ed49937b1a/all_1_1_0/ in table default.win_logs_poc (1767a123-fe51-4ce8-9be3-c9ed49937b1a) located on disk default of type local, from mark 0 with max_rows_to_read = 8192): While executing MergeTreeSelect(pool: ReadPool, algorithm: Thread). Stack trace:
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c7eec3b
+1. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x0000000007751a6c
+2. DB::Exception::Exception<>(int, FormatStringHelperImpl<>) @ 0x000000000775f80b
+3. DB::SerializationLowCardinality::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000fcd0e96
+4. DB::SerializationTuple::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000fcfa9da
+5. DB::SerializationArray::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000fcb1b48
+6. DB::SerializationTuple::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000fcfa9da
+7. DB::MergeTreeReaderWide::readRows(unsigned long, unsigned long, bool, unsigned long, std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&) @ 0x00000000119fa629
+8. DB::MergeTreeRangeReader::DelayedStream::finalize(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&) @ 0x00000000119e2c82
+9. DB::MergeTreeRangeReader::read(unsigned long, DB::MarkRanges&) @ 0x00000000119eb8ee
+10. DB::MergeTreeReadTask::read(DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x0000000011a0ada8
+11. DB::MergeTreeThreadSelectAlgorithm::readFromTask(DB::MergeTreeReadTask&, DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x00000000122afdaf
+12. DB::MergeTreeSelectProcessor::read() @ 0x0000000011a080ee
+13. DB::MergeTreeSource::tryGenerate() @ 0x00000000122e3e58
+14. DB::ISource::work() @ 0x0000000011e60142
+15. DB::ExecutionThreadContext::executeTask() @ 0x0000000011e79fc7
+16. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000011e6e8b0
+17. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::PipelineExecutor::spawnThreads()::$_0, void ()>>(std::__function::__policy_storage const*) @ 0x0000000011e6ff2e
+18. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false, true>, void*>) @ 0x000000000c89ce39
+19. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false, true>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000c8a0d51
+20. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000c89fb3e
+21. ? @ 0x00007ff4597e2134
+22. ? @ 0x00007ff4598627dc
+. (INCORRECT_DATA)
+(query: SELECT * FROM win_logs_poc WHERE mapContains(winlog.event_data, 'not_existent_123') LIMIT 1;)
+```
+
+```
+Received exception from server (version 24.4.1):
+Code: 117. DB::Exception: Received from localhost:9000. DB::Exception: Invalid type for SerializationLowCardinality index column.: (while reading column winlog): (while reading from part ./store/627/6272a39a-34b6-4873-a29a-7a6fa1eb0cd7/all_1_1_0/ in table default.win_logs_poc (6272a39a-34b6-4873-a29a-7a6fa1eb0cd7) located on disk default of type local, from mark 0 with max_rows_to_read = 8192): While executing MergeTreeSelect(pool: ReadPool, algorithm: Thread). Stack trace:
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c9a449b
+1. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x000000000780b9ac
+2. DB::Exception::Exception<>(int, FormatStringHelperImpl<>) @ 0x0000000007819d8b
+3. DB::SerializationLowCardinality::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000ff88056
+4. DB::SerializationTuple::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000ffb323a
+5. DB::SerializationArray::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000ff684e8
+6. DB::SerializationTuple::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000000ffb323a
+7. DB::MergeTreeReaderWide::readRows(unsigned long, unsigned long, bool, unsigned long, std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&) @ 0x0000000011dd55f4
+8. DB::MergeTreeRangeReader::DelayedStream::finalize(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&) @ 0x0000000011dbc482
+9. DB::MergeTreeRangeReader::read(unsigned long, DB::MarkRanges&) @ 0x0000000011dc50e8
+10. DB::MergeTreeReadTask::read(DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x0000000011de7976
+11. DB::MergeTreeThreadSelectAlgorithm::readFromTask(DB::MergeTreeReadTask&, DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x0000000012787e8f
+12. DB::MergeTreeSelectProcessor::read() @ 0x0000000011de4b2b
+13. DB::MergeTreeSource::tryGenerate() @ 0x00000000127bd358
+14. DB::ISource::work() @ 0x000000001230a2a2
+15. DB::ExecutionThreadContext::executeTask() @ 0x00000000123257a8
+16. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012319a90
+17. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::PipelineExecutor::spawnThreads()::$_0, void ()>>(std::__function::__policy_storage const*) @ 0x000000001231b1b8
+18. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false, true>, void*>) @ 0x000000000ca5bab9
+19. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false, true>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000ca5f82a
+20. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000ca5e62d
+21. ? @ 0x00007f09d9082134
+22. ? @ 0x00007f09d91027dc
+. (INCORRECT_DATA)
+(query: SELECT * FROM win_logs_poc WHERE mapContains(winlog.event_data, 'not_existent_123') LIMIT 1;)
+```

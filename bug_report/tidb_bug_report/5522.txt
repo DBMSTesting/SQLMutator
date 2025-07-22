@@ -1,0 +1,74 @@
+ID: 5522
+Title: for decimal type, "Flen" and "Decimal" should not be -1(types.UnspecifiedLength)
+Description:
+It was discovered in https://github.com/pingcap/tidb/pull/5244:
+
+```sql
+DROP TABLE IF EXISTS tab0;
+CREATE TABLE tab0(pk INTEGER PRIMARY KEY, col0 INTEGER, col1 FLOAT, col2 TEXT, col3 INTEGER, col4 FLOAT, col5 TEXT);
+INSERT INTO tab0 VALUES(0,679,516.45,'xhnkd',487,753.15,'lnvfj');
+INSERT INTO tab0 VALUES(1,392,548.75,'byrpf',399,495.66,'evskg');
+INSERT INTO tab0 VALUES(2,716,708.29,'dhqht',832,584.88,'brclj');
+INSERT INTO tab0 VALUES(3,727,173.31,'cplql',201,189.10,'uqccp');
+INSERT INTO tab0 VALUES(4,333,631.53,'lllwp',61,48.87,'lvhza');
+INSERT INTO tab0 VALUES(5,893,405.76,'idiah',734,598.67,'forly');
+INSERT INTO tab0 VALUES(6,849,576.54,'wpmnm',938,98.50,'sxwxe');
+INSERT INTO tab0 VALUES(7,348,112.75,'bvutc',404,756.52,'eleqc');
+INSERT INTO tab0 VALUES(8,866,990.23,'anaue',510,848.68,'krvjs');
+INSERT INTO tab0 VALUES(9,835,321.44,'aswwa',897,852.34,'zxyvw');
+SELECT DISTINCT SUM(col3) + 1 FROM tab0;
+```
+
+
+```sql
+TiDB(localhost) > desc SELECT DISTINCT SUM(col3) + 1 FROM tab0;
++----------------+--------------+----------------+------+-------------------------------------------------------+-------+
+| id             | parents      | children       | task | operator info                                         | count |
++----------------+--------------+----------------+------+-------------------------------------------------------+-------+
+| TableScan_12   | HashAgg_9    |                | cop  | table:tab0, range:(-inf,+inf), keep order:false       | 10    |
+| HashAgg_9      |              | TableScan_12   | cop  | , funcs:sum(test.tab0.col3)                           | 1     |
+| TableReader_14 | HashAgg_13   |                | root | data:HashAgg_9                                        | 1     |
+| HashAgg_13     | Projection_8 | TableReader_14 | root | , funcs:sum(col_0)                                    | 1     |
+| Projection_8   | HashAgg_7    | HashAgg_13     | root | plus(2_col_0, 1)                                      | 1     |
+| HashAgg_7      |              | Projection_8   | root | group by:sum(col3) + 1, funcs:firstrow(sum(col3) + 1) | 1     |
++----------------+--------------+----------------+------+-------------------------------------------------------+-------+
+```
+
+The group by item in `HashAgg_7` is a decimal column named `sum(col3) + 1`, witch is calculated by `Projection_8`, and the type inference of `decimal` + `decimal` set the `Flen` and `Decimal` to -1, this further triggers the following panic:
+```txt
+2017/12/29 11:07:26.031 conn.go:410: [error] lastCmd SELECT DISTINCT SUM(col3) + 1 FROM tab0, should not happen, precision 4294967295, frac 65535 [types:1]Bad Number, goroutine 151 [running]:
+github.com/pingcap/tidb/server.(*clientConn).Run.func1(0xc420307860, 0xc4208bfe0f)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/conn.go:408 +0x10e
+panic(0x1c63820, 0xc4216c6540)
+        /Users/jianzhang.zj/opt/go-1.9/src/runtime/panic.go:491 +0x283
+github.com/pingcap/tidb/util/codec.EncodeDecimal(0xc4203839a0, 0x3, 0x8, 0xffffffffffff0008, 0x0, 0x0, 0x0, 0x0, 0x1e24a00, 0xc421cc0500, ...)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/util/codec/decimal.go:34 +0x3c0
+github.com/pingcap/tidb/util/codec.encode(0x2866110, 0x0, 0x0, 0xc421b9b280, 0x1, 0x1, 0xc4208b0000, 0x1010fe8, 0x0, 0x1c69380, ...)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/util/codec/codec.go:99 +0x6d3
+github.com/pingcap/tidb/util/codec.EncodeValue(0x2866110, 0x0, 0x0, 0xc421b9b280, 0x1, 0x1, 0x0, 0x0, 0x1e24a00, 0xc421cc0500, ...)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/util/codec/codec.go:172 +0x74
+github.com/pingcap/tidb/executor.(*HashAggExec).getGroupKey(0xc42076ce40, 0x2601ce0, 0xc4216c6520, 0xc4216c6520, 0x0, 0x0, 0xc4208bf958, 0x136bc8a)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/executor/aggregate.go:182 +0x34f
+github.com/pingcap/tidb/executor.(*HashAggExec).execute(0xc42076ce40, 0x2bd6e68, 0xc421b49b80, 0xc42076e000, 0x9)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/executor/aggregate.go:120 +0x1fc
+github.com/pingcap/tidb/executor.(*HashAggExec).NextChunk(0xc42076ce40, 0x2bd6e68, 0xc421b49b80, 0xc4216e0b00, 0x1, 0x0)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/executor/aggregate.go:74 +0x1fd
+github.com/pingcap/tidb/executor.(*recordSet).NextChunk(0xc421612d20, 0x2bd6e68, 0xc421b49b80, 0xc4216e0b00, 0xc421612d20, 0xc4216e0b00)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/executor/adapter.go:96 +0x56
+github.com/pingcap/tidb/server.(*tidbResultSet).NextChunk(0xc4216401b0, 0x2bd6e68, 0xc421b49b80, 0xc4216e0b00, 0x4, 0x400)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/driver_tidb.go:302 +0x51
+github.com/pingcap/tidb/server.(*clientConn).writeChunks(0xc420307860, 0x2bd6e68, 0xc421b49b80, 0x25e7a80, 0xc4216401b0, 0x0, 0xc4216401b0, 0x1)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/conn.go:936 +0x3ef
+github.com/pingcap/tidb/server.(*clientConn).writeResultset(0xc420307860, 0x2bd6e68, 0xc421b49b80, 0x25e7a80, 0xc4216401b0, 0xc4207c0000, 0x0, 0x0)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/conn.go:861 +0x668
+github.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc420307860, 0x2bd6e68, 0xc421b49b80, 0xc420380421, 0x27, 0x0, 0x0)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/conn.go:810 +0x115
+github.com/pingcap/tidb/server.(*clientConn).dispatch(0xc420307860, 0xc420380421, 0x28, 0x28, 0x0, 0x0)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/conn.go:592 +0x595
+github.com/pingcap/tidb/server.(*clientConn).Run(0xc420307860)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/conn.go:452 +0x1b8
+github.com/pingcap/tidb/server.(*Server).onConn(0xc4208ff620, 0x25ea600, 0xc4206fa008)
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/server.go:316 +0x144
+created by github.com/pingcap/tidb/server.(*Server).Run
+        /Users/jianzhang.zj/opt/gopath/src/github.com/pingcap/tidb/server/server.go:262 +0x496
+```

@@ -1,0 +1,61 @@
+ID: 55190
+Title: coprocessor request concurrency for partitioned table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+create table pt (id int primary key auto_increment, val int) partition by range (id)
+(PARTITION p1 VALUES LESS THAN (100),
+PARTITION p2 VALUES LESS THAN (200),
+PARTITION p3 VALUES LESS THAN (300),
+PARTITION p4 VALUES LESS THAN (400),
+PARTITION p5 VALUES LESS THAN (500),
+PARTITION p6 VALUES LESS THAN (600),
+PARTITION p7 VALUES LESS THAN (700));
+
+insert into pt (val) values (123),(456),(789),(1112);
+insert into pt (val) select (val) from pt;
+insert into pt (val) select (val) from pt;
+insert into pt (val) select (val) from pt;
+insert into pt (val) select (val) from pt;
+insert into pt (val) select (val) from pt;
+insert into pt (val) select (val) from pt;
+split table pt between (0) and (40960) regions 30;
+analyze table pt;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+explain analyze select * from pt order by id limit 100;
+
+mysql> explain analyze select * from pt order by id limit 100;
++----------------------------+---------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+---------+------+
+| id                         | estRows | actRows | task      | access object | execution info                                                                                                                                                                                                                                                                                                                                                                                                                 | operator info       | memory  | disk |
++----------------------------+---------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+---------+------+
+| Limit_10                   | 100.00  | 100     | root      |               | time:45.7ms, loops:2, RU:88.670214                                                                                                                                                                                                                                                                                                                                                                                             | offset:0, count:100 | N/A     | N/A  |
+| └─TableReader_17           | 100.00  | 100     | root      | partition:all | time:45.6ms, loops:1, cop_task: {num: 181, max: 788.3µs, min: 181.4µs, avg: 281.9µs, p95: 586.8µs, max_proc_keys: 100, p95_proc_keys: 0, tot_proc: 6.17ms, tot_wait: 9.63ms, copr_cache_hit_ratio: 0.00, build_task_duration: 225.8µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:181, total_time:49.2ms}}                                                                                                            | data:Limit_16       | 11.4 KB | N/A  |
+|   └─Limit_16               | 100.00  | 256     | cop[tikv] |               | tikv_task:{proc max:4ms, min:0s, avg: 22.1µs, p80:0s, p95:0s, iters:186, tasks:181}, scan_detail: {total_process_keys: 256, total_process_keys_size: 9664, total_keys: 437, get_snapshot_time: 7.08ms, rocksdb: {delete_skipped_count: 192, key_skipped_count: 448, block: {cache_hit_count: 362}}}, time_detail: {total_process_time: 6.17ms, total_wait_time: 9.63ms, total_kv_read_wall_time: 4ms, tikv_wall_time: 26.3ms}  | offset:0, count:100 | N/A     | N/A  |
+|     └─TableFullScan_15     | 100.00  | 256     | cop[tikv] | table:pt      | tikv_task:{proc max:4ms, min:0s, avg: 22.1µs, p80:0s, p95:0s, iters:186, tasks:181}                                                                                                                                                                                                                                                                                                                                            | keep order:true     | N/A     | N/A  |
++----------------------------+---------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+---------+------+
+4 rows in set (0.05 sec)
+```
+
+I expect to see  `max_distsql_concurrency: 7`
+
+### 3. What did you see instead (Required)
+
+ `max_distsql_concurrency: 1`
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master 52b4c8a27b46288ce4fcfc8e5bc8552a6c134233 
+

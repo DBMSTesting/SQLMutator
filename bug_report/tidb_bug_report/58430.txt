@@ -1,0 +1,56 @@
+ID: 58430
+Title: PiTR: cannot restore index created during log backup if it is longer than `3072`
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Start a cluster with:
+
+```fish
+tiup playground nightly --tiflash=0 --db.config=./op/adhoc/index-length-8001.toml
+```
+
+Where the config `index-length-8001.toml` is:
+
+```toml
+max-index-length = 8001
+```
+
+Do the following:
+
+```fish
+mycli --port 4000 --execute "DROP TABLE IF EXISTS test.huge_idx;"
+mycli --port 4000 --execute "CREATE TABLE test.huge_idx(id int AUTO_INCREMENT, blob1 varchar(1000), blob2 varchar(1000))"
+
+$br backup full -s (s3path "$strg_prefix-full") $argv
+set backupts (mcli cat "loc/breeze/$strg_prefix-full/backupmeta" | _get_brpb BackupMeta | rg -r '$1' 'end_version: (\d+)$')
+$br log start -s (s3path "$strg_prefix-incr") --task-name test $argv --start-ts "$backupts"
+
+mycli --port 4000 --execute "CREATE INDEX huge ON test.huge_idx(blob1, blob2);"
+
+# Wait until the checkpoint advances...
+$br restore point -s (s3path huge_index-incr) --full-backup-storage (s3path huge_index-full)
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Restore should success.
+
+### 3. What did you see instead (Required)
+
+```
+repair ingest index huge for table test.huge_idx  ABORTED
+["restore log failed summary"] [error="failed to repair ingest index: [ddl:1071]Specified key was too long (4000 bytes); max key length is 3072 bytes"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+nightly
+
+<!-- Paste the output of SELECT tidb_version() -->
+

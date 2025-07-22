@@ -1,0 +1,93 @@
+ID: 61245
+Title: Clickhouse 24.2.1.2248 crashes during startup
+Description:
+**Describe what's wrong**
+
+Clickhouse crashes during startup when upgrading from 24.1.6.52 to 24.2.1.2248 (more details below)
+
+**Does it reproduce on the most recent release?**
+
+Yes
+
+**How to reproduce**
+
+I can't remember the exact steps I took, but when I first upgraded the cluster from 24.1.6.52 to 24.2.1.2248, it worked, and there were no crashes after restarting or during startup. Then we encountered issues with GRANT on a MATERIALIZED VIEW, related to [#60439](https://github.com/ClickHouse/ClickHouse/pull/60439) I presume.
+
+After trying some stuff on our staging CH cluster, like dropping the table in question and removing metadata in ZK, to add DEFINER and SQL SECURITY NONE, I was eventually able to confirm that the GRANTS issue was resolved after doing a `ALTER TABLE gentime.index MODIFY SQL SECURITY NONE;`
+
+But before I applied it to the whole cluster, I first wanted to test the proper upgrade procedure, so I restored the original table DDL, before I downgraded CH to 24.1.6.52. This was still fine, but after trying to again upgrade to CH 24.2.1.2248, then I was constantly getting crashes during CH startup.
+
+The original table DDL:
+
+> CREATE MATERIALIZED VIEW IF NOT EXISTS gentime.index
+(
+    `Date` Date,
+    `Level` UInt32,
+    `Path` String,
+    `Version` UInt32
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/gentime.index/1', '{replica}', Version)
+PARTITION BY toYYYYMM(Date)
+ORDER BY (Level, Path, Date)
+SETTINGS index_granularity = 8192 AS
+SELECT *
+FROM graphite.index
+WHERE .....
+
+The modified table DDL (with definer):
+
+> CREATE MATERIALIZED VIEW IF NOT EXISTS gentime.index
+(
+    `Date` Date,
+    `Level` UInt32,
+    `Path` String,
+    `Version` UInt32
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/gentime.index/1', '{replica}', Version)
+PARTITION BY toYYYYMM(Date)
+ORDER BY (Level, Path, Date)
+SETTINGS index_granularity = 8192 
+DEFINER = 'gentime'
+SQL SECURITY NONE AS
+SELECT *
+FROM graphite.index
+WHERE .....
+
+It might be that there is something still left in the ZK metadata that causes it to crash, but I've also tried deleting a single replica metadata in ZK, but still the same behavior.
+
+**Expected behavior**
+
+I expect newer version of CH to be compatible with a previous version's table DDL.
+
+**Stack trace from the crash**
+
+> 2024.03.12 13:21:27.662662 [ 12674 ] {} <Fatal> BaseDaemon: ########## Short fault info ############
+2024.03.12 13:21:27.662715 [ 12674 ] {} <Fatal> BaseDaemon: (version 24.2.1.2248 (official build), build id: 11BFAC593A3DFF10D15AED5011579750AA6F6F78, git hash: 891689a41506d00aa169548f5b4a8774351242c4) (from thread 12636) Received signal 6
+2024.03.12 13:21:27.662782 [ 12674 ] {} <Fatal> BaseDaemon: Signal description: Aborted
+2024.03.12 13:21:27.662790 [ 12674 ] {} <Fatal> BaseDaemon: 
+2024.03.12 13:21:27.662805 [ 12674 ] {} <Fatal> BaseDaemon: Stack trace: 0x00007f800b03d8eb 0x00007f800b028535 0x0000000017ceb764 0x0000000017d08c4d 0x000000000d07ad28 0x0000000013733dfe 0x0000000013756ef5 0x0000000013735b41 0x0000000013772d78 0x000000001381d954 0x00000000111bd76d 0x00000000111cd33f 0x00000000111d10da 0x00000000111cac4e 0x00000000111e2754 0x000000000cffab1e 0x00007f800b1cdfa3 0x00007f800b0ff06f
+2024.03.12 13:21:27.662829 [ 12674 ] {} <Fatal> BaseDaemon: ########################################
+2024.03.12 13:21:27.662839 [ 12674 ] {} <Fatal> BaseDaemon: (version 24.2.1.2248 (official build), build id: 11BFAC593A3DFF10D15AED5011579750AA6F6F78, git hash: 891689a41506d00aa169548f5b4a8774351242c4) (from thread 12636) (no query) Received signal Aborted (6)
+2024.03.12 13:21:27.662849 [ 12674 ] {} <Fatal> BaseDaemon: 
+2024.03.12 13:21:27.662861 [ 12674 ] {} <Fatal> BaseDaemon: Stack trace: 0x00007f800b03d8eb 0x00007f800b028535 0x0000000017ceb764 0x0000000017d08c4d 0x000000000d07ad28 0x0000000013733dfe 0x0000000013756ef5 0x0000000013735b41 0x0000000013772d78 0x000000001381d954 0x00000000111bd76d 0x00000000111cd33f 0x00000000111d10da 0x00000000111cac4e 0x00000000111e2754 0x000000000cffab1e 0x00007f800b1cdfa3 0x00007f800b0ff06f
+2024.03.12 13:21:27.662909 [ 12674 ] {} <Fatal> BaseDaemon: 2. ? @ 0x00000000000378eb
+2024.03.12 13:21:27.662924 [ 12674 ] {} <Fatal> BaseDaemon: 3. ? @ 0x0000000000022535
+2024.03.12 13:21:27.662943 [ 12674 ] {} <Fatal> BaseDaemon: 4. ? @ 0x0000000017ceb764
+2024.03.12 13:21:27.662952 [ 12674 ] {} <Fatal> BaseDaemon: 5. ? @ 0x0000000017d08c4d
+2024.03.12 13:21:27.663021 [ 12674 ] {} <Fatal> BaseDaemon: 6. DB::IAST::formatImpl(DB::IAST::FormatSettings const&, DB::IAST::FormatState&, DB::IAST::FormatStateStacked) const @ 0x000000000d07ad28
+2024.03.12 13:21:27.663059 [ 12674 ] {} <Fatal> BaseDaemon: 7. DB::ASTAlterCommand::formatImpl(DB::IAST::FormatSettings const&, DB::IAST::FormatState&, DB::IAST::FormatStateStacked) const @ 0x0000000013733dfe
+2024.03.12 13:21:27.663076 [ 12674 ] {} <Fatal> BaseDaemon: 8. DB::ASTExpressionList::formatImpl(DB::IAST::FormatSettings const&, DB::IAST::FormatState&, DB::IAST::FormatStateStacked) const @ 0x0000000013756ef5
+2024.03.12 13:21:27.663088 [ 12674 ] {} <Fatal> BaseDaemon: 9. DB::ASTAlterQuery::formatQueryImpl(DB::IAST::FormatSettings const&, DB::IAST::FormatState&, DB::IAST::FormatStateStacked) const @ 0x0000000013735b41
+2024.03.12 13:21:27.663099 [ 12674 ] {} <Fatal> BaseDaemon: 10. DB::ASTQueryWithOutput::formatImpl(DB::IAST::FormatSettings const&, DB::IAST::FormatState&, DB::IAST::FormatStateStacked) const @ 0x0000000013772d78
+2024.03.12 13:21:27.663121 [ 12674 ] {} <Fatal> BaseDaemon: 11. DB::serializeAST(DB::IAST const&) @ 0x000000001381d954
+2024.03.12 13:21:27.663155 [ 12674 ] {} <Fatal> BaseDaemon: 12. DB::DDLTaskBase::formatRewrittenQuery(std::shared_ptr<DB::Context const>) @ 0x00000000111bd76d
+2024.03.12 13:21:27.663177 [ 12674 ] {} <Fatal> BaseDaemon: 13. DB::DDLWorker::initAndCheckTask(String const&, String&, std::shared_ptr<zkutil::ZooKeeper> const&) @ 0x00000000111cd33f
+2024.03.12 13:21:27.663203 [ 12674 ] {} <Fatal> BaseDaemon: 14. DB::DDLWorker::scheduleTasks(bool) @ 0x00000000111d10da
+2024.03.12 13:21:27.663219 [ 12674 ] {} <Fatal> BaseDaemon: 15. DB::DDLWorker::runMainThread() @ 0x00000000111cac4e
+2024.03.12 13:21:27.663249 [ 12674 ] {} <Fatal> BaseDaemon: 16. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<true>::ThreadFromGlobalPoolImpl<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x00000000111e2754
+2024.03.12 13:21:27.663281 [ 12674 ] {} <Fatal> BaseDaemon: 17. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000cffab1e
+2024.03.12 13:21:27.663306 [ 12674 ] {} <Fatal> BaseDaemon: 18. start_thread @ 0x0000000000007fa3
+2024.03.12 13:21:27.663315 [ 12674 ] {} <Fatal> BaseDaemon: 19. ? @ 0x00000000000f906f
+2024.03.12 13:21:31.786968 [ 11915 ] {} <Fatal> Application: Child process was terminated by signal 6.
+
+Please let me know if you require any further information that might help with identifying this issue.

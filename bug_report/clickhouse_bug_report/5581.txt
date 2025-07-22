@@ -1,0 +1,50 @@
+ID: 5581
+Title: Lot of `stat` calls before starting the select.
+Description:
+While checking ClickHouse on slow storage I've found that it runs plenty of `stat` call BEFORE actual query execution. 
+
+It looks like a big pause between sending a query and showing the progress bar & actual data reading.
+
+Those stat calls happen during files existence checks here:
+https://github.com/yandex/ClickHouse/blob/1b0d1a4450c728d5c5bde3fdfc48667a258df799/dbms/src/Storages/MergeTree/MergeTreeDataPart.cpp#L861-L872
+
+Here is stacktrace:
+```
+Thread 39 (Thread 0x7efd505f5700 (LWP 2089)):
+#0  0x00007efdaaaa0775 in __GI___xstat (vers=<optimized out>, name=0x7efd61a68070 "/data1/clickhouse/data/nyc_taxi_rides_s3/tripdata/20130701_20130731_797_797_0/pickup_location_id.bin", buf=0x7efd505eab90
+) at ../sysdeps/unix/sysv/linux/wordsize-64/xstat.c:35
+#1  0x00000000077dcd6a in Poco::File::exists() const ()
+#2  0x0000000006ddd599 in DB::MergeTreeDataPart::hasColumnFiles(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) const ()
+#3  0x0000000007177619 in DB::injectRequiredColumns(DB::MergeTreeData const&, std::shared_ptr<DB::MergeTreeDataPart const> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std:
+:allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >&) ()
+#4  0x0000000006e14b7a in DB::MergeTreeReadPool::fillPerPartInfo(std::vector<DB::RangesInDataPart, std::allocator<DB::RangesInDataPart> >&, bool) ()
+#5  0x0000000006e1648b in DB::MergeTreeReadPool::MergeTreeReadPool(unsigned long, unsigned long, unsigned long, std::vector<DB::RangesInDataPart, std::allocator<DB::RangesInDataPart> >, DB::MergeTreeData 
+const&, std::shared_ptr<DB::PrewhereInfo> const&, bool, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::MergeTreeReadPool::BackoffSettings const&, unsigned long, bool) ()
+#6  0x0000000006defc40 in DB::MergeTreeDataSelectExecutor::spreadMarkRangesAmongStreams(std::vector<DB::RangesInDataPart, std::allocator<DB::RangesInDataPart> >&&, unsigned long, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, unsigned long, bool, std::shared_ptr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::Settings const&) const ()
+#7  0x0000000006df552f in DB::MergeTreeDataSelectExecutor::readFromParts(std::vector<std::shared_ptr<DB::MergeTreeDataPart const>, std::allocator<std::shared_ptr<DB::MergeTreeDataPart const> > >, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, unsigned long, unsigned int, std::unordered_map<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, long, std::hash<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::equal_to<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, long> > > const*) const ()
+#8  0x0000000006df7cd7 in DB::MergeTreeDataSelectExecutor::read(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, unsigned long, unsigned int, std::unordered_map<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, long, std::hash<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::equal_to<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, long> > > const*) const ()
+#9  0x0000000006d12451 in DB::StorageMergeTree::read(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) ()
+#10 0x0000000006b0204b in DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&) ()
+#11 0x0000000006b0571d in DB::InterpreterSelectQuery::executeImpl(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, bool) ()
+#12 0x0000000006b086e1 in DB::InterpreterSelectQuery::executeWithMultipleStreams() ()
+#13 0x0000000006b1297c in DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams() ()
+#14 0x0000000006b12f78 in DB::InterpreterSelectWithUnionQuery::execute() ()
+#15 0x0000000006c1ae61 in ?? ()
+#16 0x0000000006c1ca44 in DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) ()
+#17 0x0000000003936c62 in DB::TCPHandler::runImpl() ()
+#18 0x00000000039372ab in DB::TCPHandler::run() ()
+#19 0x00000000077879bf in Poco::Net::TCPServerConnection::start() ()
+#20 0x00000000077880f9 in Poco::Net::TCPServerDispatcher::run() ()
+#21 0x000000000783b231 in Poco::PooledThread::run() ()
+#22 0x00000000078373f8 in Poco::ThreadImpl::runnableEntry(void*) ()
+#23 0x000000000b5488bf in ?? ()
+#24 0x00007efdab5336db in start_thread (arg=0x7efd505f5700) at pthread_create.c:463
+#25 0x00007efdaaab288f in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+```
+
+Checking all the files before each select look like excessive work which can be avoided.
+What do you think?
+
+UPD: `select from system.parts_columns` have all data neccesary for selects, and it doesn't check file existence.
+
+UPD2: it looks like those file existence checks use sinlge thread.

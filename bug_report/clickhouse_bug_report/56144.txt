@@ -1,0 +1,87 @@
+ID: 56144
+Title: Wrong insert in column with Enum type breaks the Select for the table 
+Description:
+
+Clickhouse Version: 23.8.1
+
+A way to reproduce: 
+Create a table with Enum column
+```
+CREATE TABLE test_table
+(
+    `enum_type` Enum8('public' = 1, 'restricted' = 2),
+    `name` String
+)
+ORDER BY name
+```
+Insert a row 
+```
+INSERT INTO test_table VALUES ('public', 'Val1')
+```
+Insert another row
+```
+INSERT INTO test_table VALUES (2, 'Val2')
+```
+Run Select
+```
+SELECT *
+FROM test_table
+```
+Output
+```
+┌─enum_type──┬─name──┐
+│ restricted │ Val2 │
+└────────────┴───────┘
+┌─enum_type─┬─name─┐
+│ public    │ Val1 │
+└───────────┴──────┘
+```
+All works great,
+
+Now, insert a row with a value not in the list,
+```
+INSERT INTO test_table VALUES ('user', 'Val3') 
+```
+This throws an error and doesn't insert the data.
+```
+Exception on client:
+Code: 691. DB::Exception: Unknown element 'user' for enum: while executing 'FUNCTION if(isNull(_dummy_0) : 3, defaultValueOfTypeName('Enum8(\'public\' = 1, \'restricted\' = 2)') :: 2, _CAST(_dummy_0, 'Enum8(\'public\' = 1, \'restricted\' = 2)') :: 4) -> if(isNull(_dummy_0), defaultValueOfTypeName('Enum8(\'public\' = 1, \'restricted\' = 2)'), _CAST(_dummy_0, 'Enum8(\'public\' = 1, \'restricted\' = 2)')) Enum8('public' = 1, 'restricted' = 2) : 1': While executing ValuesBlockInputFormat: data for INSERT was parsed from query. (UNKNOWN_ELEMENT_OF_ENUM)
+```
+But, if a numeric value, which is not part of the named value, is inserted, ClickHouse accepts it without throwing an error.
+```
+INSERT INTO test_table VALUES (3, 'Val4')
+
+Query id: 88d0b0bc-7089-4676-9122-59623e02be8d
+
+Ok.
+
+1 row in set. Elapsed: 0.209 sec.
+```
+But now if I run SELECT on the table,
+```
+SELECT *
+FROM test_table
+
+Query id: 5ca994d1-24dc-4e57-a2fd-73c0616e4af0
+
+Ok.
+Exception on client:
+Code: 36. DB::Exception: Code: 36. DB::Exception: Unexpected value 3 in enum. (BAD_ARGUMENTS) (version 23.9.1.284 (official build)). (BAD_ARGUMENTS)
+
+```
+And count shows there are 3 rows in the table.
+```
+SELECT count(*)
+FROM test_table
+
+Query id: 9bc66821-b0d8-47cf-956a-a8e99c2a94a7
+
+┌─count()─┐
+│       3 │
+└─────────┘
+
+1 row in set. Elapsed: 0.002 sec.
+```
+
+Expected behavior: 
+ClickHouse should throw an exception and shouldn't insert the row. This is breaking SELECT on the table. 

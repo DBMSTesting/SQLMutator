@@ -1,0 +1,70 @@
+ID: 9914
+Title: HTTP GET is not readonly
+Description:
+**Describe the bug**
+In previous releases HTTP GET was enforced all operations to be readonly.
+Now any query may be executed successfully.
+
+**How to reproduce**
+All tests are made on docker image `yandex/clickhouse-client@20.3.5.21` with zero configuration.
+<details>
+  <summary>But it also was reproduced on Debian with default configuration</summary>
+
+```
+$ sudo apt-get install clickhouse-server-common clickhouse-client -y
+The following NEW packages will be installed:
+  clickhouse-client clickhouse-common-static clickhouse-server-base
+  clickhouse-server-common
+0 upgraded, 4 newly installed, 0 to remove and 308 not upgraded.
+Get:1 http://repo.yandex.ru/clickhouse/deb/stable main/ clickhouse-common-static 20.3.5.21 [117 MB]
+Get:2 http://repo.yandex.ru/clickhouse/deb/stable main/ clickhouse-client 20.3.5.21 [126 kB]
+Get:3 http://repo.yandex.ru/clickhouse/deb/stable main/ clickhouse-server-base 19.4.5.35 [775 MB]
+Get:4 http://repo.yandex.ru/clickhouse/deb/stable main/ clickhouse-server-common 19.4.5.35
+```
+
+</details>
+
+**Steps to reproduce**
+```
+▶ curl -v --data-urlencode 'query=CREATE TABLE xxx (a Date) ENGINE = MergeTree(a, a, 256)' --get 'http://localhost:8123/'
+> GET /?query=CREATE%20TABLE%20xxx%20%28a%20Date%29%20ENGINE%20%3D%20MergeTree%28a%2C%20a%2C%20256%29 HTTP/1.1
+>
+< HTTP/1.1 200 OK
+< X-ClickHouse-Summary: {"read_rows":"0","read_bytes":"0","written_rows":"0","written_bytes":"0","total_rows_to_read":"0"}
+
+
+▶ curl -v --data-urlencode 'query=INSERT INTO xxx VALUES (today())' --get 'http://localhost:8123'
+> GET /?query=INSERT%20INTO%20xxx%20VALUES%20%28today%28%29%29 HTTP/1.1
+>
+< HTTP/1.1 200 OK
+< X-ClickHouse-Summary: {"read_rows":"0","read_bytes":"0","written_rows":"0","written_bytes":"0","total_rows_to_read":"0"}
+
+
+▶ curl -v --data-urlencode 'query=SELECT count() FROM xxx' --get 'http://localhost:8123'
+> GET /?query=SELECT%20count%28%29%20FROM%20xxx HTTP/1.1
+>
+< HTTP/1.1 200 OK
+<
+1
+
+
+▶ curl -v --data-urlencode 'query=DROP TABLE xxx' --get 'http://localhost:8123'
+> GET /?query=DROP%20TABLE%20xxx HTTP/1.1
+>
+< HTTP/1.1 200 OK
+< X-ClickHouse-Summary: {"read_rows":"0","read_bytes":"0","written_rows":"0","written_bytes":"0","total_rows_to_read":"0"}
+```
+
+And this one is my favourite 🙃 
+```
+▶ curl -v --data-urlencode 'readonly=1' --data-urlencode 'query=SELECT * FROM system.numbers LIMIT 1' --get 'http://localhost:8123/'
+> GET /?readonly=1&query=SELECT%20%2A%20FROM%20system.numbers%20LIMIT%201 HTTP/1.1
+>
+< HTTP/1.1 500 Internal Server Error
+< X-ClickHouse-Summary: {"read_rows":"0","read_bytes":"0","written_rows":"0","written_bytes":"0","total_rows_to_read":"0"}
+<
+Code: 164, e.displayText() = DB::Exception: Cannot modify 'readonly' setting in readonly mode (version 20.3.5.21 (official build))
+```
+
+**Expected behavior**
+According to [the documentation](https://clickhouse.tech/docs/en/interfaces/http/) `GET` must still be readonly. 

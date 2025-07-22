@@ -1,0 +1,65 @@
+ID: 58958
+Title: `SEMI_JOIN_REWRITE` hint failed when inexplicit cast happened on JOIN KEY
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+create table t1(a int);
+create table t2(a varchar(10));
+create table t3(a int);
+
+explain select * from t1 where exists(select /*+ semi_join_rewrite() */ 1 from t2 where t1.a=t2.a);
+explain select * from t1 where exists(select /*+ semi_join_rewrite() */ 1 from t3 where t1.a=t3.a);
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Hints inside two SQLs all worked.
+
+### 3. What did you see instead (Required)
+
+```
+mysql> explain select * from t1 where exists(select /*+ semi_join_rewrite() */ 1 from t2 where t1.a=t2.a);
++------------------------------+----------+-----------+---------------+--------------------------------------------------------------------+
+| id                           | estRows  | task      | access object | operator info                                                      |
++------------------------------+----------+-----------+---------------+--------------------------------------------------------------------+
+| HashJoin_11                  | 8000.00  | root      |               | semi join, left side:Projection_13, equal:[eq(Column#6, Column#7)] |
+| ├─Projection_16(Build)       | 10000.00 | root      |               | cast(test.t2.a, double BINARY)->Column#7                           |
+| │ └─TableReader_18           | 10000.00 | root      |               | data:TableFullScan_17                                              |
+| │   └─TableFullScan_17       | 10000.00 | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                     |
+| └─Projection_13(Probe)       | 10000.00 | root      |               | test.t1.a, cast(test.t1.a, double BINARY)->Column#6                |
+|   └─TableReader_15           | 10000.00 | root      |               | data:TableFullScan_14                                              |
+|     └─TableFullScan_14       | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                     |
++------------------------------+----------+-----------+---------------+--------------------------------------------------------------------+
+7 rows in set, 1 warning (0.01 sec)
+
+mysql> explain select * from t1 where exists(select /*+ semi_join_rewrite() */ 1 from t3 where t1.a=t3.a);
++----------------------------------+----------+-----------+---------------+----------------------------------------------------------+
+| id                               | estRows  | task      | access object | operator info                                            |
++----------------------------------+----------+-----------+---------------+----------------------------------------------------------+
+| HashJoin_12                      | 9990.00  | root      |               | inner join, equal:[eq(test.t1.a, test.t3.a)]             |
+| ├─HashAgg_22(Build)              | 7992.00  | root      |               | group by:test.t3.a, funcs:firstrow(test.t3.a)->test.t3.a |
+| │ └─TableReader_23               | 7992.00  | root      |               | data:HashAgg_17                                          |
+| │   └─HashAgg_17                 | 7992.00  | cop[tikv] |               | group by:test.t3.a,                                      |
+| │     └─Selection_21             | 9990.00  | cop[tikv] |               | not(isnull(test.t3.a))                                   |
+| │       └─TableFullScan_20       | 10000.00 | cop[tikv] | table:t3      | keep order:false, stats:pseudo                           |
+| └─TableReader_16(Probe)          | 9990.00  | root      |               | data:Selection_15                                        |
+|   └─Selection_15                 | 9990.00  | cop[tikv] |               | not(isnull(test.t1.a))                                   |
+|     └─TableFullScan_14           | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                           |
++----------------------------------+----------+-----------+---------------+----------------------------------------------------------+
+9 rows in set (0.00 sec)
+```
+
+The first one failed.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+
+current master.

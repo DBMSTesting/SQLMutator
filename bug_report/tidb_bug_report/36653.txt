@@ -1,0 +1,136 @@
+ID: 36653
+Title: Lightning imports data to non-destination cluster and leads to index inconsistency with data
+Description:
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+**mini reproduce:**
+deploy two tidb cluster using different status-port:
+![image](https://user-images.githubusercontent.com/76909042/181174720-3f5f9a3d-1e7b-4f55-8712-b0a7e0e548d8.png)
+
+![image](https://user-images.githubusercontent.com/76909042/181174627-b6d4e62a-306d-4a04-9b41-c9af6ca2f963.png)
+
+
+import data using tidb-lightning local mode
+```
+sysbench /usr/share/sysbench/oltp_common.lua --mysql-host=127.0.0.1 --mysql-port=6000 --mysql-db=test --mysql-user=root --mysql-password= --table_size=2000 --tables=1  --events=10000 --report-interval=10 --time=0 prepare
+
+sysbench /usr/share/sysbench/oltp_common.lua --mysql-host=127.0.0.1 --mysql-port=4000 --mysql-db=test --mysql-user=root --mysql-password= --table_size=200 --tables=1  --events=10000 --report-interval=10 --time=0 prepare
+
+tiup dumpling -B test -o ./sbtest1_dump -P 6000
+
+mysql -u root -h 127.0.0.1  -P 6000 test
+truncate table sbtest1;
+
+[tidb@172-16-120-122 ~]$ tiup tidb-lightning -c lightning.toml 
+tiup is checking updates for component tidb-lightning ...
+Starting component `tidb-lightning`: /home/tidb/.tiup/components/tidb-lightning/v6.1.0/tidb-lightning -c lightning.toml
+Verbose debug logs will be written to tidb-lightning.log
+
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  # | CHECK ITEM                                                                                                           | TYPE        | PASSED |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  1 | Source csv files size is proper                                                                                      | performance | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  2 | checkpoints are valid                                                                                                | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  3 | table schemas are valid                                                                                              | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  4 | Cluster is available                                                                                                 | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  5 | Lightning has the correct storage permission                                                                         | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  6 | sorted-kv-dir:./some_dir and data-source-dir:/home/tidb/sbtest1_dump are in the same disk, may slow down performance | performance | false  |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  7 | local disk resources are rich, estimate sorted data size 383.1KiB, local available is 806.2GiB                       | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  8 | Cluster available is rich, available is 10.77TiB, we need 1.122MiB                                                   | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  9 | Cluster doesn't have too many empty regions                                                                          | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+| 10 | Cluster region distribution is balanced                                                                              | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+
+Error: [Lighting:Restore:ErrChecksumMismatch]checksum mismatched remote vs local => (checksum: 2717476634684440220 vs 6245448145285911419) (total_kvs: 4200 vs 4000) (total_bytes:511600 vs 504000)
+tidb lightning encountered error: [Lighting:Restore:ErrChecksumMismatch]checksum mismatched remote vs local => (checksum: 2717476634684440220 vs 6245448145285911419) (total_kvs: 4200 vs 4000) (total_bytes:511600 vs 504000)
+
+mysql -u root -h 127.0.0.1  -P 4000 test
+mysql> admin check table sbtest1;
+ERROR 8134 (HY000): data inconsistency in table: sbtest1, index: k_1, col: k, handle: "1", index-values:"KindInt64 100" != record-values:"KindInt64 999", compare err:<nil>
+```
+
+
+a. tiup tidb-lightning -c lightning.toml 
+```
+Error: [Lighting:Restore:ErrChecksumMismatch]checksum mismatched remote vs local => (checksum: 2717476634684440220 vs 6245448145285911419) (total_kvs: 4200 vs 4000) (total_bytes:511600 vs 504000)
+```
+b. mysql> admin check table sbtest1;
+```
+ERROR 8134 (HY000): data inconsistency in table: sbtest1, index: k_1, col: k, handle: "1", index-values:"KindInt64 100" != record-values:"KindInt64 999", compare err:<nil>
+```
+
+2. What did you expect to see?
+```
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+|  # | CHECK ITEM                                                                                                           | TYPE        | PASSED |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+......
+|  4 | Cluster is available and correct                                                                                                | critical    | true   |
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+......
++----+----------------------------------------------------------------------------------------------------------------------+-------------+--------+
+```
+
+
+4. What did you see instead?
+```
+1. |  4 | Cluster is available                                                                                                 | critical    | true   |
+2. checksum mismatched remote vs local
+3. data inconsistency in table (in the non-destination cluster)
+```
+
+
+5. What version of BR and TiDB/TiKV/PD are you using?
+
+tidb-lightning v6.1.0
+tidb-server v6.1.0、v6.2.0-alpha
+tikv-server v6.1.0
+pd-server v6.1.0
+
+
+6. Operation logs
+   - Please upload `br.log` for BR if possible
+   - Please upload `tidb-lightning.log` for TiDB-Lightning if possible
+   - Please upload `tikv-importer.log` from TiKV-Importer if possible
+   - Other interesting logs
+
+
+7. Configuration of the cluster and the task
+   - `tidb-lightning.toml` for TiDB-Lightning if possible
+
+```
+[tidb@172-16-120-122 ~]$ cat lightning.toml 
+[lightning]
+level = "info"
+file = "tidb-lightning.log"
+check-requirements = true
+
+[mydumper]
+data-source-dir = "./sbtest1_dump"
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = "./some_dir"
+
+[tidb]
+host = "127.0.0.1"
+port = 6000
+user = "root"
+password = ""
+status-port = 10080
+```
+
+
+8. Screenshot/exported-PDF of Grafana dashboard or metrics' graph in Prometheus if possible

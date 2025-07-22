@@ -1,0 +1,89 @@
+ID: 39266
+Title: Data inconsistency when tpcc check
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+tpcc 100 warehouse data prepare, set tiflash replica , run some time. Then run the follow sql
+```sql
+SELECT
+    T.o_ol_cnt,T.order_line_count
+FROM
+    (
+        SELECT
+            o_ol_cnt,
+            order_line_count
+        FROM
+            orders
+            LEFT JOIN (
+                SELECT
+                    ol_w_id,
+                    ol_d_id,
+                    ol_o_id,
+                    count(*) order_line_count
+                FROM
+                    order_line
+                GROUP BY
+                    ol_w_id,
+                    ol_d_id,
+                    ol_o_id
+                ORDER by
+                    ol_w_id,
+                    ol_d_id,
+                    ol_o_id
+            ) AS order_line ON orders.o_w_id = order_line.ol_w_id
+            AND orders.o_d_id = order_line.ol_d_id
+            AND orders.o_id = order_line.ol_o_id
+        WHERE
+            orders.o_w_id = 7
+    ) AS T
+WHERE
+    T.o_ol_cnt != T.order_line_count
+```
+
+The plan is 
+```
+explain analyze SELECT T.o_ol_cnt,T.order_line_count FROM (SELECT o_ol_cnt, order_line_count FROM orders LEFT JOIN (SELECT ol_w_id, ol_d_id, ol_o_id, count(*) order_line_count FROM order_line GROUP BY ol_w_id, ol_d_id, ol_o_id ORDER by ol_w_id, ol_d_id, ol_o_id) AS order_line ON orders.o_w_id = order_line.ol_w_id AND orders.o_d_id = order_line.ol_d_id AND orders.o_id = order_line.ol_o_id WHERE orders.o_w_id = 7) AS T WHERE T.o_ol_cnt != T.order_line_count;
++---------------------------------+-----------+---------+--------------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+------+
+| id                              | estRows   | actRows | task         | access object    | execution info                                                                                                                                                                                                                                                                                                        | operator info                                                                                                                                                                                                                                                                                                               | memory   | disk |
++---------------------------------+-----------+---------+--------------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+------+
+| IndexJoin_21                    | 31121.95  | 2       | root         |                  | time:1.09s, loops:2, inner:{total:2.49s, concurrency:5, task:9, construct:54.1ms, fetch:2.43s, build:9.55ms}, probe:40.2ms                                                                                                                                                                                            | inner join, inner:TableReader_17, outer key:tpcc.order_line.ol_d_id, tpcc.order_line.ol_o_id, inner key:tpcc.orders.o_d_id, tpcc.orders.o_id, equal cond:eq(tpcc.order_line.ol_d_id, tpcc.orders.o_d_id), eq(tpcc.order_line.ol_o_id, tpcc.orders.o_id), other cond:ne(tpcc.orders.o_ol_cnt, Column#19)                     | 8.13 MB  | N/A  |
+| ├─StreamAgg_92(Build)           | 31.12     | 31257   | root         |                  | time:75.8ms, loops:36                                                                                                                                                                                                                                                                                                 | group by:tpcc.order_line.ol_d_id, tpcc.order_line.ol_o_id, tpcc.order_line.ol_w_id, funcs:count(Column#44)->Column#19, funcs:firstrow(tpcc.order_line.ol_o_id)->tpcc.order_line.ol_o_id, funcs:firstrow(tpcc.order_line.ol_d_id)->tpcc.order_line.ol_d_id, funcs:firstrow(tpcc.order_line.ol_w_id)->tpcc.order_line.ol_w_id | 33.1 KB  | N/A  |
+| │ └─TableReader_93              | 31.12     | 31257   | root         |                  | time:53.4ms, loops:33, cop_task: {num: 2, max: 53.2ms, min: 30.5ms, avg: 41.9ms, p95: 53.2ms, rpc_num: 2, rpc_time: 83.7ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}                                                                                                                                      | data:StreamAgg_88                                                                                                                                                                                                                                                                                                           | 978.5 KB | N/A  |
+| │   └─StreamAgg_88              | 31.12     | 31257   | cop[tiflash] |                  | tiflash_task:{proc max:49.7ms, min:28.7ms, avg: 39.2ms, p80:49.7ms, p95:49.7ms, iters:2, tasks:2, threads:2}                                                                                                                                                                                                          | group by:tpcc.order_line.ol_d_id, tpcc.order_line.ol_o_id, tpcc.order_line.ol_w_id, funcs:count(1)->Column#44                                                                                                                                                                                                               | N/A      | N/A  |
+| │     └─TableRangeScan_79       | 311221.15 | 312602  | cop[tiflash] | table:order_line | tiflash_task:{proc max:45.7ms, min:25.7ms, avg: 35.7ms, p80:45.7ms, p95:45.7ms, iters:6, tasks:2, threads:2}                                                                                                                                                                                                          | range:[7,7], keep order:true                                                                                                                                                                                                                                                                                                | N/A      | N/A  |
+| └─TableReader_17(Probe)         | 0.31      | 31256   | root         |                  | time:2.38s, loops:46, cop_task: {num: 31, max: 181.6ms, min: 1.03ms, avg: 76.3ms, p95: 181.5ms, max_proc_keys: 5088, p95_proc_keys: 3096, tot_proc: 1.96s, tot_wait: 23ms, rpc_num: 31, rpc_time: 2.37s, copr_cache_hit_ratio: 0.26, distsql_concurrency: 15}                                                         | data:Selection_16                                                                                                                                                                                                                                                                                                           | N/A      | N/A  |
+|   └─Selection_16                | 0.31      | 31256   | cop[tikv]    |                  | tikv_task:{proc max:166ms, min:4ms, avg: 69.6ms, p80:129ms, p95:164ms, iters:139, tasks:31}, scan_detail: {total_process_keys: 29464, total_process_keys_size: 2291461, total_keys: 59882, get_snapshot_time: 1.03ms, rocksdb: {delete_skipped_count: 8, key_skipped_count: 30409, block: {cache_hit_count: 265363}}} | eq(tpcc.orders.o_w_id, 7), not(isnull(tpcc.orders.o_ol_cnt))                                                                                                                                                                                                                                                                | N/A      | N/A  |
+|     └─TableRangeScan_15         | 31.12     | 31256   | cop[tikv]    | table:orders     | tikv_task:{proc max:165ms, min:4ms, avg: 69.5ms, p80:129ms, p95:164ms, iters:139, tasks:31}                                                                                                                                                                                                                           | range: decided by [eq(tpcc.orders.o_d_id, tpcc.order_line.ol_d_id) eq(tpcc.orders.o_id, tpcc.order_line.ol_o_id) eq(tpcc.orders.o_w_id, 7)], keep order:false                                                                                                                                                               | N/A      | N/A  |
++---------------------------------+-----------+---------+--------------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+------+
+8 rows in set (1.18 sec)
+
+```
+### 2. What did you expect to see? (Required)
+empty set
+### 3. What did you see instead (Required)
+```
++----------+------------------+
+| o_ol_cnt | order_line_count |
++----------+------------------+
+|        8 |                7 |
+|        8 |                1 |
++----------+------------------+
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+Release Version: v6.5.0-alpha
+Edition: Community
+Git Commit Hash: 3bcd5a889bded9ab23e7d077ea5c69df7982a495
+Git Branch: heads/refs/tags/v6.5.0-alpha
+UTC Build Time: 2022-11-19 11:13:51
+GoVersion: go1.19.2
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv

@@ -1,0 +1,77 @@
+ID: 44009
+Title: kill statement can't work and write result to conn takes a lot of time
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+```
+goroutine 388176096 [IO wait, 339 minutes]:
+internal/poll.runtime_pollWait(0x7f6b7b4d0780, 0x77)
+	/usr/local/go/src/runtime/netpoll.go:305 +0x89
+internal/poll.(*pollDesc).wait(0xc0480cb100?, 0xc00804f958?, 0x0)
+	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0x32
+internal/poll.(*pollDesc).waitWrite(...)
+	/usr/local/go/src/internal/poll/fd_poll_runtime.go:93
+internal/poll.(*FD).Write(0xc0480cb100, {0xc00804e000, 0x4000, 0x4000})
+	/usr/local/go/src/internal/poll/fd_unix.go:391 +0x2c5
+net.(*netFD).Write(0xc0480cb100, {0xc00804e000?, 0x400?, 0x400?})
+	/usr/local/go/src/net/fd_posix.go:96 +0x29
+net.(*conn).Write(0xc094424388, {0xc00804e000?, 0xc082374d00?, 0xc0d6a2aeb8?})
+	/usr/local/go/src/net/net.go:195 +0x45
+bufio.(*Writer).Flush(0xc07476fc80)
+	/usr/local/go/src/bufio/bufio.go:629 +0x62
+bufio.(*Writer).Write(0xc07476fc80, {0xc008fca000?, 0xc082374dc0?, 0xc035f09250?})
+	/usr/local/go/src/bufio/bufio.go:673 +0xd0
+github.com/pingcap/tidb/server.(*packetIO).writePacket(0xc04345c390, {0xc008fca000, 0x1d4, 0x400})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/packetio.go:189 +0x1b8
+github.com/pingcap/tidb/server.(*clientConn).writePacket(0xc008fca000?, {0xc008fca000?, 0x3d5f83e?, 0xc0d8916400?})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:433 +0x25
+github.com/pingcap/tidb/server.(*clientConn).writeChunks(0xc091db8160, {0x4302c70, 0xc015c8d9b0}, {0x43126b0, 0xc0802d2ff0}, 0x1, 0x1ba5?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:2243 +0x4ec
+github.com/pingcap/tidb/server.(*clientConn).writeResultset(0xc091db8160, {0x4302c70, 0xc015c8d9b0}, {0x43126b0, 0xc0802d2ff0}, 0x18?, 0x0, 0x30?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:2163 +0x23e
+github.com/pingcap/tidb/server.(*clientConn).executePreparedStmtAndWriteResult(0xc091db8160, {0x4302c70, 0xc015c8d9b0}, {0x431cb90, 0xc04cf9a540}, {0xc04a2214f0?, 0xc04fd886b4?, 0xc?}, 0x0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn_stmt.go:266 +0x36d
+github.com/pingcap/tidb/server.(*clientConn).handleStmtExecute(0xc091db8160, {0x4302bc8, 0xc09895ef80}, {0xc04fd886a9, 0x17, 0x17})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn_stmt.go:201 +0x685
+github.com/pingcap/tidb/server.(*clientConn).dispatch(0xc091db8160, {0x4302c70?, 0xc04345c480?}, {0xc04fd886a8, 0x18, 0x18})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:1393 +0x134b
+github.com/pingcap/tidb/server.(*clientConn).Run(0xc091db8160, {0x4302c70, 0xc04345c480})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:1121 +0x24e
+github.com/pingcap/tidb/server.(*Server).onConn(0xc002bd10a0, 0xc091db8160)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:559 +0x6d4
+created by github.com/pingcap/tidb/server.(*Server).startNetworkListener
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:455 +0x5ca
+```
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+after https://github.com/pingcap/tidb/pull/32809, when a conn receives a kill signal, it can skip out of the blocked read of client cmd and check the kill signal, and quit.  This has a pre-condition that you have done the last cmd your received (meaning dispatch and writing result work is done)
+
+```
+for {
++->    1: cmd, err = readPackage (currently can skip out when timeout)
+ |       ...  (kill signal check)
+ |     2: dispatch(cmd). 
+ |       ...
+ |     3: drain result (chunk unit)
+ |          1: Next (check kill signal in every operator's  Next function)
+ |          2: Write results to conn (still blocked write)
++----+
+...
+```
+
+But if we blocked at step 3-2 (writing result) in the last cmd you just received, the kill signal is impossible to be checked even if you have the read cmd timeout.
+
+### 2. What did you expect to see? (Required)
+kill statement should be responded quickly anyway
+
+### 3. What did you see instead (Required)
+block at writeResult to conn
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+even master
+

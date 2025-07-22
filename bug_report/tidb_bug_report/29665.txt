@@ -1,0 +1,114 @@
+ID: 29665
+Title: [lightning] max-error switch not work as expected
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. Do a normal lightning import
+2. Do another import which results in errors,  e.g. wrong data types when sql-mode = "STRICT_TRANS_TABLES"
+
+```
+[root@centos76_vm max_error]# cat max_error.t2-schema.sql
+/*!40101 SET NAMES binary*/;
+CREATE TABLE `t2` (
+  `a` int(11) NOT NULL,
+  `b` varchar(10) DEFAULT NULL,
+  `c` datetime DEFAULT NULL,
+  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */,
+  UNIQUE KEY `uk_b` (`b`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+[root@centos76_vm max_error]# cat max_error.t2.000000000.csv
+"a","b","c"
+"xxx","b1","0"
+
+[root@centos76_vm max_error]# grep -v ^# lighting.toml
+[lightning]
+level = "info"
+file = "tidb-lightning.log"
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = "/home/sorted-kv-dir"
+
+[mydumper]
+data-source-dir = "s3://nfs/tools_test_data/max_error?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http%3a%2f%2fminio.pingcap.net%3a9000&force-path-style=true"
+no-schema = false
+
+filter = ['*.*', 'mysql.*', '!sys.*', '!INFORMATION_SCHEMA.*', '!PERFORMANCE_SCHEMA.*', '!METRICS_SCHEMA.*', '!INSPECTION_SCHEMA.*']
+
+[mydumper.csv]
+separator = ','
+delimiter = '"'
+header = true
+
+
+[tidb]
+host = "172.16.6.217"
+port = 4000
+user = "root"
+status-port = 10080
+sql-mode = "STRICT_TRANS_TABLES"
+
+```
+
+### 2. What did you expect to see? (Required)
+1. For a successful import, lightning_task_info should not be created.
+2. For an import with error , error should not be recorded in tidb lightning_task_info database, if max-error not configured (default 0)
+
+### 3. What did you see instead (Required)
+1. For a successful import, lightning_task_info  is created, though max-error not configured (default 0)
+2. For an import with errors, errors are recorded in lightning_task_info database, though max-error not configured (default 0)
+
+```
+[root@centos76_vm max_error]# /root/tidb/bin/tidb-lightning -config lighting.toml
+Verbose debug logs will be written to tidb-lightning.log
+
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| # | CHECK ITEM                                                                                | TYPE        | PASSED |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 1 | Source csv files size is proper                                                           | performance | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 2 | checkpoints are valid                                                                     | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 3 | table schemas are valid                                                                   | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 4 | Cluster is available                                                                      | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 5 | Lightning has the correct storage permission                                              | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 6 | local disk resources are rich, estimate sorted data size 84B, local available is 369.1GiB | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 7 | Cluster available is rich, available is 369.1GiB, we need 84B                             | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 8 | Cluster doesn't have too many empty regions                                               | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+| 9 | Cluster region distribution is balanced                                                   | critical    | true   |
++---+-------------------------------------------------------------------------------------------+-------------+--------+
+Error: restore table `max_error`.`t1` failed: in file max_error.t1.000000000.csv:0 at offset 57: failed to cast value as int(11) for column `a` (#1): [types:1690]BIGINT value is out of range in '99999999999999999999999999999999999999999999999999'
+tidb lightning encountered error:  restore table `max_error`.`t1` failed: in file max_error.t1.000000000.csv:0 at offset 57: failed to cast value as int(11) for column `a` (#1): [types:1690]BIGINT value is out of range in '99999999999999999999999999999999999999999999999999'
+
+mysql> select * from lightning_task_info.type_error_v1;
++---------------------+----------------------------+------------------+----------------------------+--------+-------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------+
+| task_id             | create_time                | table_name       | path                       | offset | error                                                                                                                                                 | row_data                                              |
++---------------------+----------------------------+------------------+----------------------------+--------+-------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------+
+| 1636538956404040876 | 2021-11-10 18:09:17.544721 | `max_error`.`t1` | max_error.t1.000000000.csv |     57 | failed to cast value as int(11) for column `a` (#1): [types:1690]BIGINT value is out of range in '99999999999999999999999999999999999999999999999999' | /* ERROR: column count mismatch, expected 0, got 1 */ |
+| 1636538956404040876 | 2021-11-10 18:09:17.557284 | `max_error`.`t2` | max_error.t2.000000000.csv |     27 | failed to cast value as int(11) for column `a` (#1): [types:1292]Truncated incorrect DOUBLE value: 'xxx'                                              | /* ERROR: column count mismatch, expected 0, got 3 */ |
++---------------------+----------------------------+------------------+----------------------------+--------+-------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------+
+2 rows in set (0.00 sec)
+
+```
+
+### 4. What is your TiDB version? (Required)
+
+[root@centos76_vm max_error]# /root/tidb/bin/tidb-lightning -V
+Release Version: v5.3.0-alpha-1332-gc6d6523
+Git Commit Hash: c6d65239a01662b239ff6f6c10abda4ab28ec8c5
+Git Branch: release-5.3
+Go Version: go1.16.6
+UTC Build Time: 2021-11-10 08:28:09
+Race Enabled: false
+
+

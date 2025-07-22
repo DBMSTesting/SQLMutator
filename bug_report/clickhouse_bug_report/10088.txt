@@ -1,0 +1,81 @@
+ID: 10088
+Title: Different FULL JOIN results between JOIN ON and JOIN USING
+Description:
+**Describe the bug**
+We've noticed a seemingly incorrect result of a FULL JOIN query when using JOIN ON syntax. It seems that values that are missing on the left side are not handled properly. 
+
+**How to reproduce**
+* Which ClickHouse server version to use
+
+Reproduced on 20.3.5.21 and 20.1.9.54
+
+* Which interface to use, if matters
+
+native clickhouse-client
+
+* Non-default settings, if any
+
+no
+
+* `CREATE TABLE` statements for all tables involved
+
+```sql
+CREATE TABLE foo (server_date Date, dimension_1 String, metric_1 UInt32) ENGINE = MergeTree() PARTITION BY toYYYYMM(server_date) ORDER BY (server_date);
+CREATE TABLE bar (server_date Date, dimension_1 String, metric_2 UInt32) ENGINE = MergeTree() PARTITION BY toYYYYMM(server_date) ORDER BY (server_date);
+```
+
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+
+```sql
+INSERT INTO foo VALUES ('2020-01-01', 'test1', 10), ('2020-01-01', 'test2', 20);
+INSERT INTO bar VALUES ('2020-01-01', 'test2', 30), ('2020-01-01', 'test3', 40);
+```
+
+* Queries to run that lead to unexpected result
+
+JOIN USING query
+
+```sql
+SELECT dimension_1, sum_metric_1, sum_metric_2
+FROM
+(SELECT dimension_1, sum(metric_1) as sum_metric_1 FROM foo GROUP BY dimension_1) AS subquery_1
+ALL FULL JOIN
+(SELECT dimension_1, sum(metric_2) as sum_metric_2 FROM bar GROUP BY dimension_1) AS subquery_2
+USING dimension_1
+ORDER BY dimension_1 ASC
+```
+
+JOIN ON query
+
+```sql
+SELECT dimension_1, sum_metric_1, sum_metric_2
+FROM
+(SELECT dimension_1, sum(metric_1) as sum_metric_1 FROM foo GROUP BY dimension_1) AS subquery_1
+ALL FULL JOIN
+(SELECT dimension_1, sum(metric_2) as sum_metric_2 FROM bar GROUP BY dimension_1) AS subquery_2
+ON subquery_1.dimension_1 = subquery_2.dimension_1
+ORDER BY dimension_1 ASC
+```
+
+
+**Expected behavior**
+
+```
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│ test1       │           10 │            0 │
+│ test2       │           20 │           30 │
+│ test3       │            0 │           40 │
+└─────────────┴──────────────┴──────────────┘
+```
+
+**Error message and/or stacktrace**
+
+JOIN ON query returns
+
+```
+┌─dimension_1─┬─sum_metric_1─┬─sum_metric_2─┐
+│             │            0 │           40 │
+│ test1       │           10 │            0 │
+│ test2       │           20 │           30 │
+└─────────────┴──────────────┴──────────────┘
+```

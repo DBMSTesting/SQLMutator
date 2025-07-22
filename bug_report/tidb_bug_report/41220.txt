@@ -1,0 +1,124 @@
+ID: 41220
+Title: INL_JOIN not matching table names for sub query
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+CREATE TABLE `t_0` (
+   `c_128` varchar(34) NOT NULL ,
+   `c_1` varchar(16) NOT NULL ,
+   `c_2` varchar(16) NOT NULL ,
+   `c_3` varchar(8) NOT NULL ,
+   `c_4` varchar(3) NOT NULL ,
+   `c_5` varchar(17) DEFAULT NULL ,
+   `c_132` date DEFAULT NULL ,
+   `c_7` varchar(9) DEFAULT NULL ,
+   `c_8` varchar(9) DEFAULT NULL ,
+   `c_9` varchar(5) DEFAULT NULL ,
+   `c_10` varchar(17) DEFAULT NULL ,
+   `c_11` varchar(4) DEFAULT NULL ,
+   `c_12` varchar(3) DEFAULT NULL ,
+   `c_13` varchar(2) DEFAULT NULL ,
+   `c_14` varchar(12) DEFAULT NULL ,
+   `c_15` varchar(32) DEFAULT NULL ,
+   `c_16` varchar(4) DEFAULT NULL ,
+   `c_17` varchar(4) DEFAULT NULL ,
+   `c_18` varchar(100) DEFAULT NULL ,
+   `c_19` varchar(50) DEFAULT NULL ,
+   `c_38` varchar(12) DEFAULT NULL ,
+   `c_39` varchar(3) DEFAULT NULL ,
+   `c_40` decimal(14,6) DEFAULT NULL ,
+   `c_41` varchar(1) DEFAULT NULL ,
+   `c_134` varchar(1) DEFAULT NULL ,
+   `c_101` int(2) DEFAULT NULL ,
+
+   `c_120` varchar(1) DEFAULT NULL ,
+   `c_121` varchar(1) DEFAULT NULL ,
+   `c_122` varchar(2000) DEFAULT NULL ,
+   `c_123` varchar(1) NOT NULL ,
+   `c_124` varchar(10) DEFAULT NULL ,
+   `c_125` varchar(18) DEFAULT NULL ,
+   `c_126` date DEFAULT NULL ,
+   `c_127` varchar(6) DEFAULT NULL ,
+   PRIMARY KEY (`c_128`,`c_1`,`c_2`,`c_4`) /*T![clustered_index] NONCLUSTERED */,
+   KEY `c_129` (`c_15`,`c_134`),
+   KEY `c_130` (`c_128`,`c_1`,`c_2`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T! SHARD_ROW_ID_BITS=6 PRE_SPLIT_REGIONS=6 */ ;
+ 
+ 
+ CREATE TABLE `t_131` (
+   `c_136` bigint(20) unsigned NOT NULL /*T![auto_rand] AUTO_RANDOM(5) */ ,
+   `c_132` date NOT NULL ,
+   `c_138` varchar(32) NOT NULL ,
+   `c_134` varchar(1) NOT NULL ,
+   `c_135` varchar(10) DEFAULT NULL ,
+   PRIMARY KEY (`c_136`) /*T![clustered_index] CLUSTERED */,
+   KEY `c_137` (`c_132`,`c_138`,`c_134`)
+ ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin 
+ 
+ 
+ alter table t_131 add index idx_old_n2  (`c_138`,`c_134`,`c_132`,`c_135`);
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+no warnings;
+
+### 3. What did you see instead (Required)
+
+```sql
+mysql> EXPLAIN
+    ->  SELECT /*+ inl_join(t_131) */
+    ->    TTBI.c_132, TTBI.c_15, TTBI.c_134, TTBI.c_127, TTBI.c_126
+    ->  FROM
+    ->    t_0 TTBI
+    ->  WHERE
+    ->    TTBI.c_126 >= STR_TO_DATE('20221020', '%Y%m%d')
+    ->    AND SUBSTR(TTBI.c_15, 1, 2) = 'JJ'
+    ->    AND NOT EXISTS (
+    ->      SELECT
+    ->        1
+    ->      FROM
+    ->        t_131
+    ->      WHERE
+    ->        t_131.c_138 = TTBI.c_15
+    ->        AND t_131.c_134 = TTBI.c_134
+    ->        AND t_131.c_132 = TTBI.c_132
+    ->        AND SUBSTR(t_131.c_138, 1, 2) = 'JJ'
+    ->        AND c_135 = '600000'
+    ->    )
+    ->    AND TTBI._tidb_rowid BETWEEN 1 AND 1000;
++--------------------------------+----------+-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| id                             | estRows  | task      | access object                                             | operator info                                                                                                                               |
++--------------------------------+----------+-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_8                   | 2133.33  | root      |                                                           | case5.t_0.c_132, case5.t_0.c_15, case5.t_0.c_134, case5.t_0.c_127, case5.t_0.c_126                                                          |
+| └─HashJoin_20                  | 2133.33  | root      |                                                           | anti semi join, equal:[eq(case5.t_0.c_15, case5.t_131.c_138) eq(case5.t_0.c_134, case5.t_131.c_134) eq(case5.t_0.c_132, case5.t_131.c_132)] |
+|   ├─IndexReader_29(Build)      | 8.00     | root      |                                                           | index:Selection_28                                                                                                                          |
+|   │ └─Selection_28             | 8.00     | cop[tikv] |                                                           | eq(case5.t_131.c_135, "600000"), eq(substr(case5.t_131.c_138, 1, 2), "JJ")                                                                  |
+|   │   └─IndexFullScan_27       | 10000.00 | cop[tikv] | table:t_131, index:idx_old_n2(c_138, c_134, c_132, c_135) | keep order:false, stats:pseudo                                                                                                              |
+|   └─TableReader_23(Probe)      | 2666.67  | root      |                                                           | data:Selection_22                                                                                                                           |
+|     └─Selection_22             | 2666.67  | cop[tikv] |                                                           | eq(substr(case5.t_0.c_15, 1, 2), "JJ"), ge(case5.t_0.c_126, 2022-10-20)                                                                     |
+|       └─TableRangeScan_21      | 3333.33  | cop[tikv] | table:TTBI                                                | range:[1,1000], keep order:false, stats:pseudo                                                                                              |
++--------------------------------+----------+-----------+-----------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+8 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                                                                   |
++---------+------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Warning | 1815 | There are no matching table names for (t_131) in optimizer hint /*+ INL_JOIN(t_131) */ or /*+ TIDB_INLJ(t_131) */. Maybe you can use the table alias name |
++---------+------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

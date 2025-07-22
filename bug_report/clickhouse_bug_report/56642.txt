@@ -1,0 +1,53 @@
+ID: 56642
+Title: Materialize views not appending data after deduplicating in dependant table
+Description:
+This issue is replicated in the stateless test  `02912_ingestion_mv_deduplication`.
+
+Having the following tables:
+
+```sql
+CREATE TABLE landing
+(
+    time DateTime,
+    number Int64
+)
+Engine=ReplicatedReplacingMergeTree('/clickhouse/' || currentDatabase() || '/landing/{shard}/', '{replica}')
+PARTITION BY toYYYYMMDD(time)
+ORDER BY time;
+
+CREATE MATERIALIZED VIEW mv
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/' || currentDatabase() || '/mv/{shard}/', '{replica}')
+PARTITION BY toYYYYMMDD(hour) ORDER BY hour
+AS SELECT
+    toStartOfHour(time) AS hour,
+    sum(number) AS sum_amount
+FROM landing
+GROUP BY hour;
+```
+
+If you append to `landing` using the following insert, everything works fine:
+
+```sql
+INSERT INTO landing VALUES ('2022-09-01 12:23:34', 42);
+```
+
+Then, if you append the same row (duplicated block in partition `20220901`) and another completely new (to a different partition) as in:
+
+```sql
+INSERT INTO landing VALUES ('2022-09-01 12:23:34', 42),('2023-09-01 12:23:34', 42);
+```
+
+For landing table:
+- The first block (partition `20220901`) gets correctly deduplicated and not inserted
+- The second block (partition `20230901`) gets inserted
+
+For mv:
+- Somehow, both blocks get discarded when the expectation is for both to go through unless deduplication on materialized views is enabled (`deduplicate_blocks_in_dependent_materialized_views = 1`)
+
+**Affected versions**
+
+This bug affected versions from 21.9 and earlier until [this PR](https://github.com/ClickHouse/ClickHouse/pull/34780) was added. Somehow, the changes introduced in that PR mitigated the issue when `max_insert_delayed_streams_for_parallel_write < blocks`.
+
+The bug is still there and could affect S3 setups since `max_insert_delayed_streams_for_parallel_write` should be set as 1000 in those setups.
+
+It also affects setups where `max_insert_delayed_streams_for_parallel_write` is set to big enough values.

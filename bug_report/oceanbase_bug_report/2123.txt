@@ -1,0 +1,140 @@
+ID: 2123
+Title: [Bug]: server abort in oceanbase::lib::ObTenantCtxAllocator::common_free(void*)
+Description:
+**Describe the bug**
+build `master` branch with asan, client lost connection after executing a SQL.
+
+**Environment**
+<!-- Environment Details sometimes important -->
+- OS Version and CPU Arch(`uname -a`):
+```
+Linux c0c380f80f1a 6.5.0-44-generic #44~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue Jun 18 14:36:16 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+```
+  
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+ 
+
+```
+observer (OceanBase_CE 4.3.3.0)
+
+REVISION: 1-77368f00e6612c47702fddfb6217f0cf864fb0a8
+BUILD_BRANCH: master
+BUILD_TIME: Sep 13 2024 12:46:16
+BUILD_FLAGS: RelWithDebInfo
+BUILD_INFO: 
+
+Copyright (c) 2011-present OceanBase Inc.
+```
+
+**Fast Reproduce Steps(Required)**
+1. Execute `init.sql.txt`
+[init.sql.txt](https://github.com/user-attachments/files/16991584/init.sql.txt)
+
+2. Execute `error.sql.txt`
+[error.sql.txt](https://github.com/user-attachments/files/16991583/error.sql.txt)
+
+
+**Expected behavior**
+no crash
+
+**Actual Behavior**
+```
+
+OB_ABORT, tid: 17498, lbt: 0x1187f881 0x54fa401f 0x54bdb9a2 0x1194b446 0x119402c9 0x1196a4ec 0x133792ba 0x17eb50eb 0x17eb4f47 0x1aed96f3 0x1aed6119 0x1aed9af5 0x54f69c23 0x7fc038e6bac3 0x7fc038efca04
+```
+
+symbolized output:
+```shell
+$ llvm-addr2line-18 -Cfpe /data/db/vendor/ob/ob_fork/build_release_asan/src/observer/observer 0x1187f881 0x54fa401f 0x54bdb9a2 0x1194b446 0x119402c9 0x1196a4ec 0x133792ba 0x17eb50eb 0x17eb4f47 0x1aed96f3 0x1aed6119 0x1aed9af5 0x54f69c23 0x7fc038e6bac3 0x7fc038efca04
+__interceptor_backtrace.part.0 at /home/jenkins/agent/workspace/rpm-obdevtools-llvm-11.0.1-1.1.8/ob_source_code_dir/llvm_src_dir/compiler-rt/lib/asan/../sanitizer_common/sanitizer_common_interceptors.inc:4149
+oceanbase::common::lbt() at ./build_release_asan/deps/oblib/src/lib/./deps/oblib/src/lib/utility/ob_backtrace.cpp:158 (discriminator 6)
+ob_abort() at ./build_release_asan/deps/oblib/src/lib/./deps/oblib/src/lib/ob_abort.cpp:20 (discriminator 4)
+abort_unless(bool) at ./build_release_asan/deps/oblib/src/lib/./deps/oblib/src/lib/ob_abort.h:0
+oceanbase::lib::ObTenantCtxAllocator::common_free(void*) at ./build_release_asan/deps/oblib/src/lib/./deps/oblib/src/lib/alloc/ob_tenant_ctx_allocator.cpp:560
+oceanbase::common::ObAllocator::free(void*) at ./build_release_asan/deps/oblib/src/lib/./deps/oblib/src/lib/allocator/ob_allocator_v2.cpp:58
+oceanbase::common::ModulePageAllocator::free(void*) at ./build_release_asan/src/rootserver/./deps/oblib/src/lib/allocator/page_arena.h:0
+oceanbase::lib::__MemoryContext__::deinit() at ./build_release_asan/src/pl/./deps/oblib/src/lib/rc/context.h:505
+oceanbase::lib::__MemoryContext__::destory_context(oceanbase::lib::__MemoryContext__*) at ./build_release_asan/src/pl/./deps/oblib/src/lib/rc/context.h:591
+oceanbase::lib::_S<(oceanbase::lib::ContextSource)1>::~_S() at ./build_release_asan/src/observer/./deps/oblib/src/lib/rc/context.h:860 (discriminator 2)
+oceanbase::omt::ObThWorker::worker(long&, long&, int&) at ./build_release_asan/src/observer/./src/observer/omt/ob_th_worker.cpp:352
+oceanbase::omt::ObThWorker::run(long) at ./build_release_asan/src/observer/./src/observer/omt/ob_th_worker.cpp:432
+oceanbase::lib::Thread::run() at ./build_release_asan/deps/oblib/src/lib/./deps/oblib/src/lib/thread/thread.cpp:175
+```
+
+
+**Additional context**
+when using MySQL shell, if failed to reproduce, execute this before `error.sql`:
+```
+set collation_connection='latin1_bin';
+```
+
+#### tenant config
+```sql
+CREATE RESOURCE UNIT 4c7g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '7G';
+create resource pool pool_test unit='4c7g', unit_num=1, zone_list=('zone1' ,'zone2', 'zone3');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF;
+```
+
+#### deploy config
+```yaml
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.11
+    - name: server2
+      ip: 10.0.10.12
+    - name: server3
+      ip: 10.0.10.13
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+  server2:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer2
+    zone: zone2
+  server3:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer3
+    zone: zone3
+  tag: latest
+  include: obd/observer.include.yaml
+  global: 
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '40G'
+    # diag_syslog_per_error_limit: '4'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+obproxy-ce:
+  servers:
+    - 10.0.10.8
+  global:
+    listen_port: 10004
+    prometheus_listen_port: 10005
+    syslog_level: 'WARN'
+    home_path: /root/data/obproxy
+    root_password: ''
+  include: obd/obproxy.include.yaml
+  depends:
+    - oceanbase-ce
+```
+
+#### about us
+We are the BASS team from the School of Cyber Science and Technology at Beihang University. Our main focus is on system software security, operating systems, and program analysis research, as well as the development of automated program testing frameworks for detecting software defects. Using our self-developed database vulnerability testing tool, we have identified the potential vulnerabilities.

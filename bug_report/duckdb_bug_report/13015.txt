@@ -1,0 +1,116 @@
+ID: 13015
+Title: Variable Integer Size Type
+Description:
+This PR introduces a new Variable Integer type, that supports a precise representation os large integer types.
+
+The basic idea is to have a new `LogicalType::VARINT` that supports storing variable-sized integers as a blob. Similar to `LogicalType::BIT`, they will be a `PhysicalType::BLOB` and will use all comparison methods already implemented for blobs.
+
+To make this work, we must represent variable integers as a blob in a way that allows comparisons to work similarly to integral types.
+
+In other words, the binary representation of 1 should yield the same results in a binary comparison when compared to, for example, -1. The format is designed to take advantage of the native `PhysicalType::BLOB` comparisons.
+## Format
+The VARINT format consists of two parts: the header and the data itself. The header is always the first 3 bytes, and in a way store the size of the data bytes, and the remaining bytes are the data itself.
+
+We use 3 bytes for data_byte_size because this allows us to represent 2^(2ˆ23) values, which goes up to 1262612 digits. This means we can store Postgres decimals, as they can have a width of up to 131072 digits.
+
+To represent negative numbers, we use the first bit of the data byte size. If the bit is set, the number is positive. Otherwise, the number is negative.
+
+The minimal size of a VARINT is 4 bytes, where the first 3 bytes represent the number of bytes that hold the data.
+
+For example, to represent the value 1, we would have:
+
+`10000000 00000000 00000001 00000001`
+The first 3 bytes, `10000000 00000000 00000001` , indicate that we will only use one byte to hold the data, and that number is positive. The byte holding the data is the last byte `00000001` which is equivalent to the value 1.
+
+### Requirement
+In addition, the most significant byte of the data bytes must have at least one bit set, except when the data has only 1 byte, and it represents the value 0.
+
+For example: 
+`00000000 00000000 00000001 00000000`. This is valid and would represent 0.
+
+`00000000 00000000 00000010 00000000 00000000`. This is invalid because the data type has two bytes, and the most significant byte has no bits set.
+
+## Negative Numbers
+Negative integers are stored using two's complement, with the most significant bit of the most significant byte that is part of the data size set to 0.
+
+For example, the value -1 would be:
+`0111111 11111111 11111110 11111110`.
+
+The first 3 bytes are 2's complements of the actual positive size, with one byte
+`0111111 11111111 11111110` is 2's complement of `10000000 00000000 00000001`, and `11111110` is 2's complement of `00000001`.
+
+-300 would then  be: 
+`0111111 11111111 11111101 11111110 11010100`
+where `0111111 11111111 11111101` is the two's complement of the data size of 2 bytes `10000000 00000000 00000010` and the data type `11111110 11010011` is the 2's complement of positive 300. `00000001 00101100`.
+
+It's easy to see that with this representation, all positive numbers will be higher than negative numbers, since the most significant bit of the most significant byte is always set to 1. and that -1 is always bigger than any other negative, since a header pointing to a data size of 0 bytes is not valid, and `0111111 11111111 11111110` is the max possible header.
+
+## Casts
+This PR Has the following casts:
+
+### From
+- tinyint 
+- utinyint 
+- smallint 
+- usmallint 
+- integer 
+- uinteger 
+- bigint 
+- ubigint 
+- uhugeint 
+- double (Implicit)
+- float 
+- hugeint
+- varchar
+
+### To
+- double (Implicit)
+- varchar
+
+
+## Benchmarks
+To assess the current cast speed, I've executed the following benchmark:
+```sql
+-- load
+CREATE TABLE t1 AS select '340282366920938463463374607431768211455'::${FROM_TYPE} as a from range(0,10000000) tbl(i);
+
+-- run
+create or replace table t2 as select a::${TO_TYPE} from t1
+```
+| From     | To      | Time (s) |
+|----------|---------|----------|
+| Varint   | Double  | 0.07     | 
+| Varint   | Varchar | 2.37     |
+| Double   | Varint  | 0.37     |
+| Varchar  | Varint  | 0.70     |
+| Uhugeint | Varint  | 0.05     |
+| Uhugeint | Double  | 0.05     |
+
+The basic conclusion is that that from/to varchar is quite slow, it is currently an unoptimized quadratic algorithm, and we should look at Python and JS for inspiration.
+
+### Gigantic Numbers
+In this benchmark we basically check the costs of converting a single value with many digits.
+```sql 
+
+-- load
+CREATE TABLE t1 AS select concat('1', repeat('0', 1000000)) as a;
+
+-- run 
+SELECT a::varint from t1
+```
+
+| # of Digits | Time (s) | 
+|-------------|----------|
+| 10.000      | 0.008    |
+| 100.000     | 0.86     | 
+| 1.000.000   | 88.3     |
+
+## Future Work
+This PR still has some downsides and missing features. Here, I list future work ordered by priority.
+- [ ] Support arithmetic and bitwise operators. Right now, aggregations will use the implicit cast to double to be able to operate, which is very lossy for big integers.
+- [ ] Look at CPython and V8 to optimize from/to `Varchar`
+- [ ] Support Decimal Casts
+- [ ] Be able to represent very large Decimals by having VARINT as the underlying type.
+
+
+

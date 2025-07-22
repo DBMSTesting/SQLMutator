@@ -1,0 +1,95 @@
+ID: 40997
+Title: unexpected full range scan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+```
+### 1. Minimal reproduce step (Required)
+CREATE TABLE t71706696 (
+  dt char(8) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  db_id bigint(20) NOT NULL,
+  tbl_id bigint(20) NOT NULL,
+  db_name varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  UNIQUE KEY dt_2 (dt, db_id, tbl_id)
+);
+
+explain
+select
+  *
+from
+  t71706696 force index(dt_2)
+where
+  (
+    (
+      dt = '20210112'
+      and db_id = '62812'
+      and tbl_id > '228892694'
+    )
+    or (
+      dt = '20210112'
+      and db_id = '62813'
+      and tbl_id <= '226785696'
+    )
+    or (
+      dt = '20210112'
+      and db_id > '62812'
+      and db_id < '62813'
+    )
+  )
+```
+### 2. What did you expect to see? (Required)
+```
++-------------------------------+---------+-----------+------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
+| id                            | estRows | task      | access object                                  | operator info                                                                                                                                |
++-------------------------------+---------+-----------+------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
+| IndexLookUp_7                 | 0.67    | root      |                                                |                                                                                                                                              |
+| ├─IndexRangeScan_5(Build)     | 0.67    | cop[tikv] | table:t71706696, index:dt_2(dt, db_id, tbl_id) | range:("20210112" 62812 228892694,"20210112" 62812 +inf], ["20210112" 62813 -inf,"20210112" 62813 226785696], keep order:false, stats:pseudo |
+| └─TableRowIDScan_6(Probe)     | 0.67    | cop[tikv] | table:t71706696                                | keep order:false, stats:pseudo                                                                                                               |
++-------------------------------+---------+-----------+------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------+
+3 rows in set (0.00 sec
+```
+### 3. What did you see instead (Required)
+```
++-------------------------------+----------+-----------+------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                            | estRows  | task      | access object                                  | operator info                                                                                                                                                                                |
++-------------------------------+----------+-----------+------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| IndexLookUp_8                 | 0.67     | root      |                                                |                                                                                                                                                                                |
+| ├─Selection_7(Build)          | 0.67     | cop[tikv] |                                                | or(and(eq(test.t71706696.dt, "20210112"), and(eq(test.t71706696.db_id, 62812), gt(test.t71706696.tbl_id, 228892694))), or(and(eq(test.t71706696.dt, "20210112"), and(eq(test.t71706696.db_id, 62813), le(test.t71706696.tbl_id, 226785696))), and(eq(test.t71706696.dt, "20210112"), and(gt(test.t71706696.db_id, 62812), lt(test.t71706696.db_id, 62813))))) |
+| │ └─IndexFullScan_5           | 10000.00 | cop[tikv] | table:t71706696, index:dt_2(dt, db_id, tbl_id) | keep order:false, stats:pseudo                                                                                                                                                                                |
+| └─TableRowIDScan_6(Probe)     | 0.67     | cop[tikv] | table:t71706696                                | keep order:false, stats:pseudo                                                                                                                                                                                |
++-------------------------------+----------+-----------+------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+### 4. What is your TiDB version? (Required)
+
+master
+Release Version: v6.6.0-alpha-349-g07af605381-dirty
+Edition: Community
+Git Commit Hash: 07af6053817087dcde838ada84e532fdd43174ba
+Git Branch: HEAD
+UTC Build Time: 2023-02-02 09:18:25
+GoVersion: go1.19.3
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: unistore
+
+possible fix:
+```
+diff --git a/util/ranger/detacher.go b/util/ranger/detacher.go
+index 606f53c402..e49cac8030 100644
+--- a/util/ranger/detacher.go
++++ b/util/ranger/detacher.go
+@@ -678,6 +678,10 @@ func (d *rangeDetacher) detachDNFCondAndBuildRangeForIndex(condition *expression
+                        ranges := res.Ranges
+                        accesses = res.AccessConds
+                        filters = res.RemainedConds
++                       // If dnf item evaluate to false always, ignore it
++                       if len(ranges) == 0 {
++                               continue
++                       }
+                        if len(accesses) == 0 {
+                                return FullRange(), nil, nil, true, nil
+                        }
+```

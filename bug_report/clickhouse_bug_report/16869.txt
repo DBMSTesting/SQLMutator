@@ -1,0 +1,104 @@
+ID: 16869
+Title: TimeSeriesGroupSum algorithm is totally wrong 
+Description:
+... and code quality is very poor.
+
+Imagine the 3 timeseries: the first is growing from 200 with rate `2*t`, and another two are decreasing starting from 200 with `t` rate. So sum should always be constant `600`.
+
+```
+WITH [200. + (2 * number), 200. - number, 200. - number] AS vals
+SELECT
+    arrayJoin(if((number = 0) OR (number >= 10), [1, 2, 3], [(number % 3) + 1])) AS ts_id,
+    number + 1000 AS timestamp,
+    vals[ts_id] AS value
+FROM numbers(11)
+ORDER BY timestamp
+
+┌─ts_id─┬─timestamp─┬─value─┐
+│     1 │      1000 │   200 │
+│     2 │      1000 │   200 │
+│     3 │      1000 │   200 │
+│     2 │      1001 │   199 │
+│     3 │      1002 │   198 │
+│     1 │      1003 │   206 │
+│     2 │      1004 │   196 │
+│     3 │      1005 │   195 │
+│     1 │      1006 │   212 │
+│     2 │      1007 │   193 │
+│     3 │      1008 │   192 │
+│     1 │      1009 │   218 │
+│     1 │      1010 │   220 │
+│     2 │      1010 │   190 │
+│     3 │      1010 │   190 │
+└───────┴───────────┴───────┘
+
+15 rows in set. Elapsed: 0.003 sec. 
+```
+
+I've added anchors at the beginning and at both ends of all 3 sequences to simplify the calculation. 
+
+It seems the function returns the proper result: 
+```
+SELECT timeSeriesGroupSum(toUInt64(ts_id), toInt64(timestamp), value)
+FROM 
+(
+    WITH [200. + (2 * number), 200. - number, 200. - number] AS vals
+    SELECT
+        arrayJoin(if((number = 0) OR (number >= 10), [1, 2, 3], [(number % 3) + 1])) AS ts_id,
+        number + 1000 AS timestamp,
+        vals[ts_id] AS value
+    FROM numbers(11)
+)
+
+Query id: 526c8000-c02b-4677-b454-4a1916b1274b
+
+┌─timeSeriesGroupSum(toUInt64(ts_id), toInt64(timestamp), value)─────────────────────────────────────────────────────────────┐
+│ [(1000,600),(1001,600),(1002,600),(1003,600),(1004,600),(1005,600),(1006,600),(1007,600),(1008,600),(1009,600),(1010,600)] │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.003 sec. 
+```
+
+But actually they are correct only before state merges will start happening. If we will split our data into several chunks and process them in parallel, to force the states merging - the result will be completely wrong:
+
+```
+SET max_threads = 11, max_block_size = 1
+
+SELECT timeSeriesGroupSum(toUInt64(ts_id), toInt64(timestamp), value)
+FROM 
+(
+    WITH [200. + (2 * number), 200. - number, 200. - number] AS vals
+    SELECT
+        arrayJoin(if((number = 0) OR (number >= 10), [1, 2, 3], [(number % 3) + 1])) AS ts_id,
+        number + 1000 AS timestamp,
+        vals[ts_id] AS value
+    FROM numbers_mt(11)
+)
+
+Query id: 616ca5c1-95c9-4e4a-9a2a-0d5a8ea19188
+
+┌─timeSeriesGroupSum(toUInt64(ts_id), toInt64(timestamp), value)─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ [(1000,600),(1001,199),(1002,441.55555555555554),(1003,765.3611111111111),(1004,677.1666666666666),(1005,1008.9055555555556),(1006,950.6444444444444),(1007,1103.7166666666667),(1008,1159.2888888888888),(1009,830.8611111111111),(1010,600)] │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.004 sec. 
+
+```
+:scream:
+
+
+Also there are other inconsistencies there like:
+```
+SELECT timeSeriesGroupSum(id, ts, val) FROM values('id UInt64, ts Int64, val Float64', (1, 1, 1))
+┌─timeSeriesGroupSum(id, ts, val)─┐
+│ [(1,1)]                         │
+└─────────────────────────────────┘
+```
+
+vs 
+```
+SELECT timeSeriesGroupSum(id, ts, val) FROM values('id UInt64, ts Int64, val Float64', (1, 1, 0))
+┌─timeSeriesGroupSum(id, ts, val)─┐
+│ []                              │
+└─────────────────────────────────┘
+```

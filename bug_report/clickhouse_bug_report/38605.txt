@@ -1,0 +1,195 @@
+ID: 38605
+Title: Code: 8. DB::Exception: Cannot find column  in source stream, there are only columns:  (THERE_IS_NO_COLUMN) (version 22.6.2.12 (official build))
+Description:
+
+I have a problem with the distributed table. When I run the following query;
+
+Select
+       sum(case when statusTransaction  in('DESFEITA_NOK','DESFEITA_OK') then 1 else 0 end)/count()*100 as perc_desfeita
+FROM dataflow.transactions
+where dateTransaction >'2022-06-20'
+
+
+I get the error below:
+
+Code: 8. DB::Exception: Cannot find column `countIf(in(statusTransaction, ('DESFEITA_NOK', 'DESFEITA_OK')))` in source stream, there are only columns: [sum(if(in(statusTransaction, ('DESFEITA_NOK', 'DESFEITA_OK')), 1, 0)), count()]. (THERE_IS_NO_COLUMN) (version 22.6.2.12 (official build))
+
+
+Note: when I use the source table, just replicated the query works normally.
+
+Select
+       sum(case when statusTransaction  in('DESFEITA_NOK','DESFEITA_OK') then 1 else 0 end)/count()*100 as perc_desfeita
+FROM dataflow.transactions_ori2 --> change to Replicated table, its works
+where dateTransaction >'2022-06-20'
+
+
+
+I have two other environments that work with distributed tables and I never had this problem. The actual versions of the other environments are 22.6.2.12.
+
+Specifically in the environment I'm having this error, I added a password for the default user. But even removing the error still remains.
+
+All my environments are running on Kubernetes, below the configuration YAML:
+
+
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: "clickhouse"
+  labels:
+    enviroment: production
+    app: clickhouse
+spec:
+  #volumes:
+  #- name: clickhouse-database
+  #  persistentVolumeClaim:
+  #    claimNAme: ch-storage
+
+  defaults:
+    templates:
+      volumeClaimTemplate: clickhouse-volume-data
+      logVolumeClaimTemplate: clickhouse-template-log
+      podTemplate: clickhouse-aiops
+      #clusterServiceTemplate: clickhouse-service-template
+      serviceTemplate: clickhouse-service-template
+  templates:
+    volumeClaimTemplates:
+    - name: clickhouse-volume-data
+      reclaimPolicy: Retain
+  #    persistentVolumeClaim:
+  #    metadata:
+  #      name: clickhouse-database
+      spec:
+  #        storageClassName: default
+  #        storageClass: standard
+        accessModes: 
+          - ReadWriteOnce
+        # Dev
+        resources:
+          requests:
+            storage: 60Gi
+        # Conectcar
+        # resources:
+        #  requests:
+        #    storage: 200Gi
+     #inicial 
+    podTemplates:
+      - name: database
+        # zone:
+        #   key: "clickhouse-aiops"
+        #   values: 
+        #     - "allow"
+        # podDistribution:
+        #   - type: ShardAntiAffinity
+        #   - type: MaxNumberPerNode
+        #     number: 1
+        #     # Apply podDistribution on per-host basis
+        #     topologyKey: "kubernetes.io/hostname"
+        # distribution: "OnePerHost"
+        metadata:
+          labels:
+            custom.label: "alma-clickhouse"
+          annotations:
+            custom.annotation: "Alma Plataform"
+                # type PodSpec struct {} from k8s.io/core/v1
+        spec:
+          containers:
+            - name: alma-clickhouse
+              image: yandex/clickhouse-server:22.1.3.7
+              volumeMounts:
+                - name: clickhouse-volume-data
+                  mountPath: /var/lib/clickhouse
+              # Dev
+              resources:
+                requests:
+                  memory: "1Gi"
+                  cpu: "250m"
+              # BIG (Conectcar)
+              #resources:
+              #  requests:
+              #    memory: "2Gi"
+              #    cpu: "1000m"
+              #  limits:
+              #    memory: "10Gi"
+              #    cpu: "2000m"
+   #fim 
+  #  service template 
+    serviceTemplates: 
+      - name: clickhouse-service-template
+        generateName: clickhouse-{chi}
+        metadata:
+        ## DESCOMENTAR ABAIXO PARA ACESSO SOMENTE INTERNO 
+          labels:
+            custom.label: "custom.value"
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-internal: 0.0.0.0/0 # --> acesso interno do loadbalancer aws, gerenciado pelo operator
+        spec:
+          ports:
+            - name: http
+              port: 8123
+            - name: tcp
+              port: 9000
+          #   - name: interserver
+          #     port: 9009
+          ## ALTERAR  de LoadBalancer para clusterIP quando acesso externo for desnecessário
+          type: ClusterIP
+          # type: LoadBalancer #--> Para acesso externo usando LoadBalancer descomentar esse trecho e ativar o de cima.
+          #externalTrafficPolicy: external
+  configuration:
+    settings:
+      max_concurrent_queries: 2000
+      compression/case/method: zstd
+      disable_internal_dns_cache: 1
+      max_server_memory_usage: 20000000000
+      #merge_tree/max_suspicious_broken_parts: 20000 #remover depois , responsável para liberação do serviço quanto há divergência de parts
+      # ou files entre nós.
+      merge_tree/old_parts_lifetime: 30 # tempo total das partes em segundos que foram mergeadas e não deletadas.
+      merge_tree/parts_to_delay_insert: 150
+      merge_tree/parts_to_throw_insert: 900 # total de segmentos durante o insert, padrao 300.
+      #merge_tree/max_delay_to_insert: 2  unicos em uma particao - padrao 300. deve ser aumentando os batchs
+      merge_tree/max_delay_to_insert: 5 #tempo em milisegundos, calculado entre part_throw e delay
+      #merge_tree/replicated_max_ratio_of_wrong_parts: 0.5 #permite um valor limite para instancia subir novamente quando há divergência ou erros
+      # entre a qtde de registros no zookeeper e no arquivo do banco
+      #parts_to_delay_insert: 400
+      #skip_check_for_incorrect_settings: 1
+      # configs adicionais para acessos em diferentes portas nas VM`s 
+      # http_port: 8124
+      # tcp_port: 9001
+      # interserver_http_port: 9010
+      
+      remote_servers/alma/secret: alma # senha do secret para comunicação intra cluster. É necessário quando requer usuário e senha para autenti
+      
+      #cação para ambientes distribuídos e replicados. Não é possível criptografar essa senha de comunicação interna.
+
+
+
+    users:
+      default/networks/ip: "::/0"
+      default/password: alma
+      default/quota: default
+      #default/networks/host_regexp: '(chi-clickhouse-alma-\d+-\d+|clickhouse-alma).default.svc.cluster.local$'
+      readonly/networks/ip: "::/0"
+      almauser1/networks/ip: "::/0"
+      almauser2/networks/ip: "::/0"
+      #config adicional para usuários de leitura
+      readonly/profile: readonly
+      readonly/password: dataread
+      readonly/quota: default
+      
+      #config para usuários com secret de acesso
+      almauser1/k8s_secret_password: alma-v2/clickhouse-credentials/almauser1
+      almauser2/k8s_secret_password_sha256_hex: alma-v2/clickhouse-credentials/almauser2
+
+    profiles:
+      default/max_memory_usage: 12000000000 # test 12GB para consultas
+      almauser1/max_memory_usage: 12000000000
+      almauser2/max_memory_usage: 12000000000
+      default/background_pool_size: 32
+    zookeeper:
+        nodes:
+        - host: alma-zookeeper-clickhouse
+          port: 2181
+    clusters:
+      - name: "alma"
+        layout:
+          shardsCount: 2
+          replicasCount: 2

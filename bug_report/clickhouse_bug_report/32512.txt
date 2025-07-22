@@ -1,0 +1,89 @@
+ID: 32512
+Title: `optimize_monotonous_functions_in_order_by` optimization breaks matching of primary key for `optimize_read_in_order` optimization in `Distributed` tables
+Description:
+
+
+**How to reproduce**
+
+```sql
+CREATE TABLE t_local
+(
+    `d` DateTime,
+    `v` UInt32
+)
+ENGINE = MergeTree
+ORDER BY toStartOfHour(d);
+
+CREATE TABLE t_dist AS t_local
+ENGINE = Distributed(test_shard_localhost, currentDatabase(), t_local);
+
+INSERT INTO t_local VALUES (now(), 1);
+```
+
+```sql
+
+EXPLAIN PIPELINE
+SELECT v
+FROM t_dist
+ORDER BY
+    toStartOfHour(d) ASC,
+    v ASC
+SETTINGS optimize_monotonous_functions_in_order_by = 0
+
+┌─explain────────────────────────────┐
+│ (SettingQuotaAndLimits)            │
+│   (Expression)                     │
+│   ExpressionTransform              │
+│     (Sorting)                      │
+│  -> FinishSortingTransform <-      │
+│       PartialSortingTransform      │
+│         (Expression)               │
+│         ExpressionTransform        │
+│           (SettingQuotaAndLimits)  │
+│             (ReadFromMergeTree)    │
+│             MergeTreeInOrder 0 → 1 │
+└────────────────────────────────────┘
+
+EXPLAIN PIPELINE
+SELECT v
+FROM t_dist
+ORDER BY
+    toStartOfHour(d) ASC,
+    v ASC
+SETTINGS optimize_monotonous_functions_in_order_by = 1
+
+┌─explain──────────────────────────────┐
+│ (SettingQuotaAndLimits)              │
+│   (Expression)                       │
+│   ExpressionTransform                │
+│     (Sorting)                        │
+│  -> MergeSortingTransform   <-            │
+│       LimitsCheckingTransform        │
+│         PartialSortingTransform      │
+│           (Expression)               │
+│           ExpressionTransform        │
+│             (SettingQuotaAndLimits)  │
+│               (ReadFromMergeTree)    │
+│               MergeTreeInOrder 0 → 1 │
+└──────────────────────────────────────┘
+
+EXPLAIN SYNTAX
+SELECT v
+FROM t_dist
+ORDER BY
+    toStartOfHour(d) ASC,
+    v ASC
+SETTINGS optimize_monotonous_functions_in_order_by = 1
+
+Query id: 1add8abb-1f3c-4f50-82df-cadcf162358d
+
+┌─explain────────────────────────────────────────────────┐
+│ SELECT v                                               │
+│ FROM t_dist                                            │
+│ ORDER BY                                               │
+│     d ASC,                                             │
+│     v ASC                                              │
+│ SETTINGS optimize_monotonous_functions_in_order_by = 1 │
+└────────────────────────────────────────────────────────┘
+```
+It happens, because `optimize_monotonous_functions_in_order_by` eliminates monotonous function from `ORDER BY`, while it is used for matching the prefix of primary key and `optimize_read_in_order` doesn't work.

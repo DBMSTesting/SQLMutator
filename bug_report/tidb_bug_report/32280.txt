@@ -1,0 +1,106 @@
+ID: 32280
+Title: br restore clustered index table to tidb 4.0 issue
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. Create 2 tidb cluster,  src tidb: master, target tidb: release-4.0
+2. On master tidb, tidb_enable_clustered_index is OFF
+```
+mysql> select @@tidb_enable_clustered_index;  
++-------------------------------+             
+| @@tidb_enable_clustered_index |             
++-------------------------------+             
+| OFF                           |             
++-------------------------------+             
+1 row in set (0.00 sec)                       
+```
+3. Use lightning 5.5 v5.5.0-nightly to import tables with clustered index to src tidb  (lightning data source: s3://nfs/tools_test_data/sb_10tables_csv_cache_on?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http%3a%2f%2fminio.pingcap.net%3a9000&force-path-style=true)
+```
+mysql> show create table sbtest1;                                                                                                                                                               
++---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------+                                      
+| Table   | Create Table                                                                                                                                                                        
+                                                                                                                                                         |                                      
++---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------+                                      
+| sbtest1 | CREATE TABLE `sbtest1` (                                                                                                                                                            
+  `id` int(11) NOT NULL AUTO_INCREMENT,                                                                                                                                                         
+  `k` int(11) NOT NULL DEFAULT '0',                                                                                                                                                             
+  `c` char(120) NOT NULL DEFAULT '',                                                                                                                                                            
+  `pad` char(60) NOT NULL DEFAULT '',                                                                                                                                                           
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,                                                                                                                                        
+  KEY `k_1` (`k`)                                                                                                                                                                               
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=391703 |                                                                                                             
++---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------+                                      
+1 row in set (0.00 sec)                                                                                                                                                                         
+                                                                                                                                                                                                
+mysql> show index from sbtest1;                                                                                                                                                                 
++---------+------------+----------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+-----------+ 
+| Table   | Non_unique | Key_name | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression | Clustered | 
++---------+------------+----------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+-----------+ 
+| sbtest1 |          0 | PRIMARY  |            1 | id          | A         |           0 |     NULL | NULL   |      | BTREE      |         |               | YES     | NULL       | YES       | 
+| sbtest1 |          1 | k_1      |            1 | k           | A         |           0 |     NULL | NULL   |      | BTREE      |         |               | YES     | NULL       | NO        | 
++---------+------------+----------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+-----------+ 
+2 rows in set (0.00 sec)                                                                                                                                                                        
+```
+4. Use br v5.5.0-nightly to backup src tidb
+```
+/br  backup "--check-requirements=false" db "-s" "s3://tmp/br-backup-basicb5fa0192-373e-4723-b973-a2de4f160cad?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http%3a%2f%2fminio.pingcap.net%3a9000&force-path-style=true" "-u" "http://dst-tidb-pd.fb-testbed-comp-fpf6r:2379" "--db" "sbtest"
+```
+5. Use br v5.5.0-nightly to restore the backup to target tidb 
+```
+/br  restore "--check-requirements=false" db "-s" "s3://tmp/br-backup-basicb5fa0192-373e-4723-b973-a2de4f160cad?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http%3a%2f%2fminio.pingcap.net%3a9000&force-path-style=true" "-u" "http://src-tidb-pd.fb-testbed-comp-fpf6r:2379" "--db" "sbtest"
+```
+
+### 2. What did you expect to see? (Required)
+Restore should fail as target tidb 4.0 doesn't support clustered index.
+
+### 3. What did you see instead (Required)
+Restore can be successful.
+```
+/ # /br  restore "--check-requirements=false" db "-s" "s3://tmp/br-backup-basicb5fa0192-373e-4723-b973-a2de4f160cad?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http%3a%2f%2fminio.pingcap.net%3a9000&force-path-style=true" "-u" "http://src-tidb-pd.fb-testbed-comp-fpf6r:23
+79" "--db" "sbtest"
+Detail BR log in /tmp/br.log.2022-02-11T10.24.59Z
+Database restore <-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------> 100.00%
+[2022/02/11 10:25:06.745 +00:00] [INFO] [collector.go:67] ["Database restore success summary"] [total-ranges=30] [ranges-succeed=30] [ranges-failed=0] [split-region=1.751545163s] [restore-ranges=20] [total-take=7.209828568s] [BackupTS=431115494942048257] [total-kv=2000000] [total-kv-size=254MB] [average-speed=35.23MB/s] [restore-data-size(after-compressed)=103.4MB] [Size=103401717]
+
+```
+
+### 4. What is your TiDB version? (Required)
+br version:
+/ # /br -V
+Release Version: v5.5.0-nightly
+Git Commit Hash: c0244a380b2e0f63c1f9a813011ce87f97740ac4
+Git Branch: heads/refs/tags/v5.5.0-nightly
+Go Version: go1.16.4
+UTC Build Time: 2022-02-11 06:09:49
+Race Enabled: false
+
+target tidb: 
+/ # /tidb-server -V
+Release Version: v4.0.0-nightly
+Edition: Community
+Git Commit Hash: 75f81d2d7faae72575c4e471ec0b96756796284a
+Git Branch: heads/refs/tags/v4.0.0-nightly
+UTC Build Time: 2022-01-18 09:20:30
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+
+source tidb: 
+/ # /tidb-server -V
+Release Version: v5.5.0-nightly
+Edition: Community
+Git Commit Hash: c0244a380b2e0f63c1f9a813011ce87f97740ac4
+Git Branch: heads/refs/tags/v5.5.0-nightly
+UTC Build Time: 2022-02-11 06:14:52
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+

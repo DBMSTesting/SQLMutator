@@ -1,0 +1,103 @@
+ID: 8863
+Title: User settings table filter doesn't work with Distributed table if cluster communication uses a different user
+Description:
+**Describe the bug or unexpected behaviour**
+If you create a user filter for a Distributed table, the filter is not applied for that user if the underlying cluster communication uses a different user.
+
+Background: the default user has read-only permission on the tables. A separate user is used for writes, to allow INSERTs.
+
+**How to reproduce**
+We are using ClickHouse 19.16.4.12.
+
+config.xml:
+```
+  <remote_servers>
+    <testcluster>
+      <shard>
+        <weight>100</weight>
+        <internal_replication>true</internal_replication>
+        <replica>
+          <host>test1</host>
+          <port>9000</port>
+          <user>writer</user>
+          <password>test</password>
+        </replica>
+      </shard>
+      <shard>
+        <weight>100</weight>
+        <internal_replication>true</internal_replication>
+        <replica>
+          <host>test2</host>
+          <port>9000</port>
+          <user>writer</user>
+          <password>test</password>
+        </replica>
+      </shard>
+    </testcluster>
+  </remote_servers>
+```
+
+users.xml:
+```
+  <profiles>
+    <default>
+    </default>
+    <readonly>
+      <readonly>1</readonly>
+    </readonly>
+  </profiles>
+  <users>
+     <default>
+        <password></password>
+        <profile>readonly</profile>
+        <databases>
+          <default>
+            <Filtered>
+               <filter>Name <> 'Not Seen'</filter>
+            </Filtered>
+            <FilteredShard>
+               <filter>Name <> 'Not Seen'</filter>
+            </FilteredShard>
+          </default>
+       </databases>
+    </default>
+    <writer>
+      <password>test</password>
+      <profile>default</profile>
+    </writer>
+  </users>
+```
+```
+CREATE TABLE default.FilteredShard(Date Date, Name String) ENGINE=MergeTree() ORDER BY (Date);
+CREATE TABLE default.Filtered(Date Date, Name String) ENGINE=Distributed(testcluster, default, FilteredShard, rand());
+```
+Connect as user `writer`:
+```
+INSERT INTO Filtered VALUES (today(), 'One'), (today(), 'Two'), (today(), 'Three'), (today(), 'Four'), (today(), 'Not Seen'), (today(), 'Not Seen'), (today(), 'Not Seen'), (today(), 'Not Seen');
+```
+Connect as user `default`:
+```
+SELECT * FROM Filtered;
+
+┌───────Date─┬─Name─────┐
+│ 2020-01-27 │ Not Seen │
+└────────────┴──────────┘
+┌───────Date─┬─Name─────┐
+│ 2020-01-27 │ One      │
+│ 2020-01-27 │ Two      │
+│ 2020-01-27 │ Three    │
+│ 2020-01-27 │ Four     │
+│ 2020-01-27 │ Not Seen │
+│ 2020-01-27 │ Not Seen │
+│ 2020-01-27 │ Not Seen │
+└────────────┴──────────┘
+
+8 rows in set. Elapsed: 0.005 sec.
+```
+
+`SELECT * FROM FilteredShard` will apply the filter, and `Not Seen` records will not be found.
+
+**Expected behavior**
+The table filter for user `default` table `Filtered` should be applied.
+
+I think I now understand why this happens, but it was initially surprising. It's not covered in the documentation. I think I can see how to work around this (create separate read-only and read-write clusters, create separate database for read-only with duplicated Distributed tables except using read-only cluster and allow read-only user access to only that database), but it's not pretty. 

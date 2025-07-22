@@ -1,0 +1,92 @@
+ID: 13863
+Title: `duckdb.duckdb.InvalidInputException: Invalid Input Error: PandasScan called but GIL was already held!` on recursive python calls
+Description:
+### What happens?
+
+A code previously working until duckdb 1.0.0 started erroring out in duckdb 1.1 by raising following error:
+
+```
+    res = eval(code, gs, ns)
+          ^^^^^^^^^^^^^^^^^^
+  File "<string>", line 1, in <module>
+duckdb.duckdb.InvalidInputException: Invalid Input Error: PandasScan called but GIL was already held!
+```
+
+
+### To Reproduce
+
+```
+import pandas as pd
+import duckdb
+
+get_data = lambda start, N=10: pd.DataFrame({'a':range(N), 'b':[f'{i+1}' for i in range(start, start+N)]})
+
+tab1 = get_data(65)
+tab2 = get_data(66)
+
+db = duckdb.connect()
+sql = '''
+create table fixed_ids as
+with recursive fanout as (
+    SELECT c1.a as node_id, c2.a as comp_id2,
+        from tab1 c1
+        inner JOIN tab2 c2 on c1.b = c2.b
+        inner JOIN tab2 c2l2 on c2.a = c2l2.a
+    UNION all
+    SELECT fo.comp_id2 as node_id, c2l1.b as comp_id2
+        FROM tab1 c1 inner JOIN fanout fo ON fo.comp_id2 = c1.a
+        inner JOIN tab2 c2l1 on c1.b = c2l1.b
+)
+SELECT node_id, first(comp_id2)::uint64 as fixed_id from fanout group by node_id;
+
+SELECT * from fixed_ids
+'''
+if 0: # Enable to run sql statement-by-statement to workaround https://github.com/duckdb/duckdb/issues/13863
+    stmts = db.extract_statements(sql)
+    for stmt in stmts[:-1]:
+        db.execute(stmt.query)
+    sql = stmts[-1].query
+print(db.execute(sql).df())
+```
+
+
+
+### OS:
+
+RH8
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Pankaj Pandey
+
+### Affiliation:
+
+Cadence
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+Tested with duckdb 1.1 release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,36 @@
+ID: 16210
+Title: Improve performance of `UNNEST/UNPIVOT` by using selection vectors to unnest multiple lists at once
+Description:
+The current `UNNEST` implementation handles one list a time. While that works fine for large lists, we often unnest small lists. One scenario where we unnest small lists is in `UNPIVOT`, where the list size is equivalent to the amount of columns we are unpivoting. For example, the query:
+
+```sql
+UNPIVOT (SELECT l_orderkey, l_returnflag, l_shipinstruct FROM lineitem) ON l_returnflag, l_shipinstruct;
+```
+
+Is translated into the below query:
+
+```sql
+SELECT l_orderkey, UNNEST(['l_returnflag', 'l_shipinstruct']) AS name, UNNEST([l_returnflag, l_shipinstruct]) AS value
+FROM lineitem;
+```
+
+This frequently leads to unnesting of small lists (in the above example lists of size 2).
+
+The current `UNNEST` implementation handles this inefficiently because it will, in this scenario, emit vectors of at most size 2. This PR reworks the `UNNEST` to handle multiple lists at once. In addition, it also gets rid of the copying that `UNNEST` would previously do by instead rewriting `UNNEST` to only work using selection vectors.
+
+Effectively we traverse the input lists and construct a selection vector with the rows we need from (1) the input payload, and (2) the list entries. We then slice the input/list children with these selection vectors.
+
+When unnesting lists of different sizes we must add `NULL` entries. We do this as a separate pass - we slice the first row of the given list vector, and then call `Flatten` + assign `NULL` to the entries for which this is required. This is slower - but still does not require any special code. The flattening could be avoided if the list child has `NULL` entries itself but that is not guaranteed, so for now this optimization is skipped. I also presume that unnesting multiple lists of different lengths is probably pretty rare (but have no data to back that up).
+
+### Performance
+
+Below is the performance of the given `UNPIVOT` query running on TPC-H SF10:
+
+
+```sql
+UNPIVOT (SELECT l_orderkey, l_returnflag, l_shipinstruct FROM lineitem) ON l_returnflag, l_shipinstruct;
+```
+
+| v1.2.0 |  New  |
+|--------|-------|
+| 8.9s   | 0.37s |

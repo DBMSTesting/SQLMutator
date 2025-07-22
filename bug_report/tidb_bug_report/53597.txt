@@ -1,0 +1,85 @@
+ID: 53597
+Title: decorrelate query for concat_ws condition was push down to join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+drop table if exists ast;
+create table ast ( id bigint primary key , t_cd varchar(60), t_nm varchar(20), key idx_ast_id(id));
+insert into ast values (4611686018427387945, "TIKV_REGION_PEERS", "xxx");
+analyze table ast;
+select ( select concat_ws('', t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
+select ( select concat(t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
+select ( select /*+ no_decorrelate() */ concat_ws('', t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+TiDB root:test> select ( select concat_ws('', t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
++-----+-------------------+
+| val | t_cd              |
++-----+-------------------+
+| <null> | TIKV_REGION_PEERS |
++-----+-------------------+
+1 row in set
+Time: 0.009s
+```
+### 3. What did you see instead (Required)
+
+```sql
+[17:10:56]TiDB root:test> select ( select concat_ws('', t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
++-----+-------------------+
+| val | t_cd              |
++-----+-------------------+
+| :   | TIKV_REGION_PEERS |
++-----+-------------------+
+1 row in set
+Time: 0.009s
+mysql> explain select ( select concat_ws('', t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a;
++--------------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| id                             | estRows | task      | access object | operator info                                                |
++--------------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| Projection_9                   | 2.00    | root      |               | concat_ws(, test.ast.t_cd, :)->Column#10, test.ast.t_cd      |
+| └─MergeJoin_10                 | 2.00    | root      |               | left outer join, left key:test.ast.id, right key:test.ast.id |
+|   ├─TableReader_29(Build)      | 0.00    | root      |               | data:Selection_28                                            |
+|   │ └─Selection_28             | 0.00    | cop[tikv] |               | isnull(test.ast.t_nm)                                        |
+|   │   └─TableFullScan_27       | 2.00    | cop[tikv] | table:t       | keep order:true                                              |
+|   └─TableReader_26(Probe)      | 2.00    | root      |               | data:TableFullScan_25                                        |
+|     └─TableFullScan_25         | 2.00    | cop[tikv] | table:a       | keep order:true                                              |
++--------------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+[17:11:03]TiDB root:test> select ( select concat(t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
++--------+-------------------+
+| val    | t_cd              |
++--------+-------------------+
+| <null> | TIKV_REGION_PEERS |
++--------+-------------------+1 row in set
+Time: 0.008s
+[17:11:12]TiDB root:test> select ( select /*+ no_decorrelate() */ concat_ws('', t_cd, ':') from ast t where t.id = a.id and t_nm is null) val, t_cd from ast a limit 1;
++--------+-------------------+
+| val    | t_cd              |
++--------+-------------------+
+| <null> | TIKV_REGION_PEERS |
++--------+-------------------+1 row in set
+Time: 0.009s
+
+```
+### 4. What is your TiDB version? (Required)
+```sql
+[17:11:20]TiDB root:test> select tidb_version()\G
+***************************[ 1. row ]***************************
+tidb_version() | Release Version: v8.2.0-alpha-224-g10873885aa
+Edition: Community
+Git Commit Hash: 10873885aa55354e78178fec39db18fc9589aa5a
+Git Branch: HEAD
+UTC Build Time: 2024-05-24 01:48:43
+GoVersion: go1.21.10
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv1 row in set 
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,100 @@
+ID: 27125
+Title: planner wrongly pushed enum/set filter into tiflash side
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+create table t1(a int);
+create table t2(a varchar(20),b set("a","b"));
+alter table t1 set tiflash replica 2;
+alter table t2 set tiflash replica 2;
+select max( length(t2.a)) from  t1 right join  t2 on (t2. b is NULL);
+```
+the plan is 
+```
++------------------------------------------------------+----------+-------------------+---------------+--------------------------------------------------------+
+| id                                                   | estRows  | task              | access object | operator info                                          |
++------------------------------------------------------+----------+-------------------+---------------+--------------------------------------------------------+
+| StreamAgg_13                                         | 1.00     | root              |               | funcs:max(Column#10)->Column#6                         |
+| └─Projection_44                                      | 1.00     | root              |               | length(rs.t2.a)->Column#10                             |
+|   └─Projection_42                                    | 1.00     | root              |               | rs.t2.a                                                |
+|     └─TopN_16                                        | 1.00     | root              |               | Column#9:desc, offset:0, count:1                       |
+|       └─Projection_43                                | 10000.00 | root              |               | rs.t2.a, length(rs.t2.a)->Column#9                     |
+|         └─HashJoin_19                                | 10000.00 | root              |               | CARTESIAN right outer join, right cond:isnull(rs.t2.b) |
+|           ├─Projection_40(Build)                     | 1.00     | root              |               | rs.t2.a, rs.t2.b                                       |
+|           │ └─TopN_26                                | 1.00     | root              |               | Column#8:desc, offset:0, count:1                       |
+|           │   └─Projection_41                        | 1.00     | root              |               | rs.t2.a, rs.t2.b, length(rs.t2.a)->Column#8            |
+|           │     └─TableReader_37                     | 1.00     | root              |               | data:ExchangeSender_36                                 |
+|           │       └─ExchangeSender_36                | 1.00     | batchCop[tiflash] |               | ExchangeType: PassThrough                              |
+|           │         └─Projection_38                  | 1.00     | batchCop[tiflash] |               | rs.t2.a, rs.t2.b                                       |
+|           │           └─TopN_35                      | 1.00     | batchCop[tiflash] |               | Column#7:desc, offset:0, count:1                       |
+|           │             └─Projection_39              | 8000.00  | batchCop[tiflash] |               | rs.t2.a, rs.t2.b, length(rs.t2.a)->Column#7            |
+|           │               └─Selection_34             | 8000.00  | batchCop[tiflash] |               | not(isnull(length(rs.t2.a)))                           |
+|           │                 └─TableFullScan_33       | 10000.00 | batchCop[tiflash] | table:t2      | keep order:false, stats:pseudo                         |
+|           └─TableReader_23(Probe)                    | 10000.00 | root              |               | data:TableFullScan_22                                  |
+|             └─TableFullScan_22                       | 10000.00 | cop[tiflash]      | table:t1      | keep order:false, stats:pseudo                         |
++------------------------------------------------------+----------+-------------------+---------------+--------------------------------------------------------+
+```
+### 2. What did you expect to see? (Required)
+successfully
+### 3. What did you see instead (Required)
+ERROR 1105 (HY000): close of nil channel
+```
+[2021/08/11 20:15:31.617 +08:00] [ERROR] [conn.go:919] ["connection running loop panic"] [conn=221] [lastSQL="select max( length(t2.a)) from  t1 right join  t2 on (t2. b is NULL)"] [err="close of nil channel"] [stack="goroutine 5750755 [running]:
+github.com/pingcap/tidb/server.(*clientConn).Run.func1(0x4028ad0, 0xc003ec00f0, 0xc001e0e000)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/server/conn.go:917 +0xf5
+panic(0x36de1e0, 0x3f9e590)
+\t/usr/local/go/src/runtime/panic.go:965 +0x1b9
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec.func1(0xc0021c4820, 0xc0087d6b00, 0xc0087d6ae0)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/adapter.go:333 +0x4d4
+panic(0x36de1e0, 0x3f9e590)
+\t/usr/local/go/src/runtime/panic.go:965 +0x1b9
+github.com/pingcap/tidb/executor.(*HashJoinExec).Close(0xc0042b5600, 0x0, 0xc0086dd650)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/join.go:117 +0x47
+github.com/pingcap/tidb/executor.(*baseExecutor).Close(0xc008893800, 0x2b, 0x4029588)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/executor.go:180 +0x7e
+github.com/pingcap/tidb/executor.(*ProjectionExec).Close(0xc008893800, 0x0, 0x0)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/projection.go:328 +0x138
+github.com/pingcap/tidb/executor.(*SortExec).Close(0xc001d2cdc0, 0x0, 0x0)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/sort.go:80 +0xee
+github.com/pingcap/tidb/executor.(*baseExecutor).Close(0xc008893900, 0x2a, 0x4029588)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/executor.go:180 +0x7e
+github.com/pingcap/tidb/executor.(*ProjectionExec).Close(0xc008893900, 0x0, 0xc0086dd740)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/projection.go:328 +0x138
+github.com/pingcap/tidb/executor.(*baseExecutor).Close(0xc008893a00, 0x2c, 0x4029588)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/executor.go:180 +0x7e
+github.com/pingcap/tidb/executor.(*ProjectionExec).Close(0xc008893a00, 0x306a85a, 0xc001d2cdc0)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/projection.go:328 +0x138
+github.com/pingcap/tidb/executor.(*baseExecutor).Close(0xc008893b00, 0x3111b45, 0xc008893900)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/executor.go:180 +0x7e
+github.com/pingcap/tidb/executor.(*StreamAggExec).Close(0xc008893b00, 0xc0018ff440, 0xc0087d6800)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/aggregate.go:1276 +0xb6
+github.com/pingcap/parser/terror.Call(0xc0087d6a58)
+\t/nfs/cache/mod/github.com/pingcap/parser@v0.0.0-20210806073423-d4a88481405f/terror/terror.go:282 +0x3f
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec(0xc0021c4820, 0x4028ad0, 0xc0086dd410, 0x0, 0x0, 0x3fd9400, 0xc0018ff440)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/adapter.go:389 +0x41f
+github.com/pingcap/tidb/session.runStmt(0x4028ad0, 0xc0086dc180, 0xc003954a00, 0x4041280, 0xc0021c4820, 0x0, 0x0, 0x0, 0x0)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/session/session.go:1783 +0x37f
+github.com/pingcap/tidb/session.(*session).ExecuteStmt(0xc003954a00, 0x4028ad0, 0xc0086dc180, 0x4045fa8, 0xc0087d8960, 0x0, 0x0, 0x0, 0x0)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/session/session.go:1677 +0xab1
+github.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt(0xc007d78a50, 0x4028ad0, 0xc0086dc180, 0x4045fa8, 0xc0087d8960, 0xc0096d8d40, 0x4028ad0, 0xc0086dc180, 0x2fdf)
+\t/home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/server/driver_tidb.go:218 +0x6b
+github.com/pingcap/tidb/server.(*clientConn).handleStmt(0xc001e0e000, 0x4028a28, 0xc0086dc180, 0x4045fa8, 0xc0087d8960, 0x5d87a98, 0x0, 0x0, 0x1, 0x0, ."]
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+Release Version: v5.2.0-alpha-549-g6720fcd40
+Edition: Community
+Git Commit Hash: 6720fcd40ff90f11c2f678bb42bb288474854c19
+Git Branch: master
+UTC Build Time: 2021-08-09 03:22:37
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false

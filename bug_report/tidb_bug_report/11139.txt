@@ -1,0 +1,77 @@
+ID: 11139
+Title: should fill index data after adding an index on a virtual generated column
+Description:
+## Bug Report
+
+## 1. What did you do?
+
+All the following operations are executed on a tidb-server built from https://github.com/pingcap/tidb/pull/10802
+
+```sql
+drop table if exists t;
+create table t(a bigint, b bigint as (a+1) virtual, c bigint as (b+1) virtual);
+alter table t add index idx_b(b);
+alter table t add index idx_c(c);
+insert into t(a) values(1);
+alter table t add column(d bigint as (c+1) virtual);
+```
+
+The query below can produce a correct result:
+```sql
+TiDB(root@127.0.0.1:test) > select * from t where d > 2;
++------+------+------+------+
+| a    | b    | c    | d    |
++------+------+------+------+
+|    1 |    2 |    3 |    4 |
++------+------+------+------+
+1 row in set (0.00 sec)
+```
+
+Then create an index on the newly added column `d`:
+```sql
+alter table t add index idx_d(d);
+```
+
+And run the query again, the result is incorrect:
+```sql
+TiDB(root@127.0.0.1:test) > select * from t where d > 2;
+Empty set (0.00 sec)
+```
+
+The execution plan now is changed to:
+```sql
+TiDB(root@127.0.0.1:test) > desc select * from t where d > 2;
++----------------------+-------+------+----------------------------------------------------------------------------------------------------------------------------------+
+| id                   | count | task | operator info                                                                                                                    |
++----------------------+-------+------+----------------------------------------------------------------------------------------------------------------------------------+
+| Projection_11        | 0.33  | root | test.t.a, cast(plus(test.t.a, 1)), cast(plus(cast(plus(test.t.a, 1)), 1)), cast(plus(cast(plus(cast(plus(test.t.a, 1)), 1)), 1)) |
+| └─IndexLookUp_12     | 0.33  | root |                                                                                                                                  |
+|   ├─IndexScan_9      | 0.33  | cop  | table:t, index:d, range:(2,+inf], keep order:false, stats:pseudo                                                                 |
+|   └─TableScan_10     | 0.33  | cop  | table:t, keep order:false, stats:pseudo                                                                                          |
++----------------------+-------+------+----------------------------------------------------------------------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+```
+
+## 2. What did you expect to see?
+
+produce the correct result
+
+## 3. What did you see instead?
+
+As I mentioned above, it produces no result.
+
+## 4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```sql
+TiDB(root@127.0.0.1:test) > select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v3.0.0-rc.1-314-gca686bba7
+Git Commit Hash: ca686bba759ea6127fae70746abba5437f6c7e42
+Git Branch: pr/10802
+UTC Build Time: 2019-07-09 02:44:55
+GoVersion: go version go1.12.5 darwin/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

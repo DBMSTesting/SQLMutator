@@ -1,0 +1,117 @@
+ID: 25333
+Title: Use of indexed generated columns to optimize execution plan
+Description:
+## Feature Request
+
+Basically:
+If a function is used on a column check if there is a virtual column that is index with a matching function. Then use that column instead.
+
+TiDB:
+<pre><span style="background-color:#E4E4E4"><font color="#005F5F">5.7.25-TiDB-v5.2.0-alpha-14-g75388187f</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:4000 </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>SHOW CREATE TABLE t1\G
+*************************** 1. row ***************************
+       Table: t1
+Create Table: CREATE TABLE `t1` (
+  `id` bigint(20) NOT NULL /*T![auto_rand] AUTO_RANDOM(5) */,
+  `c` timestamp NULL DEFAULT NULL,
+  `epoch` bigint(20) DEFAULT NULL,
+  `calc_ts` timestamp GENERATED ALWAYS AS (from_unixtime(`epoch`)) VIRTUAL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+  KEY `calc_ts` (`calc_ts`),
+  KEY `epoch` (`epoch`),
+  KEY `c` (`c`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![auto_rand_base] AUTO_RANDOM_BASE=30001 */
+1 row in set (0.0038 sec)
+<span style="background-color:#E4E4E4"><font color="#005F5F">5.7.25-TiDB-v5.2.0-alpha-14-g75388187f</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:4000 </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>TABLE t1;
++---------------------+---------------------+------------+---------------------+
+| id                  | c                   | epoch      | calc_ts             |
++---------------------+---------------------+------------+---------------------+
+|                   3 | 2021-06-10 09:30:49 | 1623310249 | 2021-06-10 09:30:49 |
+|  864691128455135244 | 2021-06-10 09:30:54 | 1623310254 | 2021-06-10 09:30:54 |
+| 1729382256910270465 | 2021-06-10 09:30:46 | 1623310246 | 2021-06-10 09:30:46 |
+| 2017612633061982213 | 2021-06-10 09:30:51 | 1623310251 | 2021-06-10 09:30:51 |
+| 2594073385365405700 | 2021-06-10 09:30:51 | 1623310251 | 2021-06-10 09:30:51 |
+| 2882303761517117453 | 2021-06-10 09:30:54 | 1623310254 | 2021-06-10 09:30:54 |
+| 3458764513820540934 | 2021-06-10 09:30:51 | 1623310251 | 2021-06-10 09:30:51 |
+| 5476377146882523147 | 2021-06-10 09:30:53 | 1623310253 | 2021-06-10 09:30:53 |
+| 6341068275337658377 | 2021-06-10 09:30:53 | 1623310253 | 2021-06-10 09:30:53 |
+| 7782220156096217095 | 2021-06-10 09:30:52 | 1623310252 | 2021-06-10 09:30:52 |
+| 8070450532247928834 | 2021-06-10 09:30:47 | 1623310247 | 2021-06-10 09:30:47 |
+| 8070450532247928840 | 2021-06-10 09:30:52 | 1623310252 | 2021-06-10 09:30:52 |
+| 8358680908399640590 | 2021-06-10 09:30:55 | 1623310255 | 2021-06-10 09:30:55 |
+| 8935141660703064074 | 2021-06-10 09:30:53 | 1623310253 | 2021-06-10 09:30:53 |
++---------------------+---------------------+------------+---------------------+
+14 rows in set (0.0050 sec)
+<span style="background-color:#E4E4E4"><font color="#005F5F">5.7.25-TiDB-v5.2.0-alpha-14-g75388187f</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:4000 </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>explain select * FROM t1 WHERE from_unixtime(epoch) = &apos;2021-06-10 09:30:53&apos;;
++---------------------+---------+-----------+---------------+------------------------------------------------------------------------------------------+
+| id                  | estRows | task      | access object | operator info                                                                            |
++---------------------+---------+-----------+---------------+------------------------------------------------------------------------------------------+
+| Selection_7         | 14.00   | root      |               | eq(from_unixtime(cast(test.t1.epoch, decimal(20,0) BINARY)), 2021-06-10 09:30:53.000000) |
+| └─TableReader_6     | 14.00   | root      |               | data:TableFullScan_5                                                                     |
+|   └─TableFullScan_5 | 14.00   | cop[tikv] | table:t1      | keep order:false                                                                         |
++---------------------+---------+-----------+---------------+------------------------------------------------------------------------------------------+
+3 rows in set, 1 warning (0.0013 sec)
+Warning (code 1105): Scalar function &apos;from_unixtime&apos;(signature: FromUnixTime1Arg) can not be pushed to tikv
+<span style="background-color:#E4E4E4"><font color="#005F5F">5.7.25-TiDB-v5.2.0-alpha-14-g75388187f</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:4000 </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>explain select * FROM t1 WHERE calc_ts = &apos;2021-06-10 09:30:53&apos;;
++---------------------------+---------+-----------+----------------------------------+-------------------------------------------------------------------+
+| id                        | estRows | task      | access object                    | operator info                                                     |
++---------------------------+---------+-----------+----------------------------------+-------------------------------------------------------------------+
+| IndexLookUp_10            | 3.00    | root      |                                  |                                                                   |
+| ├─IndexRangeScan_8(Build) | 3.00    | cop[tikv] | table:t1, index:calc_ts(calc_ts) | range:[2021-06-10 09:30:53,2021-06-10 09:30:53], keep order:false |
+| └─TableRowIDScan_9(Probe) | 3.00    | cop[tikv] | table:t1                         | keep order:false                                                  |
++---------------------------+---------+-----------+----------------------------------+-------------------------------------------------------------------+
+3 rows in set (0.0017 sec)
+</pre>
+
+MySQL 8.0:
+<pre><span style="background-color:#E4E4E4"><font color="#005F5F">8.0.22</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:18022+  </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>show create table t1\G
+*************************** 1. row ***************************
+       Table: t1
+Create Table: CREATE TABLE `t1` (
+  `id` bigint NOT NULL,
+  `c` timestamp NULL DEFAULT NULL,
+  `epoch` bigint DEFAULT NULL,
+  `calc_ts` timestamp GENERATED ALWAYS AS (from_unixtime(`epoch`)) VIRTUAL NULL,
+  PRIMARY KEY (`id`),
+  KEY `epoch` (`epoch`),
+  KEY `c` (`c`),
+  KEY `calc_ts` (`calc_ts`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+1 row in set (0.0010 sec)
+<span style="background-color:#E4E4E4"><font color="#005F5F">8.0.22</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:18022+  </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>table t1;
++---------------------+---------------------+------------+---------------------+
+| id                  | c                   | epoch      | calc_ts             |
++---------------------+---------------------+------------+---------------------+
+|                   3 | 2021-06-10 09:30:49 | 1623310249 | 2021-06-10 09:30:49 |
+|  864691128455135244 | 2021-06-10 09:30:54 | 1623310254 | 2021-06-10 09:30:54 |
+| 1729382256910270465 | 2021-06-10 09:30:46 | 1623310246 | 2021-06-10 09:30:46 |
+| 2017612633061982213 | 2021-06-10 09:30:51 | 1623310251 | 2021-06-10 09:30:51 |
+| 2594073385365405700 | 2021-06-10 09:30:51 | 1623310251 | 2021-06-10 09:30:51 |
+| 2882303761517117453 | 2021-06-10 09:30:54 | 1623310254 | 2021-06-10 09:30:54 |
+| 3458764513820540934 | 2021-06-10 09:30:51 | 1623310251 | 2021-06-10 09:30:51 |
+| 5476377146882523147 | 2021-06-10 09:30:53 | 1623310253 | 2021-06-10 09:30:53 |
+| 6341068275337658377 | 2021-06-10 09:30:53 | 1623310253 | 2021-06-10 09:30:53 |
+| 7782220156096217095 | 2021-06-10 09:30:52 | 1623310252 | 2021-06-10 09:30:52 |
+| 8070450532247928834 | 2021-06-10 09:30:47 | 1623310247 | 2021-06-10 09:30:47 |
+| 8070450532247928840 | 2021-06-10 09:30:52 | 1623310252 | 2021-06-10 09:30:52 |
+| 8358680908399640590 | 2021-06-10 09:30:55 | 1623310255 | 2021-06-10 09:30:55 |
+| 8935141660703064074 | 2021-06-10 09:30:53 | 1623310253 | 2021-06-10 09:30:53 |
++---------------------+---------------------+------------+---------------------+
+14 rows in set (0.0007 sec)
+<span style="background-color:#E4E4E4"><font color="#005F5F">8.0.22</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:18022+  </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>explain select * FROM t1 WHERE from_unixtime(epoch) = &apos;2021-06-10 09:30:53&apos;;
++----+-------------+-------+------------+------+---------------+---------+---------+-------+------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys | key     | key_len | ref   | rows | filtered | Extra |
++----+-------------+-------+------------+------+---------------+---------+---------+-------+------+----------+-------+
+|  1 | SIMPLE      | t1    | NULL       | ref  | calc_ts       | calc_ts | 5       | const |    3 |      100 | NULL  |
++----+-------------+-------+------------+------+---------------+---------+---------+-------+------+----------+-------+
+1 row in set, 1 warning (0.0030 sec)
+Note (code 1003): /* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`epoch` AS `epoch`,`test`.`t1`.`calc_ts` AS `calc_ts` from `test`.`t1` where (`test`.`t1`.`calc_ts` = &apos;2021-06-10 09:30:53&apos;)
+<span style="background-color:#E4E4E4"><font color="#005F5F">8.0.22</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:18022+  </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>explain select * FROM t1 WHERE calc_ts = &apos;2021-06-10 09:30:53&apos;;
++----+-------------+-------+------------+------+---------------+---------+---------+-------+------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys | key     | key_len | ref   | rows | filtered | Extra |
++----+-------------+-------+------------+------+---------------+---------+---------+-------+------+----------+-------+
+|  1 | SIMPLE      | t1    | NULL       | ref  | calc_ts       | calc_ts | 5       | const |    3 |      100 | NULL  |
++----+-------------+-------+------------+------+---------------+---------+---------+-------+------+----------+-------+
+1 row in set, 1 warning (0.0012 sec)
+Note (code 1003): /* select#1 */ select `test`.`t1`.`id` AS `id`,`test`.`t1`.`c` AS `c`,`test`.`t1`.`epoch` AS `epoch`,`test`.`t1`.`calc_ts` AS `calc_ts` from `test`.`t1` where (`test`.`t1`.`calc_ts` = TIMESTAMP&apos;2021-06-10 09:30:53&apos;)
+<span style="background-color:#E4E4E4"><font color="#005F5F">8.0.22</font></span><span style="background-color:#3A3A3A"><font color="#E4E4E4"></font></span><span style="background-color:#3A3A3A"><font color="#FDF6E3"> 127.0.0.1:18022+  </font></span><span style="background-color:#6C6C6C"><font color="#3A3A3A"></font></span><span style="background-color:#6C6C6C"><font color="#FDF6E3"> test </font></span><span style="background-color:#D75F00"><font color="#6C6C6C"></font></span><span style="background-color:#D75F00"><font color="#FDF6E3"> SQL </font></span><span style="background-color:#073642"><font color="#D75F00"> </font></span>
+</pre>

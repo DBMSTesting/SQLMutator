@@ -1,0 +1,53 @@
+ID: 25008
+Title: SAMPLE BY isn't working on an int column without HASH function (+ another interesting note)
+Description:
+Hi all,
+
+A small brief:
+I'm trying to achieve real time funnel calculation using the `windowFunnel` function (not related to the issue).
+My data I'm testing on is:
+```
+CREATE OR REPLACE TABLE funnels (
+	EventTime DateTime,
+	UserId UInt64, 
+	Step UInt8 
+)
+ENGINE = MergeTree()
+--ORDER BY (intHash32(UserId), EventTime)
+ORDER BY (UserId, EventTime)
+PARTITION BY (EventTime)
+--SAMPLE BY intHash32(UserId)
+SAMPLE BY UserId;
+
+INSERT INTO funnels SELECT 24*60*60*0, number, 1 from system.numbers LIMIT 100000000;
+INSERT INTO funnels SELECT 24*60*60*1, number, 2 from system.numbers LIMIT 10000000;
+INSERT INTO funnels SELECT 24*60*60*2, number, 3 from system.numbers LIMIT 1000000;
+```
+
+Client flag `optimize_aggregation_in_order=1`
+
+**Some notes I've noticed:**
+1. Inserting into this table when using the intHash32 on the table, is MUCH slower (39s vs 6s without it)
+2. intHash32 isn't a uniform hash (we don't want to use it anyways since the UserId is already a unique int)
+3. The interesting part: 
+Query:
+```
+SELECT level, count() AS c FROM ( 
+    SELECT UserId, windowFunnel(25920000)(EventTime, Step = 1, Step = 2, Step = 3) AS level 
+    FROM funnels 
+    SAMPLE 1/10000 
+    GROUP BY UserId 
+) as a 
+GROUP BY level 
+ORDER BY level ASC
+```
+
+The SAMPLE BY part is working only when the table is created with intHash32 on the `ORDER BY` and the `SAMLE` parts.
+It isn't working (completely ignored) when I don't use it, or even when I insert using intHash32 (still the table is defined without it).
+
+### So my questions are:
+1. Why? 
+2. How can I make it work without paying so much on insertion time?
+3. Is it a bug?
+
+Thanks.

@@ -1,0 +1,62 @@
+ID: 13046
+Title: Process crashes with "Assertion `part.heap_block_offset < heap_block.size' failed." in TupleDataAllocator
+Description:
+### What happens?
+
+We are running multiple instances of DuckDB within a single server process - we dynamically spin up a DuckDB Connection per client request, it runs a single query against a set of Parquet files on disk, and we close down the Connection immediately after the query is finished and a response is sent back to the client.
+
+About once or twice per day, the server process crashes with the following panic:
+```
+duckdb::TupleDataAllocator::PinHeapBlock(duckdb::TupleDataPinState&, const duckdb::TupleDataChunkPart&): Assertion `part.heap_block_offset < heap_block.size' failed.
+```
+
+It's unclear the conditions under which this happens, but wanted to file this issue in case anyone else has encountered it, or if the resolution is obvious. It is perhaps due to our setup where we are running multiple instances of DuckDB within the same process - is it possible that there are process-global data structures (e.g. in jemalloc?) that get corrupted under some race condition during concurrent access?
+
+The server process may handle multiple client requests at the same time, so there may be multiple copies of DuckDB in the same process concurrently accessing the same global data structures. Note that we do fully `close` the DuckDB connection after each query.
+
+It's clear based on this jemalloc discussion that indeed there is "state" that is maintained across Connection opens/closes:
+https://github.com/duckdb/duckdb/discussions/11455#discussioncomment-9923245
+
+I can confirm that it is not correlated with memory pressure - we've seen this assertion failure during both low memory pressure and high memory pressure scenarios.
+
+
+### To Reproduce
+
+Hard to reproduce, likely a race condition under concurrent scenarios. It does happen very consistently, around once or twice per day.
+
+
+### OS:
+
+Linux Debian Bookworm, x86
+
+### DuckDB Version:
+
+0.10.2 (but probably applicable to 1.x+)
+
+### DuckDB Client:
+
+Rust
+
+### Full Name:
+
+Howard Zuo
+
+### Affiliation:
+
+Dataland
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - Other reason (please specify in the issue body)
+
+### Did you include all code required to reproduce the issue?
+
+- [ ] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

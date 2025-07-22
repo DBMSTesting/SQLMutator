@@ -1,0 +1,86 @@
+ID: 29838
+Title: Incorrect join with Merge engine
+Description:
+**How to reproduce:**
+
+```
+// first table with distributed
+CREATE TABLE first_table_lr on cluster '{cluster}'
+(
+    id String,
+    id2 String
+) ENGINE = ReplicatedMergeTree()
+ORDER BY id;
+
+
+CREATE TABLE first_table on cluster '{cluster}'
+(
+    id String,
+    id2 String
+)
+ENGINE = Distributed('{cluster}', 'default', 'first_table_lr');
+
+// second table with distributed
+CREATE TABLE second_table_lr on cluster '{cluster}'
+(
+    id String,
+    id2 String
+) ENGINE = MergeTree()
+ORDER BY id;
+
+CREATE TABLE second_table on cluster '{cluster}'
+(
+    id String,
+    id2 String
+)
+ENGINE = Distributed('{cluster}', 'default', 'second_table_lr');
+
+INSERT INTO first_table VALUES ('1', '2'), ('3', '4');
+INSERT INTO second_table VALUES ('1', '2'), ('3', '4');
+
+// Add merge engine table
+CREATE TABLE two_tables
+(
+    id String,
+    id2 String
+)
+ENGINE = Merge('default', '^(first_table)$')
+```
+
+Correct result
+`count() 2`
+
+```
+SELECT 
+    count()
+FROM first_table as s
+GLOBAL ANY JOIN second_table as f USING (id)
+WHERE 
+    f.id2 GLOBAL IN (
+        SELECT
+            id2
+        FROM second_table
+        GROUP BY id2
+    );  
+```
+
+But if i use merge engine table(**two_tables**)
+Result is not correct
+`count() 0`
+
+```
+SELECT 
+    count()
+FROM two_tables as s
+GLOBAL ANY JOIN second_table as f USING (id)
+WHERE 
+    f.id2 GLOBAL IN (
+        SELECT
+            id2
+        FROM second_table
+        GROUP BY id2
+    ); 
+```
+
+I reproduce it on 21.9.4.35, 21.8.7.22 and 21.3.17.2 versions
+On version 19.13.1.11 everything works correctly

@@ -1,0 +1,36 @@
+ID: 58483
+Title: on owner change, when DDL with higher schema version commits before a DDL with lower schema version, MDL fails to update version for it
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+this case only happens on owner change, as there can only be 1 schema version update in progress at the same time.
+
+we use create-table as a example, timeline for the case:
+- owner A runs `create table aaa` J1, after alloc schema version X, but before it commit the txn with diff, owner change to B
+- B might run `create table bbb` J2 first as we run jobs without dependency concurrently, so it alloc schema version `X+1`, and commit the txn with diff
+- B start to wait schema version synced for J2, and all node update their version to `X+1`, and they all set `jobNeedToSync=false` https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/domain/domain.go#L1098-L1100
+- A might hasn't retire completely, so it keeps running, and commit the txn with diff, J1 state changed to `done`
+- A retire completely before it start waiting schema synced
+- B starts to run J1, and fails with create the table as it's already created by A, but we didn't cancel it in here, so it keeps running https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/ddl/create_table.go#L98-L101.
+  -  Also due to the bug https://github.com/pingcap/tidb/issues/52747, the state of J1 is overridden to `running`, because:
+      - we set to `running` in here https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/ddl/job_worker.go#L824
+      - we fail at here as it's already set by A https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/ddl/create_table.go#L98-L101
+      - the `runJobErr` is saved, and retried later, **in this case the job never ends until it used up `ddl-error-count-limit`**, it's another issue, https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/ddl/job_worker.go#L589-L600
+- B tries to run J1 again, in this time, J1 state is `running`, but found that it has un-synced schema version change in here https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/ddl/job_scheduler.go#L565-L569
+- but all nodes have already synced to `X+1`, so MDL check loop keeps continue in here https://github.com/pingcap/tidb/blob/042a332aae6f31ae0d0ee929faadbd74b45cc685/pkg/domain/domain.go#L1063-L1070
+
+it also introduced another bug https://github.com/pingcap/tidb/issues/58486 that even through all node have synced to `X+1`, they all think `X` is a hole and skip it, so no one knows `aaa` is created even we fix all above issues.
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

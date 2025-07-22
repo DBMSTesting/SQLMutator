@@ -1,0 +1,60 @@
+ID: 40612
+Title: reorg worker panic during concurrent modify column
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+``` SQL
+func TestConcurrentModifyColumn(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int);")
+	tk.MustExec("insert into t values (7028555)")
+
+	var wg sync.WaitGroup
+
+	hook := &ddl.TestDDLCallback{Do: dom}
+	wg.Add(2)
+	var checkErr error
+
+	one := false
+	f := func(job *model.Job) {
+		if !one {
+			one = true
+		} else {
+			return
+		}
+		go func() {
+			tk2.MustExec("set sql_mode='';")
+			_, checkErr = tk2.Exec("alter table test.t modify column a TIME NULL")
+			wg.Done()
+		}()
+	}
+
+	hook.OnJobUpdatedExported.Store(&f)
+	dom.DDL().SetHook(hook)
+	tk.MustExec("set sql_mode='';")
+	tk.MustExec("alter table test.t modify column a ENUM('v', 'wy') NULL DEFAULT 'v'")
+	wg.Wait()
+	require.NoError(t, checkErr)
+}
+```
+
+### 2. What did you expect to see? (Required)
+Test pass
+### 3. What did you see instead (Required)
+```
+[2023/01/16 14:55:44.252 +08:00] [WARN] [session.go:2221] ["run statement failed"] [schemaVersion=48] [error="[ddl:8211]Reorg worker panic"] [errorVerbose="[ddl:8211]Reorg worker panic\ngithub.com/pingcap/errors.AddStack\n\t/Users/bba/.gvm/pkgsets/go1.19/global/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/errors.go:174\ngithub.com/pingcap/errors.Trace\n\t/Users/bba/.gvm/pkgsets/go1.19/global/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/juju_adaptor.go:15\ngithub.com/pingcap/tidb/ddl.(*ddl).DoDDLJob\n\t/Users/bba/pc/tidb/ddl/ddl.go:1077\ngithub.com/pingcap/tidb/ddl.(*ddl).ModifyColumn\n\t/Users/bba/pc/tidb/ddl/ddl_api.go:5200\ngithub.com/pingcap/tidb/ddl.(*ddl).AlterTable\n\t/Users/bba/pc/tidb/ddl/ddl_api.go:3396\ngithub.com/pingcap/tidb/executor.(*DDLExec).executeAlterTable\n\t/Users/bba/pc/tidb/executor/ddl.go:383\ngithub.com/pingcap/tidb/executor.(*DDLExec).Next\n\t/Users/bba/pc/tidb/executor/ddl.go:147\ngithub.com/pingcap/tidb/executor.Next\n\t/Users/bba/pc/tidb/executor/executor.go:328\ngithub.com/pingcap/tidb/executor.(*ExecStmt).next\n\t/Users/bba/pc/tidb/executor/adapter.go:1153\ngithub.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor\n\t/Users/bba/pc/tidb/executor/adapter.go:926\ngithub.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay\n\t/Users/bba/pc/tidb/executor/adapter.go:774\ngithub.com/pingcap/tidb/executor.(*ExecStmt).Exec\n\t/Users/bba/pc/tidb/executor/adapter.go:569\ngithub.com/pingcap/tidb/session.runStmt\n\t/Users/bba/pc/tidb/session/session.go:2352\ngithub.com/pingcap/tidb/session.(*session).ExecuteStmt\n\t/Users/bba/pc/tidb/session/session.go:2216\ngithub.com/pingcap/tidb/testkit.(*TestKit).ExecWithContext\n\t/Users/bba/pc/tidb/testkit/testkit.go:321\ngithub.com/pingcap/tidb/testkit.(*TestKit).Exec\n\t/Users/bba/pc/tidb/testkit/testkit.go:294\ngithub.com/pingcap/tidb/ddl_test.TestMDLTruncateTable.func1.1\n\t/Users/bba/pc/tidb/ddl/db_test.go:1602\nruntime.goexit\n\t/Users/bba/.gvm/gos/go1.19/src/runtime/asm_arm64.s:1165"] [session="{\n  \"currDBName\": \"\",\n  \"id\": 2,\n  \"status\": 2,\n  \"strictMode\": false,\n  \"user\": null\n}"]
+
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

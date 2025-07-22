@@ -1,0 +1,80 @@
+ID: 23031
+Title: flash: A pari of ExchangeReceiver / ExchangeSender has difference schema on the same column
+Description:
+## Bug Report
+
+Related to https://github.com/pingcap/tics/issues/1500 & https://github.com/pingcap/tics/issues/1492
+
+### 1. Minimal reproduce step (Required)
+
+```
+mysql> set @@tidb_allow_mpp=1; EXPLAIN SELECT DISTINCT 87 FROM tab0 AS cor0 WHERE NOT NULL IS NOT NULL;
+Query OK, 0 rows affected (0.00 sec)
+
++------------------------------------+---------+--------------+---------------+-------------------------------------------------------+
+| id                                 | estRows | task         | access object | operator info                                         |
++------------------------------------+---------+--------------+---------------+-------------------------------------------------------+
+| TableReader_19                     | 1.00    | root         |               | data:ExchangeSender_18                                |
+| └─ExchangeSender_18                | 1.00    | cop[tiflash] |               | ExchangeType: PassThrough                             |
+|   └─Projection_17                  | 1.00    | cop[tiflash] |               | Column#9                                              |
+|     └─HashAgg_7                    | 1.00    | cop[tiflash] |               | group by:Column#9, funcs:firstrow(Column#9)->Column#9 |
+|       └─ExchangeReceiver_16        | 1000.00 | cop[tiflash] |               |                                                       |
+|         └─ExchangeSender_15        | 1000.00 | cop[tiflash] |               | ExchangeType: HashPartition, Hash Cols: Column#9      |
+|           └─Projection_12          | 1000.00 | cop[tiflash] |               | 87->Column#9                                          |
+|             └─TableFullScan_13     | 1000.00 | cop[tiflash] | table:cor0    | keep order:false, stats:pseudo                        |
++------------------------------------+---------+--------------+---------------+-------------------------------------------------------+
+8 rows in set (0.00 sec)
+
+mysql> set @@tidb_allow_mpp=1; SELECT DISTINCT 87 FROM tab0 AS cor0 WHERE NOT NULL IS NOT NULL;
+Query OK, 0 rows affected (0.00 sec)
+
+ERROR 1105 (HY000): rpc error: code = Unavailable desc = transport is closing
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++----+
+| 87 |
++----+
+| 87 |
++----+
+```
+
+### 3. What did you see instead (Required)
+
+with RELWITHDEBINFO build
+
+```
+ERROR 1105 (HY000): rpc error: code = Unavailable desc = transport is closing
+
+# tiflash/log/error.log
+2021.02.26 17:00:59.624138 [ 39 ] <Error> BaseDaemon: ########################################
+2021.02.26 17:00:59.624200 [ 39 ] <Error> BaseDaemon: (from thread 38) Received signal Segmentation fault (11).
+2021.02.26 17:00:59.624228 [ 39 ] <Error> BaseDaemon: Address: NULL pointer.
+2021.02.26 17:00:59.624244 [ 39 ] <Error> BaseDaemon: Access: read.
+2021.02.26 17:00:59.624274 [ 39 ] <Error> BaseDaemon: Address not mapped to object.
+2021.02.26 17:00:59.636653 [ 39 ] <Error> BaseDaemon: 0. /root/tison/mpp/tiflash0/tiflash(DB::IAggregateFunctionHelper<DB::AggregateFunctionNullUnary<true, true> >::addFree(DB::IAggregateFunction const*, char*, DB::IColumn const**, unsigned long, DB::Arena*)+0xb) [0x65d0e7b]
+2021.02.26 17:00:59.636725 [ 39 ] <Error> BaseDaemon: 1. /root/tison/mpp/tiflash0/tiflash(void DB::Aggregator::executeImplCase<false, DB::AggregationMethodKeysFixed<HashMapTable<DB::UInt128, HashMapCell<DB::UInt128, char*, DB::UInt128HashCRC32, HashTableNoState>, DB::UInt128HashCRC32, HashTableGrower<8ul>, Allocator<true> >, true> >(DB::AggregationMethodKeysFixed<HashMapTable<DB::UInt128, HashMapCell<DB::UInt128, char*, DB::UInt128HashCRC32, HashTableNoState>, DB::UInt128HashCRC32, HashTableGrower<8ul>, Allocator<true> >, true>&, DB::AggregationMethodKeysFixed<HashMapTable<DB::UInt128, HashMapCell<DB::UInt128, char*, DB::UInt128HashCRC32, HashTableNoState>, DB::UInt128HashCRC32, HashTableGrower<8ul>, Allocator<true> >, true>::State&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, DB::Aggregator::AggregateFunctionInstruction*, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<StringRef, std::allocator<StringRef> >&, char*) const+0x1b5) [0x77b3d35]
+2021.02.26 17:00:59.636766 [ 39 ] <Error> BaseDaemon: 2. /root/tison/mpp/tiflash0/tiflash(void DB::Aggregator::executeImpl<DB::AggregationMethodKeysFixed<HashMapTable<DB::UInt128, HashMapCell<DB::UInt128, char*, DB::UInt128HashCRC32, HashTableNoState>, DB::UInt128HashCRC32, HashTableGrower<8ul>, Allocator<true> >, true> >(DB::AggregationMethodKeysFixed<HashMapTable<DB::UInt128, HashMapCell<DB::UInt128, char*, DB::UInt128HashCRC32, HashTableNoState>, DB::UInt128HashCRC32, HashTableGrower<8ul>, Allocator<true> >, true>&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, std::vector<std::shared_ptr<TiDB::ITiDBCollator>, std::allocator<std::shared_ptr<TiDB::ITiDBCollator> > >&, DB::Aggregator::AggregateFunctionInstruction*, std::vector<unsigned long, std::allocator<unsigned long> > const&, std::vector<StringRef, std::allocator<StringRef> >&, bool, char*) const+0x8f) [0x77b423f]
+2021.02.26 17:00:59.636791 [ 39 ] <Error> BaseDaemon: 3. /root/tison/mpp/tiflash0/tiflash(DB::Aggregator::executeOnBlock(DB::Block const&, DB::AggregatedDataVariants&, std::shared_ptr<DB::FileProvider> const&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, std::vector<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >, std::allocator<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > > >&, std::vector<StringRef, std::allocator<StringRef> >&, bool&)+0x178c) [0x775b0ec]
+2021.02.26 17:00:59.636808 [ 39 ] <Error> BaseDaemon: 4. /root/tison/mpp/tiflash0/tiflash(DB::ParallelAggregatingBlockInputStream::Handler::onBlock(DB::Block&, unsigned long)+0x64) [0x771ba64]
+2021.02.26 17:00:59.636829 [ 39 ] <Error> BaseDaemon: 5. /root/tison/mpp/tiflash0/tiflash(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler, (DB::StreamUnionMode)0>::loop(unsigned long)+0x1b3) [0x7721523]
+2021.02.26 17:00:59.636847 [ 39 ] <Error> BaseDaemon: 6. /root/tison/mpp/tiflash0/tiflash(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler, (DB::StreamUnionMode)0>::thread(MemoryTracker*, unsigned long)+0x20d) [0x77219ad]
+2021.02.26 17:00:59.636861 [ 39 ] <Error> BaseDaemon: 7. /root/tison/mpp/tiflash0/tiflash() [0x84a785f]
+2021.02.26 17:00:59.636875 [ 39 ] <Error> BaseDaemon: 8. /usr/lib64/libpthread.so.0(+0x7ea5) [0x7f0cc5203ea5]
+```
+
+with TiFlash DEBUG build
+
+```
+ERROR 1105 (HY000): other error for mpp stream: DB::Exception: Block structure mismatch in TiRemoteBlockInputStream(ExchangeReceiver) stream: different types:
+exchange_receiver_0 0 Int64 Int64(size = 1) 0
+exchange_receiver_0 0 Nullable(Int64) Nullable(size = 0, Int64(size = 0), UInt8(size = 0)) 0
+```
+
+### 4. What is your TiDB version? (Required)
+
+tidb = 03109adaadcbc3259658dad18cd3134cb5c33767
+tiflash = 0f2ba3a6dc4c81d5e3f8c6755b033cff0f96b430
+

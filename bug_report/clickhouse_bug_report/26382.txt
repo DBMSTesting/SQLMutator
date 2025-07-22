@@ -1,0 +1,68 @@
+ID: 26382
+Title: Crash on multiple buffer table inserts
+Description:
+ClickHouse 21.4.4
+
+Crash occurred when doing fairly intense inserts (production traffic plus backfill using INSERT INTO) into a buffer table.  There were two virtually identical stack traces, first one below.
+
+Table definition:
+
+```CREATE TABLE comcast_xcr.atsec_15m_bf
+(
+    `datetime` DateTime,
+    `svc_type` String,
+    `svc` String,
+    `cache_group` String,
+    `cache_result` Enum8('hit' = 1, 'miss' = 2, 'error' = 3, 'abort' = 4, 'stale' = 5),
+    `client_response` Enum8('none' = 0, 'success' = 2, 'redirect' = 3, 'client_error' = 4, 'server_error' = 5, '502' = 6, '503' = 7),
+    `parent_response` Enum8('none' = 0, 'success' = 2, 'redirect' = 3, 'client_error' = 4, 'server_error' = 5, '502' = 6, '503' = 7),
+    `event_count` UInt64,
+    `served_bytes` UInt64,
+    `parent_bytes` UInt64,
+    `ttms_avg` AggregateFunction(avg, UInt32),
+    `ttms_quants` AggregateFunction(quantilesTiming(0.99, 0.95, 0.9), UInt32),
+    `chi_count` AggregateFunction(uniq, FixedString(16)),
+    `manifest_count` UInt64,
+    `fragment_count` UInt64,
+    `ttms_gt_250` UInt64,
+    `ttms_gt_750` UInt64,
+    `ttms_gt_1000` UInt64,
+    `ttms_gt_2000` UInt64,
+    `ttms_gt_5000` UInt64,
+    `stms_gt_300` UInt64,
+    `stms_gt_500` UInt64,
+    `stms_gt_1000` UInt64,
+    `ttms_gt_1200` UInt64,
+    `stms_avg` AggregateFunction(avgIf, Int32, UInt8),
+    `stms_quants` AggregateFunction(quantilesTimingIf(0.99, 0.95, 0.9), Int32, UInt8)
+)
+ENGINE = Buffer('comcast_xcr', 'atsec_15m', 1, 30, 300, 100000, 1000000, 50000000, 200000000) 
+```
+
+Crash:
+
+
+```2021.07.15 17:45:49.101227 [ 2622510 ] {} <Fatal> BaseDaemon: Stack trace: 0xf023c14 0xf025690 0xf1c286b 0xf1bfa15 0xff9cc6e 0xff9bd2b 0xffa55ba 0xffa995a 0xffa8916 0xffa20f3 0xffa2dbd 0xffa15eb 0x1019b9e5 0x1019b5da 0x1034c8ba 0x101d4c7d 0x101d1931 0x101d6476 0x8954fef 0x8958a83 0x7f30657ab14a 0x7f30654dcf23
+2021.07.15 17:45:49.101295 [ 2622510 ] {} <Fatal> BaseDaemon: 1. DB::CompressedReadBufferBase::readCompressedData(unsigned long&, unsigned long&, bool) @ 0xf023c14 in /usr/bin/clickhouse
+2021.07.15 17:45:49.101305 [ 2622510 ] {} <Fatal> BaseDaemon: 2. DB::CompressedReadBufferFromFile::nextImpl() @ 0xf025690 in /usr/bin/clickhouse
+2021.07.15 17:45:49.107677 [ 2622510 ] {} <Fatal> BaseDaemon: 3. DB::SerializationAggregateFunction::deserializeBinaryBulk(DB::IColumn&, DB::ReadBuffer&, unsigned long, double) const @ 0xf1c286b in /usr/bin/clickhouse
+2021.07.15 17:45:49.115493 [ 2622510 ] {} <Fatal> BaseDaemon: 4. DB::ISerialization::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::__1::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > >*) const @ 0xf1bfa15 in /usr/bin/clickhouse
+2021.07.15 17:45:49.115975 [ 2622510 ] {} <Fatal> BaseDaemon: 5. DB::MergeTreeReaderWide::readData(DB::NameAndTypePair const&, COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, bool, unsigned long, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > >&) @ 0xff9cc6e in /usr/bin/clickhouse
+2021.07.15 17:45:49.115997 [ 2622510 ] {} <Fatal> BaseDaemon: 6. DB::MergeTreeReaderWide::readRows(unsigned long, bool, unsigned long, std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0xff9bd2b in /usr/bin/clickhouse
+2021.07.15 17:45:49.116009 [ 2622510 ] {} <Fatal> BaseDaemon: 7. DB::MergeTreeRangeReader::DelayedStream::finalize(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0xffa55ba in /usr/bin/clickhouse
+2021.07.15 17:45:49.116016 [ 2622510 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeRangeReader::continueReadingChain(DB::MergeTreeRangeReader::ReadResult&, unsigned long&) @ 0xffa995a in /usr/bin/clickhouse
+2021.07.15 17:45:49.116024 [ 2622510 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xffa8916 in /usr/bin/clickhouse
+2021.07.15 17:45:49.116041 [ 2622510 ] {} <Fatal> BaseDaemon: 10. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0xffa20f3 in /usr/bin/clickhouse
+2021.07.15 17:45:49.116047 [ 2622510 ] {} <Fatal> BaseDaemon: 11. DB::MergeTreeBaseSelectProcessor::readFromPart() @ 0xffa2dbd in /usr/bin/clickhouse
+2021.07.15 17:45:49.116053 [ 2622510 ] {} <Fatal> BaseDaemon: 12. DB::MergeTreeBaseSelectProcessor::generate() @ 0xffa15eb in /usr/bin/clickhouse
+2021.07.15 17:45:49.116069 [ 2622510 ] {} <Fatal> BaseDaemon: 13. DB::ISource::tryGenerate() @ 0x1019b9e5 in /usr/bin/clickhouse
+2021.07.15 17:45:49.116081 [ 2622510 ] {} <Fatal> BaseDaemon: 14. DB::ISource::work() @ 0x1019b5da in /usr/bin/clickhouse
+2021.07.15 17:45:49.116088 [ 2622510 ] {} <Fatal> BaseDaemon: 15. DB::SourceWithProgress::work() @ 0x1034c8ba in /usr/bin/clickhouse
+2021.07.15 17:45:49.116094 [ 2622510 ] {} <Fatal> BaseDaemon: 16. ? @ 0x101d4c7d in /usr/bin/clickhouse
+2021.07.15 17:45:49.119231 [ 2622510 ] {} <Fatal> BaseDaemon: 17. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0x101d1931 in /usr/bin/clickhouse
+2021.07.15 17:45:49.119240 [ 2622510 ] {} <Fatal> BaseDaemon: 18. ? @ 0x101d6476 in /usr/bin/clickhouse
+2021.07.15 17:45:49.119250 [ 2622510 ] {} <Fatal> BaseDaemon: 19. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8954fef in /usr/bin/clickhouse
+2021.07.15 17:45:49.119255 [ 2622510 ] {} <Fatal> BaseDaemon: 20. ? @ 0x8958a83 in /usr/bin/clickhouse
+2021.07.15 17:45:49.119268 [ 2622510 ] {} <Fatal> BaseDaemon: 21. start_thread @ 0x814a in /usr/lib64/libpthread-2.28.so
+2021.07.15 17:45:49.119278 [ 2622510 ] {} <Fatal> BaseDaemon: 22. clone @ 0xfcf23 in /usr/lib64/libc-2.28.so
+```

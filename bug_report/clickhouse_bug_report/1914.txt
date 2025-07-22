@@ -1,0 +1,73 @@
+ID: 1914
+Title: Data corruption in ReplacingMergeTree in 1.1.54343 and earlier
+Description:
+Hi
+The following flow sometimes lead to corrupted data in ReplacingMergeTree
+
+Our data have `date`, `key` and `version` for each record and the records are stored in `CollapsingMergeTree(date, (key, version), ..., sign)` to allow amendments without version change. 
+
+Then, the rows are copied to `ReplacingMergeTree(date, key, ..., version)` to provide a 'latest version' view for the data. The rows are copied once a day with `insert ... select ...`. I've noticed that some of the rows in the 'latest version' table are not actually the latest version of the data. Synthetic case to reproduce is below.
+
+```
+create table t0 (date Date, sign Int8, id Int64, version Int64, x1 Int64, x2 Int64, x3 Int64, x4 Int64, x5 Int64, x6 Int64, x7 Int64, x8 Int64, x9 Int64, x10 Int64) engine=CollapsingMergeTree(date, id, 8192, sign);
+create table t1 (date Date, sign Int8, id Int64, version UInt64, x1 Int64, x2 Int64, x3 Int64, x4 Int64, x5 Int64, x6 Int64, x7 Int64, x8 Int64, x9 Int64, x10 Int64) engine=ReplacingMergeTree(date, id, 8192, version);
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 0, 100000;
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1100000, 1200000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1200000, 1300000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1300000, 1400000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1400000, 1500000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1500000, 1600000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1600000, 1700000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1700000, 1800000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1800000, 1900000; 
+insert into t0 select toDate('2018-02-13') as date, toInt8(1) as sign, toInt64(floor(number/1000)) as id, toInt64(modulo(number, 1000)) as version, version as x1, version as x2, version as x3, version as x4, version as x5, version as x6, version as x7, version as x8, version as x9, version as x10 from system.numbers limit 1900000, 11000000;
+insert into t1 select date, sign, id, toUInt64(version) as version, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 from t0;
+select countIf(version <> x1), count() from t1; 
+optimize table t1 partition 201802 final;
+select countIf(version <> x1), count() from t1;  
+```
+
+It gives me the following output
+
+```
+:) select countIf(version <> x1), count() from t1; 
+
+SELECT 
+    countIf(version != x1), 
+    count()
+FROM t1 
+
+┌─countIf(notEquals(version, x1))─┬─count()─┐
+│                               0 │ 4715192 │
+└─────────────────────────────────┴─────────┘
+
+1 rows in set. Elapsed: 0.032 sec. Processed 4.72 million rows, 75.44 MB (145.66 million rows/s., 2.33 GB/s.) 
+
+:) optimize table t1 partition 201802 final;
+
+OPTIMIZE TABLE t1 PARTITION 201802 FINAL
+
+Ok.
+
+0 rows in set. Elapsed: 0.483 sec. 
+
+:) select countIf(version <> x1), count() from t1;  
+
+SELECT 
+    countIf(version != x1), 
+    count()
+FROM t1 
+
+┌─countIf(notEquals(version, x1))─┬─count()─┐
+│                               4 │   11900 │
+└─────────────────────────────────┴─────────┘
+
+1 rows in set. Elapsed: 0.001 sec. Processed 11.90 thousand rows, 190.40 KB (8.17 million rows/s., 130.67 MB/s.) 
+
+```
+The bug is concurrent in it's nature, use more data and more cpu cores to reproduce. Inserting data by chunks is also a must.
+
+I was not able to reproduce the bug inserting directly to ReplacingMergeTree, but probably I just was not lucky enough.
+
+In production we have something like 0.01% of the rows corrupted.
+

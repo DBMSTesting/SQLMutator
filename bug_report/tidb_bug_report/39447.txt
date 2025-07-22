@@ -1,0 +1,85 @@
+ID: 39447
+Title: The start tso in prepare statements does not calculated by GC safe point
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```java
+    public static void main(String args[]) {
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+            Connection con = DriverManager.getConnection(
+                "jdbc:mysql://127.0.0.1:4000/test?useServerPrepStmts=true&rewriteBatchedStatements=true&useCursorFetch=true&defaultFetchSize=48", "root", "");
+            Statement select = con.createStatement();
+            PreparedStatement stmt1 = con.prepareStatement("insert into t1 values (?)");
+
+            ResultSet rs = select.executeQuery("select * from t");
+            while (rs.next()) {
+                String i = rs.getString(1);
+                System.out.println("i: " + i);
+                stmt1.setString(1, i);
+                stmt1.execute();
+                Thread.sleep(10000);
+            }
+
+            rs.close();
+            select.close();
+
+            stmt1.close();
+
+            Statement select1 = con.createStatement();
+            ResultSet rs1 = select1.executeQuery("select * from t1");
+            while (rs1.next()) {
+                String i = rs1.getString(1);
+                System.out.println("j: " + i);
+            }
+            rs1.close();
+            select1.close();
+
+            con.createStatement().execute("truncate table t1");
+
+            con.close();
+        } catch (Exception e) {
+            System.out.println(e);
+        }
+    }
+}
+```
+
+When the thread is sleeping, run `select * from information_schema.processlist` to check out the TxnStart of the above session.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> select * from information_schema.processlist;                                                                                                                                                                                                                                                               
++---------------------+------+-----------------------+------+---------+------+------------+----------------------------------------------+------------------------------------------------------------------+------+------+----------------------------------------+                                               
+| ID                  | USER | HOST                  | DB   | COMMAND | TIME | STATE      | INFO                                         | DIGEST                                                           | MEM  | DISK | TxnStart                               |                                               
++---------------------+------+-----------------------+------+---------+------+------------+----------------------------------------------+------------------------------------------------------------------+------+------+----------------------------------------+                                               
+| 4354866490457981331 | root | 172.16.120.219:52332  | test | Query   |    0 | autocommit | select * from information_schema.processlist | 4b5e7cdd5d3ed84d6c1a6d56403a3d512554b534313caf296268abdec1c9ea99 |    0 |    0 |                                        |                                               
+| 4354866490457981335 | root | 114.248.173.229:42914 | test | Sleep   |    3 | autocommit | NULL                                         | e5796985ccafe2f71126ed6c0ac939ffa015a8c0744a24b7aee6d587103fd2f7 |    0 |    0 | 11-29 12:47:10.984(437701110919069699) |                                               
++---------------------+------+-----------------------+------+---------+------+------------+----------------------------------------------+------------------------------------------------------------------+------+------+----------------------------------------+  
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> select * from information_schema.processlist;                                                                                                                                                                                                                                                               
++---------------------+------+-----------------------+------+---------+------+------------+----------------------------------------------+------------------------------------------------------------------+------+------+----------+                                                                             
+| ID                  | USER | HOST                  | DB   | COMMAND | TIME | STATE      | INFO                                         | DIGEST                                                           | MEM  | DISK | TxnStart |                                                                             
++---------------------+------+-----------------------+------+---------+------+------------+----------------------------------------------+------------------------------------------------------------------+------+------+----------+                                                                             
+| 2389247563250271241 | root | 172.16.120.219:45030  | test | Query   |    0 | autocommit | select * from information_schema.processlist | 4b5e7cdd5d3ed84d6c1a6d56403a3d512554b534313caf296268abdec1c9ea99 |    0 |    0 |          |                                                                             
+| 2389247563250271245 | root | 114.248.173.229:57526 | test | Sleep   |   40 | autocommit | NULL                                         | e5796985ccafe2f71126ed6c0ac939ffa015a8c0744a24b7aee6d587103fd2f7 |    0 |    0 |          |                                                                             
++---------------------+------+-----------------------+------+---------+------+------------+----------------------------------------------+------------------------------------------------------------------+------+------+----------+                                                                             
+2 rows in set (0.00 sec) 
+```
+
+### 4. What is your TiDB version? (Required)
+
+v6.1.2
+<!-- Paste the output of SELECT tidb_version() -->
+

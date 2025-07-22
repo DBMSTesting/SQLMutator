@@ -1,0 +1,39 @@
+ID: 13338
+Title: Extension install locks
+Description:
+Add locking to make extension folder changes connected to installing extensions atomic in 2 cases:
+
+#### Multiple parallel connections installing extensions
+A mutex-based lock ensures only 1 given connection at a time can modify extensions files.
+I am not positive this was an actual problem, I would assume so but I have to say I have not build a test scenario where this becomes a problem. To be reviewed, relevant commit can otherwise not be merged
+
+#### Multiple duckdb processes
+A file-based lock relying on file-system process-based exclusive locks to make sure only a given process is going to write into `name.duckdb_extension` and `name.duckdb_extension.info`
+
+This has been tested by building a loadable extension, via adding `duckdb_extension_load(fts DONT_LINK)`, adding sleep(100) to the `WriteExtensionFiles` function, then performing on parallel duckdb processes: `FORCE INSTALL fts FROM 'build/release/repository'`, that is basically the same setup from the bug report in https://github.com/duckdb/duckdb/issues/12589:
+```bash
+#!/usr/bin/env bash
+
+for i in $(seq 1 10); do
+  duckdb -cmd 'install httpfs; install postgres;' :memory: &
+done
+
+sleep 10
+```
+Fixes https://github.com/duckdb/duckdb/issues/12589 
+
+FileBasedLock can be considered for other system-wide resources like persistent secrets, where the problem is basically the same.
+
+#### Multiple duckdb instances within the same process: NOT solved
+This has not been touched as part as this PR.
+
+I think only proper way would requires global state to be solved, we might consider having a mechanism to make multiple duckdb-instances in the same process aware of each other, but that requires a bigger rework / some thinking.
+
+One idea could be adding some API like:
+```c++
+duckdb_global_state* CreateDuckDBGlobalState();
+duckdb_status RegisterToDuckDBGlobalState(duckdb_global_state *state, /*params....*/);
+```
+Where it becomes responsibility of whoever embeds duckdb to register all of them to make safe for them to independently update and access global files in the `.duckdb` folder.
+
+Current solution for this is separate the folders that are accesses by setting them to custom values.

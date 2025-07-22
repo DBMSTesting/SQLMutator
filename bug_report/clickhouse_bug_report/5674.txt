@@ -1,0 +1,64 @@
+ID: 5674
+Title: Push down do not work with indirect alias
+Description:
+```
+create table A (ts DateTime, id String, id_b String) engine=MergeTree PARTITION BY toStartOfHour(ts) ORDER BY (ts,id);
+create table B (ts DateTime, id String, id_c String) engine=MergeTree PARTITION BY toStartOfHour(ts) ORDER BY (ts,id);
+
+insert into A select toDateTime(number),'id' || toString(number % 1000),'id' || toString(number % 1000) from system.numbers limit 100000;
+insert into B select toDateTime(0),'id' || toString(number % 1000),'id' || toString(number % 1000) from system.numbers limit 1000;
+
+SET enable_debug_queries = 1;
+
+ANALYZE SELECT ts, id, id_b, b.ts, b.id, id_c
+FROM (SELECT ts, id, id_b FROM A) AS a
+ALL LEFT JOIN B AS b ON b.id = a.id_b
+WHERE a.ts <= toDateTime('1970-01-01 03:00:00');
+
+ANALYZE  SELECT ts AS `--a.ts`, id AS `--a.id`, id_b AS `--a.id_b`, b.ts AS `--b.ts`, b.id AS `--b.id`, id_c AS `--b.id_c`
+FROM (SELECT ts, id, id_b FROM A) AS a
+ALL LEFT JOIN B AS b ON `--b.id` = `--a.id_b`
+WHERE `--a.ts` <= toDateTime('1970-01-01 03:00:00');
+```
+The first query has got push down.
+```
+SELECT 
+    ts, 
+    id, 
+    id_b, 
+    b.ts, 
+    b.id, 
+    id_c
+FROM 
+(
+    SELECT 
+        ts, 
+        id, 
+        id_b
+    FROM A 
+    WHERE ts <= toDateTime('1970-01-01 03:00:00')
+) AS a 
+ALL LEFT JOIN B AS b ON b.id = id_b
+WHERE ts <= toDateTime('1970-01-01 03:00:00')
+```
+The second query has not.
+```
+SELECT 
+    ts AS `--a.ts`, 
+    id AS `--a.id`, 
+    id_b AS `--a.id_b`, 
+    b.ts AS `--b.ts`, 
+    b.id AS `--b.id`, 
+    id_c AS `--b.id_c`
+FROM 
+(
+    SELECT 
+        ts, 
+        id, 
+        id_b
+    FROM A 
+) AS a 
+ALL LEFT JOIN B AS b ON `--b.id` = `--a.id_b`
+WHERE `--a.ts` <= toDateTime('1970-01-01 03:00:00')
+```
+The problem is Multiple JOIN use the second form of query.

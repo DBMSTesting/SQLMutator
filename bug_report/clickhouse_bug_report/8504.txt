@@ -1,0 +1,54 @@
+ID: 8504
+Title: Multiple columns with TTL cause checksum failures on merge
+Description:
+We have some large tables (schema at the end).  On a shard with three replicas, if I alter the table to add two column TTL values, the following messages appear in the logs on two of the replicas:  
+
+`DB::Exception: Checksums of parts don't match: hash of uncompressed files doesn't match (version 19.17.4.11). Data after merge is not byte-identical to data on another replicas. There could be several reasons: 1. Using newer version of compression library after server update. 2. Using another compression method. 3. Non-deterministic compression algorithm (highly unlikely). 4. Non-deterministic merge algorithm due to logical error in code. 5. Data corruption in memory due to bug in code. 6. Data corruption in memory due to hardware issue. 7. Manual modification of source data after server startup. 8. Manual modification of checksums stored in ZooKeeper. We will download merged part from replica to force byte-identical result.
+`
+
+ClickHouse version 19.17.4.11 on all three replicas.  The TTLs added were to the `parent_id `and `trace_id `columns, each 14 days.  If I add the TTL to only a single column, such as `trace_id` or `uas`, there are no checksum problems reported in the logs.  Type of column does not seem to matter --reproduced by adding a TTL to the `uas` column and the `php` column also.  
+
+It appears the the checksum issues are related to deeper merges with mixed sizes of parts.  (Not all merges cause the checksum error).  Checksum messages occur on newly inserted data/parts, every few seconds.
+
+Table is partitioned by `toDate(datetime)`.  `use_minimalistic_part_header_in_zookeeper` is 1.  No other relevant changes from default configuration.
+
+After checksum issues start, removing the TTL from a single column (via manually modifying the zookeeper `columns` node and detaching/attaching the table on all three replicas) does not fix the issue.  Removing all column TTLs does fix the issue.
+
+
+Table Schema:
+
+> CREATE TABLE cdn.ats_access
+(
+    `datetime`   DateTime,
+    `ms`         UInt16,
+    `host`       LowCardinality(String),
+    `ptcl`       Enum8('undef' = -2, 'UNKNOWN' = -1, 'http' = 0, 'https' = 1, 'ftp' = 2, 'mailto' = 3, 'file' = 4, 'data' = 5),
+    `domain`     String,
+    `path`       String,
+    `qry`        String,
+    `frag`       String,
+    `b`          UInt32,
+    `cfsc`       Enum8('FIN' = 0, 'TIMEOUT' = 1, 'INTR' = 2),
+    `chi`        FixedString(16),
+    `cqhm`       Enum8('INVALID' = 0, 'GET' = 1, 'POST' = 2, 'PUT' = 3, 'DELETE' = 4, 'HEAD' = 5, 'OPTIONS' = 6, 'CONNECT' = 7, 'TRACE' = 8, 'PROPFIND' = 9),
+    `cqhv`       Enum8('UNKNOWN' = 0, 'HTTP/0.9' = 1, 'HTTP/1.0' = 2, 'HTTP/1.1' = 3, 'HTTP/2.0' = 4, 'HTTP/3.0' = 5, 'HTTP' = 100),
+    `crc`        Enum8('TCP_HIT' = 1, 'TCP_IMS_HIT' = 2, 'TCP_IMS_MISS' = 3, 'TCP_MEM_HIT' = 4, 'TCP_MISS' = 5, 'TCP_REFRESH_FAIL_HIT' = 6, 'TCP_REFRESH_HIT' = 7, 'TCP_REFRESH_MISS' = 8, 'TCP_SWAPFAIL_MISS' = 9, 'ERR_CLIENT_ABORT' = 10, 'ERR_CONNECT_FAIL' = 11, 'ERR_INVALID_REQ' = 12, 'ERR_INVALID_URL' = 13, 'ERR_PROXY_DENIED' = 14, 'ERR_READ_ERROR' = 15, 'ERR_READ_TIMEOUT' = 16, 'ERR_UNKNOWN' = 17, 'TCP_MISS_REDIRECT' = 18, 'TCP_CLIENT_REFRESH' = 19, 'TCP_REF_FAIL_HIT' = 20, 'ERR_CLIENT_READ_ERROR' = 21, 'ERR_DNS_FAIL' = 22),
+    `pfsc`       Enum8('FIN' = 0, 'TIMEOUT' = 1, 'INTR' = 2),
+    `php`        UInt16,
+    `phr`        Enum8('NONE' = 0, 'PARENT_HIT' = 1, 'DIRECT' = 2, 'TIMEOUT_DIRECT' = 3, 'EMPTY' = 4),
+    `pqsn`       LowCardinality(String),
+    `pssc`       UInt16,
+    `sscl`       UInt32,
+    `sssc`       UInt16,
+    `ttms`       UInt32,
+    `uas`        String,
+    `svc`        LowCardinality(String),
+    `svc_type`   LowCardinality(String),
+    `kafka_time` DateTime,
+    `span_id`    Int64,
+    `parent_id`  Int64 TTL datetime + toIntervalDay(14),
+    `trace_id`   UUID TTL datetime + toIntervalDay(14),
+    `uas_type`   LowCardinality(String),
+    `uas_device` String
+) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/cdn.ats_access',
+           '{replica}') PARTITION BY toDate(datetime) ORDER BY (datetime, chi, path, ms) SETTINGS index_granularity = 16384

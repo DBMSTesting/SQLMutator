@@ -1,0 +1,115 @@
+ID: 25490
+Title: Wrong execution plan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+when instance_id = 1, the execution plan is correct
+``` 
+mysql> explain analyze
+    -> SELECT *
+    -> FROM (SELECT *, RANK() OVER (PARTITION BY topsql.time_window ORDER BY topsql.cpu_time_sum DESC ) AS rk
+    ->       FROM (SELECT instance_id, sql_digest, floor(timestamp / 60) AS time_window, sum(cpu_time_ms) AS cpu_time_sum
+    ->             FROM cpu_time
+    ->             WHERE timestamp < 3600
+    ->               AND instance_id = 3
+    ->             GROUP BY time_window, sql_digest) topsql) sql_ranked
+    -> WHERE sql_ranked.rk <= 10;
++----------------------------------------------+-------------+----------+-------------------+----------------+-----------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+---------+
+| id                                           | estRows     | actRows  | task              | access object  | execution info                                                                                | operator info                                                                                                                                                                                                                                                  | memory   | disk    |
++----------------------------------------------+-------------+----------+-------------------+----------------+-----------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+---------+
+| Selection_12                                 | 0.80        | 600      | root              |                | time:374.4ms, loops:2                                                                         | le(Column#10, 10)                                                                                                                                                                                                                                              | 87.7 KB  | N/A     |
+| └─Window_13                                  | 1.00        | 12000    | root              |                | time:373.4ms, loops:14                                                                        | rank()->Column#10 over(partition by Column#8 order by Column#7 desc)                                                                                                                                                                                           | N/A      | N/A     |
+|   └─Sort_51                                  | 1.00        | 12000    | root              |                | time:372.5ms, loops:13                                                                        | Column#8, Column#7:desc                                                                                                                                                                                                                                        | 864.6 KB | 0 Bytes |
+|     └─Projection_14                          | 1.00        | 12000    | root              |                | time:364.5ms, loops:13, Concurrency:OFF                                                       | test2.cpu_time.instance_id, test2.cpu_time.sql_digest, floor(div(cast(test2.cpu_time.timestamp, decimal(20,0) BINARY), 60))->Column#8, Column#7                                                                                                                | 750.2 KB | N/A     |
+|       └─TableReader_39                       | 1.00        | 12000    | root              |                | time:362.6ms, loops:13, cop_task: {num: 1, max: 0s, proc_keys: 0, copr_cache_hit_ratio: 0.00} | data:ExchangeSender_38                                                                                                                                                                                                                                         | N/A      | N/A     |
+|         └─ExchangeSender_38                  | 1.00        | 12000    | batchCop[tiflash] |                | tiflash_task:{time:352.1ms, loops:1, threads:1}                                               | ExchangeType: PassThrough                                                                                                                                                                                                                                      | N/A      | N/A     |
+|           └─Projection_37                    | 1.00        | 12000    | batchCop[tiflash] |                | tiflash_task:{time:352.1ms, loops:1, threads:1}                                               | Column#7, test2.cpu_time.sql_digest, test2.cpu_time.timestamp, test2.cpu_time.instance_id                                                                                                                                                                      | N/A      | N/A     |
+|             └─HashAgg_18                     | 1.00        | 12000    | batchCop[tiflash] |                | tiflash_task:{time:352.1ms, loops:1, threads:1}                                               | group by:Column#31, Column#32, funcs:sum(Column#27)->Column#7, funcs:firstrow(Column#28)->test2.cpu_time.sql_digest, funcs:firstrow(Column#29)->test2.cpu_time.timestamp, funcs:firstrow(Column#30)->test2.cpu_time.instance_id                                | N/A      | N/A     |
+|               └─Projection_52                | 0.00        | 720000   | batchCop[tiflash] |                | tiflash_task:{time:344.1ms, loops:36, threads:6}                                              | cast(test2.cpu_time.cpu_time_ms, decimal(32,0) BINARY)->Column#27, test2.cpu_time.sql_digest, test2.cpu_time.timestamp, test2.cpu_time.instance_id, floor(div(cast(test2.cpu_time.timestamp, decimal(20,0) BINARY), 60))->Column#31, test2.cpu_time.sql_digest | N/A      | N/A     |
+|                 └─ExchangeReceiver_36        | 0.00        | 720000   | batchCop[tiflash] |                | tiflash_task:{time:332.1ms, loops:36, threads:6}                                              |                                                                                                                                                                                                                                                                | N/A      | N/A     |
+|                   └─ExchangeSender_35        | 0.00        | 720000   | batchCop[tiflash] |                | tiflash_task:{time:320.4ms, loops:1808, threads:6}                                            | ExchangeType: HashPartition, Hash Cols: test2.cpu_time.sql_digest                                                                                                                                                                                              | N/A      | N/A     |
+|                     └─Selection_34           | 0.00        | 720000   | batchCop[tiflash] |                | tiflash_task:{time:320.4ms, loops:1808, threads:6}                                            | eq(test2.cpu_time.instance_id, 3), lt(test2.cpu_time.timestamp, 3600)                                                                                                                                                                                          | N/A      | N/A     |
+|                       └─TableFullScan_33     | 71834940.00 | 19437576 | batchCop[tiflash] | table:cpu_time | tiflash_task:{time:304.4ms, loops:1818, threads:6}                                            | keep order:false                                                                                                                                                                                                                                               | N/A      | N/A     |
++----------------------------------------------+-------------+----------+-------------------+----------------+-----------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+---------+
+13 rows in set (0.38 sec)
+
+```
+
+Then run the query again with instance_id=0
+```
+mysql> explain analyze
+    -> SELECT *
+    -> FROM (SELECT *, RANK() OVER (PARTITION BY topsql.time_window ORDER BY topsql.cpu_time_sum DESC ) AS rk
+    ->       FROM (SELECT instance_id, sql_digest, floor(timestamp / 60) AS time_window, sum(cpu_time_ms) AS cpu_time_sum
+    ->             FROM cpu_time
+    ->             WHERE timestamp < 3600
+    ->               AND instance_id = 0
+    ->             GROUP BY time_window, sql_digest) topsql) sql_ranked
+    -> WHERE sql_ranked.rk <= 10;
++--------------------------------+---------+---------+------+---------------+----------------------------------------------+----------------------------------------------------------------------+----------+---------+
+| id                             | estRows | actRows | task | access object | execution info                               | operator info                                                        | memory   | disk    |
++--------------------------------+---------+---------+------+---------------+----------------------------------------------+----------------------------------------------------------------------+----------+---------+
+| Selection_12                   | 210.08  | 600     | root |               | time:310.7ms, loops:2                        | le(Column#10, 10)                                                    | 87.7 KB  | N/A     |
+| └─Shuffle_52                   | 262.61  | 12000   | root |               | time:310.4ms, loops:17, ShuffleConcurrency:5 | execution info: concurrency:5, data sources:[Projection_14]          | N/A      | N/A     |
+|   └─Window_13                  | 262.61  | 12000   | root |               | time:1.55s, loops:20                         | rank()->Column#10 over(partition by Column#8 order by Column#7 desc) | N/A      | N/A     |
+|     └─Sort_51                  | 262.61  | 12000   | root |               | time:1.55s, loops:20                         | Column#8, Column#7:desc                                              | 170.1 KB | 0 Bytes |
+|       └─ShuffleReceiver_58     | 262.61  | 0       | root |               |                                              |                                                                      | N/A      | N/A     |
++--------------------------------+---------+---------+------+---------------+----------------------------------------------+----------------------------------------------------------------------+----------+---------+
+5 rows in set (0.32 sec)
+
+```
+
+### 2. What did you expect to see? (Required)
+The two execution is the same
+
+### 3. What did you see instead (Required)
+incomplete execution plan for the second query
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v5.2.0-alpha-14-g75388187f
+Edition: Community
+Git Commit Hash: 75388187f3865db18bc70ca1ef30260d85dba2e2
+Git Branch: master
+UTC Build Time: 2021-06-08 09:21:55
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```
+
+### Table schema
+```
+mysql> desc cpu_time;
++-------------+---------------+------+------+---------+-------+
+| Field       | Type          | Null | Key  | Default | Extra |
++-------------+---------------+------+------+---------+-------+
+| id          | bigint(20)    | NO   | PRI  | NULL    |       |
+| sql_digest  | varbinary(32) | NO   |      | NULL    |       |
+| plan_digest | varbinary(32) | YES  |      | NULL    |       |
+| timestamp   | int(11)       | NO   |      | NULL    |       |
+| cpu_time_ms | int(11)       | NO   |      | NULL    |       |
+| instance_id | int(11)       | NO   |      | NULL    |       |
++-------------+---------------+------+------+---------+-------+
+6 rows in set (0.00 sec)
+```
+
+### Example data records
+```
+mysql> select * from cpu_time limit 1;
++--------------------+------------------------+--------------------------+-----------+-------------+-------------+
+| id                 | sql_digest             | plan_digest              | timestamp | cpu_time_ms | instance_id |
++--------------------+------------------------+--------------------------+-----------+-------------+-------------+
+| 288230376164215985 | 0x6934325F73716C34     | 0x6934325F706C616E34     |       600 |         338 |          42 |
++--------------------+------------------------+--------------------------+-----------+-------------+-------------+
+1 row in set (0.04 sec)
+```

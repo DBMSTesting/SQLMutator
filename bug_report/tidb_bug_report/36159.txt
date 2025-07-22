@@ -1,0 +1,124 @@
+ID: 36159
+Title: concurrent map writes of stmtCache map[StmtCacheKey]interface{} when enable prepared plan cache
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. enable prepared plan cache
+2. 
+```sql
+create table t (i datetime, j datetime);
+```
+
+then, run
+
+```go
+package main
+
+import (
+	"database/sql"
+	"flag"
+	"log"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+type config struct {
+	db        string
+	selectSQL string
+}
+
+func (c *config) parse() {
+	db := flag.String("url", "root@tcp(127.0.0.1:4000)/test", "DB URL")
+	selectSQL := flag.String("select", "insert into t select now(), now() union all select now(), now() union all select now(), now()", "select SQL")
+	flag.Parse()
+	c.db = *db
+	c.selectSQL = *selectSQL
+}
+
+func main() {
+	cfg := &config{}
+	cfg.parse()
+	connStr := cfg.db + "?maxAllowedPacket=512000000&charset=utf8mb4&parseTime=True&loc=Local&allowAllFiles=true"
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	stmt, err := db.Prepare(cfg.selectSQL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		_, err = stmt.Exec()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+No panic.
+
+### 3. What did you see instead (Required)
+```
+fatal error: concurrent map writes
+
+goroutine 794 [running]:
+runtime.throw({0x1029774c0?, 0x14010e95aa0?})
+	/usr/local/go/src/runtime/panic.go:992 +0x50 fp=0x14010726760 sp=0x14010726730 pc=0x100ae7580
+runtime.mapassign_fast64(0x10362c820?, 0x140109a0e10?, 0x0)
+	/usr/local/go/src/runtime/map_fast64.go:102 +0x2e0 fp=0x140107267a0 sp=0x14010726760 pc=0x100ac00b0
+github.com/pingcap/tidb/sessionctx/stmtctx.(*StatementContext).GetOrStoreStmtCache(...)
+	/Users/yusp/work/tidb/sessionctx/stmtctx/stmtctx.go:346
+github.com/pingcap/tidb/sessionctx/variable.glob..func9(0x14010a0b500)
+	/Users/yusp/work/tidb/sessionctx/variable/sysvar.go:78 +0x120 fp=0x14010726800 sp=0x140107267a0 pc=0x10176ad70
+github.com/pingcap/tidb/sessionctx/variable.(*SysVar).GetSessionFromHook(0x1055a5c20, 0x14010a0b500)
+	/Users/yusp/work/tidb/sessionctx/variable/variable.go:176 +0x40 fp=0x14010726850 sp=0x14010726800 pc=0x101778ed0
+github.com/pingcap/tidb/sessionctx/variable.GetSessionOrGlobalSystemVar(0x14010a0b500, {0x10295175a, 0x9})
+	/Users/yusp/work/tidb/sessionctx/variable/varsutil.go:180 +0x178 fp=0x140107268b0 sp=0x14010726850 pc=0x10177c4f8
+github.com/pingcap/tidb/expression.getStmtTimestamp({0x1036e6520, 0x1400fca3d40})
+	/Users/yusp/work/tidb/expression/helper.go:168 +0x5c fp=0x14010726900 sp=0x140107268b0 pc=0x1019ae6ec
+github.com/pingcap/tidb/expression.evalNowWithFsp({0x1036e6520, 0x1400fca3d40}, 0x0?)
+	/Users/yusp/work/tidb/expression/builtin_time.go:2481 +0x2c fp=0x14010726960 sp=0x14010726900 pc=0x10193397c
+github.com/pingcap/tidb/expression.(*builtinNowWithoutArgSig).vecEvalTime(0x0?, 0x0?, 0x14010f3e460)
+	/Users/yusp/work/tidb/expression/builtin_time_vec.go:1266 +0x60 fp=0x140107269c0 sp=0x14010726960 pc=0x101959e60
+github.com/pingcap/tidb/expression.(*ScalarFunction).VecEvalTime(0x0?, {0x0?, 0x14010726c48?}, 0x10147dc70?, 0x0?)
+	/Users/yusp/work/tidb/expression/scalar_function.go:68 +0x34 fp=0x140107269f0 sp=0x140107269c0 pc=0x1019aea74
+github.com/pingcap/tidb/expression.(*Constant).VecEvalTime(0x14010726a58?, {0x1036e6520?, 0x1400fca3d40?}, 0x100b07594?, 0x100b1d550?)
+	/Users/yusp/work/tidb/expression/constant.go:166 +0x3c fp=0x14010726a40 sp=0x140107269f0 pc=0x10198528c
+github.com/pingcap/tidb/expression.evalOneVec({0x1036e6520, 0x1400fca3d40}, {0x1036e5cd0, 0x140109695c0}, 0x14010eb8cd0, 0x14010f1cd20, 0x0)
+	/Users/yusp/work/tidb/expression/chunk_executor.go:165 +0x4f8 fp=0x14010726bf0 sp=0x14010726a40 pc=0x1019792b8
+github.com/pingcap/tidb/expression.(*defaultEvaluator).run(0x14010d7ffc0, {0x1036e6520, 0x1400fca3d40}, 0x14010eb8cd0, 0x14010eb8cd0?)
+	/Users/yusp/work/tidb/expression/evaluator.go:52 +0x190 fp=0x14010726c80 sp=0x14010726bf0 pc=0x10199f080
+github.com/pingcap/tidb/expression.(*EvaluatorSuite).Run(0x14010d65f50, {0x1036e6520, 0x1400fca3d40}, 0x14010f19300?, 0x14010eb8cd0?)
+	/Users/yusp/work/tidb/expression/evaluator.go:124 +0x48 fp=0x14010726cd0 sp=0x14010726c80 pc=0x10199f7b8
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0x14010f34a20, {0x103693130?, 0x14010f2dad0?}, 0x14010f1cd20)
+	/Users/yusp/work/tidb/executor/projection.go:201 +0x13c fp=0x14010726d20 sp=0x14010726cd0 pc=0x10261982c
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0x14010f34a20, {0x103693130, 0x14010f2dad0}, 0x0?)
+	/Users/yusp/work/tidb/executor/projection.go:179 +0x5c fp=0x14010726d60 sp=0x14010726d20 pc=0x10261968c
+github.com/pingcap/tidb/executor.Next({0x103693130, 0x14010f2dad0}, {0x103696878, 0x14010f34a20}, 0x14010f1cd20)
+	/Users/yusp/work/tidb/executor/executor.go:319 +0x428 fp=0x14010726eb0 sp=0x14010726d60 pc=0x1025806f8
+github.com/pingcap/tidb/executor.(*UnionExec).resultPuller(0x14010f3a200, {0x103693130, 0x14010f2dad0}, 0x1)
+	/Users/yusp/work/tidb/executor/executor.go:1706 +0x410 fp=0x14010726fa0 sp=0x14010726eb0 pc=0x102588aa0
+github.com/pingcap/tidb/executor.(*UnionExec).initialize.func1()
+	/Users/yusp/work/tidb/executor/executor.go:1659 +0x38 fp=0x14010726fd0 sp=0x14010726fa0 pc=0x102588658
+runtime.goexit()
+	/usr/local/go/src/runtime/asm_arm64.s:1263 +0x4 fp=0x14010726fd0 sp=0x14010726fd0 pc=0x100b1c7c4
+created by github.com/pingcap/tidb/executor.(*UnionExec).initialize
+	/Users/yusp/work/tidb/executor/executor.go:1659 +0x230
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+e4bb7f74517f9effcbb50dad1795eaf541929cef and also in v5.4.0

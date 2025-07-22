@@ -1,0 +1,157 @@
+ID: 56619
+Title: "throwing pseudo region error due to no replica available"
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Using this test script:
+
+```
+package main
+
+import (
+        "math/rand"
+        "sync/atomic"
+        "context"
+        "database/sql"
+        "flag"
+        "fmt"
+        "log"
+        "time"
+
+        _ "github.com/go-sql-driver/mysql"
+)
+
+var (
+        host     = flag.String("h", "127.0.0.1", "host")
+        port     = flag.Int("P", 4000, "port")
+        user     = flag.String("u", "root", "username")
+        password = flag.String("p", "", "password")
+)
+
+func openDB() (*sql.DB, error) {
+        dbDSN := fmt.Sprintf("%s:%s@tcp(%s:%d)/test", *user, *password, *host, *port)
+        db, err := sql.Open("mysql", dbDSN)
+        if err != nil {
+                return nil, err
+        }
+        return db, nil
+}
+
+func mustExec(db *sql.DB, query string, args ...interface{}) {
+        _, err := db.Exec(query, args...)
+        if err != nil {
+                log.Fatal(err)
+        }
+}
+
+func assert(err error) {
+        if err != nil {
+                log.Fatal(err)
+        }
+}
+
+func main() {
+        flag.Parse()
+        db, err := openDB()
+        if err != nil {
+                log.Fatal(err)
+        }
+
+        var idx int64 = 0
+        // var idx atomic.Bool
+
+        for i := 0; i < 64; i++ {
+                time.Sleep(time.Duration(rand.Intn(5))*time.Millisecond)
+                go func() {
+                        conn, err := db.Conn(context.Background())
+                        assert(err)
+                        defer conn.Close()
+
+                        _, err = conn.ExecContext(context.Background(), "use test")
+                        assert(err)
+
+                        for {
+                                // if rand.Intn(10) < 2 {
+                                //      _, err := conn.ExecContext(context.Background(), "insert into t values (666)")
+                                //      assert(err)
+                                // } else {
+                                //      rows, err := conn.QueryContext(context.Background(), "select * from t limit 1")
+                                //      assert(err)
+                                //      for rows.Next() {
+                                //              var ignore int
+                                //              err := rows.Scan(&ignore)
+                                //              assert(err)
+                                //      }
+                                //      rows.Close()
+                                // }
+                                // time.Sleep(40*time.Millisecond)
+
+                                tmp := atomic.AddInt64(&idx, 1)
+
+                                _, err := conn.ExecContext(context.Background(),                                        fmt.Sprintf("create user test%d identified by 'test';", tmp))
+                                if err != nil {
+                                        fmt.Println("err==", err)
+                                }
+
+                                if tmp >= 2000000 {
+                                        break
+                                }
+                        }
+                }()
+        }
+
+        fmt.Println("benchmark end ...")
+        t := time.NewTicker(2*time.Minute)
+        for {
+                select {
+                case <-t.C:
+                        fmt.Println("===", atomic.LoadInt64(&idx))
+                }
+        }
+        time.Sleep(time.Hour)
+}
+```
+
+tidb work correctly in 9.26 using commit
+
+```
+commit 39ce61c3b37cd91cca0a8a4fa14858c8c4d3f014 (HEAD)
+Author: lance6716 <lance6716@gmail.com>
+Date:   Thu Sep 26 01:46:59 2024 +0800
+```
+
+But in 10.12, something is wrong
+
+```
+commit 025c2a3c5b72557b1a4fc2df7c0ee7be8f551957 (HEAD -> master, origin/master, origin/HEAD)
+Author: Yuanjia Zhang <zhangyuanjia@pingcap.com>
+Date:   Sat Oct 12 15:41:55 2024 +0800
+
+    planner: use go:generate go generate Plan Clone code (#56570)
+    
+    ref pingcap/tidb#54057
+```
+
+### 2. What did you expect to see? (Required)
+
+No error
+
+### 3. What did you see instead (Required)
+
+After a while, tid does not respond.
+The log is some thing like 
+
+```
+[2024/10/12 19:13:42.720 +08:00] [INFO] [region_request.go:968] ["throwing pseudo region error due to no replica available"] [req-ts=453176546853388719] [req-type=Get] [region="{ region id: 118, ver: 10, confVer: 1 }"] [replica-read-type=leader] [stale-read=false] [request-sender="{rpcError:[[127.0.0.1:20160](http://127.0.0.1:20160/)](1) wait sendLoop: context deadline exceeded, replicaSelector: replicaSelectorV2{replicaReadType: leader, attempts: 1, cacheRegionIsValid: false, replicaStatus: [peer: 119, store: 1, isEpochStale: false, attempts: 1, attempts_time: 30s, replica-epoch: 0, store-epoch: 0, store-state: resolved, store-liveness-state: reachable]}}"] [total-round-stats="{total-backoff: 73ms, total-backoff-times: 2}"] [current-round-stats="{time: 30.1s, backoff: 71ms, timeout: 30s, req-max-exec-timeout: 30s, retry-times: 1}"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

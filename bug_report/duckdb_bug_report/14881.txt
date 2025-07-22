@@ -1,0 +1,129 @@
+ID: 14881
+Title: Misleading Binder Error when Reading CSV from stdin
+Description:
+### What happens?
+
+I haven't quite gotten to the bottom of this, but roughly: It seems like when reading CSV from `/dev/stdin`, the schema is not inferred (at all? correctly?), which leads to a confusing `Binder Error: Referenced table "<table name>" not found!`.
+This also appears if I read the contents from a file rather than CSV, but specify an invalid column name.
+
+Concretely, if I pipe something into `duckdb` and have it read it from `/dev/stdin`, the error appears.
+If, on the other hand, I pipe that into a file first and read the file from within `duckdb`, it works fine.
+
+The problematic part is not so much that it doesn't work, I can write this to a temp file just fine.
+The problem is the error message talking about a missing referenced table.
+
+Sorry for the confusing report, thanks for looking into this, and thanks for duckdb overall! Very cool stuff.
+
+### To Reproduce
+
+This is the problematic query:
+```
+COPY (
+    WITH metadata_source AS (SELECT * FROM '/foo/bar/metadata.json'),
+         bitswap_cids AS (SELECT * FROM read_csv('/dev/stdin')),
+         annotated_source_cids AS (SELECT l.cid_id, l.source_cid, (r.source_cid IS NOT NULL) AS bitswap_source
+                                   FROM (SELECT cid_id, unnest(sources).source_cid as source_cid
+                                         FROM metadata_source) l
+                                            LEFT OUTER JOIN bitswap_cids r
+                                                            ON l.source_cid = r.normalized_cid),
+         bitswap_annotated_cids AS (SELECT cid_id, BOOL_OR(bitswap_source) AS bitswap_source
+                                    FROM annotated_source_cids
+                                    GROUP BY cid_id)
+    SELECT m.*, a.bitswap_source AS seen_via_bitswap
+    FROM metadata_source m
+             INNER JOIN bitswap_annotated_cids a
+                        ON m.cid_id = a.cid_id ) TO '/tmp/tmp.JD4hUZzW62/metadata_annotated.json';
+```
+
+Where the error returned is
+```
+Binder Error: Referenced table "r" not found!
+Candidate tables: "m"
+LINE 8: ...ECT * FROM '/foo/bar/metadata.json'),
+         bitswap_cids AS (SELECT * FROM read_csv('/dev/stdin')),
+         annotated_source_cids AS (SELECT l.cid_id, l.source_cid, (r.source_cid IS NOT NULL) AS bitswap_source
+                                   FROM (SELECT cid_id, unnest(sources).source_cid as source_cid
+                                         FROM metadata_source) l
+                                            LEFT OUTER JOIN bitswap_cids r
+                                                            ON l.source_cid = r.normalized_cid),
+                                                  ^
+```
+
+The whole thing is called from bash as something like
+```bash
+find "$DAILY_SAMPLED_CIDS_DIR" -type f | parallel --will-cite 'zcat {}' | some-other-program-that-transforms-the-data-and-outputs-csv | duckdb -echo -json -c "$QUERY"
+```
+
+If I change that to first write to a file and load it in `duckdb` via `WITH [...] bitswap_cids AS (SELECT * FROM read_csv('tmpfile.csv'))`, it works fine.
+
+Additionally, and also confusingly, if I do the above with a temporary file, but mess up the column specification, e.g.:
+```
+COPY (
+    WITH metadata_source AS (SELECT * FROM '/foo/bar/metadata.json'),
+         bitswap_cids AS (SELECT * FROM read_csv('/tmp/tmp.ThJpUJsC5B/bitswap_cids.csv')),
+         annotated_source_cids AS (SELECT l.cid_id, l.source_cid, (r.cid IS NOT NULL) AS bitswap_source
+                                   FROM (SELECT cid_id, unnest(sources).source_cid as source_cid
+                                         FROM metadata_source) l
+                                            LEFT OUTER JOIN bitswap_cids r
+                                                            ON l.source_cid = r.normalized_cid),
+         bitswap_annotated_cids AS (SELECT cid_id, BOOL_OR(bitswap_source) AS bitswap_source
+                                    FROM annotated_source_cids
+                                    GROUP BY cid_id)
+    SELECT m.*, a.bitswap_source AS seen_via_bitswap
+    FROM metadata_source m
+             INNER JOIN bitswap_annotated_cids a
+                        ON m.cid_id = a.cid_id ) TO '/tmp/tmp.ThJpUJsC5B/metadata_annotated.json';
+```
+I incorrectly specify `r.cid` instead of `r.source_cid` in the above.
+This also leads to a similarly confusing error:
+
+```
+Binder Error: Referenced table "r" not found!
+Candidate tables: "m"
+LINE 4: ...rce AS (SELECT * FROM '/foo/bar/metadata.json'),
+         bitswap_cids AS (SELECT * FROM read_csv('/tmp/tmp.ThJpUJsC5B/bitswap_cids.csv')),
+         annotated_source_cids AS (SELECT l.cid_id, l.source_cid, (r.cid IS NOT NULL) AS bitswap_source
+                                                  ^
+```
+
+Sorry for the double report.
+
+### OS:
+
+Linux
+
+### DuckDB Version:
+
+v.1.1.3 ?
+
+### DuckDB Client:
+
+CLI, v1.1.3 19864453f7
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Leo
+
+### Affiliation:
+
+TU Darmstadt
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

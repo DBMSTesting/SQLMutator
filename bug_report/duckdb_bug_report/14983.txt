@@ -1,0 +1,104 @@
+ID: 14983
+Title: Memory Leaking when upsertting data containing long strings
+Description:
+### What happens?
+
+Upsertting data via a combination of INSERT and UPDATE statements causes memory to infinitely grow. This only happens when the incoming data contains string values longer than 12 characters; see reproduction code for more details and findings.
+
+### To Reproduce
+
+```python
+import duckdb
+import pandas as pd
+import psutil
+
+data_size = 100_000
+# Create data
+# FINDINGS
+# - Upsertting with string values of length 12 or less uses stable memory.
+# - Upsertting with string values of length 13 or more leaks memory.
+data = pd.DataFrame(
+    {
+        # "string_column": ["a" * 12 for _ in range(data_size)]  # Does not cause leak
+        "string_column": ["a" * 13 for _ in range(data_size)]  # Causes Leak
+    },
+)
+
+conn = duckdb.connect()
+
+# create table
+conn.execute("""
+    CREATE TABLE base_table (
+        string_column VARCHAR,
+    )
+""")
+
+process = psutil.Process()
+mem_before = process.memory_info().rss
+while True:
+    # Update exising rows.
+    # FINDINGS
+    # - Commenting *only* the below UPDATE execute block out stops the leak.
+    conn.register("incoming_table", data.reset_index())
+    conn.execute(
+        """
+            UPDATE base_table
+            SET string_column = incoming_table.string_column
+            FROM incoming_table
+        """
+    )
+    # Insert new rows.
+    # FINDINGS
+    # - Commenting *only* the below INSERT execute block out stops the leak.
+    conn.execute(
+        """
+            INSERT INTO base_table (string_column)
+            SELECT DISTINCT string_column FROM incoming_table
+        """
+    )
+    conn.unregister("incoming_table")
+    mem_after = process.memory_info().rss
+
+    mem_growth = mem_after - mem_before
+    print(f"Memory growth: {mem_growth / 1024**2}mb.")
+```
+
+### OS:
+
+Linux x86_64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Taran Hackman
+
+### Affiliation:
+
+Beacon Platform Inc.
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

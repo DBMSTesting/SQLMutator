@@ -1,0 +1,71 @@
+ID: 51693
+Title: goroutine leak when indexlookup's executor builder panic.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+drop table if exists t1, t2;
+create table t1(a int, b varchar(8));
+insert into t1 values(1,'1');
+create table t2(a int , b varchar(8) GENERATED ALWAYS AS (c) VIRTUAL, c varchar(8), PRIMARY KEY (a));
+insert into t2(a) values(1);
+analyze table t1;
+analyze table t2;
+set tidb_mem_quota_query = 28000;
+select /*+ tidb_inlj(t2) */ t2.b, t1.b from t1 join t2 ON t2.a=t1.a;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+SQL exits and no goroutine leak.
+
+### 3. What did you see instead (Required)
+```
+goroutine 21734 [select, 12 minutes]:
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).sendToRespCh(0x6436ae0?, 0xc00a3529f0?, 0xc00a720700?, 0x80?)
+	/workspace/source/pkg/store/copr/coprocessor.go:1008 +0xa6
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleTask(0xc00a738d90, {0x64690f8, 0xc00a736690}, 0xc00a725450?, 0xc00a517080)
+	/workspace/source/pkg/store/copr/coprocessor.go:1138 +0x31a
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).run(0xc00a738d90, {0x64690f8, 0xc00a736690})
+	/workspace/source/pkg/store/copr/coprocessor.go:817 +0xc5
+created by github.com/pingcap/tidb/pkg/store/copr.(*copIterator).open in goroutine 21696
+	/workspace/source/pkg/store/copr/coprocessor.go:861 +0x9b
+```
+
+tidb.log
+```
+[2024/03/12 14:58:43.879 +08:00] [ERROR] [index_lookup_join.go:495] ["innerWorker panicked"] [conn=3848273926] [session_alias=] [recover="[executor:8175]Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=3848273926]"] [stack="github.com/pingcap/tidb/pkg/executor.(*innerWorker).run.func1
+\t/workspace/source/pkg/executor/index_lookup_join.go:495
+runtime.gopanic
+\t/usr/local/go/src/runtime/panic.go:914
+github.com/pingcap/tidb/pkg/util/memory.(*PanicOnExceed).Action
+\t/workspace/source/pkg/util/memory/action.go:173
+github.com/pingcap/tidb/pkg/util/memory.(*Tracker).Consume.func1
+\t/workspace/source/pkg/util/memory/tracker.go:437
+github.com/pingcap/tidb/pkg/util/memory.(*Tracker).Consume
+\t/workspace/source/pkg/util/memory/tracker.go:464
+github.com/pingcap/tidb/pkg/executor.(*ProjectionExec).open
+\t/workspace/source/pkg/executor/projection.go:119
+github.com/pingcap/tidb/pkg/executor.(*dataReaderBuilder).buildProjectionForIndexJoin
+\t/workspace/source/pkg/executor/builder.go:4626
+github.com/pingcap/tidb/pkg/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal
+\t/workspace/source/pkg/executor/builder.go:4142
+github.com/pingcap/tidb/pkg/executor.(*dataReaderBuilder).buildExecutorForIndexJoin
+\t/workspace/source/pkg/executor/builder.go:4121
+github.com/pingcap/tidb/pkg/executor.(*innerWorker).fetchInnerResults
+\t/workspace/source/pkg/executor/index_lookup_join.go:702
+github.com/pingcap/tidb/pkg/executor.(*innerWorker).handleTask
+\t/workspace/source/pkg/executor/index_lookup_join.go:539
+github.com/pingcap/tidb/pkg/executor.(*innerWorker).run
+\t/workspace/source/pkg/executor/index_lookup_join.go:513"]
+```
+
+Seems projection's childExec don't close when panic happened.
+
+### 4. What is your TiDB version? (Required)
+d62ba73f7b11ad308c0ad4bd9894525dddc9dc42
+<!-- Paste the output of SELECT tidb_version() -->
+

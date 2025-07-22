@@ -1,0 +1,74 @@
+ID: 33393
+Title: Updating non-index column by point-getting on unique index may cause too many Lock records in Write CF
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### The problem
+
+It's actually the same problem as stated in https://github.com/pingcap/tidb/issues/25659 .  It's partially fixed by the workaround PR https://github.com/pingcap/tidb/pull/25730 , However it only optimized the case where the row exists (by changing the Lock records on unique-index key into Put records), and Lock records will still cumulate when trying to update non-exist rows.
+
+We notice that in an inactive TiDB cluster, it keeps updating statistics info internally while there's no user query:
+
+```sql
+UPDATE mysql.stats_meta SET version = 432042759841644547, count = count + 11, modify_count = modify_count + 12227 WHERE table_id = 17;
+```
+
+The table id 17 belongs to `mysql.tidb`, and the row doesn't exist.
+
+There are many lock records accumulated on the corresponding unique index key:
+
+```
+$ curl http://172.16.4.171:10081/mvcc/index/mysql/stats_meta/tbl/0?table_id=17
+{
+ "key": "7480000000000000155F698000000000000002038000000000000011",
+ "region_id": 3,
+ "value": {
+  "info": {
+   "writes": [
+    {
+     "type": 2,
+     "start_ts": 432042791299186690,
+     "commit_ts": 432042791299186692
+    },
+    {
+     "type": 2,
+     "start_ts": 432042775570284546,
+     "commit_ts": 432042775570284549
+    },
+    {
+     "type": 2,
+     "start_ts": 432042759841644547,
+     "commit_ts": 432042759841644549
+    },
+    {
+     "type": 2,
+     "start_ts": 432042744113266690,
+     "commit_ts": 432042744113266692
+    },
+    {
+     "type": 2,
+     "start_ts": 432042728384626690,
+     "commit_ts": 432042728384626693
+    },
+    {
+     "type": 2,
+     "start_ts": 432042712655986690,
+     "commit_ts": 432042712655986692
+    },
+.....
+```
+
+and in metrics of Scheduler - acquire_pessimisitc_lock:
+
+![origin_img_v2_854f0e4c-6885-47d8-a8c2-5e1d73901dbg](https://user-images.githubusercontent.com/9948422/159882214-0ed46e7b-d715-4ef8-a730-531163b2ef1c.png)
+
+It seems that the lock records are not GC-ed because compaction is run very infrequently when the cluster is idle.
+
+We didn't find this problem affect any user for now, but it's a problem and has potential risks.
+
+### What is your TiDB version?
+
+4.0.10+, 5.x, master
+

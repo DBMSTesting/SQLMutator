@@ -1,0 +1,126 @@
+ID: 14547
+Title: [Performance Enhancement] Temporary views and inner joins
+Description:
+### What happens?
+
+Hi, I was trying to investigate duckdb filter pushdown and inner join enhancements
+
+I noticed duckdb is not doing the most optimal path and scanning more files than required in inner joins, doing two "reads" instead of one
+
+I came up with this fake dataset which has `i, j, k, l` numbers from 1 to 10/100 and is partitioned by `i` and `j`
+
+And ran the query 
+
+```sql
+WITH
+    base_view AS (FROM read_parquet("mock_data/*/*/*", hive_partitioning = true)),
+    filtered_view AS (FROM base_view WHERE i = 10 AND k = 3)
+FROM base_view
+INNER JOIN filtered_view ON base_view.i = filtered_view.i
+WHERE base_view.j = 10 AND base_view.l = 4
+```
+
+Which shows the `explain`
+
+![image](https://github.com/user-attachments/assets/fe2e9e0a-7ac2-4853-be66-a2cbede46595)
+
+My question is why are there two `read_parquets`. This could have been done as one read_parquet with both `i = 10` & `j = 10` filters combined right? Significantly reducing number of files read?
+
+
+### To Reproduce
+
+Fake dataset:
+
+```sql
+FROM read_parquet("mock_data/*/*/*", hive_partitioning = true, filename = true)
+USING SAMPLE 20 ROWS;
+```
+
+```text
+┌───────┬────────┬────────────────────────────────────┬───────┬───────┐
+│   k   │   l    │              filename              │   i   │   j   │
+│ int64 │ uint64 │              varchar               │ int64 │ int64 │
+├───────┼────────┼────────────────────────────────────┼───────┼───────┤
+│    42 │      3 │ mock_data/i=63/j=7/data_0.parquet  │    63 │     7 │
+│    77 │     55 │ mock_data/i=88/j=8/data_0.parquet  │    88 │     8 │
+│    34 │     55 │ mock_data/i=56/j=9/data_0.parquet  │    56 │     9 │
+│    42 │     86 │ mock_data/i=57/j=10/data_0.parquet │    57 │    10 │
+│     9 │     64 │ mock_data/i=26/j=3/data_0.parquet  │    26 │     3 │
+│    71 │     32 │ mock_data/i=35/j=9/data_0.parquet  │    35 │     9 │
+│     1 │     61 │ mock_data/i=44/j=3/data_0.parquet  │    44 │     3 │
+│    76 │     73 │ mock_data/i=97/j=8/data_0.parquet  │    97 │     8 │
+│    51 │     39 │ mock_data/i=78/j=5/data_0.parquet  │    78 │     5 │
+│    87 │     71 │ mock_data/i=62/j=1/data_0.parquet  │    62 │     1 │
+│     9 │     15 │ mock_data/i=96/j=2/data_0.parquet  │    96 │     2 │
+│    57 │     60 │ mock_data/i=32/j=7/data_0.parquet  │    32 │     7 │
+│    11 │     49 │ mock_data/i=20/j=8/data_0.parquet  │    20 │     8 │
+│    44 │     44 │ mock_data/i=82/j=5/data_0.parquet  │    82 │     5 │
+│    21 │     14 │ mock_data/i=13/j=7/data_0.parquet  │    13 │     7 │
+│    30 │     91 │ mock_data/i=86/j=6/data_0.parquet  │    86 │     6 │
+│    29 │     22 │ mock_data/i=54/j=1/data_0.parquet  │    54 │     1 │
+│    42 │      8 │ mock_data/i=82/j=3/data_0.parquet  │    82 │     3 │
+│    74 │     89 │ mock_data/i=26/j=3/data_0.parquet  │    26 │     3 │
+│    58 │      1 │ mock_data/i=63/j=3/data_0.parquet  │    63 │     3 │
+├───────┴────────┴────────────────────────────────────┴───────┴───────┤
+│ 20 rows                                                   5 columns │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+<details>
+
+<summary>Generator query</summary>
+
+```sql
+    DROP TABLE IF EXISTS mock_data_in;
+    CREATE TABLE mock_data_in AS (
+            SELECT
+            i, j, k,
+            hash(i * 10000 + j * 100 + k) % 100 AS l,
+            FROM generate_series(1, 100) s(i)
+            CROSS JOIN generate_series(1, 10) t(j)
+            CROSS JOIN generate_series(1, 100) u(k)
+        );
+    COPY mock_data_in TO 'mock_data' (FORMAT PARQUET, PARTITION_BY (i, j));
+```
+
+</details>
+
+### OS:
+
+linux
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Megh Parikh
+
+### Affiliation:
+
+Bloomberg
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - Other reason (please specify in the issue body)
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

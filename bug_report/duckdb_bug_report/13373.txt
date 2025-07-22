@@ -1,0 +1,115 @@
+ID: 13373
+Title: Tuning ART indexes for duplicate values
+Description:
+# Tuning ART indexes for duplicate values
+
+This PR contains many changes to significantly improve ART insertion and deletion performance in the presence of duplicate values, which is typically the case for foreign keys.
+
+## Benchmarks
+
+Benchmark:  `benchmark/micro/index/insert/insert_pk_fk.benchmark`.
+Source: https://github.com/duckdb/duckdb/issues/7565.
+
+|      | main | PR |
+| ----------- | ----------- | ----------- |
+| `CALL dsdgen(sf=0.01)`      | 1.1075s       | 0.0685s       |
+| `CALL dsdgen(sf=0.1)`   | `TIMEOUT`        | 0.3146s        |
+| `CALL dsdgen(sf=0.5)`   | `TIMEOUT`        | 2.2242s        |
+
+## Solution
+
+The main change in this PR is to move away from dedicated `LEAF` nodes storing a linked list of row IDs in the presence of duplicate keys. 
+
+We can inline the row ID directly into its `Node` pointer for unique row IDs. The `Node` pointer of a `Node` usually points to the children at `byte`. If there are no children, i.e., if we reach a leaf, we can store the row ID instead.
+
+This optimization is impossible for duplicate values, where each key has multiple matching row IDs. Before this PR, we used the `LEAF` node type to store these row IDs. However, this means we need to append the row ID to the front or back of the list for any insertion.
+
+- Current leaf option: Appends to the back. Slow insertions and deletions. Straightforward implementation. When introducing the ART, DuckDB did not support foreign keys. Thus, fast insertion and deletion for duplicate values were not relevant. With this solution, we go to the tail and append the row ID. We find the row ID's location for deletions and then replace it with the last row ID in the list.
+- Band-aid: Appends to the front. Fast insertions. Slow deletions. Slightly more code complexity.
+
+**Both approaches are undesirable and can cause `O(n^2)` insertion and deletion performance. Thus, we fully refactored the `LEAF` node type, making it redundant for newer storage versions.**
+
+### Nested leaves
+
+Row IDs are of a fixed eight-byte size and always **unique**. They do not differ from `BIGINT` ART keys. Thus, instead of using a different representation for leaves, we can recurse into a nested leaf, again an ART. To do so, we flip a bit in the `Node` pointer previously pointing to the first `LEAF` node. We call this flipped bit a `Gate`. Now, this pointer points to the first node of the nested ART. As we now store row IDs in nested ARTs, we achieve `O(key_len + row_id_len)` insertion and deletion performance for duplicates. We never nest more than one level, as row IDs are unique.
+
+Necessary changes:
+- Transform row IDs into ART keys.
+- Implement `Gate` logic.
+- Refactor many algorithms to work with `Gate` nodes. This refactoring is relevant, especially for prefixes and functions such as `Concatenate`, `Traverse`, and `Split`.
+- Refactor scan algorithms. We now scan nested leaves using the same logic as inlined row IDs.
+- Refactor the `Construct` (merge) algorithm to recurse into nested leaves.
+- Add logic to expand an `INLINED_LEAF` into a nested leaf.
+- Add logic to shrink a nested leaf into an `INLINED_LEAF`.
+- Implement transformations between nested leaves and old `LEAF` lists.
+
+## Storage size regression
+
+With all these changes in place, we noticed significant performance improvements. However, we also detected a substantial regression in ART storage sizes in the presence of duplicates. While the ART uses vertical compression with prefixes and horizontal compression with the different node types, it is not storage-optimized. The node contains an empty ` Node` pointer for any empty byte in a node, i.e., a byte with no child. In a nested ART, storing two row IDs results takes up the same amount of memory as storing four row IDs differing at the same byte position. If the ART is sparse, this regression is more stark for the `Node48` and the `Node256`.
+
+#### Affected tests
+
+- `test/sql/index/art/vacuum/test_art_vacuum_strings.test_slow`
+- `test/sql/index/art/memory/test_art_varchar.test_slow`
+- `test/sql/index/art/memory/test_art_non_linear.test_slow`
+
+### Mitigation
+
+We implemented two major mitigation strategies. However, this PR still introduces a slight regression in storage size for indexes with duplicate values.
+
+#### Leaf nodes
+
+We can reconstruct the row ID when traversing the nested ART with slight modifications to the current algorithms. Thus, storing a child pointer or inlining the row ID is unnecessary if the row IDs differ at their last byte position (`sizeof(row_t) - 1`). Therefore, we introduce four new (aligned) node types: `PREFIX_INLINED`, `NODE_7_LEAF`, `NODE_15_LEAF`, and `NODE_256_LEAF`.
+
+#### Adaptive prefix sizes
+
+Currently, each prefix has a fixed size of 15 bytes. To further reduce the memory footprint of the ARTs, especially leaves, we added adaptive prefix sizes. Each ART still has a fixed prefix size, which can differ between ARTs.
+
+We calculate the prefix length for primary keys or unique indexes according to the `key_length`. For ARTs containing nested keys, the minimum of `key_length` and `ROW_ID_PREFIX_COUNT = sizeof(row_t) - 1`. This minimum is required for the `PREFIX_INLINED` node, as we need to guarantee that we can inline `sizeof(row_t) - 1`.
+
+### Limitations
+
+The change for adaptive prefix sizes only takes effect slowly. The first time we serialize an ART to storage, we currently still transform the ART storage to a `1.0.0'—compatible format, i.e., we expanded the prefixes to contain 15 bytes.
+
+## Storage compatibility
+
+The `IndexStorageInfo` now contains an additional property: `case_insensitive_map_t<Value> options;`. Any index, i.e., extension indexes, can write options for this map. On default, the map is empty to ensure compatibility. This change causes the patch to the `vss` extension.
+
+We write a new option for ART indexes: `"v1_0_0_storage": bool`. We write this option if we are **NOT** defaulting to the (older) v.1.0.0. storage. I.e., we only write if `!v1_0_0_storage`.
+
+We use the following check in the WAL and when checkpointing to determine whether to write the older storage format.
+```cpp
+auto db_options = database.GetDatabase().config.options;
+auto v1_0_0_storage = db_options.serialization_compatibility.serialization_version < 3;
+```
+
+We then pass the options to the ART serialization code and possibly perform transformations. We only transform in-memory nodes, as any other Nodes and their children already have the target storage format.
+
+We transform each prefix if the ART uses a prefix count that is not DEPRECATED_PREFIX_COUNT.
+If we are serializing it to older storage, we transform each nested leaf to the old leaf representation.
+We have yet to transform anything when deserializing, as we deserialize the ART lazily. If we encounter a deprecated leaf, we transform it into a nested leaf. We do not change the prefix size to avoid excessive transformations during execution. _Not changing the prefix size during deserialization means only indexes that were never serialized to older storage formats will contain the newer, possibly more memory-efficient, prefix sizes._
+
+## Other notable changes
+
+- In many places, instead of using memory safe types like `optional_ptr`, we now use the unsafe types.
+- Removed the `LogicalType` parameter from most `ARTKey` functions. Other small changes to `ARTKeys`.
+- The nodes to use significantly more templating. Notably, nodes now implement `Iterator` functions.
+
+### Fixed-size allocator
+
+The `FixedSizeAllocator` now exposes these additional functions:
+```cpp
+template <class T> 
+T *GetInMemoryPtr(const IndexPointer ptr);
+data_ptr_t GetInMemoryPtr(const IndexPointer ptr);
+idx_t GetSegmentSize() const;
+idx_t GetSegmentCount() const;
+void RemoveEmptyBuffers();
+bool IsEmpty();
+```
+
+## Related Issues
+
+- Fixes https://github.com/duckdb/duckdb/issues/7565.
+- Fixes https://github.com/duckdblabs/duckdb-internal/issues/841.
+- Fixes https://github.com/duckdb/duckdb/issues/11227.

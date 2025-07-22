@@ -1,0 +1,176 @@
+ID: 38116
+Title: PreparedStatement parameter related error causing TiDB server down when using cursor fetch
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+The bug can be reproduced using JDBC
+
+install dependency
+
+```XML
+<dependency>
+  <groupId>mysql</groupId>
+  <artifactId>mysql-connector-java</artifactId>
+  <version>8.0.15</version>
+</dependency>
+```
+
+create test table
+
+```SQL
+create table test_tab
+(
+    idx_col bigint auto_increment
+        primary key
+);
+```
+
+execute following codes
+
+```JAVA
+public static void reproduceParameterError() throws SQLException {
+
+    String url = "jdbc:mysql://${ip-address}:${port}/${database}?useCursorFetch=true";
+    String user = "${user}";
+    String password = "${password}";
+
+    Connection conn = DriverManager.getConnection(url, user, password);
+
+    conn.setAutoCommit(false); // must set
+
+    PreparedStatement statement1 = conn.prepareStatement("" +
+            "select * " +
+            "from " +
+            "test_tab " +
+            "where (idx_col = ?)"); // must be wrapped in parentheses
+
+    statement1.setFetchSize(500); // must set
+
+    statement1.setBigDecimal(1, BigDecimal.valueOf(123456)); // must set BigDecimal instead of long or integer
+
+    statement1.executeQuery();
+    conn.commit();
+    conn.close();
+}
+```
+
+check tidb server status
+
+### 2. What did you expect to see? (Required)
+nothing unexpected
+
+### 3. What did you see instead (Required)
+tidb server down with following log in tidb_stderr.log
+
+```
+panic: runtime error: index out of range [0] with length 0
+
+goroutine 3429 [running]:
+github.com/pingcap/tidb/expression.(*ParamMarker).GetUserVar(...)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/constant.go:91
+github.com/pingcap/tidb/expression.(*Constant).getLazyDatum(0x6?, {0x0?, 0x0?})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/constant.go:187 +0x26a
+github.com/pingcap/tidb/expression.(*Constant).Eval(0xc000b3acc0, {0x0?, 0xc009c3d0e0?})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/constant.go:197 +0x98
+github.com/pingcap/tidb/expression.(*Constant).ExplainInfo(0x427b380?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/explain.go:83 +0x65
+github.com/pingcap/tidb/expression.(*ScalarFunction).explainInfo(0xc01094ec80, 0x0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/explain.go:52 +0x1d3
+github.com/pingcap/tidb/expression.(*ScalarFunction).ExplainInfo(0x14a4b57?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/explain.go:30 +0x1b
+github.com/pingcap/tidb/expression.sortedExplainExpressionList({0xc001ba48f0, 0x1, 0x100000008?}, 0x0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/explain.go:149 +0x2b1
+github.com/pingcap/tidb/expression.SortedExplainExpressionList(...)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/expression/explain.go:139
+github.com/pingcap/tidb/planner/core.(*PhysicalSelection).ExplainInfo(0x42ee4f8?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/planner/core/explain.go:527 +0x33
+github.com/pingcap/tidb/planner/core.(*planEncoder).encodePlan(0xc001414000, {0x42b3898, 0xc0033b7130}, 0x1, 0x0, 0x0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/planner/core/encode.go:103 +0x1bf
+github.com/pingcap/tidb/planner/core.(*planEncoder).encodePlanTree(0xc001414000, {0x42b3898, 0xc0033b7130})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/planner/core/encode.go:65 +0x85
+github.com/pingcap/tidb/planner/core.EncodePlan({0x42b3898?, 0xc0033b7130?})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/planner/core/encode.go:58 +0x10e
+github.com/pingcap/tidb/executor.getEncodedPlan({0x42ee4f8, 0xc000be8fc0}, {0x42b3898, 0xc0033b7130}, 0x1)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:1179 +0x118
+github.com/pingcap/tidb/executor.(*ExecStmt).SummaryStmt.func1()
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:1240 +0x3b
+github.com/pingcap/tidb/util/stmtsummary.newStmtSummaryByDigestElement(0xc0013882c0, 0x632d2130, 0xc00337e900?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/stmtsummary/statement_summary.go:601 +0x36
+github.com/pingcap/tidb/util/stmtsummary.(*stmtSummaryByDigest).add.func1(0xc00356c180, 0xc00356c180?, 0x632d2130, 0xc009c7c660?, 0x18)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/stmtsummary/statement_summary.go:557 +0x1af
+github.com/pingcap/tidb/util/stmtsummary.(*stmtSummaryByDigest).add(0xc000132280?, 0xc0013882c0?, 0x160?, 0x648d6c0?, 0xc0013882c0?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/stmtsummary/statement_summary.go:568 +0x25
+github.com/pingcap/tidb/util/stmtsummary.(*stmtSummaryByDigestMap).AddStatement(0xc000132280, 0xc0013882c0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/stmtsummary/statement_summary.go:339 +0x177
+github.com/pingcap/tidb/executor.(*ExecStmt).SummaryStmt(0xc0008f2a80, 0x1)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:1316 +0xbd1
+github.com/pingcap/tidb/executor.(*ExecStmt).FinishExecuteStmt(0xc0008f2a80, 0xc00141e110?, {0x0, 0x0}, 0x8?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:959 +0x25f
+github.com/pingcap/tidb/executor.(*ExecStmt).CloseRecordSet(0xc0008f2a80, 0x2204?, {0x0?, 0x0?})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:988 +0x2e
+github.com/pingcap/tidb/executor.(*recordSet).Close(0xc0130ee460)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:181 +0x5d
+github.com/pingcap/tidb/session.(*execStmtResult).Close(0xc0049d0870)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:2116 +0x36
+github.com/pingcap/tidb/server.(*tidbResultSet).Close(0x7ffac4615860?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/driver_tidb.go:341 +0x3c
+github.com/pingcap/tidb/parser/terror.Call(0x386d6a0?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/parser/terror/terror.go:298 +0x31
+github.com/pingcap/tidb/server.(*TiDBStatement).Close(0xc0033fcf50)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/driver_tidb.go:182 +0x259
+github.com/pingcap/tidb/parser/terror.Call(0xc006e97a80?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/parser/terror/terror.go:298 +0x31
+github.com/pingcap/tidb/server.(*TiDBContext).Close(0xc0047f6660)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/driver_tidb.go:248 +0x90
+github.com/pingcap/tidb/server.closeConn(0xc00067d1e0, 0xc001bc6630?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:348 +0x1dc
+github.com/pingcap/tidb/server.(*clientConn).Close(0xc00067d1e0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:332 +0x89
+github.com/pingcap/tidb/server.(*Server).onConn.func2()
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:534 +0x2f
+github.com/pingcap/tidb/server.(*Server).onConn(0xc0017041c0, 0xc00067d1e0)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:579 +0x785
+created by github.com/pingcap/tidb/server.(*Server).startNetworkListener
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:455 +0x5ca
+```
+
+### 4. What is your TiDB version? (Required)
+Release Version: v6.1.0
+Edition: Community
+Git Commit Hash: 1a89decdb192cbdce6a7b0020d71128bc964d30f
+Git Branch: heads/refs/tags/v6.1.0
+UTC Build Time: 2022-06-05 05:15:11
+GoVersion: go1.18.2
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+
+### 5. Additional
+The bug was first discovered in step InsertUpdate of [pentaho/pentaho-kettle](https://github.com/pentaho/pentaho-kettle). In execution it generates a simple query against the target table using specified predicates. For compatibilty reason, the predicates in where clause are always wrapped in parentheses twice even when there is only one expression. While investigating the cause, I noticed that when the parentheses are used (one pair is enough), tidb would always do a full scan on the table even under this situation where test_tab.idx_col is a index, which is seemingly caused by data type mismatch.
+
+sql test
+
+```SQL
+SELECT
+  *
+FROM
+  test_tab
+WHERE
+  (idx_col = ?) [arguments: 123456]
+```
+
+execution plan
+
+```
+id                   	task     	estRows	operator info                                                	actRows	execution info                                                                                                                                                                                                                         	memory   	disk
+Selection_8          	root     	8000   	eq(cast(dcdb.test_tab.idx_col, decimal(20,0) BINARY), 123456)	0      	time:1.65ms, loops:1                                                                                                                                                                                                                   	380 Bytes	N/A
+└─TableReader_7      	root     	8000   	data:Selection_6                                             	0      	time:1.65ms, loops:1, cop_task: {num: 1, max: 1.56ms, proc_keys: 0, rpc_num: 1, rpc_time: 1.54ms, copr_cache_hit_ratio: 0.00}                                                                                                          	190 Bytes	N/A
+  └─Selection_6      	cop[tikv]	8000   	eq(cast(dcdb.test_tab.idx_col, decimal(20,0) BINARY), 123456)	0      	tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 0, total_process_keys_size: 0, total_keys: 1, rocksdb: {delete_skipped_count: 0, key_skipped_count: 0, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}	N/A      	N/A
+    └─TableFullScan_5	cop[tikv]	10000  	table:test_tab, keep order:false, stats:pseudo               	0      	tikv_task:{time:0s, loops:1}                                                                                                                                                                                                           	N/A      	N/A
+```
+
+But if setLong() or setInt() was used instead of setBigDecimal(), or predicate was not wrapped in parentheses, the issue would not occour, and tidb would simply do a point get on the primary key.

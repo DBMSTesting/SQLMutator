@@ -1,0 +1,86 @@
+ID: 56217
+Title: ```read_from_storage``` hint doesn't effect while plan choose the index merge plan
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+1. create table 
+
+```
+CREATE TABLE `abc_detect` (
+  `id` bigint(20) NOT NULL,
+  `win_code` varchar(32) NOT NULL
+  `lose_code` varchar(32) NOT NULL
+  `abc_status` tinyint(4) NOT NULL DEFAULT '0'
+  `monitor_time` int(11) NOT NULL DEFAULT '0' 
+  PRIMARY KEY (`id`) /*T![clustered_index] NONCLUSTERED */,
+  KEY `idx_win_user_site_code` (`win_code`,`monitor_time`),
+  KEY `idx_lose_user_site_code` (`lose_code`,`monitor_time`),
+  KEY `idx_win_site_code_status` (`win_code`,`abc_status`),
+  KEY `idx_lose_site_code_status` (`lose_code`,`abc_status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+```
+
+2. add tiflash replica
+
+3. insert some data
+
+4. query hint with read_from_storage(tiflash[xx])
+
+```
+SELECT
+      /*+ read_from_storage(tiflash[a]) */
+      a.id
+    FROM
+      abc_detect a
+    WHERE
+      a.source_type = 0
+      AND a.abc_status NOT IN (-1, 0)
+      AND monitor_time >= 1726910326
+      AND monitor_time <= 1726910391
+      AND (
+        a.win_code IN ('1123')
+        OR a.lose_code IN ('1123')
+      )
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++-----------------------------+--------------+--------------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                          | estRows      | task         | access object | operator info                                                                                                                                                                                                                                                                                                 |
++-----------------------------+--------------+--------------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| TableReader_12              | 0.00         | root         |               | data:ExchangeSender_11                                                                                                                                                                                                                                                                                        |
+| └─ExchangeSender_11         | 0.00         | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                                                                                                     |
+|   └─Projection_5            | 0.00         | mpp[tiflash] |               | prod_risk.abc_detect.id                                                                                                                                                                                                                                                                                       |
+|     └─Selection_10          | 0.00         | mpp[tiflash] |               | eq(prod_risk.pvp_detect.source_type, 0), ge(prod_risk.abc_detect.monitor_time, 1726910326), le(prod_risk.abc_detect.monitor_time, 1726910391), not(in(prod_risk.abc_detect.abc_status, -1, 0)), or(eq(prod_risk.abc_detect.win_user_site_code, "1123"), eq(prod_risk.abc_detect.lose_user_site_code, "1123")) |
+|       └─TableFullScan_9     | 114079471.00 | mpp[tiflash] | table:a       | keep order:false                                                                                                                                                                                                                                                                                              |
++-----------------------------+--------------+--------------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+5 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+The hint doesn't effect. The query plan choose the index merge plan instead of tiflash plan.
+
+```
++----------------------------------+-----------+-----------+---------------------------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                               | estRows   | task      | access object                                                             | operator info                                                                                                                                                                                  |
++----------------------------------+-----------+-----------+---------------------------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_4                     | 0.00      | root      |                                                                           | prod_risk.pvp_detect.id                                                                                                                                                                        |
+| └─IndexMerge_13                  | 0.00      | root      |                                                                           | type: union                                                                                                                                                                                    |
+|   ├─IndexRangeScan_9(Build)      | 128031.51 | cop[tikv] | table:a, index:idx_win_user_site_code(win_code, monitor_time)   | range:["1123","1123"], keep order:false                                                                                                                                                        |
+|   ├─IndexRangeScan_10(Build)     | 126990.41 | cop[tikv] | table:a, index:idx_lose_site_code_status(lose_code, abc_status) | range:["1123","1123"], keep order:false                                                                                                                                                        |
+|   └─Selection_12(Probe)          | 0.00      | cop[tikv] |                                                                           | eq(prod_risk.abc_detect.source_type, 0), ge(prod_risk.abc_detect.monitor_time, 1726910326), le(prod_risk.abc_detect.monitor_time, 1726910391), not(in(prod_risk.abc_detect.abc_status, -1, 0)) |
+|     └─TableRowIDScan_11          | 254879.39 | cop[tikv] | table:a                                                                   | keep order:false                                                                                                                                                                               |
++----------------------------------+-----------+-----------+---------------------------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+v6.5.7
+
+<!-- Paste the output of SELECT tidb_version() -->
+

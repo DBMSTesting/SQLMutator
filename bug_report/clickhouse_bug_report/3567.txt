@@ -1,0 +1,114 @@
+ID: 3567
+Title: Size of permutation is less than required..
+Description:
+Noticed some issues with aliasing and ALL INNER JOIN. This is on master.
+
+To reproduce - use test 00702_join_with_using.sql as a base - modify the test setup to be:
+
+```
+DROP TABLE IF EXISTS test.using1;
+DROP TABLE IF EXISTS test.using2;
+
+CREATE TABLE test.using1(a String, b DateTime) ENGINE=MergeTree order by a;
+CREATE TABLE test.using2(c String, a String, d DateTime) ENGINE=MergeTree order by c;
+
+INSERT INTO test.using1 VALUES ('a', '2018-01-01 00:00:00') ('b', '2018-01-01 00:00:00') ('c', '2018-01-01 00:00:00');
+INSERT INTO test.using2 VALUES ('d', 'd', '2018-01-01 00:00:00') ('b', 'b', '2018-01-01 00:00:00') ('c', 'c', '2018-01-01 00:00:00');
+```
+
+Working test case:
+
+```
+SELECT * FROM test.using1 t1 ALL LEFT JOIN (SELECT *, c as a, d as b FROM test.using2) t2 USING (a, b) ORDER BY d format PrettySpace;
+
+SELECT *
+FROM test.using1 AS t1 
+ALL LEFT JOIN 
+(
+    SELECT 
+        *, 
+        c AS a, 
+        d AS b
+    FROM test.using2 
+) AS t2 USING (a, b)
+ORDER BY d ASC
+FORMAT PrettySpace
+
+a                     b   c   t2.a                     d                  t2.b
+
+a   2018-01-01 00:00:00              0000-00-00 00:00:00   0000-00-00 00:00:00
+b   2018-01-01 00:00:00   b   b      2018-01-01 00:00:00   2018-01-01 00:00:00
+c   2018-01-01 00:00:00   c   c      2018-01-01 00:00:00   2018-01-01 00:00:00
+
+3 rows in set. Elapsed: 0.004 sec. 
+```
+
+Change the LEFT JOIN to INNER JOIN:
+
+```
+SELECT * FROM test.using1 t1 ALL INNER JOIN (SELECT *, c as a, d as b FROM test.using2) t2 USING (a, b) ORDER BY d;
+
+SELECT *
+FROM test.using1 AS t1 
+ALL INNER JOIN 
+(
+    SELECT 
+        *, 
+        c AS a, 
+        d AS b
+    FROM test.using2 
+) AS t2 USING (a, b)
+ORDER BY d ASC
+
+Received exception from server (version 18.14.9):
+Code: 9. DB::Exception: Received from localhost:9000, 127.0.0.1. DB::Exception: Size of permutation is less than required..
+```
+
+I can work around this 
+
+```
+set join_use_nulls = 1;
+
+SELECT 
+    t1.*, 
+    t2.*
+FROM test.using1 AS t1 
+ALL LEFT JOIN 
+(
+    SELECT 
+        *, 
+        c AS a, 
+        d AS b
+    FROM test.using2 
+) AS t2 USING (a, b)
+WHERE isNotNull(t2.c)
+ORDER BY d ASC
+FORMAT PrettySpace
+
+a                     b   c   t2.a                     d   t2.a                  t2.b
+
+b   2018-01-01 00:00:00   b   b      2018-01-01 00:00:00   b      2018-01-01 00:00:00
+c   2018-01-01 00:00:00   c   c      2018-01-01 00:00:00   c      2018-01-01 00:00:00
+
+2 rows in set. Elapsed: 0.005 sec. 
+```
+
+Or:
+
+```
+SELECT 
+    t1.*, 
+    t2.*
+FROM test.using1 AS t1 
+ALL LEFT JOIN test.using2 AS t2 ON (a = c) AND (b = d)
+WHERE isNotNull(t2.a)
+ORDER BY d ASC
+FORMAT PrettySpace
+
+a                     b   c   t2.a                     d
+
+b   2018-01-01 00:00:00   b   b      2018-01-01 00:00:00
+c   2018-01-01 00:00:00   c   c      2018-01-01 00:00:00
+
+2 rows in set. Elapsed: 0.005 sec.
+```

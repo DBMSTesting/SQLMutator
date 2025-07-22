@@ -1,0 +1,152 @@
+ID: 6767
+Title: Multiple JOINs in VIEW do not work with enable_optimize_predicate_expression=1
+Description:
+Hello. I'm not sure if it's a bug or just experimental implementation. I'm observing the following behaviour. If it's indeed for the experimental feature, please, write few words on plans.
+
+The data structure.
+```
+CREATE TABLE t1 (
+    id UInt32,
+    value1 String
+) ENGINE ReplacingMergeTree() ORDER BY id;
+ 
+CREATE TABLE t2 (
+    id UInt32,
+    value2 String
+) ENGINE ReplacingMergeTree() ORDER BY id;
+ 
+CREATE TABLE t3 (
+    id UInt32,
+    value3 String
+) ENGINE ReplacingMergeTree() ORDER BY id;
+ 
+INSERT INTO t1 (id, value1) VALUES (1, 'val11');
+INSERT INTO t2 (id, value2) VALUES (1, 'val21');
+INSERT INTO t3 (id, value3) VALUES (1, 'val31');
+```
+
+### Case 1
+If I create a view with >1 join in it I get an exception for queries containing a where statement.
+```
+CREATE VIEW IF NOT EXISTS view1 AS SELECT
+    t1.id AS id,
+    t1.value1 AS value1,
+    t2.value2 AS value2,
+    t3.value3 AS value3
+FROM t1
+LEFT JOIN t2 ON t1.id = t2.id
+LEFT JOIN t3 ON t1.id = t3.id
+WHERE t1.id > 0;
+ 
+SELECT * FROM view1 WHERE id = 1;
+
+Received exception from server (version 19.13.1):
+Code: 48. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Multiple JOIN disabled or does not support the query. 'set allow_experimental_multiple_joins_emulation' to enable..
+```
+
+### Case 2
+A query (with the predicate expression optimizer disabled) works.
+
+```
+SELECT count(*) FROM view1 WHERE id = 1 SETTINGS enable_optimize_predicate_expression = 0;
+
+┌─id─┬─value1─┬─value2─┬─value3─┐
+│  1 │ val11  │ val21  │ val31  │
+└────┴────────┴────────┴────────┘
+```
+
+### Case 3
+If I perform a query containing a view as a subquery (mentioned in the documentation, how view should work https://clickhouse.yandex/docs/en/query_language/create/#create-view) it works.
+
+```
+SELECT *
+FROM
+(SELECT
+    t1.id AS id,
+    t1.value1 AS value1,
+    t2.value2 AS value2,
+    t3.value3 AS value3
+FROM t1
+LEFT JOIN t2 ON t1.id = t2.id
+LEFT JOIN t3 ON t1.id = t3.id
+WHERE t1.id > 0) AS v
+WHERE v.id = 1;
+
+┌─id─┬─value1─┬─value2─┬─value3─┐
+│  1 │ val11  │ val21  │ val31  │
+└────┴────────┴────────┴────────┘
+```
+
+### Case 4
+If I rewrite the view to contain only one join per query and other joins are put in nested subqueries then same query on the view as above works.
+
+```
+CREATE VIEW IF NOT EXISTS view1 AS SELECT
+    p1.id AS id,
+    p1.value1 AS value1,
+    p1.value2 AS value2,
+    t3.value3 AS value3
+FROM
+(SELECT
+    t1.id AS id,
+    t1.value1 AS value1,
+    t2.value2 AS value2
+FROM t1
+LEFT JOIN t2 ON t1.id = t2.id
+WHERE t1.id > 0) AS p1
+LEFT JOIN t3 ON p1.id = t3.id;
+
+SELECT * FROM view1 WHERE id = 1;
+
+┌─id─┬─value1─┬─value2─┬─value3─┐
+│  1 │ val11  │ val21  │ val31  │
+└────┴────────┴────────┴────────┘
+```
+
+allow_experimental_multiple_joins_emulation is enabled for all cases listed above.
+
+```
+┌─name────────────────────────────────────────┬─value─┬─changed─┬─description───────────────────────────────┐
+│ allow_experimental_multiple_joins_emulation │ 1     │       0 │ "Emulate multiple joins using subselects" │
+└─────────────────────────────────────────────┴───────┴─────────┴───────────────────────────────────────────┘
+```
+
+My environment
+
+```
+clickhouse-server --version
+ClickHouse server version 19.13.1.11 (official build).
+```
+
+Stack trace in logs
+
+```
+2019.09.01 14:50:15.246423 [ 27 ] {66251b8b-f037-4de9-bb2d-89fa3288334c} <Error> executeQuery: Code: 48, e.displayText() = DB::Exception: Multiple JOIN disabled or does not support the query. 'set allow_experimental_multiple_joins_emulation' to enable. (version 19.13.1.11 (official build)) (from 172.17.0.3:52688) (in query: SELECT * FROM view1 WHERE id = 1), Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x30) [0x7f58f30]
+1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x25) [0x3c427b5]
+2. /usr/bin/clickhouse-server() [0x3a91325]
+3. /usr/bin/clickhouse-server(DB::TranslateQualifiedNamesMatcher::visit(DB::ASTSelectQuery&, std::shared_ptr<DB::IAST> const&, DB::TranslateQualifiedNamesMatcher::Data&)+0x2b) [0x6e75eeb]
+4. /usr/bin/clickhouse-server(DB::TranslateQualifiedNamesMatcher::visit(std::shared_ptr<DB::IAST>&, DB::TranslateQualifiedNamesMatcher::Data&)+0x92) [0x6e76412]
+5. /usr/bin/clickhouse-server(DB::PredicateExpressionsOptimizer::getSelectQueryProjectionColumns(std::shared_ptr<DB::IAST>&)+0x76f) [0x74d2faf]
+6. /usr/bin/clickhouse-server(DB::PredicateExpressionsOptimizer::getSubqueryProjectionColumns(std::shared_ptr<DB::IAST> const&, std::map<DB::ASTSelectQuery*, std::vector<std::pair<std::shared_ptr<DB::IAST>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::shared_ptr<DB::IAST>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > >, std::less<DB::ASTSelectQuery*>, std::allocator<std::pair<DB::ASTSelectQuery* const, std::vector<std::pair<std::shared_ptr<DB::IAST>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::shared_ptr<DB::IAST>, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > > > > >&)+0x100) [0x74d3e00]
+7. /usr/bin/clickhouse-server(DB::PredicateExpressionsOptimizer::getAllSubqueryProjectionColumns[abi:cxx11]()+0x79) [0x74d47e9]
+8. /usr/bin/clickhouse-server(DB::PredicateExpressionsOptimizer::optimize()+0x10a) [0x74d494a]
+9. /usr/bin/clickhouse-server(DB::StorageView::read(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int)+0x222) [0x7538c92]
+10. /usr/bin/clickhouse-server(void DB::InterpreterSelectQuery::executeFetchColumns<DB::InterpreterSelectQuery::Pipeline>(DB::QueryProcessingStage::Enum, DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x1b6d) [0x6d712ed]
+11. /usr/bin/clickhouse-server(void DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuery::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, bool)+0x668) [0x6d77768]
+12. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeWithMultipleStreams()+0x51) [0x6d5cf51]
+13. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams()+0x63) [0x6d79163]
+14. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::execute()+0x38) [0x6d7b028]
+15. /usr/bin/clickhouse-server() [0x6e874db]
+16. /usr/bin/clickhouse-server(DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool)+0xfc) [0x6e885dc]
+17. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x9fa) [0x3c83f0a]
+18. /usr/bin/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x3c847cb]
+19. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0x10) [0x792cde0]
+20. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0xed) [0x792d4fd]
+21. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x81) [0x8057e21]
+22. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x3c) [0x8055bcc]
+23. /usr/bin/clickhouse-server() [0xba2baa0]
+24. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f23359246db]
+25. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7f23350ab88f]
+```

@@ -1,0 +1,178 @@
+ID: 76443
+Title: JSONExtract doesn’t work with Kafka engine
+Description:
+### Company or project name
+
+Sender
+
+### Describe what's wrong
+
+Using JSONExtract to convert a key in a Kafka message which contains an object to a `Map(String, Variant)` column results in empty `Map`.
+
+Kafka topic is named custom_events and contains messages like this:
+```
+{
+    "account_id": 123456,
+    "event_type": "test",
+    "subscriber_id": 123456,
+    "properties": {"key1":"string string","key2":555},
+    "created": "2025-02-19 13:37:00"
+}
+```
+Kafka table schema:
+```sql
+CREATE TABLE kafka_custom_events
+(
+    `account_id` UInt64,
+    `event_type` String,
+    `subscriber_id` UInt64,
+    `properties` String,
+    `created` DateTime
+)
+ENGINE = Kafka('localhost:19092', 'topic', 'custom_events_cg11', 'JSONEachRow')
+SETTINGS kafka_skip_broken_messages = 1
+```
+
+Materialized view:
+```sql 
+CREATE MATERIALIZED VIEW kafka_custom_events_consumer TO custom_events
+(
+    `account_id` UInt64,
+    `event_type` String,
+    `subscriber_id` UInt64,
+    `properties` String,
+    `properties_map` Map(String, Variant(Array(Int64), DateTime, Int64, String)),
+    `created` DateTime
+)
+AS SELECT
+    account_id,
+    event_type,
+    subscriber_id,
+    properties,
+    JSONExtract(properties, 'Map(String,Variant(Array(Int64),DateTime,Int64,String))'),
+    created
+FROM kafka_custom_events
+```
+
+Destination table:
+```sql
+CREATE TABLE custom_events
+(
+    `account_id` UInt32 CODEC(T64, ZSTD(1)),
+    `event_type` String CODEC(ZSTD(1)),
+    `subscriber_id` UInt64 CODEC(T64, ZSTD(1)),
+    `properties` String,
+    `properties_map` Map(String, Variant(Array(Int64), DateTime, Int64, String)) CODEC(ZSTD(1)),
+    `created` DateTime CODEC(DoubleDelta, ZSTD(1))
+)
+ENGINE = MergeTree
+PRIMARY KEY (account_id, event_type)
+ORDER BY (account_id, event_type, created)
+SETTINGS index_granularity = 8192
+```
+
+`properties_map` column contains `{}` (empty Map) instead of `{'key1':'string string','key2':555}`
+
+
+### Does it reproduce on the most recent release?
+
+Yes
+
+### How to reproduce
+
+Clickhouse version 24.11.1.2557
+```
+DROP TABLE IF EXISTS kafka_custom_events;
+DROP TABLE IF EXISTS custom_events;
+DROP TABLE IF EXISTS kafka_custom_events_consumer;
+
+CREATE TABLE kafka_custom_events
+(
+    `account_id` UInt64,
+    `event_type` String,
+    `subscriber_id` UInt64,
+    `properties` String,
+    `created` DateTime
+)
+ENGINE = Kafka('localhost:19092', 'topic', 'custom_events_cg11', 'JSONEachRow')
+SETTINGS kafka_skip_broken_messages = 1
+
+Query id: cad4ba3b-e266-4d2d-877d-c8ca0c6e3f83
+
+Ok.
+
+0 rows in set. Elapsed: 0.131 sec. 
+
+
+CREATE TABLE custom_events
+(
+    `account_id` UInt32 CODEC(T64, ZSTD(1)),
+    `event_type` String CODEC(ZSTD(1)),
+    `subscriber_id` UInt64 CODEC(T64, ZSTD(1)),
+    `properties` String,
+    `properties_map` Map(String, Variant(Array(Int64), DateTime, Int64, String)) CODEC(ZSTD(1)),
+    `created` DateTime CODEC(DoubleDelta, ZSTD(1))
+)
+ENGINE = MergeTree
+PRIMARY KEY (account_id, event_type)
+ORDER BY (account_id, event_type, created)
+SETTINGS index_granularity = 8192
+
+Query id: e8576f83-554c-4666-9fe3-d79fb6a38f69
+
+Ok.
+
+0 rows in set. Elapsed: 0.155 sec. 
+
+
+CREATE MATERIALIZED VIEW kafka_custom_events_consumer TO custom_events
+(
+    `account_id` UInt64,
+    `event_type` String,
+    `subscriber_id` UInt64,
+    `properties` String,
+    `properties_map` Map(String, Variant(Array(Int64), DateTime, Int64, String)),
+    `created` DateTime
+)
+AS SELECT
+    account_id,
+    event_type,
+    subscriber_id,
+    properties,
+    JSONExtract(properties, 'Map(String,Variant(Array(Int64),DateTime,Int64,String))'),
+    created
+FROM kafka_custom_events
+
+Query id: b41b9ac4-89fb-4d87-a7fc-010fa50a111c
+
+Ok.
+
+0 rows in set. Elapsed: 0.159 sec. 
+
+SELECT DISTINCT
+    properties,
+    properties_map,
+    JSONExtract(properties, 'Map(String,Variant(Array(Int64),DateTime,Int64,String))')
+FROM custom_events
+
+Query id: e5ec84eb-45b4-45ad-bb85-910be9b78976
+
+   ┌─properties──────────────────────────┬─properties_map─┬─JSONExtract(properties, 'Map(String,Variant(Array(Int64),DateTime,Int64,String))')─┐
+1. │ {"key1":"string string","key2":555} │ {}             │ {'key1':'string string','key2':555}                                                │
+2. │ {"keya":"string string","keyb":666} │ {}             │ {'keya':'string string','keyb':666}                                                │
+   └─────────────────────────────────────┴────────────────┴────────────────────────────────────────────────────────────────────────────────────┘
+
+2 rows in set. Elapsed: 0.003 sec. 
+```
+
+### Expected behavior
+
+`properties_map` column should contain a Map `{'key1':'string string','key2':555}`
+
+### Error message and/or stacktrace
+
+None
+
+### Additional context
+
+_No response_

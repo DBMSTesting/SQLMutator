@@ -1,0 +1,83 @@
+ID: 42405
+Title: Found a data race in GCWorker
+Description:
+## Bug Report
+
+Original report: https://ask.pingcap.com/t/data-race-found-in-version/474
+
+Application environment: 3 TiKV nodes, 3 PD nodes, 2 TiDB nodes in a local cluster
+PoC environment
+TiDB version: 6.6.0 (commit b417ad0689795a265df9cdba22c40871f50b7e55)
+Reproduction method: Brought the environment up and ran a simple bank account transaction workload, using the antithesis testing platform.
+
+Problem: 3 Data Races observed:
+First DATA RACE:
+
+```
+WARNING: DATA RACE
+Read at 0x00c001e86958 by goroutine 9152:
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).resolveLocks()
+      /tidb/store/gcworker/gc_worker.go:1169 +0xb2
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).runGCJob()
+      /tidb/store/gcworker/gc_worker.go:767 +0x117
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).leaderTick.func1()
+      /tidb/store/gcworker/gc_worker.go:444 +0x6c
+
+Previous write at 0x00c001e86958 by goroutine 1007:
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).checkLeader()
+      /tidb/store/gcworker/gc_worker.go:1920 +0x1cb
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).tick()
+      /tidb/store/gcworker/gc_worker.go:286 +0x64
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).start()
+      /tidb/store/gcworker/gc_worker.go:229 +0x659
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).Start.func1()
+      /tidb/store/gcworker/gc_worker.go:120 +0x64
+
+Goroutine 9152 (running) created at:
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).leaderTick()
+      /tidb/store/gcworker/gc_worker.go:443 +0xb5a
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).tick()
+      /tidb/store/gcworker/gc_worker.go:293 +0x8f
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).start()
+      /tidb/store/gcworker/gc_worker.go:229 +0x659
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).Start.func1()
+      /tidb/store/gcworker/gc_worker.go:120 +0x64
+
+Goroutine 1007 (running) created at:
+  github.com/pingcap/tidb/store/gcworker.(*GCWorker).Start()
+      /tidb/store/gcworker/gc_worker.go:120 +0x1f7
+  github.com/pingcap/tidb/store/driver.(*tikvStore).StartGCWorker()
+      /tidb/store/driver/tikv_driver.go:320 +0x98
+  github.com/pingcap/tidb/session.BootstrapSession()
+      /tidb/session/session.go:3467 +0x1aaa
+  github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCache()
+      /tidb/domain/sysvar_cache.go:147 +0x8d0
+  github.com/pingcap/tidb/sessionctx/variable.glob..func174()
+      /tidb/sessionctx/variable/sysvar.go:904 +0x5e
+  github.com/pingcap/tidb/sessionctx/variable.(*SysVar).ValidateWithRelaxedValidation()
+      /tidb/sessionctx/variable/variable.go:361 +0x1c7
+  github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCache()
+      /tidb/domain/sysvar_cache.go:146 +0x844
+  github.com/pingcap/tidb/domain.(*Domain).LoadSysVarCacheLoop()
+      /tidb/domain/domain.go:1448 +0xa8
+  github.com/pingcap/tidb/session.BootstrapSession()
+      /tidb/session/session.go:3350 +0x6d3
+  github.com/pingcap/tidb/domain.(*Domain).GetSessionCache()
+      /tidb/domain/sysvar_cache.go:62 +0x59
+  github.com/pingcap/tidb/session.(*session).loadCommonGlobalVariablesIfNeeded()
+      /tidb/session/session.go:3669 +0x104
+  github.com/pingcap/tidb/session.(*session).ExecuteStmt()
+      /tidb/session/session.go:2148 +0x145
+  github.com/pingcap/tidb/session.(*session).ExecuteInternal()
+      /tidb/session/session.go:1678 +0x31b
+  github.com/pingcap/tidb/domain.(*Domain).LoadPrivilegeLoop()
+      /tidb/domain/domain.go:1392 +0x130
+  github.com/pingcap/tidb/session.BootstrapSession()
+      /tidb/session/session.go:3343 +0x684
+  main.createStoreAndDomain()
+      /tidb/tidb-server/main.go:351 +0x304
+  main.main()
+```
+
+Data race detected.
+

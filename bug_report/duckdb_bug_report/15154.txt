@@ -1,0 +1,296 @@
+ID: 15154
+Title: Inconsistent problem with recursive CTE, possibly also with arrays?
+Description:
+### What happens?
+
+Selecting different columns from a single row returns incorrect data for some columns depending on which columns are referenced. Selecting from a recursive CTE.
+
+### To Reproduce
+
+```
+select version()
+┌─────────────┐
+│ "version"() │
+│   varchar   │
+├─────────────┤
+│ v1.1.3      │
+└─────────────┘
+
+
+
+create table playlists (
+  id int
+);
+
+create table playlist_files (
+  playlist_id int not null,
+  id int not null,
+  order_no int not null,
+  filename text not null
+);
+
+create table playlist_subplaylists (
+  playlist_id int,
+  id int not null,
+  primary key (playlist_id, id),
+  order_no int not null,
+  unique (playlist_id, order_no),
+  subplaylist_id int not null
+);
+create view flattened_playlists as
+with recursive playlist_paths_rec as (
+  select
+    cr.subplaylist_id,
+    [cr.playlist_id, cr.subplaylist_id] as playlist_path,
+    [id] as line_id,
+    [cr.order_no] as order_nos
+  from playlist_subplaylists cr
+  union all
+  select
+    cr.subplaylist_id,
+    list_append(pr.playlist_path,cr.subplaylist_id) as playlist_path,
+    list_append(pr.line_id,cr.id) as line_id,
+    list_append(pr.order_nos,cr.order_no) as order_nos,
+  from playlist_paths_rec pr
+  inner join playlist_subplaylists cr
+    on cr.playlist_id = pr.subplaylist_id
+), playlist_paths as (
+select
+  playlist_path,
+  line_id,
+  order_nos
+from playlist_paths_rec
+union all
+select
+  [id] as playlist_path,
+  [] as line_id,
+  [] as order_nos
+from playlists)
+select
+  row_number() over (partition by playlist_path[1] order by order_nos) - 1 as index,
+  playlist_path[1] as playlist_id,
+  f.filename,
+  list_append(pp.line_id, f.id) as line_id,
+  list_append(pp.order_nos, f.order_no) as order_nos
+from playlist_paths pp
+inner join playlist_files f
+  on pp.playlist_path[len(pp.playlist_path)] = f.playlist_id;
+
+insert into playlists
+values (1);
+
+insert into playlist_files
+values (1,1,0,'a1'),
+(1,2,1,'a2'),
+(1,3,2,'a3');
+
+select * from flattened_playlists
+┌───────┬─────────────┬──────────┬─────────┬───────────┐
+│ index │ playlist_id │ filename │ line_id │ order_nos │
+│ int64 │    int32    │ varchar  │ int32[] │  int32[]  │
+├───────┼─────────────┼──────────┼─────────┼───────────┤
+│     0 │           1 │ a1       │ [1]     │ [0]       │
+│     1 │           1 │ a2       │ [2]     │ [1]       │
+│     2 │           1 │ a3       │ [3]     │ [2]       │
+└───────┴─────────────┴──────────┴─────────┴───────────┘
+
+select *
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌───────┬─────────────┬──────────┬─────────┬───────────┐
+│ index │ playlist_id │ filename │ line_id │ order_nos │
+│ int64 │    int32    │ varchar  │ int32[] │  int32[]  │
+├───────┼─────────────┼──────────┼─────────┼───────────┤
+│     0 │           1 │ a1       │ [1]     │ [0]       │
+└───────┴─────────────┴──────────┴─────────┴───────────┘
+
+-- the following should return [1]
+
+select line_id
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┐
+│ line_id │
+│ int32[] │
+├─────────┤
+│ [3]     │
+└─────────┘
+
+select line_id,order_nos
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┬───────────┐
+│ line_id │ order_nos │
+│ int32[] │  int32[]  │
+├─────────┼───────────┤
+│ [3]     │ [2]       │
+└─────────┴───────────┘
+
+select order_nos,line_id
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌───────────┬─────────┐
+│ order_nos │ line_id │
+│  int32[]  │ int32[] │
+├───────────┼─────────┤
+│ [2]       │ [3]     │
+└───────────┴─────────┘
+
+-- selecting other fields instead seems to work:
+
+select index
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌───────┐
+│ index │
+│ int64 │
+├───────┤
+│     0 │
+└───────┘
+
+select playlist_id
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────────┐
+│ playlist_id │
+│    int32    │
+├─────────────┤
+│           1 │
+└─────────────┘
+
+select filename
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌──────────┐
+│ filename │
+│ varchar  │
+├──────────┤
+│ a1       │
+└──────────┘
+
+select order_nos
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌───────────┐
+│ order_nos │
+│  int32[]  │
+├───────────┤
+│ [0]       │
+└───────────┘
+
+-- some combinations work, and some fail
+-- fails:
+
+select line_id,index
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┬───────┐
+│ line_id │ index │
+│ int32[] │ int64 │
+├─────────┼───────┤
+│ [3]     │     0 │
+└─────────┴───────┘
+
+-- it's getting the right index, but the wrong line_id
+
+-- fails:
+
+select line_id,index,playlist_id
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┬───────┬─────────────┐
+│ line_id │ index │ playlist_id │
+│ int32[] │ int64 │    int32    │
+├─────────┼───────┼─────────────┤
+│ [3]     │     0 │           1 │
+└─────────┴───────┴─────────────┘
+
+-- works:
+
+select line_id,index,playlist_id,filename
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┬───────┬─────────────┬──────────┐
+│ line_id │ index │ playlist_id │ filename │
+│ int32[] │ int64 │    int32    │ varchar  │
+├─────────┼───────┼─────────────┼──────────┤
+│ [1]     │     0 │           1 │ a1       │
+└─────────┴───────┴─────────────┴──────────┘
+
+-- works:
+
+select line_id,index,playlist_id,filename, line_id
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┬───────┬─────────────┬──────────┬─────────┐
+│ line_id │ index │ playlist_id │ filename │ line_id │
+│ int32[] │ int64 │    int32    │ varchar  │ int32[] │
+├─────────┼───────┼─────────────┼──────────┼─────────┤
+│ [1]     │     0 │           1 │ a1       │ [1]     │
+└─────────┴───────┴─────────────┴──────────┴─────────┘
+
+-- works:
+
+select line_id,index,playlist_id,filename, line_id, order_nos
+from flattened_playlists
+where playlist_id=1
+      and index=0;
+┌─────────┬───────┬─────────────┬──────────┬─────────┬───────────┐
+│ line_id │ index │ playlist_id │ filename │ line_id │ order_nos │
+│ int32[] │ int64 │    int32    │ varchar  │ int32[] │  int32[]  │
+├─────────┼───────┼─────────────┼──────────┼─────────┼───────────┤
+│ [1]     │     0 │           1 │ a1       │ [1]     │ [0]       │
+└─────────┴───────┴─────────────┴──────────┴─────────┴───────────┘
+```
+
+### OS:
+
+Linux x86_64
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+Python, also tested with nightly cli, v1.1.4-dev2261
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Jake Wheat
+
+### Affiliation:
+
+N/A
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

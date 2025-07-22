@@ -1,0 +1,90 @@
+ID: 25500
+Title: TiFlash and TiDB Idle grpc connection doesn't been recycle
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. create a TiDB cluster such as below:
+
+```
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------------+---------------+-----------+
+| TYPE    | INSTANCE        | STATUS_ADDRESS  | VERSION                    | GIT_HASH                                 | START_TIME                | UPTIME        | SERVER_ID |
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------------+---------------+-----------+
+| tidb    | 127.0.0.1:4000  | 127.0.0.1:10080 | 5.2.0-alpha                | ed52601e6eb560138db8cdccdfa1b5e2d33a11f0 | 2021-06-16T21:40:22+08:00 | 15m40.11743s  | 0         |
+| tidb    | 127.0.0.1:4001  | 127.0.0.1:10081 | 5.2.0-alpha                | ed52601e6eb560138db8cdccdfa1b5e2d33a11f0 | 2021-06-16T21:40:22+08:00 | 15m41.12832s  | 0         |
+| pd      | 127.0.0.1:2379  | 127.0.0.1:2379  | 5.1.0-alpha                | d26c09a3fa4d56ac73f145b3a858432d73cec15f | 2021-06-16T21:40:04+08:00 | 15m58.117436s | 0         |
+| tiflash | 127.0.0.1:3930  | 127.0.0.1:20292 | v5.2.0-alpha-10-g1078d0b81 | 1078d0b8199a1cfe54d73623ea8da636505f419b | 2021-06-16T21:40:39+08:00 | 15m23.117438s | 0         |
+| tikv    | 127.0.0.1:20160 | 127.0.0.1:20180 | 5.1.0-alpha                | 1c07acbc6477c5623d78db1023318bdd590361a5 | 2021-06-16T21:40:11+08:00 | 15m51.11744s  | 0         |
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------------+---------------+-----------+
+```
+
+2. Do some query:
+
+```sql
+create table t (a int auto_increment, b int, primary key (a));
+alter table t set tiflash replica 1;
+insert into t () values (),(),(),(),(),(),();
+select count(*) from t;  -- make sure this query use tiflash.
+select * from information_schema.cluster_statements_summary;
+```
+
+3. shutdown the tiflash and tidb:4001 server, and the TiDB cluster become to:
+
+```sql
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------------+---------------+-----------+
+| TYPE    | INSTANCE        | STATUS_ADDRESS  | VERSION                    | GIT_HASH                                 | START_TIME                | UPTIME        | SERVER_ID |
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------------+---------------+-----------+
+| tidb    | 127.0.0.1:4000  | 127.0.0.1:10080 | 5.2.0-alpha                | ed52601e6eb560138db8cdccdfa1b5e2d33a11f0 | 2021-06-16T21:40:22+08:00 | 15m40.11743s  | 0         |
+| pd      | 127.0.0.1:2379  | 127.0.0.1:2379  | 5.1.0-alpha                | d26c09a3fa4d56ac73f145b3a858432d73cec15f | 2021-06-16T21:40:04+08:00 | 15m58.117436s | 0         |
+| tikv    | 127.0.0.1:20160 | 127.0.0.1:20180 | 5.1.0-alpha                | 1c07acbc6477c5623d78db1023318bdd590361a5 | 2021-06-16T21:40:11+08:00 | 15m51.11744s  | 0         |
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------------+---------------+-----------+
+```
+
+4. Check the tidb log, you will found many log like this:
+
+```log
+[2021/06/16 21:57:33.569 +08:00] [WARN] [grpclogger.go:89] ["grpc: addrConn.createTransport failed to connect to {127.0.0.1:3930  <nil> 0 <nil>}. Err :connection error: desc = \"transport: Error while dialing dial tcp 127.0.0.1:3930: connect: connection refused\". Reconnecting..."] [system=grpc] [grpc_log=true]
+[2021/06/16 21:57:33.571 +08:00] [WARN] [grpclogger.go:89] ["grpc: addrConn.createTransport failed to connect to {192.168.196.2:10081  <nil> 0 <nil>}. Err :connection error: desc = \"transport: Error while dialing dial tcp 192.168.196.2:10081: connect: connection refused\". Reconnecting..."] [system=grpc] [grpc_log=true]
+[2021/06/16 21:57:33.972 +08:00] [WARN] [grpclogger.go:89] ["grpc: addrConn.createTransport failed to connect to {127.0.0.1:3930  <nil> 0 <nil>}. Err :connection error: desc = \"transport: Error while dialing dial tcp 127.0.0.1:3930: connect: connection refused\". Reconnecting..."] [system=grpc] [grpc_log=true]
+[2021/06/16 21:57:34.378 +08:00] [WARN] [grpclogger.go:89] ["grpc: addrConn.createTransport failed to connect to {192.168.196.2:10081  <nil> 0 <nil>}. Err :connection error: desc = \"transport: Error while dialing dial tcp 192.168.196.2:10081: connect: connection refused\". Reconnecting..."] [system=grpc] [grpc_log=true]
+...
+...
+...
+```
+
+The TiDB:4001 and Tiflash:3930 was already been shut down, but the TiDB:4000 still try to reconnect to those servers, this is unexpected, we should close the grpc connection that connected into the shut down servers.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+After shut down tidb/tiflash server, TiDB doesn't output the annoying log and stop to reconnect into those server which is been shut down .
+
+### 3. What did you see instead (Required)
+
+I see the annoying log in TiDB log.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```sql
+***************************[ 1. row ]***************************
+tidb_version() | Release Version: v5.2.0-alpha-88-ged52601e6
+Edition: Community
+Git Commit Hash: ed52601e6eb560138db8cdccdfa1b5e2d33a11f0
+Git Branch: master
+UTC Build Time: 2021-06-16 13:33:24
+GoVersion: go1.16
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+
+### 5. The cause of the problem
+
+In `tikv/client-go/v2/client/client.go`, It has the function `recycleIdleConnArray` to recycle the idle connection, but it only recycle the TiKV idle connection, not recycle the TiDB/TiFlash idle connection.
+

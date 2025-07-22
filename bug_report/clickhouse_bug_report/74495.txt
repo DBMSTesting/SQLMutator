@@ -1,0 +1,80 @@
+ID: 74495
+Title: COUNT(nullable) function use the wrong projection
+Description:
+### Company or project name
+
+_No response_
+
+### Question
+
+Hi all, I’m having some issues with projection: When I use `sql2` for an aggregation query, I find that it uses the wrong projection, which causes the result of count to be incorrect. I’m using `count(ruleId)` in projection, which filters null values for count. In my `sql2`, I directly ran `count()`, but I found that `sql2` used this projection, which caused the result to be incorrect. Then I declare `optimize_use_projections=0;` in `sql3` it’s correct.
+More Detail:
+ck version: `24.8.8.17`
+playground: [https://fiddle.clickhouse.com/23cf8556-b497-499a-9d84-e7d1774c7561](https://fiddle.clickhouse.com/23cf8556-b497-499a-9d84-e7d1774c7561)
+sql:
+```
+CREATE TABLE log(
+    collectorReceiptTime DateTime, 
+    eventId String, 
+    ruleId Nullable(String),
+    PROJECTION ailog_rule_count (
+    SELECT
+        collectorReceiptTime,
+        ruleId,
+        count(ruleId)
+    GROUP BY
+        collectorReceiptTime,
+        ruleId
+    )
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(collectorReceiptTime)
+ORDER BY (collectorReceiptTime, eventId);
+
+
+INSERT INTO log VALUES ('2025-01-01 00:02:03', 'eventId_001', Null);
+INSERT INTO log VALUES ('2025-01-01 01:04:05', 'eventId_002', Null);
+INSERT INTO log VALUES ('2025-01-01 02:06:07', 'eventId_003', Null);
+INSERT INTO log VALUES ('2025-01-01 03:08:09', 'eventId_004', Null);
+INSERT INTO log VALUES ('2025-01-01 04:10:11', 'eventId_005', Null);
+INSERT INTO log VALUES ('2025-01-01 05:12:13', 'eventId_006', Null);
+
+
+SELECT 'count direct';
+--- mark as sql1
+SELECT COUNT() as count FROM log WHERE (collectorReceiptTime between '2025-01-01 00:00:00' AND '2025-01-01 23:59:59' );
+
+--- This SQL should not use the projection 'ailog_rule_count', ailog_rule_count uses count(ruleId) to filter null values, 
+--- and the current SQL does not need to filter null values. This can lead to incorrect results.
+SELECT 'count group by';
+--- mark as sql2
+SELECT formatDateTime(toStartOfInterval(collectorReceiptTime, INTERVAL 1 HOUR), '%Y-%m-%d %H') AS time, COUNT() as count 
+FROM log WHERE (collectorReceiptTime between '2025-01-01 00:00:00' AND '2025-01-01 23:59:59' ) 
+GROUP BY time ORDER BY time DESC;
+
+SELECT 'count group by with optimize_use_projections=0;';
+--- mark as sql3
+SELECT formatDateTime(toStartOfInterval(collectorReceiptTime, INTERVAL 1 HOUR), '%Y-%m-%d %H') AS time, COUNT() as count 
+FROM log WHERE (collectorReceiptTime between '2025-01-01 00:00:00' AND '2025-01-01 23:59:59' ) 
+GROUP BY time ORDER BY time DESC SETTINGS optimize_use_projections=0;
+
+SELECT '';
+SELECT '';
+SELECT 'explain indexes 1';
+EXPLAIN indexes=1 SELECT COUNT() as count FROM log WHERE (collectorReceiptTime between '2025-01-01 00:00:00' AND '2025-01-01 23:59:59' );
+
+SELECT '';
+SELECT '';
+SELECT 'explain indexes 2';
+EXPLAIN indexes=1 SELECT formatDateTime(toStartOfInterval(collectorReceiptTime, INTERVAL 1 HOUR), '%Y-%m-%d %H') AS time, COUNT() as count 
+FROM log WHERE (collectorReceiptTime between '2025-01-01 00:00:00' AND '2025-01-01 23:59:59' ) 
+GROUP BY time ORDER BY time DESC;
+
+SELECT '';
+SELECT '';
+SELECT 'explain indexes 3';
+EXPLAIN indexes=1 SELECT formatDateTime(toStartOfInterval(collectorReceiptTime, INTERVAL 1 HOUR), '%Y-%m-%d %H') AS time, COUNT() as count 
+FROM log WHERE (collectorReceiptTime between '2025-01-01 00:00:00' AND '2025-01-01 23:59:59' ) 
+GROUP BY time ORDER BY time DESC SETTINGS optimize_use_projections=0;
+```
+![image](https://github.com/user-attachments/assets/a2ae3f73-a5dc-49a5-aa83-0ec8e562ac7f)

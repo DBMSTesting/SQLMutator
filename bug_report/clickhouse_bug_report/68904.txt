@@ -1,0 +1,63 @@
+ID: 68904
+Title: DB::Exception: Not found column Attributes.keys in block NOT_FOUND_COLUMN_IN_BLOCK
+Description:
+
+**Describe the unexpected behaviour**
+I am using clickhouse (24.9.1).  It looks like the latest release broke the materialized view which used to work fine in 24.3 release.
+"DB::Exception: Not found column Attributes.keys in block"
+
+
+**How to reproduce**
+```
+CREATE TABLE mydb.rawtable
+(
+  `Id` UInt64 CODEC(Delta(8), ZSTD(1)),
+  `Attributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+  `MetricName` LowCardinality(String) CODEC(ZSTD(1)),
+  `TimeUnix` DateTime CODEC(Delta(8), ZSTD(1))
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMMDD(TimeUnix)
+ORDER BY (MetricName, Attributes, toUnixTimestamp(TimeUnix))
+
+CREATE MATERIALIZED VIEW mydb.raw_to_attributes_mv TO mydb.attributes
+(
+  `Id` UInt64,
+  `MetricName` LowCardinality(String),
+  `TimeUnix` DateTime,
+  `AttributeKeys` Array(LowCardinality(String)),
+  `AttributeValues` Array(String)
+)
+AS SELECT
+  Id,
+  MetricName,
+  toStartOfDay(TimeUnix) AS TimeUnix,
+  mapKeys(Attributes) AS AttributeKeys,
+  mapValues(Attributes) AS AttributeValues
+FROM mydb.rawtable
+
+CREATE TABLE mydb.attributes
+(
+  `Id` UInt64 CODEC(Delta(8), ZSTD(1)),
+  `MetricName` LowCardinality(String) CODEC(ZSTD(1)),
+  `TimeUnix` DateTime CODEC(Delta(8), ZSTD(1)),
+  `AttributeKeys` Array(LowCardinality(String)) CODEC(ZSTD(1)),
+  `AttributeValues` Array(String) CODEC(ZSTD(1))
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMMDD(TimeUnix)
+ORDER BY (MetricName, Id, TimeUnix) 
+```
+
+* Which ClickHouse server version to use
+24.9.1
+
+* Queries to run that lead to unexpected result
+
+insert into rawtable values (1, {'key1': 'value1', 'key2': 'value2'}, 'm1', now())
+
+**Expected behavior**
+This used to work in 24.5. 
+
+**Error message and/or stacktrace**
+DB::Exception: Not found column Attributes.keys in block. There are only columns: Id, Attributes, MetricName, TimeUnix: while pushing to view mydb.raw_to_attributes_mv. (NOT_FOUND_COLUMN_IN_BLOCK)

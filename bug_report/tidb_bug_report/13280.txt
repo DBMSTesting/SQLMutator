@@ -1,0 +1,80 @@
+ID: 13280
+Title: Different decimal results returned by HashAgg when enable-chunk-rpc is true/false
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+```mysql
+CREATE TABLE tt(a INT, b INT, c INT, d INT);
+INSERT INTO tt VALUES (1,1,1,1), (2,2,4,2), (3,3,9,3);
+```
+
+2. What did you expect to see?
+
+```
+[tikv-client]
+# Enable chunk encoded data for coprocessor requests.
+enable-chunk-rpc = true
+```
+
+```mysql
+MySQL [test]> SELECT sum(c/d)  FROM tt  group by a, b;
++----------+
+| sum(c/d) |
++----------+
+|   1.0000 |
+|   2.0000 |
+|   3.0000 |
++----------+
+3 rows in set (0.00 sec)
+
+MySQL [test]> desc SELECT sum(c/d)  FROM tt  group by a, b;
++-----------------------+----------+-----------+-----------------------------------------------------------------------------+
+| id                    | count    | task      | operator info                                                               |
++-----------------------+----------+-----------+-----------------------------------------------------------------------------+
+| HashAgg_9             | 8000.00  | root      | group by:Column#10, Column#9, funcs:sum(Column#8)                           |
+| └─TableReader_10  | 8000.00  | root      | data:HashAgg_5                                                              |
+|   └─HashAgg_5     | 8000.00  | cop[tikv] | group by:Column#1, Column#2, funcs:sum(div(cast(Column#3), cast(Column#4))) |
+|     └─TableScan_8 | 10000.00 | cop[tikv] | table:tt, range:[-inf,+inf], keep order:false, stats:pseudo                 |
++-----------------------+----------+-----------+-----------------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+```
+
+3. What did you see instead?
+
+```
+[tikv-client]
+# Enable chunk encoded data for coprocessor requests.
+enable-chunk-rpc = false
+```
+
+```mysql
+MySQL [test]> SELECT sum(c/d)  FROM tt  group by a, b;
++-------------+
+| sum(c/d)    |
++-------------+
+| 1.000000000 |
+| 2.000000000 |
+| 3.000000000 |
++-------------+
+3 rows in set (0.01 sec)
+
+MySQL [test]> desc SELECT sum(c/d)  FROM tt  group by a, b;
++-----------------------+----------+-----------+-----------------------------------------------------------------------------+
+| id                    | count    | task      | operator info                                                               |
++-----------------------+----------+-----------+-----------------------------------------------------------------------------+
+| HashAgg_9             | 8000.00  | root      | group by:Column#10, Column#9, funcs:sum(Column#8)                           |
+| └─TableReader_10  | 8000.00  | root      | data:HashAgg_5                                                              |
+|   └─HashAgg_5     | 8000.00  | cop[tikv] | group by:Column#1, Column#2, funcs:sum(div(cast(Column#3), cast(Column#4))) |
+|     └─TableScan_8 | 10000.00 | cop[tikv] | table:tt, range:[-inf,+inf], keep order:false, stats:pseudo                 |
++-----------------------+----------+-----------+-----------------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+Only appears in commit 79756747e, because `hashagg` can be push down in this commit temparorily and disabled in following commit, so this issue can reappear, 

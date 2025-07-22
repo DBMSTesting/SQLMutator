@@ -1,0 +1,31 @@
+ID: 25964
+Title: Report write-conflict error in pessimistic transactions
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. Enable async-commit.
+2. Make two transactions conflict on the non-unique secondary index, for example, one transaction inserts a row and the other delete it. Because pessimistic transaction in TiDB doesn't acquire pessimistic locks on the non-unique secondary index, it's possible the second transaction conflicts with the former one while prewriting, and it resolves the lock immediately because of the special logic for resolving non-pessimistic lock conflict: https://github.com/tikv/tikv/blob/54ac25ca0d100fb5969eb0c30290eeb5b65159ff/src/storage/txn/actions/prewrite.rs#L238-L248
+3. The lock isn't resolved because it uses async-commit protocol and it isn't expired.
+4. The former version TiDB assumes that pessimistic transaction is able to resolve all non-pessimistic locks while prewriting which is not true since v5.0 due to async-commit. TiDB wrongly handles such a case and return a write-conflict error: https://github.com/tikv/client-go/blob/d0a98864a6ac4df1e229f89b9f79fe8bc20febb2/tikv/lock_resolver.go#L415-L423. 
+
+### 2. What did you expect to see? (Required)
+
+The transaction commit successfully.
+
+### 3. What did you see instead (Required)
+```
+[2021/07/05 12:35:17.448 +08:00] [INFO] [prewrite.go:310] ["prewrite encounters lock"] [session=1343] [lock="key: 7480000000000000405f6980000000000000010380000000005f489b0380000000004cc096, primary: 7480000000000000765f7280000000004d2186, txnStartTS: 426104512050627094, lockForUpdateTS:426104512050627094, minCommitTs:426104512116425201, ttl: 0, type: Put, UseAsyncCommit: true"]
+[2021/07/05 12:35:17.450 +08:00] [WARN] [session.go:605] ["can not retry txn"] [conn=1343] [label=general] [error="[kv:9007]Write conflict, txnStartTS=426104512037519522, conflictStartTS=426104512050627094, conflictCommitTS=0, key={tableID=64, indexID=1, indexValues={6244507, 5030038, }} primary=[]byte(nil) [try again later]"] [IsBatchInsert=false] [IsPessimistic=true] [InRestrictedSQL=false] [tidb_retry_limit=10] [tidb_disable_txn_auto_retry=true]
+[2021/07/05 12:35:17.450 +08:00] [WARN] [session.go:621] ["commit failed"] [conn=1343] ["finished txn"="Txn{state=invalid}"] [error="[kv:9007]Write conflict, txnStartTS=426104512037519522, conflictStartTS=426104512050627094, conflictCommitTS=0, key={tableID=64, indexID=1, indexValues={6244507, 5030038, }} primary=[]byte(nil) [try again later]"]
+[2021/07/05 12:35:17.450 +08:00] [INFO] [conn.go:877] ["command dispatched failed"] [conn=1343] [connInfo="id:1343, addr:172.16.6.48:42149 status:10, collation:latin1_swedish_ci, user:root"] [command=Execute] [status="inTxn:0, autocommit:1"] [sql=COMMIT] [txn_mode=PESSIMISTIC] [err="[kv:9007]Write conflict, txnStartTS=426104512037519522, conflictStartTS=426104512050627094, conflictCommitTS=0, key={tableID=64, indexID=1, indexValues={6244507, 5030038, }} primary=[]byte(nil) [try again later]\nCOMMIT"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v5.0.0-v5.0.3, v5.1.0

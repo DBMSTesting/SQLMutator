@@ -1,0 +1,126 @@
+ID: 56013
+Title: Miss `Selection` lead to panic
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+CREATE TABLE t0(c0 BOOL UNSIGNED CHECK (((((66058967)^(false)))<(true))) NOT NULL DEFAULT false , c1 NUMERIC ZEROFILL NOT NULL , c2 TEXT(33) , c3 TINYINT ZEROFILL  AS (c0) VIRTUAL UNIQUE )PARTITION BY RANGE(c3) (
+PARTITION p0 VALUES LESS THAN (910),
+PARTITION p1 VALUES LESS THAN (1820),
+PARTITION p2 VALUES LESS THAN (2730),
+PARTITION p23 VALUES LESS THAN MAXVALUE);
+
+INSERT IGNORE  INTO t0(c1, c0) VALUES (NULL, NULL);
+analyze table t0;
+
+SELECT t0.c1 FROM t0 WHERE '4' AND (t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 12877 AND 14560) AND t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 13650 AND 15255));
+```
+
+### 2. What did you expect to see? (Required)
+
+no panic
+
+Plan
+``` sql
+mysql> explain SELECT t0.c1 FROM t0 WHERE '4' AND (t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 12877 AND 14560) AND t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 13650 AND 15255));
++--------------------------------------+---------+-----------+------------------------+--------------------------------------------------------------------------------------------------------------------+
+| id                                   | estRows | task      | access object          | operator info                                                                                                      |
++--------------------------------------+---------+-----------+------------------------+--------------------------------------------------------------------------------------------------------------------+
+| HashJoin_20                          | 200.00  | root      |                        | inner join, equal:[eq(test.t0.c3, test.t0.c3)]                                                                     |
+| ├─StreamAgg_71(Build)                | 200.00  | root      |                        | group by:test.t0.c3, funcs:firstrow(test.t0.c3)->test.t0.c3                                                        |
+| │ └─IndexReader_77                   | 250.00  | root      | partition:p23          | index:IndexRangeScan_35                                                                                            |
+| │   └─IndexRangeScan_35              | 250.00  | cop[tikv] | table:t0, index:c3(c3) | range:[13650,15255], keep order:true, stats:pseudo                                                                 |
+| └─IndexHashJoin_47(Probe)            | 250.00  | root      |                        | inner join, inner:Projection_44, outer key:test.t0.c3, inner key:test.t0.c3, equal cond:eq(test.t0.c3, test.t0.c3) |
+|   ├─StreamAgg_53(Build)              | 200.00  | root      |                        | group by:test.t0.c3, funcs:firstrow(test.t0.c3)->test.t0.c3                                                        |
+|   │ └─IndexReader_59                 | 250.00  | root      | partition:p23          | index:IndexRangeScan_25                                                                                            |
+|   │   └─IndexRangeScan_25            | 250.00  | cop[tikv] | table:t0, index:c3(c3) | range:[12877,14560], keep order:true, stats:pseudo                                                                 |
+|   └─Projection_44(Probe)             | 200.00  | root      |                        | test.t0.c1, test.t0.c3                                                                                             |
+|     └─IndexLookUp_43                 | 200.00  | root      | partition:all          |                                                                                                                    |
+(Need this line in plan) |       ├─Selection_42(Build)          | 200.00  | cop[tikv] |                        | not(isnull(test.t0.c3))                                                                                            |
+|       │ └─IndexRangeScan_40          | 200.00  | cop[tikv] | table:t0, index:c3(c3) | range: decided by [eq(test.t0.c3, test.t0.c3)], keep order:false, stats:pseudo                                     |
+|       └─TableRowIDScan_41(Probe)     | 200.00  | cop[tikv] | table:t0               | keep order:false, stats:pseudo                                                                                     |
++--------------------------------------+---------+-----------+------------------------+--------------------------------------------------------------------------------------------------------------------+
+13 rows in set, 6 warnings (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+panic
+
+<details>
+  <summary><b>Panic plan</b></summary>
+
+``` sql
+mysql> explain SELECT t0.c1 FROM t0 WHERE '4' AND (t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 12877 AND 14560) AND t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 13650 AND 15255));                                                                                      +--------------------------------------+---------+-----------+------------------------+-----------------------------------------------------------------------+
+| id                                   | estRows | task      | access object          | operator info                                                         |
++--------------------------------------+---------+-----------+------------------------+-----------------------------------------------------------------------+
+| MergeJoin_18                         | 1.00    | root      |                        | inner join, left key:test.t0.c3, right key:test.t0.c3                 |
+| ├─StreamAgg_32(Build)                | 1.00    | root      |                        | group by:test.t0.c3, funcs:firstrow(test.t0.c3)->test.t0.c3           |
+| │ └─IndexReader_35                   | 1.00    | root      | partition:p23          | index:IndexRangeScan_34                                               |
+| │   └─IndexRangeScan_34              | 1.00    | cop[tikv] | table:t0, index:c3(c3) | range:[13650,15255], keep order:true, stats:partial[c3:unInitialized] |
+| └─MergeJoin_21(Probe)                | 1.00    | root      |                        | inner join, left key:test.t0.c3, right key:test.t0.c3                 |
+|   ├─StreamAgg_26(Build)              | 1.00    | root      |                        | group by:test.t0.c3, funcs:firstrow(test.t0.c3)->test.t0.c3           |
+|   │ └─IndexReader_29                 | 1.00    | root      | partition:p23          | index:IndexRangeScan_28                                               |
+|   │   └─IndexRangeScan_28            | 1.00    | cop[tikv] | table:t0, index:c3(c3) | range:[12877,14560], keep order:true, stats:partial[c3:unInitialized] |
+|   └─Projection_25(Probe)             | 1.00    | root      |                        | test.t0.c1, test.t0.c3                                                |
+|     └─IndexLookUp_24                 | 1.00    | root      | partition:all          |                                                                       |
+|       ├─IndexFullScan_22(Build)      | 1.00    | cop[tikv] | table:t0, index:c3(c3) | keep order:true, stats:partial[c3:unInitialized]                      |
+|       └─TableRowIDScan_23(Probe)     | 1.00    | cop[tikv] | table:t0               | keep order:false, stats:partial[c3:unInitialized]                     |
++--------------------------------------+---------+-----------+------------------------+-----------------------------------------------------------------------+
+12 rows in set, 6 warnings (0.00 sec)
+```
+</details>
+
+<details>
+  <summary><b>Panic stack</b></summary>
+
+```
+SELECT t0.c1 FROM t0 WHERE '4' AND (t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 12877 AND 14560) AND t0.c3 IN (SELECT c3 FROM t0 WHERE t0.c3 BETWEEN 13650 AND 15255))"] [txn_mode=PESSIMISTIC] [timestamp=452470589781180416] [err="runtime error: slice bounds out of range [:1] with capacity 0
+github.com/pingcap/errors.AddStack
+	/Users/mohangjie/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20240318064555-6bd07397691f/errors.go:178
+github.com/pingcap/errors.Trace
+	/Users/mohangjie/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20240318064555-6bd07397691f/juju_adaptor.go:15
+github.com/pingcap/tidb/pkg/util.GetRecoverError
+	/Users/mohangjie/tidb/pkg/util/util.go:288
+github.com/pingcap/tidb/pkg/executor/internal/exec.Next.func1
+	/Users/mohangjie/tidb/pkg/executor/internal/exec/executor.go:435
+runtime.gopanic
+	/opt/homebrew/Cellar/go/1.23.1/libexec/src/runtime/panic.go:785
+runtime.goPanicSliceAcap
+	/opt/homebrew/Cellar/go/1.23.1/libexec/src/runtime/panic.go:141
+github.com/pingcap/tidb/pkg/util/chunk.(*Decoder).decodeColumn
+	/Users/mohangjie/tidb/pkg/util/chunk/codec.go:328
+github.com/pingcap/tidb/pkg/util/chunk.(*Decoder).Decode
+	/Users/mohangjie/tidb/pkg/util/chunk/codec.go:266
+github.com/pingcap/tidb/pkg/distsql.(*selectResult).readFromChunk
+	/Users/mohangjie/tidb/pkg/distsql/select_result.go:467
+github.com/pingcap/tidb/pkg/distsql.(*selectResult).Next
+	/Users/mohangjie/tidb/pkg/distsql/select_result.go:398
+github.com/pingcap/tidb/pkg/executor.(*tableResultHandler).nextChunk
+	/Users/mohangjie/tidb/pkg/executor/table_reader.go:612
+github.com/pingcap/tidb/pkg/executor.(*TableReaderExecutor).Next
+	/Users/mohangjie/tidb/pkg/executor/table_reader.go:331
+github.com/pingcap/tidb/pkg/executor/internal/exec.Next
+	/Users/mohangjie/tidb/pkg/executor/internal/exec/executor.go:451
+github.com/pingcap/tidb/pkg/executor.(*tableWorker).executeTask
+	/Users/mohangjie/tidb/pkg/executor/distsql.go:1557
+github.com/pingcap/tidb/pkg/executor.(*tableWorker).pickAndExecTask
+	/Users/mohangjie/tidb/pkg/executor/distsql.go:1257
+github.com/pingcap/tidb/pkg/executor.(*IndexLookUpExecutor).startTableWorker.func1
+	/Users/mohangjie/tidb/pkg/executor/distsql.go:855
+runtime.goexit
+	/opt/homebrew/Cellar/go/1.23.1/libexec/src/runtime/asm_arm64.s:1223
+```
+</details>
+
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

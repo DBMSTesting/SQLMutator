@@ -1,0 +1,74 @@
+ID: 4373
+Title: Undiagnosable parser error
+Description:
+**Describe the bug**
+During around 40 billion records per day insertions, I'm getting parse error every few hours, and clickhouse error log doesn't give me any clue what it is having problem parsing with.
+
+I dug up the code and found out any error while gathering diagnostic info on another error is being ignored. (https://github.com/yandex/ClickHouse/blob/v18.16.1-stable/dbms/src/Formats/BlockInputStreamFromRowInputStream.cpp#L137)
+
+ I don't see why this kind of error is okay to be ignored. 
+
+**How to reproduce**
+* Which ClickHouse server version to use: **18.16.1**
+* Which interface to use, if matters: **HTTPS**
+* Non-default settings, if any: 
+```
+        <compression>
+            <case>
+                    <method>zstd</method>
+           </case>
+        </compression>
+        <max_threads>1</max_threads>
+        <max_concurrent_queries>200</max_concurrent_queries>
+        <merge_tree>
+            <parts_to_delay_insert>750</parts_to_delay_insert>
+            <parts_to_throw_insert>1500</parts_to_throw_insert>
+        </merge_tree>
+        <max_insert_block_size>1280000000</max_insert_block_size>
+```
+* `CREATE TABLE` statements for all tables involved
+```
+CREATE TABLE logs.logs_buffer ( request_date Date,  timestamp_5m DateTime,  timestamp_1d DateTime,  timestamp_hour String,  ingest_timestamp DateTime,  partition_code String,  hash_5m UInt32,  hash_5m_url UInt32,  hash_1d UInt32,  hash_1d_url UInt32,  req_uuid String,  account_number UInt64,  scheme String,  method String,  m_type String,  cache_status String,  status UInt32,  country_code String,  origin String,  host String,  content_type String,  user_agent String,  root_directory String,  leaf_directory String,  path String,  file_size UInt64,  bytes_in UInt64,  bytes_out UInt64,  complete_downloads UInt64,  download_attempts UInt64,  total_conn_time Float64,  transfer_rate Float64,  hits UInt64) ENGINE = Buffer(logs, logs_local, 16, 10, 60, 2000000, 20000000, 100000000, 300000000)
+```
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/yandex/ClickHouse/blob/master/dbms/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+
+https://gist.git.edgecastcdn.net/ejo/191f475dcddcdd0e672ab1685830fe60
+
+(Can't find any documentation about ohw to use Obfuscator)
+
+* Queries to run that lead to unexpected result
+```
+INSERT INTO logs.logs_buffer (request_date,timestamp_5m,timestamp_1d,timestamp_hour,ingest_timestamp,partition_code,hash_5m,hash_5m_url,hash_1d,hash_1d_url,account_number,host,path,leaf_directory,root_directory,method,status,cache_status,m_type,origin,scheme,country_code,content_type,user_agent,file_size,bytes_in,bytes_out,complete_downloads,download_attempts,total_conn_time,transfer_rate,hits,req_uuid) FORMAT TSV
+```
+
+**Expected behavior**
+Any error thrown from trying to get diagnostic information from another error should not be ignored but instead logged properly.
+
+**Error message and/or stacktrace**
+If applicable, add screenshots to help explain your problem.
+```
+2019.02.12 00:50:07.648593 [ 233823 ] {} <Error> HTTPHandler: Code: 27, e.displayText() = DB::Exception: Cannot parse input: expected \t at end of stream.: (at row 6634)
+, e.what() = DB::Exception, Stack trace:
+
+0. clickhouse-server(StackTrace::StackTrace()+0x16) [0x9c778f6]
+1. clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x22) [0x32b6342]
+2. clickhouse-server(DB::throwAtAssertionFailed(char const*, DB::ReadBuffer&)+0x19f) [0x9c9fe2f]
+3. clickhouse-server(DB::TabSeparatedRowInputStream::read(std::vector<COWPtr<DB::IColumn>::mutable_ptr<DB::IColumn>, std::allocator<COWPtr<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, DB::RowReadExtension&)+0xc3) [0x7294f13]
+4. clickhouse-server(DB::BlockInputStreamFromRowInputStream::readImpl()+0x15c) [0x7502f7c]
+5. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x25a) [0x6d6ac6a]
+6. clickhouse-server(DB::InputStreamFromASTInsertQuery::readImpl()+0x28) [0x6fc0cc8]
+7. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x25a) [0x6d6ac6a]
+8. clickhouse-server(DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*)+0x81) [0x6d86611]
+9. clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x187) [0x6fc03d7]
+10. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x31b9) [0x32d2e19]
+11. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x3be) [0x32d543e]
+12. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x332) [0x9e02c62]
+13. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x9dfb50f]
+14. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x16a) [0x9dfb8ea]
+15. clickhouse-server(Poco::PooledThread::run()+0x77) [0xa0ce957]
+16. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0xa0ca818]
+17. clickhouse-server() [0xa94e40f]
+18. /lib/x86_64-linux-gnu/libpthread.so.0(+0x8184) [0x7fb0df555184]
+19. /lib/x86_64-linux-gnu/libc.so.6(clone+0x6d) [0x7fb0deb7003d]
+```
+

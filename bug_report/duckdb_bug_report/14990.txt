@@ -1,0 +1,84 @@
+ID: 14990
+Title: Duckdb uploads broken parquet to s3 if it encounters an error
+Description:
+### What happens?
+
+I have a process which uploads partitioned parquet files to s3.
+sometimes it fails with `duckdb.duckdb.OutOfMemoryException: Out of Memory Error: could not allocate block of size 76.5 MiB (1.8 GiB/1.8 GiB used)`, and then subsequent processes that tries to read those files fails with `duckdb.duckdb.InvalidInputException: Invalid Input Error: No magic bytes found at end of file 's3://<redacted>/data_0.parquet'`
+
+### To Reproduce
+
+first process:
+```
+create table data as
+select *,
+  submission_date_time::date as date,
+  current_timestamp as extracted_at,
+from '<put a big file here (mine is ~400MB ndjson)>';
+
+copy (from data)
+to 's3://{{somewhere}}/' (
+  format parquet,
+  partition_by (date, extracted_at),
+  compression zstd,
+  overwrite_or_ignore
+);
+```
+make first process fail with OOM (e.g. run it on a small k8s pod)
+process fails sometimes with 1 core, 2GB memory on the pod, and duckdb 'max_memory' config of 2GB
+
+second process:
+```
+copy (
+  with deduped as (
+    select distinct on (id) *
+    from 's3://{{output of part 1}}/date={{date}}/**/*.parquet'
+    order by extracted_at desc
+  )
+  select * from deduped
+  order by submission_date_time
+)
+to 's3://{{somewhere else}}/data_0.parquet'
+ (compression zstd, overwrite_or_ignore)
+```
+this fails if the folder contains any bad files produces by incomplete first process
+
+### OS:
+
+linux x86 (python docker image)
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Mauro Ronchi
+
+### Affiliation:
+
+Whatwapp entertainment srl
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

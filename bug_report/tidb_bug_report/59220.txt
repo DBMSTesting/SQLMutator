@@ -1,0 +1,115 @@
+ID: 59220
+Title: Null-safe equals operator in WHERE clause might under-fetch rows
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+CREATE TABLE t0(c0 BOOL);
+INSERT INTO t0 (c0) VALUES (NULL);
+CREATE TABLE t1(c0 BOOL, c1 BOOL);
+INSERT INTO t1 (c0, c1) VALUES (NULL, true);
+SELECT
+    t0.c0 AS ref0,
+    t1.c0 AS ref1
+FROM t0
+INNER JOIN t1 ON t1.c1 = 1
+WHERE t0.c0 <=> t1.c0;
+```
+
+### 2. What did you expect to see? (Required)
+
+|  ref0 |  ref1   |
+| ----  | ----    |
+| null  | null    |
+
+This is also the expected result in MySQL (8.0) and MariaDB (11.5).
+
+### 3. What did you see instead (Required)
+
+no rows
+
+---
+
+This result is unexpected because the INNER JOIN in the original query (without including the WHERE clause) produces the following rows:
+
+|  ref0 |  ref1   |
+| ----  | ----    |
+| null  | null    |
+
+Since the [null-safe equals operator](https://dev.mysql.com/doc/refman/8.0/en/comparison-operators.html#operator_equal-to) evaluates to 1 for `NULL <=> NULL`, this row should be returned in the result.
+
+Moreover, by considering the query plan for this query, it appears that the standard equals operator is used in the evaluation of the where clause instead of the null-safe equals operator.
+
+```
+            id             | estRows  |   task    | access object |                 operator info                  
+---------------------------+----------+-----------+---------------+------------------------------------------------
+ Projection_10             | 12.50    | root      |               | test.t0.c0, test.t1.c0 
+ └─HashJoin_12             | 12.50    | root      |               | inner join, equal:[eq(test.t1.c0, test.t0.c0)] 
+   ├─TableReader_15(Build) | 10.00    | root      |               | data:Selection_14 
+   │ └─Selection_14        | 10.00    | cop[tikv] |               | eq(test.t1.c1, 1) 
+   │   └─TableFullScan_13  | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo 
+   └─TableReader_17(Probe) | 10000.00 | root      |               | data:TableFullScan_16 
+     └─TableFullScan_16    | 10000.00 | cop[tikv] | table:t0      | keep order:false, stats:pseudo 
+(7 rows)
+```
+
+Furthermore, consider the following query, where the WHERE condition uses `(t0.c0 <=> t1.c0) IS TRUE` instead of `t0.c0 <=> t1.c0`.
+
+```sql
+CREATE TABLE t0(c0 BOOL);
+INSERT INTO t0 (c0) VALUES (NULL);
+CREATE TABLE t1(c0 BOOL, c1 BOOL);
+INSERT INTO t1 (c0, c1) VALUES (NULL, true);
+SELECT
+    t0.c0 AS ref0,
+    t1.c0 AS ref1
+FROM t0
+INNER JOIN t1 ON t1.c1 = 1
+WHERE (t0.c0 <=> t1.c0) IS TRUE;
+```
+
+The query plan of the above query is as follows, where the null-safe equals operator is correctly used:
+
+```
+            id             |  estRows  |   task    | access object |                              operator info                              
+---------------------------+-----------+-----------+---------------+-------------------------------------------------------------------------
+ Projection_10             | 100000.00 | root      |               | test.t0.c0, test.t1.c0 
+ └─HashJoin_12             | 100000.00 | root      |               | CARTESIAN inner join, other cond:istrue(nulleq(test.t0.c0, test.t1.c0)) 
+   ├─TableReader_15(Build) | 10.00     | root      |               | data:Selection_14 
+   │ └─Selection_14        | 10.00     | cop[tikv] |               | eq(test.t1.c1, 1) 
+   │   └─TableFullScan_13  | 10000.00  | cop[tikv] | table:t1      | keep order:false, stats:pseudo 
+   └─TableReader_17(Probe) | 10000.00  | root      |               | data:TableFullScan_16 
+     └─TableFullScan_16    | 10000.00  | cop[tikv] | table:t0      | keep order:false, stats:pseudo 
+(7 rows)
+```
+
+This query produces the expected result:
+
+|  ref0 |  ref1   |
+| ----  | ----    |
+| null  | null    |
+
+Both queries are semantically equivalent, but produce different results, which is unexpected.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+                      tidb_version()                       
+-----------------------------------------------------------
+ Release Version: v8.5.1                                  +
+ Edition: Community                                       +
+ Git Commit Hash: fea86c8e35ad4a86a5e1160701f99493c2ee547c+
+ Git Branch: HEAD                                         +
+ UTC Build Time: 2025-01-16 07:40:33                      +
+ GoVersion: go1.23.2                                      +
+ Race Enabled: false                                      +
+ Check Table Before Drop: false                           +
+ Store: tikv 
+(1 row)
+```

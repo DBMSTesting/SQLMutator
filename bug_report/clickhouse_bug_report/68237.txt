@@ -1,0 +1,119 @@
+ID: 68237
+Title: Behavior Change on views with version 24.3
+Description:
+> Please make sure that the version you're using is still supported (you can find the list [here](https://github.com/ClickHouse/ClickHouse/blob/master/SECURITY.md#scope-and-supported-versions)).
+
+> You have to provide the following information whenever possible.
+
+**Company or project name**
+
+> Put your company name or project description here
+
+**Describe what's wrong**
+
+> A clear and concise description of what works not as it is supposed to.
+
+After I ungraded an old instance from 23.11.3.23 to the 24.3.6.42 LTS, I noticed some results changes. After more testing, it look like it was resolved on version 24.6 and upper, but it still affect one of the current LTS.
+
+24.7.3.42 -> ( 1	[100]	DECORATED	[] ) -> ok
+https://fiddle.clickhouse.com/77e1441c-e2b2-4aba-b57f-9da48df1767b
+
+24.6.3.95 -> ( 1	[100]	DECORATED	[] ) -> ok
+https://fiddle.clickhouse.com/bc7d1ff0-ba20-4b43-b482-e26a1bfea10b
+
+24.5.5.78 -> (1	[100]	OK	[] ) -> NOK
+https://fiddle.clickhouse.com/39766271-aa60-4c44-b845-ed9cbfcd9d9c
+
+24.3.6.42 -> (1	[100]	OK	[] ) -> NOK
+https://fiddle.clickhouse.com/b04b0d61-afd9-44d7-9e5b-0cc7c265bddd
+
+23.11.3.23 -> ( 1	[100]	DECORATED	[] ) -> ok
+https://fiddle.clickhouse.com/6f0a7af8-576f-4c4e-b8b5-52a30a6f1155
+
+**Does it reproduce on the most recent release?**
+
+It doesn't
+
+**Enable crash reporting**
+
+> Change "enabled" to true in "send_crash_reports" section in `config.xml`:
+
+Not a crash
+
+**How to reproduce**
+
+* Which ClickHouse server version to use : 24.3.6.42
+* Which interface to use, if it matters
+* Non-default settings, if any
+* `CREATE TABLE` statements for all tables involved
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+* Queries to run that lead to an unexpected result
+
+The following code to have the same result on version 24.3 as both those before and after.
+
+```sql
+-- CREATE TABLE statements for all tables involved
+CREATE TABLE default.stupid_object (
+    id UInt32,
+    object_state String
+) ENGINE=MergeTree()
+ORDER BY ( object_state, id );
+
+CREATE TABLE default.stupid_object_decorator (
+    id_stupid_object_decorator UInt32,
+    id_stupid_object UInt32
+) ENGINE=MergeTree()
+ORDER BY ( id_stupid_object, id_stupid_object_decorator );
+
+-- Sample data for all these tables
+INSERT INTO default.stupid_object VALUES ( 1, 'OK' );
+INSERT INTO default.stupid_object_decorator VALUES ( 100, 1 );
+
+-- CREATE VIEW statements for all views involved
+CREATE VIEW default.v_stupid_object AS SELECT
+so.id,
+a.decorators,
+if ( empty(a.decorators),
+    if ( so.object_state = 'cancelled', 'OK', so.object_state ),
+    'DECORATED'
+) as object_state,
+arrayConcat(
+    if ( empty(so.object_state), ['Bad decoration'], emptyArrayString() )
+) as warnings
+FROM default.stupid_object so
+LEFT JOIN (
+    SELECT
+    deco.id_stupid_object as id_stupid_object,
+    groupArray(deco.id_stupid_object_decorator) as decorators
+    FROM default.stupid_object_decorator deco
+    GROUP BY deco.id_stupid_object
+) a ON a.id_stupid_object = so.id;
+
+CREATE VIEW default.v_child_of_stupid_object AS SELECT
+p.id,
+p.decorators,
+p.object_state,
+p.warnings
+FROM default.v_stupid_object p
+WHERE notEmpty(p.object_state);
+
+-- Queries to run that lead to an unexpected result
+SELECT
+*
+FROM default.v_child_of_stupid_object
+ORDER BY id;
+
+-- EXPECTED RESULT
+-- 1	[100]	DECORATED	[]
+
+-- BAD RESULT
+-- 1	[100]	OK	[]
+```
+
+**Error message and/or stacktrace**
+
+> If applicable, add screenshots to help explain your problem.
+
+**Additional context**
+
+> Add any other context about the problem here.

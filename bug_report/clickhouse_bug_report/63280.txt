@@ -1,0 +1,106 @@
+ID: 63280
+Title: rows_before_limit_at_least multiplied by Distributed processing
+Description:
+When doing a distributed query the result of rows_before_limit_at_least is greater than the total number of rows returned by the GROUP BY statement when the total amount of rows is less than LIMIT
+
+```
+SELECT age FROM users_distributed
+group by age
+limit 20
+format JSON
+
+	"rows": 3,
+	"rows_before_limit_at_least": 6,
+```
+
+expected that rows_before_limit_at_least would equal "rows" (3)  with such a relaxed LIMIT.
+
+Test cases have to be executed on sharded environment.  remote function globbing can be used instead of Distributed table to emulate shards:
+
+```
+CREATE TABLE users (uid Int16, name String, age Int16) ENGINE=MergeTree order by uid;
+INSERT INTO users VALUES (1231, 'John', 33),(6666, 'John', 48), (8888, 'John', 50);
+
+SELECT age
+FROM remote('127.0.0.{1,1}',default.users)
+group by age
+limit 20
+format JSON
+SETTINGS prefer_localhost_replica=0
+```
+
+Result:
+```
+{
+	"meta":
+	[
+		{
+			"name": "age",
+			"type": "Int16"
+		}
+	],
+
+	"data":
+	[
+		{
+			"age": 33
+		},
+		{
+			"age": 48
+		},
+		{
+			"age": 50
+		}
+	],
+
+	"rows": 3,
+	"rows_before_limit_at_least": 6,
+	"statistics":
+	{
+		"elapsed": 0.005919109,
+		"rows_read": 6,
+		"bytes_read": 12
+	}
+}
+```
+
+It reproduced on the latest, 24.3, 23.8, 23.3
+But does not reproduce on 22.8
+
+```
+{
+	"meta":
+	[
+		{
+			"name": "age",
+			"type": "Int16"
+		}
+	],
+
+	"data":
+	[
+		{
+			"age": 33
+		},
+		{
+			"age": 48
+		},
+		{
+			"age": 50
+		}
+	],
+
+	"rows": 3,
+
+	"rows_before_limit_at_least": 3,
+
+	"statistics":
+	{
+		"elapsed": 0.003796052,
+		"rows_read": 6,
+		"bytes_read": 12
+	}
+}
+```
+
+

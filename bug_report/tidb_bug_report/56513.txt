@@ -1,0 +1,74 @@
+ID: 56513
+Title: `leading` hint doesn't work with cartesian join + outer join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+For `t1 INNER JOIN t2 ON (non-eq conditions) LEFT JOIN t3 ON (eq conditions)`, we can't use the hint to enforce the join order.
+
+```sql
+create table t1(a int, b int, c int);
+create table t2(a int, b int, c int);
+create table t3(a int, b int, c int);
+explain select /*+ leading(t1,t3,t2) */ * from t1 join t2 on (t1.a = t2.a or t1.a = t2.b) left join t3 on t1.a = t3.b;
+explain select /*+ leading(t1,t2,t3) */ * from t1 join t2 on (t1.a = t2.a or t1.a = t2.b) left join t3 on t1.a = t3.b;
+```
+
+### 2. What did you expect to see? (Required)
+
+The hint should work well in both queries, meaning two execution plans should be different.
+
+### 3. What did you see instead (Required)
+
+```sql
+> explain select /*+ leading(t1,t3,t2) */ * from t1 join t2 on (t1.a = t2.a or t1.a = t2.b) left join t3 on t1.a = t3.b;
++----------------------------------+--------------+-----------+---------------+---------------------------------------------------------------------------------------------------+
+| id                               | estRows      | task      | access object | operator info                                                                                     |
++----------------------------------+--------------+-----------+---------------+---------------------------------------------------------------------------------------------------+
+| Projection_13                    | 124875000.00 | root      |               | test.t1.a, test.t1.b, test.t1.c, test.t2.a, test.t2.b, test.t2.c, test.t3.a, test.t3.b, test.t3.c |
+| └─HashJoin_14                    | 124875000.00 | root      |               | CARTESIAN inner join, other cond:or(eq(test.t1.a, test.t2.a), eq(test.t1.a, test.t2.b))           |
+|   ├─TableReader_24(Build)        | 10000.00     | root      |               | data:TableFullScan_23                                                                             |
+|   │ └─TableFullScan_23           | 10000.00     | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                                                    |
+|   └─HashJoin_16(Probe)           | 12487.50     | root      |               | left outer join, equal:[eq(test.t1.a, test.t3.b)]                                                 |
+|     ├─TableReader_22(Build)      | 9990.00      | root      |               | data:Selection_21                                                                                 |
+|     │ └─Selection_21             | 9990.00      | cop[tikv] |               | not(isnull(test.t3.b))                                                                            |
+|     │   └─TableFullScan_20       | 10000.00     | cop[tikv] | table:t3      | keep order:false, stats:pseudo                                                                    |
+|     └─TableReader_19(Probe)      | 10000.00     | root      |               | data:TableFullScan_18                                                                             |
+|       └─TableFullScan_18         | 10000.00     | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                                    |
++----------------------------------+--------------+-----------+---------------+---------------------------------------------------------------------------------------------------+
+10 rows in set, 1 warning (0.002 sec)
+
+> explain select /*+ leading(t1,t2,t3) */ * from t1 join t2 on (t1.a = t2.a or t1.a = t2.b) left join t3 on t1.a = t3.b;
++----------------------------------+--------------+-----------+---------------+---------------------------------------------------------------------------------------------------+
+| id                               | estRows      | task      | access object | operator info                                                                                     |
++----------------------------------+--------------+-----------+---------------+---------------------------------------------------------------------------------------------------+
+| Projection_12                    | 124875000.00 | root      |               | test.t1.a, test.t1.b, test.t1.c, test.t2.a, test.t2.b, test.t2.c, test.t3.a, test.t3.b, test.t3.c |
+| └─HashJoin_13                    | 124875000.00 | root      |               | CARTESIAN inner join, other cond:or(eq(test.t1.a, test.t2.a), eq(test.t1.a, test.t2.b))           |
+|   ├─TableReader_23(Build)        | 10000.00     | root      |               | data:TableFullScan_22                                                                             |
+|   │ └─TableFullScan_22           | 10000.00     | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                                                    |
+|   └─HashJoin_15(Probe)           | 12487.50     | root      |               | left outer join, equal:[eq(test.t1.a, test.t3.b)]                                                 |
+|     ├─TableReader_21(Build)      | 9990.00      | root      |               | data:Selection_20                                                                                 |
+|     │ └─Selection_20             | 9990.00      | cop[tikv] |               | not(isnull(test.t3.b))                                                                            |
+|     │   └─TableFullScan_19       | 10000.00     | cop[tikv] | table:t3      | keep order:false, stats:pseudo                                                                    |
+|     └─TableReader_18(Probe)      | 10000.00     | root      |               | data:TableFullScan_17                                                                             |
+|       └─TableFullScan_17         | 10000.00     | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                                    |
++----------------------------------+--------------+-----------+---------------+---------------------------------------------------------------------------------------------------+
+10 rows in set, 1 warning (0.002 sec)
+
+> show warnings;
++---------+------+------------------------------------------------------------------------+
+| Level   | Code | Message                                                                |
++---------+------+------------------------------------------------------------------------+
+| Warning | 1815 | leading hint is inapplicable, check if the leading hint table is valid |
++---------+------+------------------------------------------------------------------------+
+1 row in set (0.000 sec)
+```
+
+
+### 4. What is your TiDB version? (Required)
+
+From v6.2.0 (when the `leading` hint starts support outer join) until the latest nightly (v8.4.0-alpha-nightly)
+

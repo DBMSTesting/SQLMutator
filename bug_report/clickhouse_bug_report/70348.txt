@@ -1,0 +1,53 @@
+ID: 70348
+Title: Weird handling of ALIAS in a distributed query with analyzer
+Description:
+https://fiddle.clickhouse.com/7a9a4474-8dbb-4109-aca6-4f5287febe58
+```
+CREATE TABLE users 
+(
+  name String,
+  score UInt8, 
+  user_level UInt8 ALIAS (score <= 3)
+) ENGINE=Memory;
+
+INSERT INTO users VALUES ('a',1), ('b',20);
+
+select 'no sorting';
+SELECT user_level, * FROM remote('127.0.0.{1,2}', default, users);
+
+no sorting
+1	a	1
+0	b	20
+1	a	1
+0	b	20
+
+select 'last in the set';
+SELECT *, user_level FROM remote('127.0.0.{1,2}', default, users)
+order by user_level;
+
+last in the set
+b	20	0
+b	20	0
+a	1	1
+a	1	1
+
+select 'no analyzer';
+SELECT user_level, * FROM remote('127.0.0.{1,2}', default, users)
+order by user_level
+settings allow_experimental_analyzer=0;
+
+no analyzer
+0	b	20
+0	b	20
+1	a	1
+1	a	1
+
+SELECT user_level, * FROM remote('127.0.0.{1,2}', default, users)
+order by user_level
+
+Received exception from server (version 24.10.1):
+Code: 6. DB::Exception: Received from localhost:9000. DB::Exception: Cannot parse string 'b' as UInt8: syntax error at begin of string. Note: there are toUInt8OrZero and toUInt8OrNull functions, which returns zero/NULL instead of throwing exception.: while converting source column `__table1.name` to destination column `__table1.score`: while executing 'FUNCTION _CAST(__table1.name :: 2, UInt8 :: 4) -> _CAST(__table1.name, UInt8) UInt8 : 3'. (CANNOT_PARSE_TEXT)
+(query: SELECT user_level, * FROM remote('127.0.0.{1,2}', default, users)
+order by user_level
+)
+```

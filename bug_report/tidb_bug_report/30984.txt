@@ -1,0 +1,62 @@
+ID: 30984
+Title: no_index_merge hint doesn't work in subquery
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+    drop table if exists t1, t2;
+    create table t1  (c_int int, c_str varchar(40), c_datetime datetime, c_decimal decimal(12, 6), primary key(c_int), key(c_int), key(c_str), unique key(c_decimal), key(c_datetime));
+    create table t2  like t1 ;
+    insert into t1 (c_int, c_str, c_datetime, c_decimal) values (6, 'sharp payne', '2020-06-07 10:40:39', 6.117000) , (7, 'objective kare', '2020-02-05 18:47:26', 1.053000) , (8, 'thirsty pasteur', '2020-01-02 13:06:56', 2.506000) , (9, 'blissful wilbur', '2020-06-04 11:34:04', 9.144000) ,     (10, 'reverent mclean', '2020-02-12 07:36:26', 7.751000) ;
+    insert into t2 (c_int, c_str, c_datetime, c_decimal) values (6, 'beautiful joliot', '2020-01-16 01:44:37', 5.627000) ,
+    (7, 'hopeful blackburn', '2020-05-23 21:44:20', 7.890000) , (8, 'ecstatic davinci', '2020-02-01 12:27:17', 5.648000) , (9, 'hopeful lewin', '2020-05-05 05:58:25', 7.288000) , (10, 'sharp jennings', '2020-01-28 04:35:03', 9.758000) ;
+    
+    set tidb_enable_index_merge = on;
+    explain select * from t1 where c_decimal > all (select /*+ no_index_merge() */ c_decimal from t2 where t1.c_int = t2.c_int and t1.c_datetime < t2.c_datetime and t2.c_decimal = 5.648000 or t2.c_str >= 'ZZZZZZZZZZZZZZ' and t1.c_int = t2.c_int);
+### 2. What did you expect to see? (Required)
+no index merge is used.
+
+### 3. What did you see instead (Required)
+
+    mysql> explain select * from t1 where c_decimal > all (select /*+ no_index_merge() */ c_decimal from t2 where t1.c_int = t2.c_int and t1.c_datetime < t2.c_datetime and t2.c_decimal = 5.648000 or t2.c_str >= 'ZZZZZZZZZZZZZZ' and t1.c_int = t2.c_int);
+    +-------------------------------------+----------+-----------+--------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+    | id                                  | estRows  | task      | access object                        | operator info
+               |
+    +-------------------------------------+----------+-----------+--------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+    | Projection_11                       | 10000.00 | root      |                                      | test.t1.c_int, test.t1.c_str, test.t1.c_datetime, test.t1.c_decimal
+               |
+    | └─Apply_13                          | 10000.00 | root      |                                      | CARTESIAN inner join, other cond:or(and(gt(test.t1.c_decimal, Column#9), if(ne(Column#10, 0), NULL, 1)), or(eq(Column#11, 0), if(isnull(test.t1.c_decimal), NULL, 0)))
+               |
+    |   ├─TableReader_15(Build)           | 10000.00 | root      |                                      | data:TableFullScan_14
+               |
+    |   │ └─TableFullScan_14              | 10000.00 | cop[tikv] | table:t1                             | keep order:false, stats:pseudo
+               |
+    |   └─StreamAgg_20(Probe)             | 1.00     | root      |                                      | funcs:max(Column#20)->Column#9, funcs:sum(Column#21)->Column#10, funcs:count(1)->Column#11
+               |
+    |     └─Projection_49                 | 0.00     | root      |                                      | test.t2.c_decimal, cast(isnull(test.t2.c_decimal), decimal(20,0) BINARY)->Column#21
+               |
+    |       └─IndexMerge_48               | 0.00     | root      |                                      |
+               |
+    |         ├─Selection_43(Build)       | 0.00     | cop[tikv] |                                      | eq(test.t1.c_int, test.t2.c_int)
+               |
+    |         │ └─IndexRangeScan_42       | 1.00     | cop[tikv] | table:t2, index:c_decimal(c_decimal) | range:[5.648000,5.648000], keep order:false, stats:pseudo
+               |
+    |         ├─Selection_45(Build)       | 3.33     | cop[tikv] |                                      | eq(test.t1.c_int, test.t2.c_int)
+               |
+    |         │ └─IndexRangeScan_44       | 3333.33  | cop[tikv] | table:t2, index:c_str(c_str)         | range:["ZZZZZZZZZZZZZZ",+inf], keep order:false, stats:pseudo
+               |
+    |         └─Selection_47(Probe)       | 0.00     | cop[tikv] |                                      | or(and(eq(test.t1.c_int, test.t2.c_int), and(lt(test.t1.c_datetime, test.t2.c_datetime), eq(test.t2.c_decimal, 5.648000))), and(ge(test.t2.c_str, "ZZZZZZZZZZZZZZ"), eq(test.t1.c_int, test.t2.c_int))) |
+    |           └─TableRowIDScan_46       | 3.33     | cop[tikv] | table:t2                             | keep order:false, stats:pseudo
+               |
+    +-------------------------------------+----------+-----------+--------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+    13 rows in set (2.05 sec)
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master @404895c04a5183d6bf759cc910e642475f4f9f2b

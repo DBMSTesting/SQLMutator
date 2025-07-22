@@ -1,0 +1,36 @@
+ID: 53508
+Title: Crash when running query with INTERPOLATE clause
+Description:
+There is a crash under certain conditions when  executing a query with an  `ORDER BY... INTERPOLATE` clause. This issue happens in the most recent CH version.
+
+In a table with the following schema and data:
+
+```
+CREATE TABLE test (date Date, id String, f Int16) 
+  ENGINE=MergeTree() 
+  ORDER BY (date);
+
+INSERT INTO test VALUES ('2023-05-15', '1', 1);
+INSERT INTO test VALUES ('2023-05-22', '1', 15);
+```
+
+CH crashes when running the following query:
+```
+SELECT
+    date AS d,
+    toNullable(f) AS f
+FROM test
+WHERE id = '1'
+ORDER BY d ASC WITH FILL STEP toIntervalDay(1)
+INTERPOLATE ( f )
+```
+
+The exception (triggered by an `assert_cast`) is the following: 
+`Bad cast from type DB::ColumnNullable to DB::ColumnVector<short>`
+
+The query runs fine if the derived column doesn't have the same name than the column in the original table, i.e, just replace `AS f` to a different alias, f2, and interpolate f2.
+
+**Bit of analysis**
+The exception is triggered in the function `FillingTransform::interpolate`, when executing the instruction `column->insertFrom(*last_row[col_pos], 0);` 
+
+The cause of this seems to be that the member `input_positions`, instead of using the type of the aliased column, associates to this position the type of the column in the original table, which is not nullable. This vector is initialized in the constructor, from the content of `interpolate_description->required_columns_map`, which is in turn initialized in the constructor of `InterpolateDescription` from the contents of an object of type `ActionsDAGPtr`

@@ -1,0 +1,130 @@
+ID: 53543
+Title: ClickHouse is deleting quotes during the view definition saving
+Description:
+Clickhouse is deleting quotes in inner selects during view definition saving.
+How to repeat the error:
+
+Create table:
+```
+create table test_table (
+ `date` Date,
+ `__sign` Int8,
+ `from` Float64,
+ `to` Float64,
+)
+ENGINE = CollapsingMergeTree(__sign)
+PARTITION BY toYYYYMM(date)
+ORDER BY (date)
+SETTINGS index_granularity = 8192;
+```
+Then create view
+```
+create VIEW test_view
+AS
+WITH cte AS
+    (
+        SELECT
+            date,
+            __sign,
+            "from",
+            "to",
+        FROM test_table
+        FINAL
+    )
+SELECT
+    date,
+    __sign,
+    "from",
+    "to",
+FROM
+cte
+```
+The view will be saved as:
+```
+ATTACH VIEW _ UUID '1a25bb46-3e50-424d-915b-79af0857ceec'
+(
+    `date` Date,
+    `__sign` Int8,
+    `from` Float64,
+    `to` Float64
+) AS
+WITH cte AS
+    (
+        SELECT
+            date,
+            __sign,
+            from,
+            to
+        FROM default.test_table
+        FINAL
+    )
+SELECT
+    date,
+    __sign,
+    from,
+    to
+FROM
+cte
+```
+As you can see, Clickhouse is missing quotes in the inner queue during saving.
+
+If we will restart the Clickhouse it will not be started cause of an error in view metadata.
+Error from errors log:
+```
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c9f4304 in /usr/bin/clickhouse
+1. ? @ 0x0000000008adc940 in /usr/bin/clickhouse
+2. DB::DatabaseOnDisk::parseQueryFromMetadata(Poco::Logger*, std::shared_ptr<DB::Context const>, String const&, bool, bool) @ 0x0000000010c51568 in /usr/bin/clickhouse
+3. ? @ 0x0000000010c6a748 in /usr/bin/clickhouse
+4. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0x000000000cac4e78 in /usr/bin/clickhouse
+5. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000cac78a0 in /usr/bin/clickhouse
+6. ThreadPoolImpl<std::thread>::worker(std::__list_iterator<std::thread, void*>) @ 0x000000000cac0ef8 in /usr/bin/clickhouse
+7. ? @ 0x000000000cac65a8 in /usr/bin/clickhouse
+8. start_thread @ 0x0000000000007624 in /usr/lib/aarch64-linux-gnu/libpthread-2.31.so
+9. ? @ 0x00000000000d149c in /usr/lib/aarch64-linux-gnu/libc-2.31.so
+ (version 23.7.4.5 (official build))
+2023.08.18 09:45:47.870721 [ 1 ] {} <Error> Application: DB::Exception: Syntax error (in file /var/lib/clickhouse/store/3be/3be24c40-9d50-4904-a286-121fd6454180/test_view.sql): failed at position 226 (',') (line 13, col 17): ,
+            to
+        FROM default.test_table
+        FINAL
+    )
+SELECT
+    date,
+    __sign,
+    from,
+    to
+FROM
+cte
+. Expected one of: table, table function, subquery or list of joined tables, table or subquery or table function, element of expression with optional alias, SELECT subquery, function, compound identifier, list of elements, identifier: Cannot parse definition from metadata file /var/lib/clickhouse/store/3be/3be24c40-9d50-4904-a286-121fd6454180/test_view.sql
+```
+Error from usual logs:
+```
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c9f4304 in /usr/bin/clickhouse
+1. ? @ 0x0000000008adc940 in /usr/bin/clickhouse
+2. DB::DatabaseOnDisk::parseQueryFromMetadata(Poco::Logger*, std::shared_ptr<DB::Context const>, String const&, bool, bool) @ 0x0000000010c51568 in /usr/bin/clickhouse
+3. ? @ 0x0000000010c6a748 in /usr/bin/clickhouse
+4. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0x000000000cac4e78 in /usr/bin/clickhouse
+5. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000000cac78a0 in /usr/bin/clickhouse
+6. ThreadPoolImpl<std::thread>::worker(std::__list_iterator<std::thread, void*>) @ 0x000000000cac0ef8 in /usr/bin/clickhouse
+7. ? @ 0x000000000cac65a8 in /usr/bin/clickhouse
+8. start_thread @ 0x0000000000007624 in /usr/lib/aarch64-linux-gnu/libpthread-2.31.so
+9. ? @ 0x00000000000d149c in /usr/lib/aarch64-linux-gnu/libc-2.31.so
+ (version 23.7.4.5 (official build))
+2023.08.18 09:45:47.870721 [ 1 ] {} <Error> Application: DB::Exception: Syntax error (in file /var/lib/clickhouse/store/3be/3be24c40-9d50-4904-a286-121fd6454180/test_view.sql): failed at position 226 (',') (line 13, col 17): ,
+            to
+        FROM default.test_table
+        FINAL
+    )
+SELECT
+    date,
+    __sign,
+    from,
+    to
+FROM
+cte
+. Expected one of: table, table function, subquery or list of joined tables, table or subquery or table function, element of expression with optional alias, SELECT subquery, function, compound identifier, list of elements, identifier: Cannot parse definition from metadata file /var/lib/clickhouse/store/3be/3be24c40-9d50-4904-a286-121fd6454180/test_view.sql
+2023.08.18 09:45:47.871879 [ 1 ] {} <Information> Application: shutting down
+2023.08.18 09:45:47.872952 [ 1 ] {} <Debug> Application: Uninitializing subsystem: Logging Subsystem
+2023.08.18 09:45:47.873784 [ 48 ] {} <Information> BaseDaemon: Stop SignalListener thread
+```
+We detected it during migration from CH version 22.3.17.13 to 23.4.2.11. In 22.3.17.13 it's working, but if you change the version to a higher - Clickhouse just will not start cause of this error. It also tests for the CH version 23.7.4.5 - the same behavior.
+

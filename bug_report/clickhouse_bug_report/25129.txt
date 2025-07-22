@@ -1,0 +1,72 @@
+ID: 25129
+Title: Input format `CSVWithNames` not working properly without all columns in data
+Description:
+ClickHouse version: 21.4.7.3
+Ubuntu: 18.04.4
+
+**Describe the bug**
+
+Data insertion using `CSVWithNames` not working properly if `Nullable` columns aren't presented in input data.
+Seems ClickHouse adds a full column list to insert query itself if trying to insert data from stdin with the query `INSERT INTO test FORMAT CSVWithNames` without specifying the exact columns list. ClickHouse inserts some part of data before error raises. But strictly specifying columns list from input data makes it work.
+
+**Error**
+```
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x87e86ca in /usr/bin/clickhouse
+1. DB::Chunk::checkNumRowsIsConsistent() @ 0xff10545 in /usr/bin/clickhouse
+2. DB::Chunk::Chunk(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >, unsigned long) @ 0xff109f6 in /usr/bin/clickhouse
+3. DB::IRowInputFormat::generate() @ 0xff89925 in /usr/bin/clickhouse
+4. DB::ISource::tryGenerate() @ 0xff18685 in /usr/bin/clickhouse
+5. DB::ISource::work() @ 0xff1827a in /usr/bin/clickhouse
+6. DB::ParallelParsingInputFormat::InternalParser::getChunk() @ 0xffdf07e in /usr/bin/clickhouse
+7. DB::ParallelParsingInputFormat::parserThreadFunction(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long) @ 0xffde5ee in /usr/bin/clickhouse
+8. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x882b2f8 in /usr/bin/clickhouse
+9. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() @ 0x882d2bf in /usr/bin/clickhouse
+10. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x882883f in /usr/bin/clickhouse
+11. ? @ 0x882c363 in /usr/bin/clickhouse
+12. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+13. clone @ 0x121a3f in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 21.4.7.3 (official build))
+Code: 49. DB::Exception: Invalid number of rows in Chunk column Nullable(UInt8) position 1: expected 193403, got 0: data for INSERT was parsed from stdin
+
+```
+
+**Logs**
+
+No new logs appear in `clickhouse-server.err.log`.
+
+But `clickhouse-server.log` shows that ClickHouse specifying full column list itself:
+```
+<Trace> ContextAccess (default): Access granted: INSERT(col0, col1) ON db.test;
+```
+
+**How to reproduce**
+
+* ClickHouse: 21.4.7.3
+* Client: clickhouse-client
+* Default settings
+```
+CREATE TABLE db.test (
+    col0 Date,
+    col1 Nullable(UInt8)
+)
+ENGINE MergeTree()
+PARTITION BY toYYYYMM(col0)
+ORDER BY col0;
+```
+Command to insert 1.000.000 rows into `test` table only with `col0` column:
+```
+(echo col0; for _ in `seq 1 1000000`; do echo '2021-05-05'; done) | clickhouse-client -q "INSERT INTO test FORMAT CSVWithNames" 
+```
+Commands to insert 1.000.000 rows into `test` that works:
+All columns from table are presented in input data
+```
+(echo col0,col1; for _ in `seq 1 1000000`; do echo '2021-05-05',1; done) | clickhouse-client -q "INSERT INTO test FORMAT CSVWithNames" 
+```
+Only one column presented in input data but the column list is strictly specified in the insert query.
+```
+(echo col0; for _ in `seq 1 1000000`; do echo '2021-05-05'; done) | clickhouse-client -q "INSERT INTO test (col0) FORMAT CSVWithNames" 
+```
+
+**Expected behavior**
+`*WithNames` formats should work without specifying the actual column list from input data even if input data doesn't have all table columns.
+

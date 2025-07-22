@@ -1,0 +1,69 @@
+ID: 5067
+Title: Server unresponsive after enabling SSL on Kafka
+Description:
+**Describe the bug**
+
+After running with non-SSL Kafka tables for some time, our brokers were changed to use SSL client connections. After successfully configuring clickhouse-server, and verifying messages from Kafka by selecting from the Kafka engine tables, I am seeing the server process become unresponsive after SSL connection errors.
+
+**Two concerns**
+
+1) Is >250000 rows per second per node potentially too high an ingest rate and more nodes are needed to distribute the load
+2) If the ingest rate is too high, could introducing SSL to the Kafka engine cause it to "hang" and hus hang the server daemon itself?
+
+**How to reproduce**
+
+ClickHouse server version 19.4.3.1 from Altinity repo on CentOS Linux release 7.4.1708
+4 node cluster, ingesting 800,000 - 1M rows per second
+Similar issues seen on Ubuntu with Docker and Yandex Dockerfiles
+
+1) Create Kafka engine table as client, and materialized views to consume and write to shards
+2) Verify messages can be queried by SELECTing from Kafka table
+3) Stop server
+4) Enable SSL in /etc/clickhouse-server/config.xml
+5) Drop and recreate client and consumer tables
+6) Verify messages can be queried by SELECTing from Kafka table
+7) Some nodes become unresposive to client requests requiring kill -9
+
+**Error message and/or stacktrace:**
+
+No errors other than the following SSL messages are logged in /var/log/clickhouse-server. No cores generated. Nothing related to Clickhouse in dmesg.
+
+stderr.log - these repeat multiple times just before server becomes unresponsive:
+
+```
+%3|1555795524.364|ERROR|ClickHouse 19.4.3.1#consumer-7| [thrd:ssl://msg4.*.com/bootstrap]: ssl://***1003: Failed to verify broker certificate: certificate signature failure (after 246ms in state CONNECT)
+%3|1555795527.206|FAIL|ClickHouse 19.4.3.1#consumer-11| [thrd:GroupCoordinator]: GroupCoordinator: Failed to verify broker certificate: certificate signature failure (after 211ms in state CONNECT)
+```
+
+These SSL errors are interesting because consumer does ingest messages at the expected rate from all brokers.
+
+**Example Kafka engine table definition:**
+
+```
+CREATE TABLE kafka_1
+(
+    hash String,
+    date UInt64,
+    time UInt64,
+    ...
+)
+ENGINE = Kafka
+SETTINGS kafka_broker_list = 'msg1.*.com, msg2.*.com ,msg3.*.com, msg4.*.com', kafka_topic_list = 'logs', kafka_group_name = 'clickhouse0', kafka_format = 'JSONEachRow', kafka_row_delimiter = '\n', kafka_skip_broken_messages = 1, kafka_num_consumers = 1;
+```
+
+**Example SSL config in /etc/clickhouse-server/config.xml:**
+
+```
+    <kafka>
+        <max_poll_interval_ms>60000</max_poll_interval_ms>
+        <session_timeout_ms>60000</session_timeout_ms>
+        <heartbeat_interval_ms>10000</heartbeat_interval_ms>
+        <reconnect_backoff_ms>5000</reconnect_backoff_ms>
+        <reconnect_backoff_max_ms>60000</reconnect_backoff_max_ms>
+        <security_protocol>SSL</security_protocol>
+        <ssl_ca_location>/etc/clickhouse-server/ssl/kafka-ca-qa.crt</ssl_ca_location>
+        <ssl_certificate_location>/etc/clickhouse-server/ssl/client_clickhouse_client.pem</ssl_certificate_location>
+        <ssl_key_location>/etc/clickhouse-server/ssl/client_clickhouse_client.key</ssl_key_location>
+        <ssl_key_password>kafkapass</ssl_key_password>
+    </kafka>
+```

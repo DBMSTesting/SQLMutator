@@ -1,0 +1,182 @@
+ID: 14922
+Title: Multi threaded parquet writer slows down the query significantly
+Description:
+### What happens?
+
+A result of a query is written to parquet file. A parquet file is read, transformations are applied and the result is written to another parquet file. The process runs with 8 threads.
+
+The total query runs in 315 seconds. It makes no difference if the option PER_THREAD_OUTPUT is set to true (however we can then see that multiple files are created hence parallel writing occurs).
+**This is the output of timer: Run Time (s): real 314.635 user 14.731876 sys 2034.739385**
+
+When an LIMIT clause is appended to the transformation query with the LIMIT set to the number of records in the input file we see that only a single parquet file is written (LIMIT seems to result in no parallel parquet writers?).
+However this is also result in significant faster processing time. The query now only takes approx. 15 seconds to complete!
+**This is the output of timer: Run Time (s): real 14.900 user 13.763356 sys 1.036001**
+
+
+
+### To Reproduce
+
+
+**To create a test input file**:
+
+```sql
+copy 
+(
+	select 
+		i as id, -- most simple identifier perhaps generate a more complex one
+		[ 
+			{
+				period: {
+					start_ts: '2023-11-01'::timestamp,
+					end_ts: '2024-01-01'::timestamp
+				}
+			},
+			{
+				period: {
+					start_ts: '2024-11-01'::timestamp,
+					end_ts: 'infinity'::timestamp
+				}
+			},
+		] as existence,
+		[
+			{
+				period: {
+					start_ts: '2023-12-01'::timestamp,
+					end_ts: '2024-01-01'::timestamp
+				},
+				street: 'Reth 2',
+				city: 'Baarle-Nassau'
+			},
+			{
+				period: {
+					start_ts: '2024-03-01'::timestamp,
+					end_ts: '2024-06-01'::timestamp
+				},
+				street: 'Molenstraat',
+				city: 'Breda'
+			},
+			{
+				period: {
+					start_ts: '2024-11-01'::timestamp,
+					end_ts: 'infinity'::timestamp
+				},
+				street: 'Kapelstraat',
+				city: 'Tilburg'
+			},
+		] as temporal_address
+	from range(1,10_000_001) t(i)
+) to 'test.parquet' (OVERWRITE true)
+;
+```
+
+**Run the transformation with no limit clause:**
+
+```sql
+copy 
+(
+	select 
+		id,
+		existence,
+		list_transform(
+			existence,
+			(x,i) -> {
+				c1: x.period.end_ts > x.period.start_ts,
+				c2: case when i > 1 then x.period.start_ts > existence[i-1].period.end_ts else null::boolean end
+			}
+		) as existence_period_valid,
+		temporal_address,
+		list_transform(
+			temporal_address,
+			(x,i) -> {
+				c1: x.period.end_ts > x.period.start_ts,
+				c2: case when i > 1 then x.period.start_ts > temporal_address[i-1].period.end_ts else null::boolean end,
+				during_existence: list_bool_or(
+					list_transform(
+						existence,
+						y -> case when x.period.start_ts >= y.period.start_ts and x.period.end_ts <= y.period.end_ts then true else false end
+					)
+				)
+			}
+		) as temporal_address_period_valid,
+	from   'test.parquet'
+	--limit 10_000_000
+) to 'test_validate.parquet' (OVERWRITE true)
+;
+```
+
+
+**Run with limit clause (only single thread parquet writer?):**
+
+```sql
+copy 
+(
+	select 
+		id,
+		existence,
+		list_transform(
+			existence,
+			(x,i) -> {
+				c1: x.period.end_ts > x.period.start_ts,
+				c2: case when i > 1 then x.period.start_ts > existence[i-1].period.end_ts else null::boolean end
+			}
+		) as existence_period_valid,
+		temporal_address,
+		list_transform(
+			temporal_address,
+			(x,i) -> {
+				c1: x.period.end_ts > x.period.start_ts,
+				c2: case when i > 1 then x.period.start_ts > temporal_address[i-1].period.end_ts else null::boolean end,
+				during_existence: list_bool_or(
+					list_transform(
+						existence,
+						y -> case when x.period.start_ts >= y.period.start_ts and x.period.end_ts <= y.period.end_ts then true else false end
+					)
+				)
+			}
+		) as temporal_address_period_valid,
+	from   'test.parquet'
+	limit 10_000_000
+) to 'test_validate.parquet' (OVERWRITE true)
+;
+
+```
+
+### OS:
+
+macOS Sonoma 14.4.1 on M3
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+cli
+
+### Hardware:
+
+Mac, 16cores, 48Gb memory
+
+### Full Name:
+
+Erik Jansen
+
+### Affiliation:
+
+I-Refact
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

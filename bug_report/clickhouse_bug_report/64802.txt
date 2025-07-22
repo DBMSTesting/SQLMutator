@@ -1,0 +1,38 @@
+ID: 64802
+Title: Missing Content-Encoding
+Description:
+Clickhouse-server HTTP server does not send `Content-Encoding` in some cases starting from 24.3
+It breaks clients libraries, python, java. Because they rely on `Content-Encoding` to decode HTTP stream.
+
+It happens only with long queries which return a lot of data and only when `send_progress_in_http_headers=1`.
+I used `sleep` to emulate long lasting queries. 
+
+sleep(.001)
+```
+$ (curl -Ss -vvvv -o outx1  -H 'Accept-Encoding: zstd' "localhost:8123?send_progress_in_http_headers=1&enable_http_compression=1&wait_end_of_query=0&query=select+distinct+sleep(.001),name+from+generateRandom('name+String',1,1000,2)+limit+100009+format+TSV" 2>&1) |grep 'Content-Encoding'
+```
+curl output: **[ < Content-Encoding: zstd ]** -- expected output, everything is good.
+
+
+sleep(.1)
+```
+$ (curl -Ss -vvvv -o outx2 -H 'Accept-Encoding: zstd' "localhost:8123?send_progress_in_http_headers=1&enable_http_compression=1&wait_end_of_query=0&query=select+distinct+sleep(.1),name+from+generateRandom('name+String',1,1000,2)+limit+100009+format+TSV" 2>&1) |grep 'Content-Encoding'
+```
+curl output: **[] (no Content-Encoding key in HTTP header)** -- not expected output,  expected Content-Encoding: zstd
+
+
+data is correct, only HTTP header is broken.
+```
+ls -lh outx1 outx2
+-rw-r--r-- 1 denis.zhuravlev WebAMG.StJohn 41M Jun  4 17:20 outx1
+-rw-r--r-- 1 denis.zhuravlev WebAMG.StJohn 41M Jun  4 17:20 outx2
+
+file  outx*
+outx1: Zstandard compressed data (v0.8+), Dictionary ID: None
+outx2: Zstandard compressed data (v0.8+), Dictionary ID: None
+```
+
+
+https://github.com/ClickHouse/clickhouse-connect/issues/347
+
+related to `send_progress_in_http_headers`

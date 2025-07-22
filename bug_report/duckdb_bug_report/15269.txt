@@ -1,0 +1,137 @@
+ID: 15269
+Title: `USING SAMPLE 1` is not properly recognized as VOLATILE
+Description:
+### What happens?
+
+Consider:
+```
+select histogram(r) from (
+  select (FROM range(0,10) USING SAMPLE 1) as r
+  from range(0,15) _(ix)
+);
+```
+```text
+┌──────────────────────┐
+│     histogram(r)     │
+│ map(bigint, ubigint) │
+├──────────────────────┤
+│ {7=15}               │
+└──────────────────────┘
+```
+Hmmm.  We only got one reservoir sample.  How can we get a table of them?
+
+The larger issue here is that various limitations and restrictions
+seem to conspire to make it impossible to formulate a DuckDB
+solution to a very simple task specified at
+https://rosettacode.org/wiki/One_of_n_lines_in_a_file
+
+It's easy enough to setup the appropriate reservoir-sampling function:
+
+```
+create or replace table t as from range(0, 10) _(n);
+
+create or replace function reservoir() as (
+  FROM t
+  USING SAMPLE 1
+) ;
+```
+This works nicely in the sense for example that:
+```
+D select reservoir(), reservoir();
+┌─────────────┬─────────────┐
+│ reservoir() │ reservoir() │
+│    int64    │    int64    │
+├─────────────┼─────────────┤
+│      9      │      7      │
+└─────────────┴─────────────┘
+```
+
+The problem is that  it seems it's currently not possible to construct
+the required histogram in DuckDB.  To see this, one has to try all the
+possibilities.
+
+(1)
+```
+D select histogram(r) from (select reservoir() as r from range(0,15) _(ix));
+┌──────────────────────┐
+│     histogram(r)     │
+│ map(bigint, ubigint) │
+├──────────────────────┤
+│ {0=15}               │
+└──────────────────────┘
+```
+
+(2) More surprisingly perhaps, the same problem stymies a CTE-based approach.
+
+(3) The following bombs because: `subqueries in lambda expressions are not supported`
+```
+create or replace function demo(nn) as (
+  select histogram(i)
+  from (select unnest(list_transform(range(0,nn), i -> reservoir(i))) as i)
+);
+```
+
+There are various other possibilities that I've tried, but they all run into
+one of the brick walls mentioned above.
+
+If there's a bug here, it would presumably be that DuckDB does not recognize that
+`USING SAMPLE` is a special case.
+
+It would be nice if there were a workaround.  For example, shouldn't
+it be possible to flag reservoir() in the same way that random() is
+flagged (via the STABILITY attribute)?
+
+
+
+
+
+### To Reproduce
+
+```
+create or replace table t as from range(0, 10) _(n);
+
+select histogram(r) from (
+  select (FROM t USING SAMPLE 1) as r
+  from range(0,15) _(ix)
+);
+```
+
+### OS:
+
+MacOS
+
+### DuckDB Version:
+
+v1.1.4-dev3162 et al.
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Peter Koppstein
+
+### Affiliation:
+
+Princeton University
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - Other reason (please specify in the issue body)
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

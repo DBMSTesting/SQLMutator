@@ -1,0 +1,115 @@
+ID: 46083
+Title: TiDB crashes when building query plan for `INSERT` with subquery `SELECT`
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+1. Compile the TiDB using the source repository: [link](https://github.com/pingcap/tidb)
+2. Check out with the latest master version: `6ab8a378342`, also tested with released version: v7.3.0(`40b72e7a9a`). 
+3. Compile the TiDB server using go1.21.0. Use `make` in the repo root directory. 
+4. Launch TiDB server using command: 
+
+```bash
+./tidb-server -P 8000 -socket /tmp/mysql_0.sql -path $(pwd)/db_data
+```
+
+5. Connect to the server using mysql client: 
+
+```bash
+mysql -h 127.0.0.1 -P 8000 -u root --socket /tmp/mysql_0.sql
+```
+
+6. Input the PoC Query to trigger the crash of the server. 
+
+```sql
+drop database test123;
+create database test123;
+use test123;
+CREATE TEMPORARY TABLE v0(v1 int);
+INSERT INTO v0 WITH ta2 AS (TABLE v0) TABLE ta2 FOR UPDATE OF ta2;
+```
+
+### 2. What did you expect to see? (Required)
+
+The TiDB Server should continue running.
+
+### 3. What did you see instead (Required)
+
+The TiDB-server crashes and then returns error:
+
+```
+tidb> INSERT INTO v0 WITH ta2 AS (TABLE v0) TABLE ta2 FOR UPDATE OF ta2;
+ERROR 1105 (HY000): runtime error: invalid memory address or nil pointer dereference
+```
+
+Here is a more detailed stack trace captured by `GDB`, from version: v7.3.0(`40b72e7a9a`). 
+
+```
+#0  0x0000000003f4d4d4 in github.com/pingcap/tidb/planner/core.(*PlanBuilder).buildSelect (b=0x401092e000, ctx=..., sel=0x40115b1680, p=..., err=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/logical_plan_builder.go:4433
+#1  0x0000000003fc733c in github.com/pingcap/tidb/planner/core.(*PlanBuilder).Build (b=<optimized out>, ctx=...,
+    node=<error reading variable: access outside bounds of object referenced via synthetic pointer>, ~r0=..., ~r1=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/planbuilder.go:853
+#2  0x0000000003fe7ebc in github.com/pingcap/tidb/planner/core.(*PlanBuilder).buildSelectPlanOfInsert (b=0x401092e000, ctx=..., insert=0x40105565a0,
+    insertPlan=0x4011d00340, ~r0=..., ~r0=...) at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/planbuilder.go:4263
+#3  0x0000000003fe5d08 in github.com/pingcap/tidb/planner/core.(*PlanBuilder).buildInsert (b=0x401092e000, ctx=..., insert=0x40105565a0, ~r0=..., ~r1=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/planbuilder.go:3963
+#4  0x0000000003fc70f4 in github.com/pingcap/tidb/planner/core.(*PlanBuilder).Build (b=<optimized out>, ctx=...,
+    node=<error reading variable: access outside bounds of object referenced via synthetic pointer>, ~r0=..., ~r1=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/planbuilder.go:832
+#5  0x0000000004147a18 in github.com/pingcap/tidb/planner.buildLogicalPlan (ctx=...,
+    sctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>, node=..., builder=0x401092e000, ~r0=..., ~r1=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/optimize.go:559
+#6  0x0000000004146d74 in github.com/pingcap/tidb/planner.optimize (ctx=...,
+    sctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>,
+    node=<error reading variable: access outside bounds of object referenced via synthetic pointer>, is=..., ~r0=..., ~r0=..., ~r1=..., ~r1=..., ~r2=<optimized out>,
+    ~r2=<optimized out>, ~r3=..., ~r3=...) at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/optimize.go:479
+#7  0x0000000004145680 in github.com/pingcap/tidb/planner.Optimize (ctx=...,
+    sctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>,
+    node=<error reading variable: access outside bounds of object referenced via synthetic pointer>, is=..., plan=..., slice=..., retErr=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/planner/optimize.go:337
+#8  0x0000000004587fc4 in github.com/pingcap/tidb/executor.(*Compiler).Compile (c=0x4000a1e950,
+    ctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>,
+    stmtNode=<error reading variable: access outside bounds of object referenced via synthetic pointer>, ~b0=<optimized out>, ~b0=<optimized out>, err=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/executor/compiler.go:98
+#9  0x000000000477dc1c in github.com/pingcap/tidb/session.(*session).ExecuteStmt (s=0x4000156000,
+    ctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>,
+    stmtNode=<error reading variable: access outside bounds of object referenced via synthetic pointer>, ~r0=..., ~r0=..., ~r1=..., ~r1=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/session/session.go:2225
+#10 0x00000000048151f4 in github.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt (tc=0x401178a780, ctx=...,
+    stmt=<error reading variable: access outside bounds of object referenced via synthetic pointer>, ~r0=..., ~r1=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/server/driver_tidb.go:291
+#11 0x000000000480d0f4 in github.com/pingcap/tidb/server.(*clientConn).handleStmt (cc=0x40117c2c00,
+    ctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>, stmt=..., warns=..., lastStmt=true, ~r0=<optimized out>,
+    ~r0=<optimized out>, ~r1=..., ~r1=...) at /home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1993
+#12 0x000000000480b74c in github.com/pingcap/tidb/server.(*clientConn).handleQuery (cc=0x40117c2c00, ctx=..., sql=..., err=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1784
+#13 0x00000000048081f8 in github.com/pingcap/tidb/server.(*clientConn).dispatch (cc=0x40117c2c00,
+    ctx=<error reading variable: access outside bounds of object referenced via synthetic pointer>, data=..., ~r0=..., ~r0=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1271
+#14 0x0000000004805948 in github.com/pingcap/tidb/server.(*clientConn).Run (cc=0x40117c2c00, ctx=...)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1050
+#15 0x0000000004834bfc in github.com/pingcap/tidb/server.(*Server).onConn (s=0x4000dfd000, conn=0x40117c2c00)
+    at /home/tidb/go_projects/src/github.com/tidb/tidb/server/server.go:662
+#16 0x00000000048335ec in github.com/pingcap/tidb/server.(*Server).startNetworkListener.func2 () at /home/tidb/go_projects/src/github.com/tidb/tidb/server/server.go:478
+#17 0x0000000001bd5d94 in runtime.goexit () at /usr/local/go/src/runtime/asm_arm64.s:1197
+```
+
+### 4. What is your TiDB version? (Required)
+
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                   |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.3.0
+Edition: Community
+Git Commit Hash: 40b72e7a9a4fc9670d4c5d974dd503a3c6097471
+Git Branch: HEAD
+UTC Build Time: 2023-08-14 16:03:07
+GoVersion: go1.21.0
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+

@@ -1,0 +1,92 @@
+ID: 37450
+Title: json_unquote && json_extract with asterisk push down tikv bug
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+create table test.t1 (a varchar(64));
+mysql> insert into test.t1 values('hello');
+Query OK, 1 row affected (0.01 sec)
+
+mysql> select a from test.t1;
++-------+
+| a     |
++-------+
+| hello |
++-------+
+1 row in set (0.00 sec)
+
+mysql> select json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]';
++---------------------------------------------------------------------+
+| json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]' |
++---------------------------------------------------------------------+
+|                                                                   1 |
++---------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> select a from test.t1 where json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]';
+Empty set (0.00 sec)
+
+mysql> explain analyze select json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]';
++-------------------+---------+---------+------+---------------+----------------------------------------+---------------------------------------------------------------------------------------------------------------------------+---------+------+
+| id                | estRows | actRows | task | access object | execution info                         | operator info                                                                                                             | memory  | disk |
++-------------------+---------+---------+------+---------------+----------------------------------------+---------------------------------------------------------------------------------------------------------------------------+---------+------+
+| Projection_3      | 1.00    | 1       | root |               | time:23.5µs, loops:2, Concurrency:OFF  | eq(json_unquote(cast(json_extract(cast([{"optUid":1}], json BINARY), $[*].optUid), var_string(16777216))), [1])->Column#1 | 0 Bytes | N/A  |
+| └─TableDual_4     | 1.00    | 1       | root |               | time:167ns, loops:2                    | rows:1                                                                                                                    | N/A     | N/A  |
++-------------------+---------+---------+------+---------------+----------------------------------------+---------------------------------------------------------------------------------------------------------------------------+---------+------+
+2 rows in set (0.00 sec)
+
+mysql> explain analyze select a from test.t1 where json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]';
++-------------------------+---------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+-----------+------+
+| id                      | estRows | actRows | task      | access object | execution info                                                                                                                                               | operator info                                                                                                         | memory    | disk |
++-------------------------+---------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+-----------+------+
+| TableReader_7           | 0.80    | 0       | root      |               | time:249.2µs, loops:1, cop_task: {num: 1, max: 241.5µs, proc_keys: 1, rpc_num: 1, rpc_time: 234.3µs, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}    | data:Selection_6                                                                                                      | 200 Bytes | N/A  |
+| └─Selection_6           | 0.80    | 0       | cop[tikv] |               | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_process_keys_size: 41, total_keys: 4, rocksdb: {key_skipped_count: 3, block: {}}}   | eq(json_unquote(cast(json_extract(cast("[{"optUid":1}]", json BINARY), "$[*].optUid"), var_string(16777216))), "[1]") | N/A       | N/A  |
+|   └─TableFullScan_5     | 1.00    | 1       | cop[tikv] | table:t1      | tikv_task:{time:0s, loops:1}                                                                                                                                 | keep order:false, stats:pseudo                                                                                        | N/A       | N/A  |
++-------------------------+---------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------+-----------+------+
+3 rows in set (0.00 sec)
+```
+
+
+TiDB Result:
+<img width="1876" alt="image" src="https://user-images.githubusercontent.com/3417765/187340318-384fd751-a58c-4c91-b03e-b2311faaa7cf.png">
+
+MySQL Result:
+<img width="799" alt="image" src="https://user-images.githubusercontent.com/3417765/187340668-faa6b459-8725-4d8b-b59d-039935b5d478.png">
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```
+This SQL should return one row : "hello" 
+select a from test.t1 where json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]';
+```
+### 3. What did you see instead (Required)
+```
+This SQL return 0 row
+select a from test.t1 where json_unquote(json_extract('[{"optUid":1}]', "$[*].optUid")) = '[1]';
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```sql
+select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                               |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v6.2.0
+Edition: Community
+Git Commit Hash: daf2b17cdfe30c02ce282361009fb5bdb05f2b0e
+Git Branch: heads/refs/tags/v6.2.0
+UTC Build Time: 2022-08-22 13:38:40
+GoVersion: go1.18.5
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```

@@ -1,0 +1,122 @@
+ID: 34326
+Title: select, show View Privilege behave different for view table in tidb and mysql 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+
+<!-- connect root -->
+
+create database mysqltest1;
+use mysqltest1;
+create table mysqltest1.t1 (i int);
+create table mysqltest1.t2 (j int);
+create table mysqltest1.t3 (k int, secret int);
+create view v1 as select * from t1;
+create view v2 as select * from v1, t2;
+create view v3 as select k from t3;
+create user greg@localhost;
+grant select, show view on mysqltest1.v2 to greg@localhost;
+grant         show view on mysqltest1.v1 to greg@localhost;
+grant select, show view on mysqltest1.t3 to greg@localhost;
+grant select, show view on mysqltest1.v3 to greg@localhost;
+
+<!-- connect greg -->
+
+use mysqltest1;
+select * from v2; 
+explain select * from v1; 
+explain select * from v2; 
+explain select * from t3;
+explain select * from v3;
+```
+### 2. What did you expect to see? (Required)
+```sql
+
+<!-- connection with greg user -->
+
+mysql> select * from v2; 
+Empty set (0.00 sec)
+mysql> explain select * from v1; 
+ERROR 1142 (42000): SELECT command denied to user 'greg'@'localhost' for table 'v1'
+mysql> explain select * from v2; 
+ERROR 1345 (HY000): EXPLAIN/SHOW can not be issued; lacking privileges for underlying table
+mysql> explain select * from t3;
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------+
+|  1 | SIMPLE      | t3    | NULL       | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | NULL  |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------+
+1 row in set, 1 warning (0.00 sec)
+
+mysql> explain select * from v3;
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------+
+|  1 | SIMPLE      | t3    | NULL       | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | NULL  |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------+
+1 row in set, 1 warning (0.00 sec)
+
+
+```
+### 3. What did you see instead (Required)
+```sql
+
+<!-- connection with greg user output  -->
+
+mysql> select * from v2; 
+Empty set (0.00 sec)
+
+mysql> explain select * from v1; 
+ERROR 1142 (42000): SELECT command denied to user 'greg'@'localhost' for table 'v1'
+mysql> explain select * from v2; 
++-----------------------------+--------------+-----------+---------------+--------------------------------+
+| id                          | estRows      | task      | access object | operator info                  |
++-----------------------------+--------------+-----------+---------------+--------------------------------+
+| HashJoin_11                 | 100000000.00 | root      |               | CARTESIAN inner join           |
+| ├─TableReader_16(Build)     | 10000.00     | root      |               | data:TableFullScan_15          |
+| │ └─TableFullScan_15        | 10000.00     | cop[tikv] | table:t2      | keep order:false, stats:pseudo |
+| └─TableReader_14(Probe)     | 10000.00     | root      |               | data:TableFullScan_13          |
+|   └─TableFullScan_13        | 10000.00     | cop[tikv] | table:t1      | keep order:false, stats:pseudo |
++-----------------------------+--------------+-----------+---------------+--------------------------------+
+5 rows in set (0.00 sec)
+
+mysql> explain select * from t3;
++-----------------------+----------+-----------+---------------+--------------------------------+
+| id                    | estRows  | task      | access object | operator info                  |
++-----------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_5         | 10000.00 | root      |               | data:TableFullScan_4           |
+| └─TableFullScan_4     | 10000.00 | cop[tikv] | table:t3      | keep order:false, stats:pseudo |
++-----------------------+----------+-----------+---------------+--------------------------------+
+2 rows in set (0.00 sec)
+
+mysql> explain select * from v3;
++-----------------------+----------+-----------+---------------+--------------------------------+
+| id                    | estRows  | task      | access object | operator info                  |
++-----------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_7         | 10000.00 | root      |               | data:TableFullScan_6           |
+| └─TableFullScan_6     | 10000.00 | cop[tikv] | table:t3      | keep order:false, stats:pseudo |
++-----------------------+----------+-----------+---------------+--------------------------------+
+2 rows in set (0.00 sec)
+
+
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```sql
+| Release Version: v6.1.0-alpha-278-gfb342ff86
+Edition: Community
+Git Commit Hash: fb342ff8612fbc2a18dad3ba92044c03cc5e98c0
+Git Branch: master
+UTC Build Time: 2022-04-26 05:36:37
+GoVersion: go1.18
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: true |
+```

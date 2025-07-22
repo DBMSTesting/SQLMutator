@@ -1,0 +1,158 @@
+ID: 55156
+Title: JDBC test related to schema, FK and `useInformationSchema=true` failed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Run the test of mysql j connector on TiDB, and the test `testBug95280` failed. It tests to get the FK information from JDBC. When the `useIS=false`, the test will pass, and when the `useIS=true`, the test failed (and get a redundant row).
+
+When `useIS=true`, the mysql J connector will run the following SQL:
+
+```
+SELECT DISTINCT A.REFERENCED_TABLE_SCHEMA AS PKTABLE_CAT,
+  NULL AS PKTABLE_SCHEM,
+  A.REFERENCED_TABLE_NAME AS PKTABLE_NAME,
+  A.REFERENCED_COLUMN_NAME AS PKCOLUMN_NAME,
+  A.TABLE_SCHEMA AS FKTABLE_CAT,
+  NULL AS FKTABLE_SCHEM,
+  A.TABLE_NAME AS FKTABLE_NAME,
+  A.COLUMN_NAME AS FKCOLUMN_NAME,
+  A.ORDINAL_POSITION AS KEY_SEQ,
+CASE
+    WHEN R.UPDATE_RULE = 'CASCADE' THEN 0
+    WHEN R.UPDATE_RULE = 'SET NULL' THEN 2
+    WHEN R.UPDATE_RULE = 'SET DEFAULT' THEN 4
+    WHEN R.UPDATE_RULE = 'RESTRICT' THEN 1
+    WHEN R.UPDATE_RULE = 'NO ACTION' THEN 1
+    ELSE 1
+  END AS UPDATE_RULE,
+CASE
+    WHEN R.DELETE_RULE = 'CASCADE' THEN 0
+    WHEN R.DELETE_RULE = 'SET NULL' THEN 2
+    WHEN R.DELETE_RULE = 'SET DEFAULT' THEN 4
+    WHEN R.DELETE_RULE = 'RESTRICT' THEN 1
+    WHEN R.DELETE_RULE = 'NO ACTION' THEN 1
+    ELSE 1
+  END AS DELETE_RULE,
+  A.CONSTRAINT_NAME AS FK_NAME,
+  R.UNIQUE_CONSTRAINT_NAME AS PK_NAME,
+  7 AS DEFERRABILITY
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE A
+  JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS B USING (CONSTRAINT_NAME, TABLE_NAME)
+  JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS R ON (
+    R.CONSTRAINT_NAME = B.CONSTRAINT_NAME
+    AND R.TABLE_NAME = B.TABLE_NAME
+    AND R.CONSTRAINT_SCHEMA = B.TABLE_SCHEMA
+  )
+WHERE B.CONSTRAINT_TYPE = 'FOREIGN KEY'
+  AND A.TABLE_SCHEMA = ?
+  AND A.TABLE_NAME = ?
+  AND A.REFERENCED_TABLE_SCHEMA IS NOT NULL
+ORDER BY A.REFERENCED_TABLE_SCHEMA,
+  A.REFERENCED_TABLE_NAME,
+  A.ORDINAL_POSITION
+```
+
+Therefore, this issue can be reproduced by the following SQLs:
+
+```sql
+create database dbBug95280_1;
+create table dbBug95280_1.table1(cat_id int not null auto_increment primary key, cat_name varchar(255) not null, cat_description text) ENGINE=InnoDB;
+create table dbBug95280_1.table2(prd_id int not null auto_increment primary key, prd_name varchar(355) not null, prd_price decimal, cat_id int not null, FOREIGN KEY fk_cat(cat_id) REFERENCES table1(cat_id) ON UPDATE CASCADE ON DELETE RESTRICT) ENGINE=InnoDB;
+create database dbBug95280_2;
+create table dbBug95280_2.table1(cat_id int not null auto_increment primary key, cat_name varchar(255) not null, cat_description text) ENGINE=InnoDB;
+create table dbBug95280_2.table2(prd_id int not null auto_increment primary key, prd_name varchar(355) not null, prd_price decimal, cat_id int not null, FOREIGN KEY fk_cat(cat_id) REFERENCES table1(cat_id) ON UPDATE CASCADE ON DELETE RESTRICT) ENGINE=InnoDB;
+
+SELECT DISTINCT A.REFERENCED_TABLE_SCHEMA AS PKTABLE_CAT,
+  NULL AS PKTABLE_SCHEM,
+  A.REFERENCED_TABLE_NAME AS PKTABLE_NAME,
+  A.REFERENCED_COLUMN_NAME AS PKCOLUMN_NAME,
+  A.TABLE_SCHEMA AS FKTABLE_CAT,
+  NULL AS FKTABLE_SCHEM,
+  A.TABLE_NAME AS FKTABLE_NAME,
+  A.COLUMN_NAME AS FKCOLUMN_NAME,
+  A.ORDINAL_POSITION AS KEY_SEQ,
+CASE
+    WHEN R.UPDATE_RULE = 'CASCADE' THEN 0
+    WHEN R.UPDATE_RULE = 'SET NULL' THEN 2
+    WHEN R.UPDATE_RULE = 'SET DEFAULT' THEN 4
+    WHEN R.UPDATE_RULE = 'RESTRICT' THEN 1
+    WHEN R.UPDATE_RULE = 'NO ACTION' THEN 1
+    ELSE 1
+  END AS UPDATE_RULE,
+CASE
+    WHEN R.DELETE_RULE = 'CASCADE' THEN 0
+    WHEN R.DELETE_RULE = 'SET NULL' THEN 2
+    WHEN R.DELETE_RULE = 'SET DEFAULT' THEN 4
+    WHEN R.DELETE_RULE = 'RESTRICT' THEN 1
+    WHEN R.DELETE_RULE = 'NO ACTION' THEN 1
+    ELSE 1
+  END AS DELETE_RULE,
+  A.CONSTRAINT_NAME AS FK_NAME,
+  R.UNIQUE_CONSTRAINT_NAME AS PK_NAME,
+  7 AS DEFERRABILITY
+FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE A
+  JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS B USING (CONSTRAINT_NAME, TABLE_NAME)
+  JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS R ON (
+    R.CONSTRAINT_NAME = B.CONSTRAINT_NAME
+    AND R.TABLE_NAME = B.TABLE_NAME
+    AND R.CONSTRAINT_SCHEMA = B.TABLE_SCHEMA
+  )
+WHERE B.CONSTRAINT_TYPE = 'FOREIGN KEY'
+  AND A.TABLE_SCHEMA = 'dbBug95280_1'
+  AND A.TABLE_NAME = 'table2'
+  AND A.REFERENCED_TABLE_SCHEMA IS NOT NULL
+ORDER BY A.REFERENCED_TABLE_SCHEMA,
+  A.REFERENCED_TABLE_NAME,
+  A.ORDINAL_POSITION;
+```
+
+### 2. What did you expect to see? (Required)
+
+The test pass
+
+And the SQL return one row
+
+```
++--------------+---------------+--------------+---------------+--------------+---------------+--------------+---------------+---------+-------------+-------------+---------------+---------+---------------+
+| PKTABLE_CAT  | PKTABLE_SCHEM | PKTABLE_NAME | PKCOLUMN_NAME | FKTABLE_CAT  | FKTABLE_SCHEM | FKTABLE_NAME | FKCOLUMN_NAME | KEY_SEQ | UPDATE_RULE | DELETE_RULE | FK_NAME       | PK_NAME | DEFERRABILITY |
++--------------+---------------+--------------+---------------+--------------+---------------+--------------+---------------+---------+-------------+-------------+---------------+---------+---------------+
+| dbBug95280_1 |          NULL | table1       | cat_id        | dbBug95280_1 |          NULL | table2       | cat_id        |       1 |           0 |           1 | table2_ibfk_1 | PRIMARY |             7 |
++--------------+---------------+--------------+---------------+--------------+---------------+--------------+---------------+---------+-------------+-------------+---------------+---------+---------------+
+```
+
+### 3. What did you see instead (Required)
+
+The test failed
+
+```
++--------------+---------------+--------------+---------------+--------------+---------------+--------------+---------------+---------+-------------+-------------+---------+---------+---------------+
+| PKTABLE_CAT  | PKTABLE_SCHEM | PKTABLE_NAME | PKCOLUMN_NAME | FKTABLE_CAT  | FKTABLE_SCHEM | FKTABLE_NAME | FKCOLUMN_NAME | KEY_SEQ | UPDATE_RULE | DELETE_RULE | FK_NAME | PK_NAME | DEFERRABILITY |
++--------------+---------------+--------------+---------------+--------------+---------------+--------------+---------------+---------+-------------+-------------+---------+---------+---------------+
+| dbBug95280_1 |          NULL | table1       | cat_id        | dbBug95280_1 |          NULL | table2       | cat_id        |       1 |           0 |           1 | fk_cat  | PRIMARY |             7 |
+| dbBug95280_2 |          NULL | table1       | cat_id        | dbBug95280_2 |          NULL | table2       | cat_id        |       1 |           0 |           1 | fk_cat  | PRIMARY |             7 |
++--------------+---------------+--------------+---------------+--------------+---------------+--------------+---------------+---------+-------------+-------------+---------+---------+---------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                          |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v8.3.0-alpha-65-g94d8c123ef
+Edition: Community
+Git Commit Hash: 94d8c123ef02f2f5543a99a937ce135ade0fe997
+Git Branch: master
+UTC Build Time: 2024-08-02 04:26:14
+GoVersion: go1.22.5
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+

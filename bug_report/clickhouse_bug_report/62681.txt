@@ -1,0 +1,71 @@
+ID: 62681
+Title: size of table/part/secondary index is not correct when inverted index is applied
+Description:
+On ClickHouse 24.1.7.18
+
+There're some tables with the same amount data but different types of secondary index on the same column. 
+The system.data_skipping_indices DOES NOT correctly show the size of the secondary index for inverted index.
+
+```  
+┌─table──────────────┬─name────────┬─type───────┬─type_full──────────────────┬─expr────┬─granularity─┬─data_compressed_bytes─┬─data_uncompressed_bytes─┬──marks─┐
+│ log_local          │ idx_message │ ngrambf_v1 │ ngrambf_v1(4, 32768, 3, 0) │ message │           1 │            1900157914 │              3236069376 │ 240558 │
+│ log_local_invert   │ idx_message │ inverted   │ inverted                   │ message │           1 │                894103 │                 1569764 │  92159 │
+│ log_local_invert_3 │ idx_message │ inverted   │ inverted(3)                │ message │           1 │                895692 │                 1568732 │  93494 │
+│ log_local_token    │ idx_message │ tokenbf_v1 │ tokenbf_v1(32768, 3, 2)    │ message │           1 │            1046292921 │              3209134080 │ 221475 │
+└────────────────────┴─────────────┴────────────┴────────────────────────────┴─────────┴─────────────┴───────────────────────┴─────────────────────────┴────────┘
+```
+
+As shown above, the `system.data_skipping_indices` says that the secondary index is only about 8M. 
+This is not correct because if we look at the files of a part, besides the idx and cmrk2 files, there're extra files for inverted index to saving post list which has very large size.
+In the case of inverted(3) index, its size is 3 times bigger than the size of the column.
+ 
+```
+# Files with invert(0)
+-rw-r----- 1 clickhouse clickhouse 2.1G Apr 12 14:57 message.bin
+-rw-r----- 1 clickhouse clickhouse  81K Apr 12 14:57 message.cmrk2
+-rw-r----- 1 clickhouse clickhouse  26M Apr 12 14:57 message_length.bin
+-rw-r----- 1 clickhouse clickhouse  62K Apr 12 14:57 message_length.cmrk2
+-rw-r----- 1 clickhouse clickhouse  17K Apr 12 14:57 skp_idx_idx_message.cmrk2
+-rw-r----- 1 clickhouse clickhouse 946M Apr 12 14:57 skp_idx_idx_message.gin_dict
+-rw-r----- 1 clickhouse clickhouse 1.2G Apr 12 14:57 skp_idx_idx_message.gin_post
+-rw-r----- 1 clickhouse clickhouse  12K Apr 12 14:57 skp_idx_idx_message.gin_seg
+-rw-r----- 1 clickhouse clickhouse    3 Apr 12 14:57 skp_idx_idx_message.gin_sid
+-rw-r----- 1 clickhouse clickhouse 157K Apr 12 14:57 skp_idx_idx_message.idx
+```
+
+```
+# Files with invert(3)
+-rw-r----- 1 clickhouse clickhouse 3.2G Apr 15 20:28 message.bin
+-rw-r----- 1 clickhouse clickhouse 107K Apr 15 20:28 message.cmrk2
+-rw-r----- 1 clickhouse clickhouse  36M Apr 15 20:28 message_length.bin
+-rw-r----- 1 clickhouse clickhouse  83K Apr 15 20:28 message_length.cmrk2
+-rw-r----- 1 clickhouse clickhouse  22K Apr 15 20:28 skp_idx_idx_message.cmrk2
+-rw-r----- 1 clickhouse clickhouse 151M Apr 15 20:28 skp_idx_idx_message.gin_dict
+-rw-r----- 1 clickhouse clickhouse 9.3G Apr 15 20:28 skp_idx_idx_message.gin_post
+-rw-r----- 1 clickhouse clickhouse  15K Apr 15 20:28 skp_idx_idx_message.gin_seg
+-rw-r----- 1 clickhouse clickhouse    3 Apr 15 20:28 skp_idx_idx_message.gin_sid
+-rw-r----- 1 clickhouse clickhouse 204K Apr 15 20:28 skp_idx_idx_message.idx
+```
+
+The size related columns on a part also does not reflect the actual size of inverted index files.
+```
+Row 1:
+──────
+partition:                             202403
+name:                                  202403_1584_2084_3
+uuid:                                  00000000-0000-0000-0000-000000000000
+part_type:                             Wide
+active:                                1
+marks:                                 22918
+rows:                                  124192063
+bytes_on_disk:                         4333438306 <--------Not correct 
+data_compressed_bytes:                 4331421914 <---Not correct
+data_uncompressed_bytes:               209374129045<---Not correct
+primary_key_size:                      189562
+marks_bytes:                           1595849
+secondary_indices_compressed_bytes:    208403<----Not correct
+secondary_indices_uncompressed_bytes:  368724----Not correct
+secondary_indices_marks_bytes:         21774
+```
+
+So I guess we forgot calculating the size of inverted index files by including all extra files like dictionaries and posting list.

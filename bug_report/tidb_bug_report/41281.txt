@@ -1,0 +1,131 @@
+ID: 41281
+Title: Shrinking decimal or double field precision behaves differently
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+We found that TiDB has different behavior reducing the precision of `DECIMAL` and `DOUBLE` after `ALTER TABLE MODIFY/CHANGE COLUMN` syntax:
+
+* For `DOUBLE` types, the new data will be changed but the old data will be kept the same. For example:
+```
+alter table r1 modify column `d` double(4,1) NOT NULL COMMENT '';
+```
+2、For `DECIMAL` types, both new and old data will be changed. For example:
+```
+alter table r1 modify column `a` decimal(20,2) DEFAULT '0.000000';
+```
+
+However, in MySQL, the new and old data will be always changed for `DOUBLE` and `DECIMAL` types.
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+MySQL [test]> 
+CREATE TABLE `r1` (
+      `id` int(11) NOT NULL COMMENT '',
+      `a` **DECIMAL(20,6)** DEFAULT '0.000000' COMMENT '',
+      `b` varchar(32) DEFAULT NULL COMMENT '',
+      `d` **double(4,2)** NOT NULL COMMENT '',
+      PRIMARY KEY (`id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin;
+Query OK, 0 rows affected (0.56 sec)
+MySQL [test]> insert into r1 values(1, 1.111111, '111', 11.11);
+Query OK, 1 row affected (0.05 sec)
+MySQL [test]> insert into r1 values(2, 2.222222, '222', 22.22);
+Query OK, 1 row affected (0.05 sec)
+MySQL [test]> select * from r1;
++----+----------+------+-------+
+| id | a        | b    | d     |
++----+----------+------+-------+
+|  1 | 1.111111 | 111  | 11.11 |
+|  2 | 2.222222 | 222  | 22.22 |
++----+----------+------+-------+
+2 rows in set (0.04 sec)
+MySQL [test]> alter table r1 modify column `d` double(4,1) NOT NULL COMMENT '';
+Query OK, 0 rows affected (0.55 sec)
+MySQL [test]> select * from r1;
++----+----------+------+-------+
+| id | a        | b    | d     |
++----+----------+------+-------+
+|  1 | 1.111111 | 111  | **11.11** |
+|  2 | 2.222222 | 222  | **22.22** |
++----+----------+------+-------+
+2 rows in set (0.05 sec)
+MySQL [test]> show create table r1\G
+*************************** 1. row ***************************
+       Table: r1
+Create Table: CREATE TABLE `r1` (
+  `id` int(11) NOT NULL,
+  `a` decimal(20,6) DEFAULT '0.000000',
+  `b` varchar(32) DEFAULT NULL,
+  `d` double(4,1) NOT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin
+1 row in set (0.05 sec)
+MySQL [test]> insert into r1 values(3, 3.333333, '333', 33.33);
+Query OK, 1 row affected (0.05 sec)
+mysql>  select * from r1;
++----+----------+------+-------+
+| id | a        | b    | d     |
++----+----------+------+-------+
+|  1 | 1.111111 | 111  | 11.11 |
+|  2 | 2.222222 | 222  | 22.22 |
+|  3 | 3.333333 | 333  |  **33.3** |
++----+----------+------+-------+
+3 rows in set (0.00 sec)
+MySQL [test]> alter table r1 modify column `a` **decimal(20,2)** DEFAULT '0.000000';
+Query OK, 0 rows affected, 3 warnings (3.05 sec)
+mysql> show warnings;
++---------+------+-----------------------------------------------+
+| Level   | Code | Message                                       |
++---------+------+-----------------------------------------------+
+| Warning | 1292 | Truncated incorrect DECIMAL value: '1.111111' |
+| Warning | 1292 | Truncated incorrect DECIMAL value: '1.111111' |
+| Warning | 1292 | Truncated incorrect DECIMAL value: '1.111111' |
++---------+------+-----------------------------------------------+
+3 rows in set (0.00 sec)
+MySQL [test]> select * from r1;
++----+------+------+-------+
+| id | a    | b    | d     |
++----+------+------+-------+
+|  1 | **1.11** | 111  | 11.11 |
+|  2 | **2.22** | 222  | 22.22 |
+|  3 | **3.33** | 333  |  33.3 |
++----+------+------+-------+
+3 rows in set (0.01 sec)
+```
+
+### 2. What did you expect to see? (Required)
+Same behavior as mysql
+```
+MySQL [test]> select * from r1;
++----+------+------+------+
+| id | a    | b    | d    |
++----+------+------+------+
+|  1 | 1.11 | 111  | 11.1 |
+|  2 | 2.22 | 222  | 22.2 |
+|  3 | 3.33 | 333  | 33.3 |
++----+------+------+------+
+3 rows in set (0.00 sec)
+```
+
+
+### 3. What did you see instead (Required)
+```
+MySQL [test]> select * from r1;
++----+------+------+-------+
+| id | a    | b    | d     |
++----+------+------+-------+
+|  1 | 1.11 | 111  | **11.11** |
+|  2 | 2.22 | 222  | **22.22** |
+|  3 | 3.33 | 333  |  33.3 |
++----+------+------+-------+
+3 rows in set (0.01 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+v5.4.1  & 6.5.0
+<!-- Paste the output of SELECT tidb_version() -->
+

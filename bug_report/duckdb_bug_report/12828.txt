@@ -1,0 +1,13 @@
+ID: 12828
+Title: No mark to semi join if mark index is in projection
+Description:
+closes https://github.com/duckdb/duckdb/issues/11042
+
+The optimization to convert mark joins to semi joins should not always happen. If a mark join index is in a projection operator from before the mark join, then it should not be switched to a semi join. If it is, the mark join index is lost, and the projection can no longer verify the column binding that originated from the mark join.
+
+This is implemented by iterating through the tree and gathering all column bindings in projection expressions, then traversing the children until a mark join is reached. If the projection has the mark join index in one of its expressions, then the mark join index is added to a `projected_mark_indexes` array. Before Mark -> semi join happens, this array is checked to make sure the mark join index is allowed to disappear.  It is done this way since unknown operators from extensions can cause a new FilterPushdown object to be created. If the unknown operator is between a projection with a mark join index and the mark join, the mark join to semi join conversion could still happen.
+
+~~Todo: I think instead of just projections, we should check the expressions of any operators that change the table index of expressions. Aggregate operators might exhibit the same issue, but I don't think it's possible, as a filter needs to be pushed through the blocking operator. ~~
+
+The above is not actually an issue, since a projection sits beneath the aggregate. See test case
+`select sum(in_alias::INT) FROM (select a in (select b from t2) as in_alias from t0) where in_alias`

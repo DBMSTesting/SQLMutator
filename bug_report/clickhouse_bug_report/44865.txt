@@ -1,0 +1,156 @@
+ID: 44865
+Title: Background Merges stuck on different replicas from time to time, requiring restart to solve
+Description:
+**Describe the situation**
+Since upgrading from 22.3 LTS to 22.12 Stable (via 22.8 LTS version) we have had two occasions where the background merges of a single replica suddenly stop and do not recover. This means that insert latencies go up and inserts into this node fail due to too many parts (retires on other replica succeeds). 
+
+**How to reproduce**
+* Which ClickHouse server version to use
+Running under docker on bare-metal nodes image:
+ `clickhouse/clickhouse-server:22.12.1.1752`
+* Which interface to use, if matters
+`native TLS behind HAproxy`
+* Non-default settings
+```yaml
+# config.yaml
+'@replace': replace
+default_database: idd
+default_replica_name: '{replica}'
+default_replica_path: /clickhouse/tables/{shard}/{database}/{table}
+https_port: 8443
+interserver_http_credentials:
+  password: '<redacted>'
+  user: '<redacted'
+logger:
+  count: 10
+  errorlog: /var/log/clickhouse-server/clickhouse-server.err.log
+  level: information
+  log: /var/log/clickhouse-server/clickhouse-server.log
+  size: 1000M
+openSSL:
+  server:
+    certificateFile: /etc/clickhouse-server/server.crt
+    dhParamsFile: /etc/clickhouse-server/dhparam.pem
+    privateKeyFile: /etc/clickhouse-server/server.key
+prometheus:
+  asynchronous_metrics: true
+  endpoint: /metrics
+  events: true
+  metrics: true
+  port: 9363
+  status_info: true
+tcp_port_secure: 9441
+timezone: UTC
+```
+* `CREATE TABLE` statements for all tables involved
+```sql
+CREATE TABLE IF NOT EXISTS idd_shard.ingest ON CLUSTER '{cluster}' (
+  metrics_json      Nullable(String)                                      Codec(ZSTD(9)),
+  metrics_type      LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  software_version  LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  a_id              String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  b_id              String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  c_data            String                            DEFAULT ''          Codec(ZSTD(9)),
+  d_data            String                            DEFAULT ''          Codec(ZSTD(9)),
+  endpoint          LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  environment       LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  feature_flag      String                            DEFAULT ''          Codec(ZSTD(9)),
+  fw                LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  hw                LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  o_id              String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  origin_path       String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  partition         String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  name              LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  n_id              String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  architecture      LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  site_id           String                            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  system_on_chip    LowCardinality(String)            DEFAULT 'unknown'   Codec(ZSTD(9)),
+  timestamp         DateTime                                              Codec(DoubleDelta, ZSTD(9)),
+  uptime            Nullable(UInt64)                                      Codec(DoubleDelta, ZSTD(9))
+)
+ENGINE = ReplicatedMergeTree PARTITION BY toYYYYMM(timestamp)
+ORDER BY (
+    metrics_type,
+    name,
+    fw,
+    n_id,
+    b_id,
+    partition,
+    timestamp
+)
+TTL timestamp + INTERVAL 2 MONTH
+SETTINGS ttl_only_drop_parts = 1;
+
+CREATE TABLE IF NOT EXISTS idd.ingest ON CLUSTER '{cluster}'
+AS idd_shard.ingest
+ENGINE = Distributed('{cluster}', idd_shard, ingest, cityHash64(n_id));
+```
+**We also have 60 + materialized views populating data into other tables from this table.**
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+Cannot provide this due to company policy.
+* Queries to run that lead to slow performance
+Around 200 inserts into idd.ingest table using the clickhouse-driver python module from pandas dataframe. Each insert contains 200 000 rows. We run 8 insert threads in parallel but load-balance the inserts between our 4 nodes (2 shards with 2 replicas).
+```sql
+INSERT INTO idd.ingest VALUES
+```
+
+**Expected performance**
+What are your performance expectation, why do you think they are realistic? Has it been working faster in older ClickHouse releases? Is it working faster in some specific other system?
+
+We do not expect outstanding insert performance and we see around 70k - 200k rows per seconds  per node which might be reasonable considering ZSTD(9) and our amount of Materialized Views. We are considering changing into ZSTD(1) following the insights from https://clickhouse.com/blog/optimize-clickhouse-codecs-compression-schema
+
+However, we did not have any problems with Merges getting stuck before upgrading to 22.12.
+
+**Additional context**
+* We are running 2 shards with 2 replicas each.
+* The hardware is very good and identical between all nodes. Bare metal Ubuntu 20.04 installation.
+  * 128 CPU threads
+  * 256 GB Memory
+  * Large NVME drives in RAID for storage
+  * Dedicated NVME Drive for OS, Docker, Keeper coordination
+* Embedded ClickHouse Keeper running on 3 out of the 4 nodes. We moved to embedded keeper since standalone keeper ran into trouble on virtual storage backbone and we did not have any other dedicated hardware storage nodes available. This has worked without issues but with worse keeper performance on v22.3.
+* On-premise installation with very low inter-node latency (<1 ms)
+
+Relevant logs (similar logs since merges stopped)
+```
+2023.01.03 12:09:25.203574 [ 273 ] {} <Information> idd_shard.table1 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000123088 of type MERGE_PARTS for part 202301_2866_5551_401 because another log entry queue-0000123079 of type GET_PART for the same part (202301_5550_5550_0) is being processed.
+2023.01.03 12:09:25.203675 [ 273 ] {} <Information> idd_shard.table1 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000123165 of type MERGE_PARTS for part 202301_2866_5614_403 because another log entry queue-0000123159 of type MERGE_PARTS for the same part (202301_5558_5614_11) is being processed.
+2023.01.03 12:09:25.234584 [ 346 ] {} <Information> idd_shard.table2 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000140713 of type MERGE_PARTS for part 202301_0_6355_1757 because another log entry queue-0000140708 of type MERGE_PARTS for the same part (202301_6350_6355_1) is being processed.
+2023.01.03 12:09:25.234684 [ 346 ] {} <Information> idd_shard.table3 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000140768 of type MERGE_PARTS for part 202301_0_6395_1766 because another log entry queue-0000140760 of type MERGE_PARTS for the same part (202301_6389_6394_1) is being processed.
+2023.01.03 12:09:25.234707 [ 346 ] {} <Information> idd_shard.table3 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000140813 of type MERGE_PARTS for part 202301_0_6427_1773 because another log entry queue-0000140782 of type GET_PART for the same part (202301_6410_6410_0) is being processed.
+2023.01.03 12:09:25.234766 [ 346 ] {} <Information> idd_shard.table3 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000140845 of type MERGE_PARTS for part 202301_0_6449_1780 because another log entry queue-0000140828 of type MERGE_PARTS for the same part (202301_6437_6442_1) is being processed.
+2023.01.03 12:09:25.234846 [ 346 ] {} <Information> idd_shard.table3 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000140890 of type MERGE_PARTS for part 202301_0_6482_1787 because another log entry queue-0000140883 of type MERGE_PARTS for the same part (202301_6477_6482_1) is being processed.
+2023.01.03 12:09:25.298456 [ 260 ] {} <Information> idd_shard.table4 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000112234 of type MERGE_PARTS for part 202301_0_4983_1837 because another log entry queue-0000112203 of type MERGE_PARTS for the same part (202301_4964_4970_1) is being processed.
+2023.01.03 12:09:25.298518 [ 260 ] {} <Information> idd_shard.table4 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000112278 of type MERGE_PARTS for part 202301_0_5004_1858 because another log entry queue-0000112227 of type GET_PART for the same part (202301_4985_4985_0) is being processed.
+2023.01.03 12:09:25.511648 [ 352 ] {} <Information> idd_shard.table5 (ReplicatedMergeTreeQueue): Not executing log entry queue-0000268448 of type MERGE_PARTS for part 202301_6150_6486_4 because another log entry queue-0000268294 of type GET_PART for the same part (202301_6363_6363_0) is being processed.
+2023.01.03 12:09:25.656916 [ 1968 ] {4cd5a04f-b871-4932-9b99-8c1d88496fcd} <Error> PushingPipelineExecutor: Code: 252. DB::Exception: Too many parts (300 with average size of 106.27 KiB). Merges are processing significantly slower than inserts. (TOO_MANY_PARTS), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked const&, int, bool) @ 0xe74c47a in /usr/bin/clickhouse
+1. ? @ 0x14e35cd8 in /usr/bin/clickhouse
+2. DB::MergeTreeData::delayInsertOrThrowIfNeeded(Poco::Event*, std::__1::shared_ptr<DB::Context const>) const @ 0x14e35a85 in /usr/bin/clickhouse
+3. ? @ 0x155ca199 in /usr/bin/clickhouse
+4. DB::ExceptionKeepingTransform::work() @ 0x155c9974 in /usr/bin/clickhouse
+5. DB::ExecutionThreadContext::executeTask() @ 0x153e7b26 in /usr/bin/clickhouse
+6. DB::PipelineExecutor::executeStepImpl(unsigned long, std::__1::atomic<bool>*) @ 0x153dcd1c in /usr/bin/clickhouse
+7. DB::PipelineExecutor::executeStep(std::__1::atomic<bool>*) @ 0x153db9a8 in /usr/bin/clickhouse
+8. DB::PushingPipelineExecutor::start() @ 0x153f1db8 in /usr/bin/clickhouse
+9. DB::TCPHandler::processInsertQuery() @ 0x15389c69 in /usr/bin/clickhouse
+10. DB::TCPHandler::runImpl() @ 0x153820d1 in /usr/bin/clickhouse
+11. DB::TCPHandler::run() @ 0x153956d9 in /usr/bin/clickhouse
+12. Poco::Net::TCPServerConnection::start() @ 0x1820feb4 in /usr/bin/clickhouse
+13. Poco::Net::TCPServerDispatcher::run() @ 0x1821185b in /usr/bin/clickhouse
+14. Poco::PooledThread::run() @ 0x183a0947 in /usr/bin/clickhouse
+15. Poco::ThreadImpl::runnableEntry(void*) @ 0x1839e37d in /usr/bin/clickhouse
+16. ? @ 0x7f07e80db609 in ?
+17. __clone @ 0x7f07e8000133 in ?
+ (version 22.12.1.1752 (official build))
+```
+
+This happened 4 days ago to a different replica and was solved by restarting the docker container on that node. Now it happened again with the exact same behavior.
+
+Prometheus metrics of relevance. The interesting thing is the parts metrics and merge performance. Merge performance dropts to 0 rows/second around 19:02 (18:00 UTC) which causes the inserts to start failing after the amount of parts goes above 300.
+
+![Screenshot 2023-01-03 at 15-21-11 ClickHouse - Prometheus Metrics - Grafana](https://user-images.githubusercontent.com/14290517/210375768-99b3c7ae-72fe-41e2-a838-95c4c7230fbe.png)
+![Screenshot 2023-01-03 at 15-20-46 ClickHouse - Prometheus Metrics - Grafana](https://user-images.githubusercontent.com/14290517/210375771-ecf3a29a-5098-4c44-a815-d2b2034f7006.png)
+![Screenshot 2023-01-03 at 15-19-16 ClickHouse - Prometheus Metrics - Grafana](https://user-images.githubusercontent.com/14290517/210375773-07cad4a5-113e-4f77-963b-bb141981d700.png)
+![Screenshot 2023-01-03 at 15-18-37 ClickHouse - Prometheus Metrics - Grafana](https://user-images.githubusercontent.com/14290517/210375777-f08bf958-c161-4894-9026-11cea1b687cc.png)

@@ -1,0 +1,118 @@
+ID: 38245
+Title: TiDB cannot use indexes using view queries
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+1. create table t1
+```
+CREATE TABLE `t1` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT ,
+  `cust_no` varchar(100) DEFAULT NULL ,
+  `id_type` varchar(2) DEFAULT NULL ,
+  `id_no` varchar(100) DEFAULT NULL ,
+  PRIMARY KEY (`id`) /*T![clustered_index] NONCLUSTERED */,
+  KEY `t1_i2` (`cust_no`),
+  KEY `id_no` (`id_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=123456;
+```
+
+2. create table t2
+```
+CREATE TABLE `t2` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT ,
+  `cust_no` varchar(30) NOT NULL ,
+  `model_lvl` varchar(3) NOT NULL DEFAULT '0' ,
+  `rela_lvl` varchar(3) DEFAULT NULL ,
+  `test_lvl` varchar(3) DEFAULT NULL ,
+  `test_lvl_end_date` date DEFAULT NULL ,
+  PRIMARY KEY (`id`) /*T![clustered_index] NONCLUSTERED */,
+  UNIQUE KEY `test_I0` (`cust_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=22473453;
+```
+
+3. create view vw_t2
+```
+CREATE ALGORITHM = UNDEFINED SQL SECURITY DEFINER VIEW `vw_t2` (
+	`cust_no`,
+	`rela_lvl`,
+	`test_lvl`,
+    `model_lvl`,
+	`test_lvl_end_date`,
+	`outer_lvl`
+) AS SELECT
+	`l`.`cust_no` AS `cust_no`,
+	`rela_lvl` AS `rela_lvl`,
+	`test_lvl` AS `test_lvl`,
+    `model_lvl` AS `model_lvl`,
+	`test_lvl_end_date` AS `test_lvl_end_date`,
+	CASE
+WHEN (
+	(`test_lvl` IS NOT NULL)
+	AND (
+		`test_lvl_end_date` IS NOT NULL
+	)
+	AND (
+		`test_lvl_end_date` >= CURDATE()
+	)
+) THEN
+	`test_lvl`
+ELSE
+	GREATEST(
+		`model_lvl`,
+		IFNULL(`rela_lvl`, _UTF8MB4 '0')
+	)
+END AS `outer_lvl`
+FROM
+	`test`.`t2` AS `l`;
+```
+
+4. Indexes cannot be used when using view queries
+```
+explain SELECT
+  t1.id,
+  t1.cust_no,
+  t1.id_no,
+  t1.id_type,
+  t2.outer_lvl cust_level
+FROM
+  t1
+  LEFT JOIN vw_t2 t2 ON t1.cust_no = t2.CUST_NO
+WHERE
+  1 = 1
+  AND t1.id_no = '123';
+```
+
+
+### 2. What did you expect to see? (Required)
+
+Could use index t2   UNIQUE KEY `test_I0` (`cust_no`),
+
+
+### 3. What did you see instead (Required)
+
+t2 use full scan table
+
++--------------------------------------+----------+-----------+------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                   | estRows  | task      | access object                | operator info                                                                                                                                                                                                                            |
++--------------------------------------+----------+-----------+------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_9                         | 12.50    | root      |                              | test.t1.id, test.t1.cust_no, test.t1.id_no, test.t1.id_type, Column#11                                                                                                                                                                   |
+| └─HashJoin_12                        | 12.50    | root      |                              | left outer join, equal:[eq(test.t1.cust_no, Column#6)]                                                                                                                                                                                   |
+|   ├─IndexLookUp_27(Build)            | 10.00    | root      |                              |                                                                                                                                                                                                                                          |
+|   │ ├─IndexRangeScan_25(Build)       | 10.00    | cop[tikv] | table:t1, index:id_no(id_no) | range:["123","123"], keep order:false, stats:pseudo                                                                                                                                                                                      |
+|   │ └─TableRowIDScan_26(Probe)       | 10.00    | cop[tikv] | table:t1                     | keep order:false, stats:pseudo                                                                                                                                                                                                           |
+|   └─Projection_28(Probe)             | 10000.00 | root      |                              | test.t2.cust_no, case(and(and(not(isnull(test.t2.test_lvl)), not(isnull(test.t2.test_lvl_end_date))), ge(test.t2.test_lvl_end_date, 2022-09-29)), test.t2.test_lvl, greatest(test.t2.model_lvl, ifnull(test.t2.rela_lvl, 0)))->Column#11 |
+|     └─TableReader_30                 | 10000.00 | root      |                              | data:TableFullScan_29                                                                                                                                                                                                                    |
+|       └─TableFullScan_29             | 10000.00 | cop[tikv] | table:l                      | keep order:false, stats:pseudo                                                                                                                                                                                                           |
++--------------------------------------+----------+-----------+------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+### 4. What is your TiDB version? (Required)
+
+v6.1.0
+
+<!-- Paste the output of SELECT tidb_version() -->
+

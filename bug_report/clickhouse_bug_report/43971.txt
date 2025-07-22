@@ -1,0 +1,282 @@
+ID: 43971
+Title: can't RESTORE MergeTree table created with deprecated syntax
+Description:
+**Describe what's wrong**
+after successful backup, can't restore MergeTree table 
+
+**A link to reproducer** 
+
+https://gist.github.com/b0375afc0db0054cd11cdd2e15474c91
+
+**Does it reproduce on recent release?**
+Yes, i tested on docker image `clickhouse/clickhouse-server:head`
+**How to reproduce**
+`/etc/clickhouse-server/conf.d/backup_storage_configuration.xml`
+
+```xml
+<?xml version="1.0"?>
+<clickhouse>
+    <profiles>
+        <default>
+            <allow_deprecated_database_ordinary>1</allow_deprecated_database_ordinary>
+            <allow_deprecated_syntax_for_merge_tree>1</allow_deprecated_syntax_for_merge_tree>
+        </default>
+    </profiles>
+
+    <zookeeper>
+        <node index="1">
+            <host>zookeeper</host>
+            <port>2181</port>
+        </node>
+        <session_timeout_ms>15000</session_timeout_ms>
+    </zookeeper>
+
+    <storage_configuration>
+        <disks>
+            <backups>
+              <send_metadata>true</send_metadata>
+              <type>s3</type>
+              <endpoint>http://minio:9000/clickhouse/backups/</endpoint>
+              <access_key_id>access-key</access_key_id>
+              <secret_access_key>it-is-my-super-secret-key</secret_access_key>
+              <!-- to avoid unnecessary disk space allocations -->
+              <cache_enabled>false</cache_enabled>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+        <allowed_path>/var/lib/clickhouse/backups_embedded/</allowed_path>
+    </backups>
+    <merge_tree>
+        <allow_remote_fs_zero_copy_replication>1</allow_remote_fs_zero_copy_replication>
+    </merge_tree>
+</clickhouse>
+
+```
+
+
+* Non-default settings, if any
+```
+            <allow_deprecated_database_ordinary>1</allow_deprecated_database_ordinary>
+            <allow_deprecated_syntax_for_merge_tree>1</allow_deprecated_syntax_for_merge_tree>
+```
+
+* Queries to run that lead to unexpected result
+
+```sql
+SELECT version();
+CREATE DATABASE test_ordinary ENGINE=Ordinary;
+CREATE TABLE `test_ordinary`.`.inner.table1` (Date Date, TimeStamp DateTime, Log String) ENGINE = MergeTree(Date, (TimeStamp, Log), 8192);
+INSERT INTO `test_ordinary`.`.inner.table1` VALUES('2018-10-23', '2018-10-23 07:37:14', 'One'), ('2018-10-23', '2018-10-23 07:37:15', 'Two'), ('2018-10-24', '2018-10-24 07:37:16', 'Three'), ('2018-10-24', '2018-10-24 07:37:17', 'Four'), ('2019-10-25', '2019-01-25 07:37:18', 'Five'), ('2019-10-25', '2019-01-25 07:37:19', 'Six');
+
+BACKUP DATABASE test_ordinary TO Disk('backups','test_ordinary');
+DROP DATABASE test_ordinary SYNC;
+RESTORE ALL FROM Disk('backups', 'test_ordinary');
+```
+
+**Expected behavior**
+successful restore, if successful backup
+
+**Error message and/or stacktrace**
+```
+Received exception from server (version 22.12.1):
+Code: 226. DB::Exception: Received from localhost:9000. DB::Exception: No columns.txt in part 201910_2_2_0, expected path /var/lib/clickhouse/tmp/1baaaaa/data/test_ordinary/%2Einner%2Etable1/201910_2_2_0/columns.txt on drive default. (NO_FILE_IN_DATA_PART)
+)query: RESTORE ALL FROM Disk('backups', 'test_ordinary');
+```
+why try to find `201910_2_2_0`
+if we have parts with different name 
+```bash
+root@c10a064cb814:/# ls -la /var/lib/clickhouse/disks/backups/test_ordinary/data/test_ordinary/%2Einner%2Etable1/
+total 16
+drwxr-x--- 4 clickhouse clickhouse 4096 Dec  6 09:29 .
+drwxr-x--- 3 clickhouse clickhouse 4096 Dec  6 09:29 ..
+drwxr-x--- 2 clickhouse clickhouse 4096 Dec  6 09:29 20181023_20181024_1_1_0
+drwxr-x--- 2 clickhouse clickhouse 4096 Dec  6 09:29 20191025_20191025_2_2_0
+```
+
+**Trace log***
+```
+2022.12.06 09:29:30.948897 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Debug> executeQuery: (from 127.0.0.1:59092) INSERT INTO `test_ordinary`.`.inner.table1` VALUES (stage: Complete)
+2022.12.06 09:29:30.949413 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> ContextAccess (default): Access granted: INSERT(Date, TimeStamp, Log) ON test_ordinary.`.inner.table1`
+2022.12.06 09:29:30.951662 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> test_ordinary.`.inner.table1`: Trying to reserve 1.00 MiB using storage policy from min volume index 0
+2022.12.06 09:29:30.952255 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> DiskLocal: Reserved 1.00 MiB on local disk `default`, having unreserved 198.05 GiB.
+2022.12.06 09:29:30.957003 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> MergedBlockOutputStream: filled checksums 20181023_20181024_1_1_0 (state Temporary)
+2022.12.06 09:29:30.959183 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> test_ordinary.`.inner.table1`: Trying to reserve 1.00 MiB using storage policy from min volume index 0
+2022.12.06 09:29:30.959727 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> DiskLocal: Reserved 1.00 MiB on local disk `default`, having unreserved 198.05 GiB.
+2022.12.06 09:29:30.962003 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> MergedBlockOutputStream: filled checksums 20191025_20191025_2_2_0 (state Temporary)
+2022.12.06 09:29:30.963021 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> test_ordinary.`.inner.table1`: Renaming temporary part tmp_insert_20181023_20181024_1_1_0 to 20181023_20181024_1_1_0 with tid (1, 1, 00000000-0000-0000-0000-000000000000).
+2022.12.06 09:29:30.968440 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Trace> test_ordinary.`.inner.table1`: Renaming temporary part tmp_insert_20191025_20191025_2_2_0 to 20191025_20191025_2_2_0 with tid (1, 1, 00000000-0000-0000-0000-000000000000).
+2022.12.06 09:29:30.969453 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Information> executeQuery: Read 6 rows, 112.00 B in 0.0200883 sec., 298 rows/sec., 5.44 KiB/sec.
+2022.12.06 09:29:30.970031 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Debug> MemoryTracker: Peak memory usage (for query): 8.25 MiB.
+2022.12.06 09:29:30.970472 [ 48 ] {1adb68d4-1741-4a7d-aff0-cfc0de01c282} <Debug> TCPHandler: Processed in 0.0224704 sec.
+2022.12.06 09:29:30.971935 [ 48 ] {} <Debug> TCP-Session: 5c51f85c-2fac-45ce-a74b-1973f3f7729d Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.12.06 09:29:30.973978 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Debug> executeQuery: (from 127.0.0.1:59092) BACKUP DATABASE test_ordinary TO Disk('backups','test_ordinary'); (stage: Complete)
+2022.12.06 09:29:30.974788 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> ContextAccess (default): Access granted: BACKUP ON test_ordinary.*
+2022.12.06 09:29:30.976156 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000001-file-bey/zttinddqfylkdudfswojjbaloevdh, Size: 36, WithPool: true
+2022.12.06 09:29:30.991250 [ 254 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000001-file-bey/zttinddqfylkdudfswojjbaloevdh, Object size: 36, WithPool: true
+2022.12.06 09:29:30.997473 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Will use path in backup: "/"
+2022.12.06 09:29:30.998120 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Gathering metadata (1)
+2022.12.06 09:29:30.999197 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Gathering metadata (2)
+2022.12.06 09:29:31.000110 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Gathering metadata (3)
+2022.12.06 09:29:31.000553 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Information> BackupEntriesCollector: Will backup 1 databases and 1 tables
+2022.12.06 09:29:31.000617 [ 251 ] {} <Trace> AsynchronousMetrics: MemoryTracking: was 452.39 MiB, peak 456.43 MiB, free memory in arenas 19.73 MiB, will set to 456.17 MiB (RSS), difference: 3.78 MiB
+2022.12.06 09:29:31.001020 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Adding the definition of database test_ordinary to backup
+2022.12.06 09:29:31.001859 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Adding the definition of table test_ordinary.`.inner.table1` to backup
+2022.12.06 09:29:31.002246 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Extracting data from tables
+2022.12.06 09:29:31.002605 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Collecting data of table test_ordinary.`.inner.table1` for backup
+2022.12.06 09:29:31.004945 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Running post-tasks
+2022.12.06 09:29:31.005532 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupEntriesCollector: Writing backup
+2022.12.06 09:29:31.007058 [ 271 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /metadata/test_ordinary.sql from memory buffer
+2022.12.06 09:29:31.008092 [ 271 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file metadata/test_ordinary.sql in base backup
+2022.12.06 09:29:31.008812 [ 271 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file metadata/test_ordinary.sql through memory buffers
+2022.12.06 09:29:31.015974 [ 277 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/count.txt from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/count.txt
+2022.12.06 09:29:31.016765 [ 282 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/checksums.txt from file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/checksums.txt
+2022.12.06 09:29:31.017525 [ 277 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/count.txt in base backup
+2022.12.06 09:29:31.018513 [ 282 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/checksums.txt in base backup
+2022.12.06 09:29:31.023626 [ 282 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/checksums.txt through memory buffers
+2022.12.06 09:29:31.022446 [ 277 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/count.txt through memory buffers
+2022.12.06 09:29:31.031161 [ 279 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.mrk3 from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.mrk3
+2022.12.06 09:29:31.041293 [ 278 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/count.txt from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/count.txt
+2022.12.06 09:29:31.047607 [ 279 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.mrk3 in base backup
+2022.12.06 09:29:31.047964 [ 280 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /metadata/test_ordinary/%2Einner%2Etable1.sql from memory buffer
+2022.12.06 09:29:31.050486 [ 285 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.bin from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.bin
+2022.12.06 09:29:31.048690 [ 291 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/columns.txt from file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/columns.txt
+2022.12.06 09:29:31.049168 [ 287 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/primary.idx from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/primary.idx
+2022.12.06 09:29:31.049259 [ 293 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/default_compression_codec.txt from file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/default_compression_codec.txt
+2022.12.06 09:29:31.049519 [ 283 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/default_compression_codec.txt from file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/default_compression_codec.txt
+2022.12.06 09:29:31.049864 [ 271 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000010-file-nae/cmpcsshvlibtjrbluheciyyqjnvhs, Size: 47, WithPool: true
+2022.12.06 09:29:31.049994 [ 281 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/checksums.txt from file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/checksums.txt
+2022.12.06 09:29:31.050157 [ 288 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/primary.idx from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/primary.idx
+2022.12.06 09:29:31.050356 [ 284 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.bin from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.bin
+2022.12.06 09:29:31.048365 [ 278 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/count.txt in base backup
+2022.12.06 09:29:31.050653 [ 289 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.mrk3 from file /var/lib/clickhouse/tmp/1aaaaaa/data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.mrk3
+2022.12.06 09:29:31.050573 [ 280 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file metadata/test_ordinary/%2Einner%2Etable1.sql in base backup
+2022.12.06 09:29:31.051090 [ 285 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.bin in base backup
+2022.12.06 09:29:31.049984 [ 286 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Writing backup for file /data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/columns.txt from file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/columns.txt
+2022.12.06 09:29:31.049647 [ 279 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.mrk3 through memory buffers
+2022.12.06 09:29:31.051956 [ 291 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/columns.txt in base backup
+2022.12.06 09:29:31.052863 [ 287 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/primary.idx in base backup
+2022.12.06 09:29:31.053385 [ 293 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/default_compression_codec.txt in base backup
+2022.12.06 09:29:31.053993 [ 283 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/default_compression_codec.txt in base backup
+2022.12.06 09:29:31.055071 [ 281 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/checksums.txt in base backup
+2022.12.06 09:29:31.055714 [ 288 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/primary.idx in base backup
+2022.12.06 09:29:31.056137 [ 284 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.bin in base backup
+2022.12.06 09:29:31.056659 [ 278 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/count.txt through memory buffers
+2022.12.06 09:29:31.057066 [ 289 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.mrk3 in base backup
+2022.12.06 09:29:31.057371 [ 282 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000011-file-zdn/rwhcqnlwljfcpjrkdxgrvxdegliib, Size: 185, WithPool: true
+2022.12.06 09:29:31.057451 [ 277 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000100-file-rdm/iufwmggqvpmszhkpvhfodjshiegqv, Size: 1, WithPool: true
+2022.12.06 09:29:31.057565 [ 280 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file metadata/test_ordinary/%2Einner%2Etable1.sql through memory buffers
+2022.12.06 09:29:31.058051 [ 285 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/data.bin through memory buffers
+2022.12.06 09:29:31.058497 [ 286 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Nothing found for file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/columns.txt in base backup
+2022.12.06 09:29:31.059736 [ 291 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/columns.txt through memory buffers
+2022.12.06 09:29:31.060192 [ 287 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/primary.idx through memory buffers
+2022.12.06 09:29:31.060588 [ 293 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/default_compression_codec.txt through memory buffers
+2022.12.06 09:29:31.061079 [ 283 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: File data/test_ordinary/%2Einner%2Etable1/20181023_20181024_1_1_0/default_compression_codec.txt already exist in current backup, adding reference
+2022.12.06 09:29:31.077172 [ 286 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: File data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/columns.txt already exist in current backup, adding reference
+2022.12.06 09:29:31.064080 [ 288 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/primary.idx through memory buffers
+2022.12.06 09:29:31.064469 [ 284 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.bin through memory buffers
+2022.12.06 09:29:31.065413 [ 279 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000101-file-ndl/syfbjlukrvhsmrbrfyxwrsedmmjsy, Size: 112, WithPool: true
+2022.12.06 09:29:31.066193 [ 289 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/data.mrk3 through memory buffers
+2022.12.06 09:29:31.071237 [ 254 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000010-file-nae/cmpcsshvlibtjrbluheciyyqjnvhs, Object size: 47, WithPool: true
+2022.12.06 09:29:31.063028 [ 281 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Will copy file data/test_ordinary/%2Einner%2Etable1/20191025_20191025_2_2_0/checksums.txt through memory buffers
+2022.12.06 09:29:31.078192 [ 278 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000110-file-wnt/rwoivfeelgxlgcaxzoehjrobgvjgu, Size: 1, WithPool: true
+2022.12.06 09:29:31.084057 [ 294 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000011-file-zdn/rwhcqnlwljfcpjrkdxgrvxdegliib, Object size: 185, WithPool: true
+2022.12.06 09:29:31.087570 [ 295 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000100-file-rdm/iufwmggqvpmszhkpvhfodjshiegqv, Object size: 1, WithPool: true
+2022.12.06 09:29:31.095981 [ 254 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000110-file-wnt/rwoivfeelgxlgcaxzoehjrobgvjgu, Object size: 1, WithPool: true
+2022.12.06 09:29:31.119780 [ 285 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000111-file-yxu/mxxxryuzqadbkphrootdetpyvusic, Size: 123, WithPool: true
+2022.12.06 09:29:31.120517 [ 280 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001000-file-jij/agvinzgrhzvoqmjdwcikyogotduez, Size: 141, WithPool: true
+2022.12.06 09:29:31.121225 [ 291 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001001-file-pyl/pvnedqdtfbtlwfvgenylkfqaazqkw, Size: 83, WithPool: true
+2022.12.06 09:29:31.125201 [ 289 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001101-file-iex/creldqrqrmamifeynzshmrmbugntk, Size: 112, WithPool: true
+2022.12.06 09:29:31.124090 [ 287 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001010-file-cjb/yusfnoydafreuozlarnedpeauchjd, Size: 17, WithPool: true
+2022.12.06 09:29:31.124738 [ 293 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001011-file-pxp/djlzcpnwbpebgartkfdgqetarrfmy, Size: 10, WithPool: true
+2022.12.06 09:29:31.125262 [ 284 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001110-file-tqa/kpwgeqvzrcexodwczzsnchvdfwyit, Size: 99, WithPool: true
+2022.12.06 09:29:31.124533 [ 288 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001100-file-nne/vtabtuzjnzzfbrbgtdsypfbyzaemo, Size: 17, WithPool: true
+2022.12.06 09:29:31.135377 [ 281 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001111-file-bmi/sdytsqtcqcybrddrmhbhaghoiours, Size: 185, WithPool: true
+2022.12.06 09:29:31.138884 [ 283 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000101-file-ndl/syfbjlukrvhsmrbrfyxwrsedmmjsy, Object size: 112, WithPool: true
+2022.12.06 09:29:31.149302 [ 295 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001000-file-jij/agvinzgrhzvoqmjdwcikyogotduez, Object size: 141, WithPool: true
+2022.12.06 09:29:31.149461 [ 294 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000000111-file-yxu/mxxxryuzqadbkphrootdetpyvusic, Object size: 123, WithPool: true
+2022.12.06 09:29:31.153037 [ 282 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001010-file-cjb/yusfnoydafreuozlarnedpeauchjd, Object size: 17, WithPool: true
+2022.12.06 09:29:31.153552 [ 297 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001100-file-nne/vtabtuzjnzzfbrbgtdsypfbyzaemo, Object size: 17, WithPool: true
+2022.12.06 09:29:31.153568 [ 277 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001011-file-pxp/djlzcpnwbpebgartkfdgqetarrfmy, Object size: 10, WithPool: true
+2022.12.06 09:29:31.153596 [ 278 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001101-file-iex/creldqrqrmamifeynzshmrmbugntk, Object size: 112, WithPool: true
+2022.12.06 09:29:31.154482 [ 254 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001001-file-pyl/pvnedqdtfbtlwfvgenylkfqaazqkw, Object size: 83, WithPool: true
+2022.12.06 09:29:31.166043 [ 298 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001111-file-bmi/sdytsqtcqcybrddrmhbhaghoiours, Object size: 185, WithPool: true
+2022.12.06 09:29:31.170474 [ 282 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000001110-file-tqa/kpwgeqvzrcexodwczzsnchvdfwyit, Object size: 99, WithPool: true
+2022.12.06 09:29:31.171634 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Finalizing backup Disk('backups', 'test_ordinary')
+2022.12.06 09:29:31.175475 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Making single part upload. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000010000-file-nis/zypmnvilqatbowlazwjuyxykmatjd, Size: 3277, WithPool: true
+2022.12.06 09:29:31.186475 [ 295 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> WriteBufferFromS3: Single part upload has completed. Bucket: clickhouse, Key: backups/r0000000000000000000000000000000000000000000000000000000000010000-file-nis/zypmnvilqatbowlazwjuyxykmatjd, Object size: 3277, WithPool: true
+2022.12.06 09:29:31.194953 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> S3ObjectStorage: Objects with paths [backups/r0000000000000000000000000000000000000000000000000000000000000001-file-bey/zttinddqfylkdudfswojjbaloevdh] were removed from S3
+2022.12.06 09:29:31.195582 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Trace> BackupImpl: Finalized backup Disk('backups', 'test_ordinary')
+2022.12.06 09:29:31.196058 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Information> BackupsWorker: Backup Disk('backups', 'test_ordinary') was created successfully
+2022.12.06 09:29:31.197510 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Information> executeQuery: Read 1 rows, 46.00 B in 0.2227823 sec., 4 rows/sec., 206.48 B/sec.
+2022.12.06 09:29:31.198027 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2022.12.06 09:29:31.198462 [ 48 ] {afc75160-ff5f-4b1c-81a5-2321c0b47b4f} <Debug> TCPHandler: Processed in 0.2266858 sec.
+2022.12.06 09:29:31.200431 [ 48 ] {} <Debug> TCP-Session: 5c51f85c-2fac-45ce-a74b-1973f3f7729d Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.12.06 09:29:31.201304 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Debug> executeQuery: (from 127.0.0.1:59092) DROP DATABASE test_ordinary SYNC; (stage: Complete)
+2022.12.06 09:29:31.201820 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Trace> ContextAccess (default): Access granted: DROP DATABASE ON test_ordinary.*
+2022.12.06 09:29:31.202280 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Trace> ContextAccess (default): Access granted: DROP TABLE ON test_ordinary.`.inner.table1`
+2022.12.06 09:29:31.202922 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Trace> test_ordinary.`.inner.table1`: dropAllData: waiting for locks.
+2022.12.06 09:29:31.203308 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Trace> test_ordinary.`.inner.table1`: dropAllData: removing data parts (count 2) from filesystem.
+2022.12.06 09:29:31.203673 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Debug> test_ordinary.`.inner.table1`: Removing 2 parts from filesystem: 20181023_20181024_1_1_0, 20191025_20191025_2_2_0
+2022.12.06 09:29:31.204691 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Trace> test_ordinary.`.inner.table1`: dropAllData: removing all data parts from memory.
+2022.12.06 09:29:31.205062 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Information> test_ordinary.`.inner.table1`: dropAllData: clearing temporary directories
+2022.12.06 09:29:31.205466 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Information> test_ordinary.`.inner.table1`: dropAllData: remove format_version.txt, detached, moving and write ahead logs
+2022.12.06 09:29:31.206006 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Information> test_ordinary.`.inner.table1`: dropAllData: removing table directory recursive to cleanup garbage
+2022.12.06 09:29:31.206439 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Trace> test_ordinary.`.inner.table1`: dropAllData: done.
+2022.12.06 09:29:31.207177 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2022.12.06 09:29:31.207489 [ 48 ] {ed899a43-1263-4142-95a9-126b27ae2f4f} <Debug> TCPHandler: Processed in 0.0072012 sec.
+2022.12.06 09:29:31.208834 [ 48 ] {} <Debug> TCP-Session: 5c51f85c-2fac-45ce-a74b-1973f3f7729d Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.12.06 09:29:31.209597 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Debug> executeQuery: (from 127.0.0.1:59092) RESTORE ALL FROM Disk('backups', 'test_ordinary'); (stage: Complete)
+2022.12.06 09:29:31.215033 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Will use paths in backup: "/"
+2022.12.06 09:29:31.215466 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Finding tables in backup
+2022.12.06 09:29:31.225239 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Information> RestorerFromBackup: Will restore 1 databases and 1 tables
+2022.12.06 09:29:31.225735 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> ContextAccess (default): Access granted: CREATE DATABASE ON test_ordinary.*
+2022.12.06 09:29:31.226659 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> ContextAccess (default): Access granted: INSERT, CREATE TABLE ON test_ordinary.`.inner.table1`
+2022.12.06 09:29:31.227169 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Creating databases
+2022.12.06 09:29:31.227580 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Creating database test_ordinary: CREATE DATABASE IF NOT EXISTS test_ordinary ENGINE = Ordinary
+2022.12.06 09:29:31.238119 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Information> DatabaseOrdinary (test_ordinary): Metadata processed, database test_ordinary has 0 tables and 0 dictionaries in total.
+2022.12.06 09:29:31.238573 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Information> TablesLoader: Parsed metadata of 0 tables in 1 databases in 0.0005384 sec
+2022.12.06 09:29:31.239065 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Information> DatabaseOrdinary (test_ordinary): Starting up tables.
+2022.12.06 09:29:31.239598 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Creating tables
+2022.12.06 09:29:31.240116 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Creating table test_ordinary.`.inner.table1`: CREATE TABLE IF NOT EXISTS test_ordinary.`.inner.table1` (`Date` Date, `TimeStamp` DateTime, `Log` String) ENGINE = MergeTree(Date, (TimeStamp, Log), 8192)
+2022.12.06 09:29:31.246411 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Debug> test_ordinary.`.inner.table1`: Loading data parts
+2022.12.06 09:29:31.247138 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Information> test_ordinary.`.inner.table1`: Found 0 parts for disk 'default' to load
+2022.12.06 09:29:31.247612 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Debug> test_ordinary.`.inner.table1`: There are no data parts
+2022.12.06 09:29:31.253076 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Inserting data to tables
+2022.12.06 09:29:31.253509 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> RestorerFromBackup: Will insert data to tables
+2022.12.06 09:29:31.254163 [ 287 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> DiskLocal: Reserved 531.00 B on local disk `default`, having unreserved 198.05 GiB.
+2022.12.06 09:29:31.254552 [ 285 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Trace> DiskLocal: Reserved 507.00 B on local disk `default`, having unreserved 198.05 GiB.
+2022.12.06 09:29:31.285153 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Error> executeQuery: Code: 226. DB::Exception: No columns.txt in part 201810_1_1_0, expected path /var/lib/clickhouse/tmp/1baaaaa/data/test_ordinary/%2Einner%2Etable1/201810_1_1_0/columns.txt on drive default. (NO_FILE_IN_DATA_PART) (version 22.12.1.1204 (official build)) (from 127.0.0.1:59092) (in query: RESTORE ALL FROM Disk('backups', 'test_ordinary');), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked const&, int, bool) @ 0xe515cfa in /usr/bin/clickhouse
+1. ? @ 0x7e869ad in /usr/bin/clickhouse
+2. DB::IMergeTreeDataPart::loadColumns(bool) @ 0x14b40835 in /usr/bin/clickhouse
+3. DB::IMergeTreeDataPart::loadColumnsChecksumsIndexes(bool, bool) @ 0x14b3f849 in /usr/bin/clickhouse
+4. DB::MergeTreeData::restorePartFromBackup(std::__1::shared_ptr<DB::MergeTreeData::RestoredPartsHolder>, DB::MergeTreePartInfo const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) const @ 0x14bf1af5 in /usr/bin/clickhouse
+5. ? @ 0x14c35ed3 in /usr/bin/clickhouse
+6. ? @ 0x130bc8ec in /usr/bin/clickhouse
+7. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__1::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0xe5d2a56 in /usr/bin/clickhouse
+8. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<bool ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<bool>(std::__1::function<void ()>, long, std::__1::optional<unsigned long>, bool)::'lambda0'()>(bool&&)::'lambda'(), void ()>>(std::__1::__function::__policy_storage const*) @ 0xe5d5935 in /usr/bin/clickhouse
+9. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xe5cf076 in /usr/bin/clickhouse
+10. ? @ 0xe5d4241 in /usr/bin/clickhouse
+11. ? @ 0x7f3933f29609 in ?
+12. __clone @ 0x7f3933e4e133 in ?
+
+2022.12.06 09:29:31.286105 [ 48 ] {f8b92f19-03dc-44c4-aa3a-1d19f7634606} <Error> TCPHandler: Code: 226. DB::Exception: No columns.txt in part 201810_1_1_0, expected path /var/lib/clickhouse/tmp/1baaaaa/data/test_ordinary/%2Einner%2Etable1/201810_1_1_0/columns.txt on drive default. (NO_FILE_IN_DATA_PART), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked const&, int, bool) @ 0xe515cfa in /usr/bin/clickhouse
+1. ? @ 0x7e869ad in /usr/bin/clickhouse
+2. DB::IMergeTreeDataPart::loadColumns(bool) @ 0x14b40835 in /usr/bin/clickhouse
+3. DB::IMergeTreeDataPart::loadColumnsChecksumsIndexes(bool, bool) @ 0x14b3f849 in /usr/bin/clickhouse
+4. DB::MergeTreeData::restorePartFromBackup(std::__1::shared_ptr<DB::MergeTreeData::RestoredPartsHolder>, DB::MergeTreePartInfo const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) const @ 0x14bf1af5 in /usr/bin/clickhouse
+5. ? @ 0x14c35ed3 in /usr/bin/clickhouse
+6. ? @ 0x130bc8ec in /usr/bin/clickhouse
+7. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__1::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0xe5d2a56 in /usr/bin/clickhouse
+8. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<bool ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::scheduleImpl<bool>(std::__1::function<void ()>, long, std::__1::optional<unsigned long>, bool)::'lambda0'()>(bool&&)::'lambda'(), void ()>>(std::__1::__function::__policy_storage const*) @ 0xe5d5935 in /usr/bin/clickhouse
+9. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xe5cf076 in /usr/bin/clickhouse
+10. ? @ 0xe5d4241 in /usr/bin/clickhouse
+11. ? @ 0x7f3933f29609 in ?
+12. __clone @ 0x7f3933e4e133 in ?
+
+```

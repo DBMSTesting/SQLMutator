@@ -1,0 +1,102 @@
+ID: 11541
+Title: Transformations in primary key confuse Clickhouse
+Description:
+I'm trying to work around #11482 by having a nicely sorted primary key that can be read forward.
+
+The goal is to be able to query "last X things" efficiently.
+
+My schema looks like this:
+
+```sql
+CREATE TABLE bamboozle (
+  timestamp DateTime,
+  traceID String,
+  service LowCardinality(String)
+) ENGINE MergeTree()
+PARTITION BY toDate(timestamp)
+ORDER BY (service, -toUnixTimestamp(timestamp))
+```
+
+Then I insert some data from an existing table:
+
+```sql
+insert into bamboozle (timestamp, traceID, service)
+select timestamp, traceID, service from jaeger_index_snapshot 
+```
+
+At first it works ok:
+
+```
+ :) select traceID from bamboozle order by service, -toUnixTimestamp(timestamp) limit 10
+
+select traceID
+  from bamboozle
+ order by service, -toUnixTimestamp(timestamp)
+ limit 10
+
+
+┌─traceID──────────────────────────┐
+│ 261f98a0d951b359c6aa9b24fe727202 │
+│ ab466ff17e0625d2042813b2f7cfb5cf │
+│ 43cd20538f502512200e30ab88db0b16 │
+│ b1569ea5d34ec77fa560d917a34ba5d8 │
+│ 21312c6bfdc1c851ebf16946128a39c7 │
+│ 23a74f78d0c488c435906e731d2b9220 │
+│ 98e456ed535b2cf9611d6c8005e09bf3 │
+│ d80223dd1de2acaee82d9d39db7b9fde │
+│ aa3471d4b141e9ca52bb23fac8046908 │
+│ 2048af53bfd4352410d70edde5415ece │
+└──────────────────────────────────┘
+```
+
+```
+ :) select traceID from bamboozle order by service, -toUnixTimestamp(timestamp) limit 10
+
+select traceID
+  from bamboozle
+ order by service, -toUnixTimestamp(timestamp)
+ limit 10
+
+
+┌─traceID──────────────────────────┐
+│ 261f98a0d951b359c6aa9b24fe727202 │
+└──────────────────────────────────┘
+┌─traceID──────────────────────────┐
+│ acec67327efbe0c4ab11ac25c73568f3 │
+│ 101c9d8d4835593c3e5802acd27cfdac │
+│ 79d5f8339075e1ea55839b19d8598d85 │
+│ 4d797cbb1f5abb77105290a0051ddc7f │
+│ 47676c62de62a6140d38f834c4d5b938 │
+│ 1a660e52f3529e8a1d022112290fe643 │
+│ 0920be5617252aba563f252e3a4b4b5d │
+│ a6db4f497644495e51da8dad4eb43dca │
+│ 1faa3b6febbcf746059c3f1c93f176fb │
+└──────────────────────────────────┘
+```
+
+But pretty quickly it breaks down:
+
+```
+:) select traceID from bamboozle order by service, -toUnixTimestamp(timestamp) limit 10
+
+select traceID
+  from bamboozle
+ order by service, -toUnixTimestamp(timestamp)
+ limit 10
+
+
+Query:
+select traceID from bamboozle order by service, -toUnixTimestamp(timestamp) limit 10
+
+
+Received exception from server:
+Code: 171, e.displayText() = DB::Exception: Block structure mismatch in QueryPipeline stream: different number of columns:
+timestamp DateTime UInt32(size = 0), traceID String String(size = 0), service LowCardinality(String) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, String(size = 1)))
+timestamp DateTime UInt32(size = 0), traceID String String(size = 0), service LowCardinality(String) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, String(size = 1))), negate(toUnixTimestamp(timestamp)) Int64 Int64(size = 0) (version 20.4.4.18)
+```
+
+This is on `20.4.4.18`, as you can see. On `20.1.4.14` I see:
+
+```
+Code: 15. DB::Exception: Received from 2400:cb00:36:1053::ac45:1815:9000. DB::Exception: Column 'negate(toUnixTimestamp(timestamp))' already exists.
+```

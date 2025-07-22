@@ -1,0 +1,178 @@
+ID: 17215
+Title: Incorrect columns and segfault in odbc external dictionary updates
+Description:
+**Describe the bug**
+I have a database containing two external dictionaries from postgres via ODBC. Dictionary updates are sometimes querying incorrect/fewer columns. This causes the dictionary not to update and eventually causes a segfault.
+
+**How to reproduce**
+* 20.10.4.1
+* Two external dictionaries:
+```
+CREATE DICTIONARY parkingstats.dmn
+(
+    `id` UInt64,
+    `nam` String,
+    `fid` UInt64
+)
+PRIMARY KEY id
+SOURCE(ODBC(TABLE 'dmn' CONNECTION_STRING 'DSN=parking' UPDATE_FIELD 'date_updated'))
+LIFETIME(MIN 60 MAX 120)
+LAYOUT(HASHED())
+
+CREATE DICTIONARY parkingstats.rpm
+(
+    `dmn_id` UInt64,
+    `rpm` Float64
+)
+PRIMARY KEY dmn_id
+SOURCE(ODBC(TABLE 'rpm' CONNECTION_STRING 'DSN=parking' UPDATE_FIELD 'updated_date'))
+LIFETIME(MIN 60 MAX 120)
+LAYOUT(HASHED())
+```
+
+**Expected behavior**
+Dictionaries should load and update as expected
+
+**Error message and/or stacktrace**
+The first few updates work as expected:
+
+```
+2020.11.20 14:32:22.561632 [ 5488 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id", "rpm" FROM "rpm";
+2020.11.20 14:35:22.345127 [ 5488 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id", "rpm" FROM "rpm" WHERE updated_date >= '2020-11-20 14:32:21';
+```
+
+Later updates query fewer columns:
+
+```
+2020.11.20 14:37:22.353143 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:37:32.353991 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:37:42.354739 [ 5513 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:37:52.355472 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:38:02.356139 [ 5488 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:38:17.357155 [ 5513 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:38:32.358161 [ 5513 ] {} <Trace> ODBCDictionarySource: SELECT "dmn_id" FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:39:07.361016 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT  FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:39:57.364329 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT  FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:41:37.370591 [ 5488 ] {} <Trace> ODBCDictionarySource: SELECT  FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:44:37.382286 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT  FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:53:02.857860 [ 5513 ] {} <Trace> ODBCDictionarySource: SELECT  FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+```
+
+These throw errors "RecordSet contains 0 columns while 2 expected". Example stack trace:
+
+```
+2020.11.20 14:44:37.382135 [ 5438 ] {} <Trace> ExternalDictionariesLoader: Will load the object 'parkingstats.rpm' in background, force = false, loading_id = 18
+2020.11.20 14:44:37.382194 [ 5438 ] {} <Trace> ExternalDictionariesLoader: Object 'parkingstats.rpm' is neither loaded nor failed, so it will not be reloaded as outdated.
+2020.11.20 14:44:37.382223 [ 5489 ] {} <Trace> ExternalDictionariesLoader: Start loading object 'parkingstats.rpm'
+2020.11.20 14:44:37.382286 [ 5489 ] {} <Trace> ODBCDictionarySource: SELECT  FROM "rpm" WHERE updated_date >= '2020-11-20 14:35:21';
+2020.11.20 14:44:37.382321 [ 5489 ] {} <Trace> ReadWriteBufferFromHTTP: Sending request to http://localhost:9018/ping
+2020.11.20 14:44:37.382695 [ 5489 ] {} <Trace> ReadWriteBufferFromHTTP: Sending request to http://localhost:9018/?connection_string=DSN%3Dparking&columns=columns%20format%20version%3A%201%0A2%20columns%3A%0A%
+60dmn_id%60%20UInt64%0A%60rpm%60%20Float64%0A&max_block_size=8192
+2020.11.20 14:44:37.393129 [ 5489 ] {} <Trace> ExternalDictionariesLoader: Supposed update time for 'parkingstats.rpm' is 2020-11-20 14:53:02 (backoff, 11 errors)
+2020.11.20 14:44:37.393262 [ 5489 ] {} <Error> ExternalDictionariesLoader: Could not update external dictionary 'parkingstats.rpm', leaving the previous version, next update is scheduled at 2020-11-20 14:53:0
+2: Code: 86, e.displayText() = DB::Exception: Received error from remote server /?connection_string=DSN%3Dparking&columns=columns%20format%20version%3A%201%0A2%20columns%3A%0A%60dmn_id%60%20UInt64%0A%60rpm%60
+%20Float64%0A&max_block_size=8192. HTTP status code: 500 Internal Server Error, body: <C3>^DCode: 20, e.displayText() = DB::Exception: RecordSet contains 0 columns while 2 expected, Stack trace (when copying
+this message, always include the lines below):
+
+0. ? @ 0x2bb3141 in /usr/bin/clickhouse-odbc-bridge
+1. ? @ 0x4fcefd5 in /usr/bin/clickhouse-odbc-bridge
+2. ? @ 0x4ff734f in /usr/bin/clickhouse-odbc-bridge
+3. ? @ 0x4ff8d50 in /usr/bin/clickhouse-odbc-bridge
+4. ? @ 0x5c7ba59 in ?
+5. ? @ 0x5c7844a in ?
+6. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+7. clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+ (version 20.10.4.1 (official build)), Stack trace (when copying this message, always include the lines below):
+
+0. DB::assertResponseIsOk(Poco::Net::HTTPRequest const&, Poco::Net::HTTPResponse&, std::__1::basic_istream<char, std::__1::char_traits<char> >&, bool) @ 0xc23f370 in /usr/bin/clickhouse
+1. DB::detail::ReadWriteBufferFromHTTPBase<std::__1::shared_ptr<DB::UpdatableSession> >::call(Poco::URI, Poco::Net::HTTPResponse&) @ 0xc2358a4 in /usr/bin/clickhouse
+2. DB::detail::ReadWriteBufferFromHTTPBase<std::__1::shared_ptr<DB::UpdatableSession> >::ReadWriteBufferFromHTTPBase(std::__1::shared_ptr<DB::UpdatableSession>, Poco::URI, std::__1::basic_string<char, std::__
+1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::function<void (std::__1::basic_ostream<char, std::__1::char_traits<char> >&)>, Poco::Net::HTTPBasicCredentials const&, unsigned long, std::_
+_1::vector<std::__1::tuple<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::
+__1::allocator<std::__1::tuple<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >
+>, DB::RemoteHostFilter const&) @ 0xc23110f in /usr/bin/clickhouse
+3. DB::ReadWriteBufferFromHTTP::ReadWriteBufferFromHTTP(Poco::URI, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::function<void (std::__1::basic_ostrea
+m<char, std::__1::char_traits<char> >&)>, DB::ConnectionTimeouts const&, unsigned long, Poco::Net::HTTPBasicCredentials const&, unsigned long, std::__1::vector<std::__1::tuple<std::__1::basic_string<char, std
+::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::tuple<std::__1::basic_string<char,
+ std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > > const&, DB::RemoteHostFilter const&) @ 0xc2308a4 in /usr/
+bin/clickhouse
+4. ? @ 0xc22ea56 in /usr/bin/clickhouse
+5. DB::XDBCDictionarySource::loadBase(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xc22cccb in /usr/bin/clickhouse
+6. DB::XDBCDictionarySource::loadUpdatedAll() @ 0xc22d28f in /usr/bin/clickhouse
+7. DB::HashedDictionary::updateData() @ 0xbe6c5ff in /usr/bin/clickhouse
+8. DB::HashedDictionary::loadData() @ 0xbe62d3a in /usr/bin/clickhouse
+9. DB::HashedDictionary::HashedDictionary(DB::StorageID const&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1::default_delete<DB::IDictionarySource> >, DB::ExternalLoada
+bleLifetime, bool, bool, std::__1::shared_ptr<DB::Block>) @ 0xbe62a71 in /usr/bin/clickhouse
+10. std::__1::__compressed_pair_elem<DB::HashedDictionary, 1, false>::__compressed_pair_elem<DB::StorageID&&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1::default_dele
+te<DB::IDictionarySource> >&&, DB::ExternalLoadableLifetime const&, bool const&, bool const&, std::__1::shared_ptr<DB::Block> const&, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul>(std::__1::piecewise_construct_t, std::_
+_1::tuple<DB::StorageID&&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1::default_delete<DB::IDictionarySource> >&&, DB::ExternalLoadableLifetime const&, bool const&, bo
+ol const&, std::__1::shared_ptr<DB::Block> const&>, std::__1::__tuple_indices<0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul>) @ 0xbe8095e in /usr/bin/clickhouse
+11. DB::HashedDictionary::clone() const @ 0xbe7a4ad in /usr/bin/clickhouse
+12. ? @ 0xd93d488 in /usr/bin/clickhouse
+13. DB::ExternalLoader::LoadingDispatcher::loadSingleObject(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ExternalLoader::ObjectConfig const&, std::__1::sha
+red_ptr<DB::IExternalLoadable const>) @ 0xd92e0c3 in /usr/bin/clickhouse
+14. DB::ExternalLoader::LoadingDispatcher::doLoading(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool) @ 0xd92b267 in /usr
+/bin/clickhouse
+15. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool
+, unsigned long, bool), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool>(void (DB::E
+xternalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool), DB::ExternalLoader::LoadingDispa
+tcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&)::'lambda'()::operator()() @ 0xd930e40 in /usr/bin/clickhouse
+16. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7b8b63d in /usr/bin/clickhouse
+17. ? @ 0x7b8f153 in /usr/bin/clickhouse
+18. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+19. __clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+ (version 20.10.4.1 (official build))
+2020.11.20 14:44:37.393323 [ 5489 ] {} <Trace> ExternalDictionariesLoader: Next update time for 'parkingstats.rpm' was set to 2020-11-20 14:53:02
+```
+
+The next update caused a segfault:
+
+```
+2020.11.20 15:03:03.406475 [ 5438 ] {} <Trace> ExternalDictionariesLoader: Will load the object 'parkingstats.rpm' in background, force = false, loading_id = 35
+2020.11.20 15:03:03.406525 [ 5438 ] {} <Trace> ExternalDictionariesLoader: Object 'parkingstats.rpm' is neither loaded nor failed, so it will not be reloaded as outdated.
+2020.11.20 15:03:03.406557 [ 5488 ] {} <Trace> ExternalDictionariesLoader: Start loading object 'parkingstats.rpm'
+2020.11.20 15:03:03.514120 [ 5437 ] {} <Trace> BaseDaemon: Received signal 11
+2020.11.20 15:03:03.514338 [ 7308 ] {} <Fatal> BaseDaemon: ########################################
+2020.11.20 15:03:03.514386 [ 7308 ] {} <Fatal> BaseDaemon: (version 20.10.4.1 (official build), build id: A3F2C76DFE3E61F8) (from thread 5488) (no query) Received signal Segmentation fault (11)
+2020.11.20 15:03:03.514412 [ 7308 ] {} <Fatal> BaseDaemon: Address: 0x7fce92200000 Access: read. Address not mapped to object.
+2020.11.20 15:03:03.514428 [ 7308 ] {} <Fatal> BaseDaemon: Stack trace: 0x7be7870 0xc1f9347 0xc1ff7de 0xc22c4bb 0xc22cf51 0xbe6c5ff 0xbe62d3a 0xbe62a71 0xbe8095e 0xbe7a4ad 0xd93d488 0xd92e0c3 0xd92b267 0xd930
+e40 0x7b8b63d 0x7b8f153 0x7fceaba94fa3 0x7fceab9b64cf
+2020.11.20 15:03:03.514518 [ 7308 ] {} <Fatal> BaseDaemon: 2. void DB::writeAnyEscapedString<(char)34, false>(char const*, char const*, DB::WriteBuffer&) @ 0x7be7870 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514569 [ 7308 ] {} <Fatal> BaseDaemon: 3. DB::ExternalQueryBuilder::composeLoadAllQuery(DB::WriteBuffer&) const @ 0xc1f9347 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514587 [ 7308 ] {} <Fatal> BaseDaemon: 4. DB::ExternalQueryBuilder::composeUpdateQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__
+1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xc1ff7de in /usr/bin/clickhouse
+2020.11.20 15:03:03.514605 [ 7308 ] {} <Fatal> BaseDaemon: 5. DB::XDBCDictionarySource::getUpdateFieldAndDate() @ 0xc22c4bb in /usr/bin/clickhouse
+2020.11.20 15:03:03.514618 [ 7308 ] {} <Fatal> BaseDaemon: 6. DB::XDBCDictionarySource::loadUpdatedAll() @ 0xc22cf51 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514632 [ 7308 ] {} <Fatal> BaseDaemon: 7. DB::HashedDictionary::updateData() @ 0xbe6c5ff in /usr/bin/clickhouse
+2020.11.20 15:03:03.514645 [ 7308 ] {} <Fatal> BaseDaemon: 8. DB::HashedDictionary::loadData() @ 0xbe62d3a in /usr/bin/clickhouse
+2020.11.20 15:03:03.514661 [ 7308 ] {} <Fatal> BaseDaemon: 9. DB::HashedDictionary::HashedDictionary(DB::StorageID const&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1:
+:default_delete<DB::IDictionarySource> >, DB::ExternalLoadableLifetime, bool, bool, std::__1::shared_ptr<DB::Block>) @ 0xbe62a71 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514694 [ 7308 ] {} <Fatal> BaseDaemon: 10. std::__1::__compressed_pair_elem<DB::HashedDictionary, 1, false>::__compressed_pair_elem<DB::StorageID&&, DB::DictionaryStructure const&, std::__
+1::unique_ptr<DB::IDictionarySource, std::__1::default_delete<DB::IDictionarySource> >&&, DB::ExternalLoadableLifetime const&, bool const&, bool const&, std::__1::shared_ptr<DB::Block> const&, 0ul, 1ul, 2ul,
+3ul, 4ul, 5ul, 6ul>(std::__1::piecewise_construct_t, std::__1::tuple<DB::StorageID&&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1::default_delete<DB::IDictionarySource
+> >&&, DB::ExternalLoadableLifetime const&, bool const&, bool const&, std::__1::shared_ptr<DB::Block> const&>, std::__1::__tuple_indices<0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul>) @ 0xbe8095e in /usr/bin/clickhouse
+2020.11.20 15:03:03.514720 [ 7308 ] {} <Fatal> BaseDaemon: 11. DB::HashedDictionary::clone() const @ 0xbe7a4ad in /usr/bin/clickhouse
+2020.11.20 15:03:03.514735 [ 7308 ] {} <Fatal> BaseDaemon: 12. ? @ 0xd93d488 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514750 [ 7308 ] {} <Fatal> BaseDaemon: 13. DB::ExternalLoader::LoadingDispatcher::loadSingleObject(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > con
+st&, DB::ExternalLoader::ObjectConfig const&, std::__1::shared_ptr<DB::IExternalLoadable const>) @ 0xd92e0c3 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514765 [ 7308 ] {} <Fatal> BaseDaemon: 14. DB::ExternalLoader::LoadingDispatcher::doLoading(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, un
+signed long, bool, unsigned long, bool) @ 0xd92b267 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514787 [ 7308 ] {} <Fatal> BaseDaemon: 15. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<cha
+r>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >
+&, unsigned long&, bool&, unsigned long&, bool>(void (DB::ExternalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, b
+ool, unsigned long, bool), DB::ExternalLoader::LoadingDispatcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&)::'la
+mbda'()::operator()() @ 0xd930e40 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514807 [ 7308 ] {} <Fatal> BaseDaemon: 16. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7b8b63d in /usr/bin/clickhouse
+2020.11.20 15:03:03.514819 [ 7308 ] {} <Fatal> BaseDaemon: 17. ? @ 0x7b8f153 in /usr/bin/clickhouse
+2020.11.20 15:03:03.514839 [ 7308 ] {} <Fatal> BaseDaemon: 18. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+2020.11.20 15:03:03.514857 [ 7308 ] {} <Fatal> BaseDaemon: 19. __clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+2020.11.20 15:03:03.514872 [ 7308 ] {} <Information> SentryWriter: Not sending crash report
+```
+
+Occasionally it's using the set of columns from the other dictionary:
+
+```
+2020.11.20 15:21:13.666590 [ 8284 ] {} <Trace> ODBCDictionarySource: SELECT "id", "nam", "fid" FROM "rpm" WHERE updated_date >= '2020-11-20 15:19:52';
+```
+
+I have two nodes running this DB and they segfault every 5-30 minutes. I have trace logs if needed.

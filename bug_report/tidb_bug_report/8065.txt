@@ -1,0 +1,133 @@
+ID: 8065
+Title: prepare panic via binary protocol when plan cache is enable
+Description:
+## Bug Report
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+first enable plan cache via `tidb.toml` configuration file.
+
+a. create two table
+
+```sql
+create table test1 (id int, v int);
+create table test2 (id int, k int, v int);
+```
+
+b. prepare and execute 2 sql in binary mode(cli's `prepare stmt from xxx` have no problem)
+
+```sql
+select * from test1 where id = ?;
+select * from test2 where id = ? and k = ?
+```
+can use this java snippet
+
+```java
+	List<String> text;
+
+	@PostConstruct
+	public void init() throws IOException {
+		tests = new ArrayList<>(9);
+		tests.add(new Entry(){{
+			sql = "SELECT * FROM test1 WHERE id = ?";
+			args = new String[][] {
+					{"3"},
+			};
+		}});
+
+		tests.add(new Entry(){{
+			sql = "SELECT * FROM test2 WHERE id = ? AND k = ?`";
+			args = new String[][] {
+					{"1", "2"},
+			};
+		}});
+	}
+
+
+	@RequestMapping("/")
+	public Map<String, Object> test() throws SQLException {
+		for (Entry test : tests) {
+			runSQL(test.sql, test.args);
+		}
+		return new HashMap<>();
+	}
+
+	private void runSQL(String sql, String[][] execs) throws SQLException {
+		try (Connection connection = dataSource.getConnection(); PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+			for (String[] args : execs) {
+				for (int i = 0; i < args.length; i++) {
+					preparedStatement.setString(i + 1, args[i]);
+				}
+				ResultSet resultSet = preparedStatement.executeQuery();
+				while (resultSet.next()) { }
+			}
+		}
+	}
+```
+
+
+2. What did you expect to see?
+
+```
+execute success
+```
+
+3. What did you see instead?
+
+TiDB Panic with
+
+```
+2018/10/26 01:04:09.865 conn.go:427: [error] lastCmd SELECT * FROM test2 WHERE id = ? AND k = ?`, runtime error: index out of range, goroutine 564 [running]:
+github.com/pingcap/tidb/server.(*clientConn).Run.func1(0xc00a4ec0d0, 0xc00762bbf0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/server/conn.go:425 +0xc2
+panic(0x175da60, 0x2a46240)
+	/home/robi/go1.11.1/src/runtime/panic.go:513 +0x1e6
+github.com/pingcap/tidb/expression.(*builtinGetParamStringSig).evalString(0xc007e02fc0, 0x0, 0x0, 0x0, 0x0, 0x7fe9c044f600, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/builtin_other.go:772 +0x34b
+github.com/pingcap/tidb/expression.(*ScalarFunction).EvalString(0xc0099b8aa0, 0x1c4aea0, 0xc00a448d20, 0x0, 0x0, 0x0, 0x0, 0x418600, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/scalar_function.go:217 +0x95
+github.com/pingcap/tidb/expression.(*ScalarFunction).Eval(0xc0099b8aa0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/scalar_function.go:189 +0x677
+github.com/pingcap/tidb/expression.foldConstant(0x1c4a1e0, 0xc007ef4af0, 0x0, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/constant_fold.go:145 +0x1987
+github.com/pingcap/tidb/expression.foldConstant(0x1c4a360, 0xc0099b8af0, 0x0, 0x0, 0x40f100)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/constant_fold.go:95 +0x3b8
+github.com/pingcap/tidb/expression.FoldConstant(0x1c4a360, 0xc0099b8af0, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/constant_fold.go:34 +0x45
+github.com/pingcap/tidb/expression.NewFunction(0x1c4aea0, 0xc00a448d20, 0x1920b92, 0x2, 0xc00a61a7e0, 0xc007629a80, 0x2, 0x2, 0x0, 0x0, ...)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/expression/scalar_function.go:99 +0x5e7
+github.com/pingcap/tidb/planner/core.(*expressionRewriter).constructBinaryOpFunction(0xc009768e80, 0x1c4a120, 0xc009ef97a0, 0x1c4a1e0, 0xc007ef4af0, 0x1920b92, 0x2, 0x0, 0x0, 0x0, ...)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/expression_rewriter.go:184 +0x202
+github.com/pingcap/tidb/planner/core.(*expressionRewriter).binaryOpToExpression(0xc009768e80, 0xc00a6eca90)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/expression_rewriter.go:914 +0x17c
+github.com/pingcap/tidb/planner/core.(*expressionRewriter).Leave(0xc009768e80, 0x1c1d7e0, 0xc00a6eca90, 0x0, 0x0, 0xc000689200)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/expression_rewriter.go:776 +0xf15
+github.com/pingcap/tidb/ast.(*BinaryOperationExpr).Accept(0xc00a6eca90, 0x1c196c0, 0xc009768e80, 0x0, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/ast/expressions.go:227 +0x440
+github.com/pingcap/tidb/planner/core.(*PlanBuilder).rewriteExprNode(0xc0006d9b80, 0xc009768e80, 0x1c34340, 0xc00a6eca90, 0xc000689200, 0x0, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/expression_rewriter.go:133 +0x8d
+github.com/pingcap/tidb/planner/core.(*PlanBuilder).rewriteWithPreprocess(0xc0006d9b80, 0x1c34340, 0xc00a6eca90, 0x1c4a420, 0xc0074a14a0, 0x0, 0xc007dbbe00, 0x0, 0x0, 0x0, ...)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/expression_rewriter.go:105 +0x1ec
+github.com/pingcap/tidb/planner/core.(*PlanBuilder).rewrite(0xc0006d9b80, 0x1c34340, 0xc00a6eca90, 0x1c4a420, 0xc0074a14a0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/expression_rewriter.go:81 +0xd8
+github.com/pingcap/tidb/planner/core.(*PlanBuilder).buildSelection(0xc0006d9b80, 0x1c4a420, 0xc0074a14a0, 0x1c34340, 0xc00a6ecb60, 0x0, 0x0, 0x0, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/logical_plan_builder.go:464 +0x29b
+github.com/pingcap/tidb/planner/core.(*PlanBuilder).buildSelect(0xc0006d9b80, 0xc008ded0e0, 0x1c4a420, 0xc0074a14a0, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/logical_plan_builder.go:1704 +0x9f2
+github.com/pingcap/tidb/planner/core.(*PlanBuilder).Build(0xc0006d9b80, 0x1c1e8a0, 0xc008ded0e0, 0x0, 0x0, 0x0, 0x0)
+	/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/planbuilder.go:178 +0xe0d
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+Release Version: v2.0.0-rc.4-881-g19f56480d-dirty
+Git Commit Hash: 19f56480d5591718a0d16936cb8af09d890091e9
+Git Branch: fix-prepare-plan-cache-panic
+UTC Build Time: 2018-10-25 05:04:59
+GoVersion: go version go1.11.1 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false
+```

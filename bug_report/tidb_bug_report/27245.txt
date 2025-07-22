@@ -1,0 +1,90 @@
+ID: 27245
+Title: select return error：ERROR 1105 (HY000): other error: [components/tidb_query_expr/src/impl_compare_in.rs:63]: Unexpected ExprType Float64 and EvalType Int
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+tidb configure:
+new_collations_enabled_on_first_bootstrap: true
+max-index-length: 12287
+
+mysql> select @@tidb_enable_clustered_index ;
++-------------------------------+
+| @@tidb_enable_clustered_index |
++-------------------------------+
+| ON                            |
++-------------------------------+
+1 row in set (0.00 sec)
+
+sql:
+
+CREATE TABLE `tbl_11` (
+  `col_0` year(4) NOT NULL,
+  `col_1` tinytext COLLATE utf8mb4_bin NOT NULL,
+  `col_2` bigint(20) NOT NULL,
+  `col_3` char(63) CHARACTER SET utf8 COLLATE utf8_bin NOT NULL,
+  `col_4` enum('Alice','Bob','Charlie','David') COLLATE utf8mb4_unicode_ci NOT NULL,
+  `col_5` blob NOT NULL,
+  `col_6` year(4) DEFAULT '2003',
+  `col_7` timestamp NOT NULL DEFAULT '2005-01-12 00:00:00',
+  `col_8` timestamp NOT NULL DEFAULT '1984-04-22 00:00:00',
+  `col_9` varchar(183) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`col_4`,`col_5`(3),`col_3`,`col_2`,`col_0`) /*T![clustered_index] CLUSTERED */,
+  KEY `idx_1` (`col_2`,`col_3`,`col_4`),
+  KEY `idx_2` (`col_6`,`col_4`,`col_9`(1),`col_0`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+PARTITION BY HASH( `col_2` )
+PARTITIONS 2;
+
+select col_2,col_0,col_9,col_5,col_1,col_8 from tbl_11 where tbl_11.col_0 in ( '1999' , '2000' , '1993' , null , '1991' ) and not( tbl_11.col_0 not in ( '1993' , '1991' ) ) order by tbl_11.col_0,tbl_11.col_1,tbl_11.col_2,tbl_11.col_3,tbl_11.col_4 limit 154;
+```
+
+### 2. What did you expect to see? (Required)
+
+`select return success`
+
+### 3. What did you see instead (Required)
+
+```
+select return error：
+
+mysql> explain select col_2,col_0,col_9,col_5,col_1,col_8 from tbl_11 where tbl_11.col_0 in ( '1999' , '2000' , '1993' , null , '1991' ) and not( tbl_11.col_0 not in ( '1993' , '1991' ) ) order by tbl_11.col_0,tbl_11.col_1,tbl_11.col_2,tbl_11.col_3,tbl_11. col_4 limit 154;
++------------------------------------+----------+-----------+----------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| id                                 | estRows  | task      | access object              | operator info                                                                                                           |
++------------------------------------+----------+-----------+----------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| Projection_14                      | 40.00    | root      |                            | test1.tbl_11.col_2, test1.tbl_11.col_0, test1.tbl_11.col_9, test1.tbl_11.col_5, test1.tbl_11.col_1, test1.tbl_11.col_8  |
+| └─TopN_17                          | 40.00    | root      |                            | test1.tbl_11.col_0, test1.tbl_11.col_1, test1.tbl_11.col_2, test1.tbl_11.col_3, test1.tbl_11.col_4, offset:0, count:154 |
+|   └─PartitionUnion_22              | 40.00    | root      |                            |                                                                                                                         |
+|     ├─TopN_23                      | 20.00    | root      |                            | test1.tbl_11.col_0, test1.tbl_11.col_1, test1.tbl_11.col_2, test1.tbl_11.col_3, test1.tbl_11.col_4, offset:0, count:154 |
+|     │ └─TableReader_32             | 20.00    | root      |                            | data:Selection_31                                                                                                       |
+|     │   └─Selection_31             | 20.00    | cop[tikv] |                            | in(test1.tbl_11.col_0, 1991, 1993)                                                                                      |
+|     │     └─TableFullScan_30       | 10000.00 | cop[tikv] | table:tbl_11, partition:p0 | keep order:false, stats:pseudo                                                                                          |
+|     └─TopN_36                      | 20.00    | root      |                            | test1.tbl_11.col_0, test1.tbl_11.col_1, test1.tbl_11.col_2, test1.tbl_11.col_3, test1.tbl_11.col_4, offset:0, count:154 |
+|       └─TableReader_45             | 20.00    | root      |                            | data:Selection_44                                                                                                       |
+|         └─Selection_44             | 20.00    | cop[tikv] |                            | in(test1.tbl_11.col_0, 1991, 1993)                                                                                      |
+|           └─TableFullScan_43       | 10000.00 | cop[tikv] | table:tbl_11, partition:p1 | keep order:false, stats:pseudo                                                                                          |
++------------------------------------+----------+-----------+----------------------------+-------------------------------------------------------------------------------------------------------------------------+
+11 rows in set (0.01 sec)
+
+mysql> select col_2,col_0,col_9,col_5,col_1,col_8 from tbl_11 where tbl_11.col_0 in ( '1999' , '2000' , '1993' , null , '1991' ) and not( tbl_11.col_0 not in ( '1993' , '1991' ) ) order by tbl_11.col_0,tbl_11.col_1,tbl_11.col_2,tbl_11.col_3,tbl_11. col_4 limit 154;        
+ERROR 1105 (HY000): other error: [components/tidb_query_expr/src/impl_compare_in.rs:63]: Unexpected ExprType Float64 and EvalType Int
+```
+
+### 4. What is your TiDB version? (Required)
+
+only occur release-5.0
+
+Release Version: v5.0.3-37-geb462f2db
+Edition: Community
+Git Commit Hash: eb462f2db4702d3bf4963a92d520484db1e31b8e
+Git Branch: HEAD
+UTC Build Time: 2021-08-15 18:24:13
+GoVersion: go1.13.7
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+

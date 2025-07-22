@@ -1,0 +1,55 @@
+ID: 44025
+Title: optimizer chooses a plan with higher cost after the cost model refactor
+Description:
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table t(a int, b int, c int, d int, index ia(a), index ibc(b,c));
+set @@tidb_cost_model_version=1;
+explain format = 'verbose' select * from t where a between 1 and 5 and b != 200 and c = 20 limit 100000;
+explain format = 'verbose' select * from t use index (ia) where a between 1 and 5 and b != 200 and c = 20 limit 100000;
+```
+
+### 2. What did you expect to see? (Required)
+
+Choose the plan with lower cost.
+
+### 3. What did you see instead (Required)
+
+```
+> explain format = 'verbose' select * from t where a between 1 and 5 and b != 200 and c = 20 limit 100000;
++-------------------------------+---------+-----------+-----------+--------------------------+--------------------------------------------------------------+
+| id                            | estRows | estCost   | task      | access object            | operator info                                                |
++-------------------------------+---------+-----------+-----------+--------------------------+--------------------------------------------------------------+
+| Limit_9                       | 0.17    | 32719.01  | root      |                          | offset:0, count:100000                                       |
+| └─IndexLookUp_22              | 0.17    | 32719.01  | root      |                          |                                                              |
+|   ├─Selection_19(Build)       | 6.66    | 489265.00 | cop[tikv] |                          | eq(test.t.c, 20)                                             |
+|   │ └─IndexRangeScan_17       | 6656.67 | 469295.00 | cop[tikv] | table:t, index:ibc(b, c) | range:[-inf,200), (200,+inf], keep order:false, stats:pseudo |
+|   └─Limit_21(Probe)           | 0.17    | 579.13    | cop[tikv] |                          | offset:0, count:100000                                       |
+|     └─Selection_20            | 0.17    | 579.13    | cop[tikv] |                          | ge(test.t.a, 1), le(test.t.a, 5)                             |
+|       └─TableRowIDScan_18     | 6.66    | 559.16    | cop[tikv] | table:t                  | keep order:false, stats:pseudo                               |
++-------------------------------+---------+-----------+-----------+--------------------------+--------------------------------------------------------------+
+
+> explain format = 'verbose' select * from t use index (ia) where a between 1 and 5 and b != 200 and c = 20 limit 100000;
++----------------------------------+---------+----------+-----------+----------------------+---------------------------------------------+
+| id                               | estRows | estCost  | task      | access object        | operator info                               |
++----------------------------------+---------+----------+-----------+----------------------+---------------------------------------------+
+| Limit_9                          | 0.17    | 4635.39  | root      |                      | offset:0, count:100000                      |
+| └─IndexLookUp_14                 | 0.17    | 4635.39  | root      |                      |                                             |
+|   ├─IndexRangeScan_10(Build)     | 250.00  | 14250.00 | cop[tikv] | table:t, index:ia(a) | range:[1,5], keep order:false, stats:pseudo |
+|   └─Limit_13(Probe)              | 0.17    | 21750.00 | cop[tikv] |                      | offset:0, count:100000                      |
+|     └─Selection_12               | 0.17    | 21750.00 | cop[tikv] |                      | eq(test.t.c, 20), ne(test.t.b, 200)         |
+|       └─TableRowIDScan_11        | 250.00  | 21000.00 | cop[tikv] | table:t              | keep order:false, stats:pseudo              |
++----------------------------------+---------+----------+-----------+----------------------+---------------------------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+Can be reproduced from v6.2.0.
+
+On v6.2.x, there is a workaround by using `set @@tidb_enable_new_cost_interface = 0;`
+
+Some customers upgrades from a version before the cost model refactor and cost model v2 was introduced, to a version after they are introduced. They may meet such regressions.

@@ -1,0 +1,210 @@
+ID: 19054
+Title: Data race when Update -> IndexLookUp -> UnionScan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+A new test case added in #19042.
+
+```go
+func (s *testSuite7) TestUpdateScanningHandles(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t;")
+	tk.MustExec("create table t(a int primary key, b int);")
+	tk.MustExec("begin")
+	for i := 2; i < 100000; i++ {
+		tk.MustExec("insert into t values (?, ?)", i, i)
+	}
+	tk.MustExec("commit;")
+
+	tk.MustExec("set tidb_distsql_scan_concurrency = 1;")
+	tk.MustExec("set tidb_index_lookup_join_concurrency = 1;")
+	tk.MustExec("set tidb_projection_concurrency=1;")
+	tk.MustExec("set tidb_init_chunk_size=1;")
+	tk.MustExec("set tidb_max_chunk_size=32;")
+
+	tk.MustExec("begin")
+	tk.MustExec("insert into t values (1, 1);")
+	tk.MustExec("update /*+ INL_JOIN(t1) */ t t1, (select a, b from t) t2 set t1.b = t2.b where t1.a = t2.a + 1000;")
+	result := tk.MustQuery("select a, a-b from t where a > 1000 and a - b != 1000;")
+	c.Assert(result.Rows(), HasLen, 0)
+	tk.MustExec("rollback;")
+}
+```
+
+### 2. What did you expect to see? (Required)
+No data race.
+
+### 3. What did you see instead (Required)
+#### master
+```
+WARNING: DATA RACE
+Read at 0x00c0ba891878 by goroutine 620:
+  github.com/pingcap/tidb/kv.(*memdb).successor()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/kv/memdb.go:752 +0x1a6
+  github.com/pingcap/tidb/kv.(*memdbIterator).Next()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/kv/memdb_iterator.go:88 +0x2bc
+  github.com/pingcap/tidb/executor.iterTxnMemBuffer()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/mem_reader.go:328 +0xc5
+  github.com/pingcap/tidb/executor.(*memTableReader).getMemRows()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/mem_reader.go:203 +0x143
+  github.com/pingcap/tidb/executor.(*UnionScanExec).open()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/union_scan.go:83 +0x2f9
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildUnionScanForIndexJoin()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/builder.go:2902 +0x2fa
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/builder.go:2866 +0x6d7
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/builder.go:2853 +0x110
+  github.com/pingcap/tidb/executor.(*innerWorker).fetchInnerResults()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:611 +0x1c1
+  github.com/pingcap/tidb/executor.(*innerWorker).handleTask()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:482 +0xb7
+  github.com/pingcap/tidb/executor.(*innerWorker).run()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:466 +0xf8
+
+Previous write at 0x00c0ba891878 by goroutine 718:
+  github.com/pingcap/tidb/kv.(*memdb).leftRotate()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/kv/memdb.go:486 +0x18f
+  github.com/pingcap/tidb/kv.(*memdb).tranverse()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/kv/memdb.go:449 +0x15a3
+  github.com/pingcap/tidb/kv.(*memdb).set()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/kv/memdb.go:299 +0xda
+  github.com/pingcap/tidb/kv.(*memdb).Set()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/kv/memdb.go:255 +0x155
+  github.com/pingcap/tidb/table/tables.(*TableCommon).UpdateRecord()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/table/tables/tables.go:393 +0x1223
+  github.com/pingcap/tidb/executor.updateRecord()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/write.go:210 +0x1f46
+  github.com/pingcap/tidb/executor.(*UpdateExec).exec()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/update.go:99 +0x78b
+  github.com/pingcap/tidb/executor.(*UpdateExec).updateRows()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/update.go:178 +0x6a7
+  github.com/pingcap/tidb/executor.(*UpdateExec).Next()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/update.go:129 +0xa0
+  github.com/pingcap/tidb/executor.Next()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/executor.go:269 +0x16a
+  github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/adapter.go:502 +0x38e
+  github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/adapter.go:384 +0x1a2
+  github.com/pingcap/tidb/executor.(*ExecStmt).Exec()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/adapter.go:352 +0x3f6
+  github.com/pingcap/tidb/session.runStmt()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/session/session.go:1196 +0x2c1
+  github.com/pingcap/tidb/session.(*session).ExecuteStmt()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/session/session.go:1161 +0xa57
+  github.com/pingcap/tidb/util/testkit.(*TestKit).Exec()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:160 +0x2ee
+  github.com/pingcap/tidb/util/testkit.(*TestKit).MustExec()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:206 +0x91
+  github.com/pingcap/tidb/executor_test.(*testSuite7).TestUpdateScanningHandles()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/union_scan_test.go:355 +0x491
+  github.com/pingcap/tidb/executor_test.(*testSuite7).TestUpdateScanningHandles()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/union_scan_test.go:340 +0x169
+  runtime.call32()
+      /usr/local/go/src/runtime/asm_amd64.s:539 +0x3a
+  reflect.Value.Call()
+      /usr/local/go/src/reflect/value.go:321 +0xd3
+  github.com/pingcap/check.(*suiteRunner).forkTest.func1()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:850 +0x9aa
+  github.com/pingcap/check.(*suiteRunner).forkCall.func1()
+      /home/jenkins/agent/workspace/tidb_ghpr_unit_test/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:739 +0x113
+
+```
+
+#### release-4.0
+```
+WARNING: DATA RACE
+Read at 0x00c006a32a10 by goroutine 71:
+  github.com/pingcap/tidb/kv/memdb.(*node).nodeLen()
+      /home/tuzi/projects/tidb/kv/memdb/memdb.go:510 +0x31e
+  github.com/pingcap/tidb/kv/memdb.(*node).getKey()
+      /home/tuzi/projects/tidb/kv/memdb/memdb.go:514 +0x304
+  github.com/pingcap/tidb/kv/memdb.(*Sandbox).findGreaterEqual()
+      /home/tuzi/projects/tidb/kv/memdb/memdb.go:259 +0x303
+  github.com/pingcap/tidb/kv/memdb.(*Iterator).Seek()
+      /home/tuzi/projects/tidb/kv/memdb/iterator.go:60 +0x6d
+  github.com/pingcap/tidb/kv.(*memDbBuffer).Iter()
+      /home/tuzi/projects/tidb/kv/memdb_buffer.go:63 +0x1b8
+  github.com/pingcap/tidb/store/tikv.(*tikvTxnStagingBuffer).Iter()
+      <autogenerated>:1 +0xc8
+  github.com/pingcap/tidb/kv.(*BufferStore).Iter()
+      /home/tuzi/projects/tidb/kv/buffer_store.go:73 +0xb9
+  github.com/pingcap/tidb/executor.iterTxnMemBuffer()
+      /home/tuzi/projects/tidb/executor/mem_reader.go:311 +0x379
+  github.com/pingcap/tidb/executor.(*memTableReader).getMemRows()
+      /home/tuzi/projects/tidb/executor/mem_reader.go:202 +0x143
+  github.com/pingcap/tidb/executor.(*UnionScanExec).open()
+      /home/tuzi/projects/tidb/executor/union_scan.go:142 +0x3d8
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildUnionScanForIndexJoin()
+      /home/tuzi/projects/tidb/executor/builder.go:2680 +0x2fa
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal()
+      /home/tuzi/projects/tidb/executor/builder.go:2644 +0xc12
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin()
+      /home/tuzi/projects/tidb/executor/builder.go:2631 +0x110
+  github.com/pingcap/tidb/executor.(*innerWorker).fetchInnerResults()
+      /home/tuzi/projects/tidb/executor/index_lookup_join.go:611 +0x1c1
+  github.com/pingcap/tidb/executor.(*innerWorker).handleTask()
+      /home/tuzi/projects/tidb/executor/index_lookup_join.go:482 +0xb7
+  github.com/pingcap/tidb/executor.(*innerWorker).run()
+      /home/tuzi/projects/tidb/executor/index_lookup_join.go:466 +0xfe
+
+Previous write at 0x00c006a32a10 by goroutine 126:
+  github.com/pingcap/tidb/kv/memdb.(*arena).newNode()
+      /home/tuzi/projects/tidb/kv/memdb/arena.go:87 +0xee
+  github.com/pingcap/tidb/kv/memdb.(*Sandbox).Put()
+      /home/tuzi/projects/tidb/kv/memdb/memdb.go:89 +0x331
+  github.com/pingcap/tidb/kv.(*memDbBuffer).Set()
+      /home/tuzi/projects/tidb/kv/memdb_buffer.go:100 +0x3fc
+  github.com/pingcap/tidb/table/tables.(*TableCommon).UpdateRecord()
+      /home/tuzi/projects/tidb/table/tables/tables.go:378 +0x1160
+  github.com/pingcap/tidb/executor.updateRecord()
+      /home/tuzi/projects/tidb/executor/write.go:196 +0x1a8c
+  github.com/pingcap/tidb/executor.(*UpdateExec).exec()
+      /home/tuzi/projects/tidb/executor/update.go:95 +0x7bf
+  github.com/pingcap/tidb/executor.(*UpdateExec).updateRows()
+      /home/tuzi/projects/tidb/executor/update.go:174 +0x66c
+  github.com/pingcap/tidb/executor.(*UpdateExec).Next()
+      /home/tuzi/projects/tidb/executor/update.go:125 +0xa0
+  github.com/pingcap/tidb/executor.Next()
+      /home/tuzi/projects/tidb/executor/executor.go:250 +0x16a
+  github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor()
+      /home/tuzi/projects/tidb/executor/adapter.go:499 +0x38e
+  github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay()
+      /home/tuzi/projects/tidb/executor/adapter.go:381 +0x1a2
+  github.com/pingcap/tidb/executor.(*ExecStmt).Exec()
+      /home/tuzi/projects/tidb/executor/adapter.go:349 +0x3f6
+  github.com/pingcap/tidb/session.runStmt()
+      /home/tuzi/projects/tidb/session/tidb.go:276 +0x365
+  github.com/pingcap/tidb/session.(*session).executeStatement()
+      /home/tuzi/projects/tidb/session/session.go:1033 +0xd9
+  github.com/pingcap/tidb/session.(*session).execute()
+      /home/tuzi/projects/tidb/session/session.go:1145 +0xaa5
+  github.com/pingcap/tidb/session.(*session).Execute()
+      /home/tuzi/projects/tidb/session/session.go:1076 +0xee
+  github.com/pingcap/tidb/server.(*TiDBContext).Execute()
+      /home/tuzi/projects/tidb/server/driver_tidb.go:248 +0x9f
+  github.com/pingcap/tidb/server.(*clientConn).handleQuery()
+      /home/tuzi/projects/tidb/server/conn.go:1272 +0xc3
+  github.com/pingcap/tidb/server.(*clientConn).dispatch()
+      /home/tuzi/projects/tidb/server/conn.go:906 +0x780
+  github.com/pingcap/tidb/server.(*clientConn).Run()
+      /home/tuzi/projects/tidb/server/conn.go:715 +0x364
+  github.com/pingcap/tidb/server.(*clientConn).Run()
+      /home/tuzi/projects/tidb/server/conn.go:715 +0x364
+  github.com/pingcap/tidb/server.(*Server).onConn()
+      /home/tuzi/projects/tidb/server/server.go:415 +0xfe8
+```
+
+### 4. Affected version (Required)
+
+<!-- v3.0.0, v4.0.0, etc -->
+master, release-4.0
+
+### 5. Root Cause Analysis
+
+<!-- should be filled by the investigator before it's closed -->

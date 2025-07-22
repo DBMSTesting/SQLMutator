@@ -1,0 +1,119 @@
+ID: 13423
+Title: Parquet large file write performance degredation
+Description:
+### What happens?
+
+`duckdb` and arrow seem to write parquet files at roughly the same speed until the data gets to about 10+ GB, at which point duckdb is about an order of magnitude slower.
+
+The issue also impacts partitioned writes and `COPY x.parquet TO y.parquet` workflows. Also posted in the [R issues](https://github.com/duckdb/duckdb-r/issues/208), but I think this is a DuckDB problem, since R is simply sending the query.
+
+### To Reproduce
+
+
+``` r
+library(duckdb)
+#> Loading required package: DBI
+#> Warning: package 'DBI' was built under R version 4.3.3
+library(arrow)
+#> Warning: package 'arrow' was built under R version 4.3.3
+#> 
+#> Attaching package: 'arrow'
+#> The following object is masked from 'package:utils':
+#> 
+#>     timestamp
+library(dplyr)
+#> Warning: package 'dplyr' was built under R version 4.3.2
+#> 
+#> Attaching package: 'dplyr'
+#> The following objects are masked from 'package:stats':
+#> 
+#>     filter, lag
+#> The following objects are masked from 'package:base':
+#> 
+#>     intersect, setdiff, setequal, union
+library(microbenchmark)
+library(glue)
+#> Warning: package 'glue' was built under R version 4.3.3
+
+# Generate a large DataFrame
+set.seed(123)
+n <- 1e9  # Number of rows
+df <- data.frame(
+  id = 1:n,
+  value = rnorm(n),
+  category1 = sample(LETTERS, n, replace = TRUE),
+  category2 = sample(letters, n, replace = TRUE),
+  description = replicate(n, paste(sample(c(letters, LETTERS), 10, replace = TRUE), collapse = ""))
+)
+
+df_size <- object.size(df)
+df_size_mb <- df_size / (1024^3)
+cat("DataFrame size: ", df_size_mb, "GB\n")
+#> DataFrame size:  93.13226 GB
+
+# Connect to DuckDB
+con <- dbConnect(duckdb::duckdb())
+
+# Copy DataFrame to DuckDB
+dbWriteTable(con, "df", df, overwrite = TRUE)
+
+# Create a temporary file
+temp_file <- tempfile(fileext = ".parquet")
+
+# Measure the time to write the DataFrame to Parquet using SQL
+write_time <- microbenchmark(
+  duck_part = dbExecute(con, glue("COPY (SELECT * FROM df) TO '{tempfile()}' (FORMAT 'parquet', PARTITION_BY (category1), overwrite_or_ignore)")),
+  duck = dbExecute(con, glue("COPY (SELECT * FROM df) TO '{tempfile()}' (FORMAT 'parquet', overwrite_or_ignore)")),
+  arrow = write_parquet(df, tempfile()),
+  times = 1
+)
+
+print(write_time)
+#> Unit: seconds
+#>       expr       min        lq      mean    median        uq       max neval
+#>  duck_part 4622.2497 4622.2497 4622.2497 4622.2497 4622.2497 4622.2497     1
+#>       duck 2175.2355 2175.2355 2175.2355 2175.2355 2175.2355 2175.2355     1
+#>      arrow  260.8397  260.8397  260.8397  260.8397  260.8397  260.8397     1
+
+# Clean up
+dbDisconnect(con, shutdown = TRUE)
+```
+
+
+### OS:
+
+Windows
+
+### DuckDB Version:
+
+1.0
+
+### DuckDB Client:
+
+R
+
+### Full Name:
+
+Arthur Gailes
+
+### Affiliation:
+
+Self
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have
+
+**Edit**: added the partition timing, which is worse.

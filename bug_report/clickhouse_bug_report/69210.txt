@@ -1,0 +1,85 @@
+ID: 69210
+Title: View definer is ignored by parameterized view
+Description:
+When setting a definer and SQL SECURITY to DEFINER on a parameterized view, it seems to be ignored and to use the invoker permissions to check if the query is allowed.
+
+This prevents the use of of parameterized views when wanting to also hide the underlying tables from the user.
+
+**Does it reproduce on the most recent release?**
+
+Tested on ClickHouse server 24.8.3
+
+**How to reproduce**
+
+```sh
+docker run --rm -d --name my_clickhouse clickhouse/clickhouse-server
+```
+```sql
+-- as default (`docker exec -it -e LANG=C.UTF-8 my_clickhouse clickhouse-client`)
+CREATE DATABASE private_db;
+CREATE DATABASE public_db;
+
+CREATE USER my_user NOT IDENTIFIED;
+GRANT SELECT ON public_db.* TO my_user;
+
+CREATE USER my_admin NOT IDENTIFIED;
+GRANT ALL ON private_db.* TO my_admin;
+GRANT ALL ON public_db.* TO my_admin;
+```
+```sql
+-- as my_admin (`docker exec -it -e LANG=C.UTF-8 my_clickhouse clickhouse-client  --user my_admin`)
+CREATE TABLE private_db.my_table (
+  id UInt32
+)
+ENGINE = MergeTree()
+ORDER BY tuple();
+
+CREATE VIEW public_db.my_view DEFINER = my_admin AS
+SELECT * FROM private_db.my_table;
+
+CREATE VIEW public_db.my_param_view DEFINER = my_admin AS
+SELECT *, {param:String} FROM private_db.my_table;
+
+SHOW CREATE VIEW public_db.my_view;
+-- CREATE VIEW public_db.my_view
+-- (
+--     `id` UInt32
+-- )
+-- DEFINER = my_admin SQL SECURITY DEFINER
+-- AS SELECT *
+-- FROM private_db.my_table
+
+SHOW CREATE VIEW public_db.my_param_view;
+-- CREATE VIEW public_db.my_param_view
+-- DEFINER = my_admin SQL SECURITY DEFINER
+-- AS SELECT
+--     *,
+--     {param:String}
+-- FROM private_db.my_table
+```
+```sql
+-- as my_user (`docker exec -it -e LANG=C.UTF-8 my_clickhouse clickhouse-client  --user my_user`)
+SELECT * FROM public_db.my_view;
+-- Ok.
+-- 0 rows in set. Elapsed: 0.006 sec. 
+SELECT * FROM public_db.my_param_view(param='test');
+-- Elapsed: 0.002 sec. 
+-- Received exception from server (version 24.8.3):
+-- Code: 497. DB::Exception: Received from localhost:9000. DB::Exception: my_user: Not enough privileges. To execute this query, it's necessary to have the grant SELECT(id) ON private_db.my_table. (ACCESS_DENIED)
+```
+
+**Expected behavior**
+
+User `my_user` should be able to query `public_db.my_param_view` because the definer (`my_admin`) has the permissions to query `private_db.my_table`
+
+**Error message and/or stacktrace**
+
+```
+Code: 497. DB::Exception: Received from localhost:9000. DB::Exception: my_user: Not enough privileges. To execute this query, it's necessary to have the grant SELECT(id) ON private_db.my_table. (ACCESS_DENIED)
+```
+
+**Additional context**
+
+Granting select on `private_db.my_table` to `my_user` does solve the error, but this means exposing the view's source table to the user…
+
+I couldn't find a way to reproduce on [https://fiddle.clickhouse.com/](https://fiddle.clickhouse.com/) because I couldn't change user nor edit default user permissions. 

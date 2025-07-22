@@ -1,0 +1,49 @@
+ID: 15691
+Title: Check for mark join indexes in aggregate and group by
+Description:
+Fixes https://github.com/duckdblabs/duckdb-internal/issues/3922
+
+The failing query
+```SQL
+SET order_by_non_integer_literal=true;
+SELECT DISTINCT ON ( 'string' ) 'string', GROUP BY CUBE ( 'string', ), 'string' IN ( SELECT 'string' ), HAVING 'string' IN ( SELECT 'string');
+```
+
+The Plan generated before optimization is below. During optimization there is an attempt to convert the mark join into a semi. Before this conversion takes place, we usually check to make sure the mark join is not used in any operators above the mark join to prevent plan verification errors. Up until this point, only logical projections were checked for mark joins. Turns out this query is planned in such a way that the mark join is in one of the expressions of the aggregate operator. This was not checked, so the mark to semi conversion would take place. The fix is to modify the filter pushdown optimization so that it stores table indexes from logical aggregate operators. 
+
+```
+┌───────────────────────────┐
+│       PROJECTION #1       │
+│    ────────────────────   │
+│    Expressions: #[2.0]    │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│    Expressions: #[2.1]    │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│    AGGREGATE #2, #3, #4   │
+│    ────────────────────   │
+│          Groups:          │
+│          'string'         │
+│          #[14.0]          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      COMPARISON_JOIN      │
+│    ────────────────────   │
+│      Join Type: MARK      │
+│                           ├──────────────┐
+│        Conditions:        │              │
+│    ('string' = #[8.0])    │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│       DUMMY_SCAN #0       ││       PROJECTION #8       │
+│    ────────────────────   ││    ────────────────────   │
+│                           ││   Expressions: 'string'   │
+└───────────────────────────┘└─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │       DUMMY_SCAN #7       │
+                             │    ────────────────────   │
+                             └───────────────────────────┘
+```

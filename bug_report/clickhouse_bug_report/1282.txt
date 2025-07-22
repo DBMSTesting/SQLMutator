@@ -1,0 +1,56 @@
+ID: 1282
+Title: DB::Exception: bad size of marks file when using array or nested of nullables
+Description:
+Hi,
+
+I was trying to import Firebase dataset from Google BigQuery into Clickhouse and stumbled onto some weird issue.
+It took sometime to make it reproducible anyhow here's the gist.
+
+### Issue
+
+Say you're using Array (or Nested) of Nullable element with MergeTree engine.
+If total number of elements throughout the data exceeds index granularity you set when creating table, the respective fields are no longer queryable. It emits error message like this.
+
+```
+Received exception from server:
+Code: 246. ~~~ DB::Exception: bad size of marks file  ~~~
+```
+
+There was no apparent error message at the point of insertion.
+Also other fields can be queried just fine.
+
+### Example
+
+Here's an example code to reproduce the issue.
+
+```
+clickhouse-client --query="DROP TABLE test2"
+clickhouse-client --query="CREATE TABLE test2 (date Date, keys Array(Nullable(String))) ENGINE = MergeTree(date, date, 1)"
+clickhouse-client --query="INSERT INTO test2 VALUES ('2017-09-10', ['a', 'b'])"
+clickhouse-client --query="SELECT * FROM test2 LIMIT 1"
+```
+
+This fails with following error:
+
+```
+Received exception from server:
+Code: 246. DB::Exception: Received from clickhouse-server:9000, 172.17.0.2. DB::Exception: bad size of marks file /var/lib/clickhouse/data/default/test2/20170910_20170910_1_1_0/keys.null.mrk':32, must be: 16: (while readingcolumn keys): (while reading from part /var/lib/clickhouse/data/default/test2/20170910_20170910_1_1_0/ from mark 0 with max_rows_to_read = 1).
+```
+
+If you increase the index granularity of table you're creating, for example 8192, the same thing happens when 8193th element has added to the keys array.
+Interestingly, how this capping is applied seems to be depending on the way you insert the data.
+When manually inserting each value using query like this, `INSERT INTO test2 VALUES ('2017-09-10', ['a']), ('2017-09-10', ['b', 'c', 'd']), ('2017-09-10', ['c'])`, it is applied to each row. So if your index granularity is 5, 5 elements in the array for each row is fine. If some row got 11th element it no longer works.
+When using JSONEachRow format for example, it seems to be applied to the whole data. With index granularity of 5, you can use upto 5 elements in total no matter how they are distributed throughout rows. 
+For example, following two raw JSON data
+```
+{"date": "2017-09-18", "keys": ["a", "b", "c", "d", "e", "f"]}
+```
+and 
+```
+{"date": "2017-09-18", "keys": ["a", "b", "c"]}
+{"date": "2017-09-18", "keys": ["d", "e", "f"]}
+```
+will emit same error when inserted  into a table with index granularity of 5 and `keys` are queried.
+
+I first thought this was due to some anomalies inside my dataset, but it turns out to be reproducible in a simple manner.
+I'm using latest stable version (v1.1.54289) and tested on Ubuntu 16.04 vm and Docker on OSX.

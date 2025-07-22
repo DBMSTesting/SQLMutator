@@ -1,0 +1,368 @@
+ID: 12958
+Title: `COPY tbl TO 'output.parquet' (FORMAT PARQUET);` outputs incomplete statistics in metadata with complex types if fields are `NULL`
+Description:
+# What happens?
+
+## Overview
+I am attempting to export tables as parquet files with the `COPY tbl TO 'output.parquet' (FORMAT PARQUET);` syntax from the [Parquet Export](https://duckdb.org/docs/guides/file_formats/parquet_export.html) docs and make use of `pyiceberg.Table().add_files()` method for registering parquet files as datafiles to an [Apache Iceberg](https://iceberg.apache.org) [Table](https://py.iceberg.apache.org/reference/pyiceberg/table/) like seen [here](https://github.com/apache/iceberg-python/blob/main/mkdocs/docs/api.md#add-files), but the [`pyiceberg.table.Table.add_files()` method](https://github.com/apache/iceberg-python/blob/main/pyiceberg/table/__init__.py#L1641) fails to validates the existance of statistics in the parquet metadata in a function called [`data_file_statistics_from_parquet_metadata`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L1838), assumedly per the [Apache Iceberg Spec](https://iceberg.apache.org/spec/).
+
+[`pyiceberg.io.pyarrow.data_file_statistics_from_parquet_metadata()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L1838) attempts the validation using [a member of the `pyarrow.parquet.ColumnChunkMetaData` class called `is_stats_set: bool`]((https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ColumnChunkMetaData.html#pyarrow.parquet.ColumnChunkMetaData.is_stats_set)) from [`pyarrow's latest version (currently v16.1.0)`](https://github.com/apache/iceberg-python/blob/main/pyproject.toml#L61) as seen [on this line of the pyiceberg src](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L1910). For a simpler look, so we can all now forget about `pyiceberg`, here is a snippet to express the validation that is failing in isolation:
+```python
+import pyarrow.parquet as pq # version 16.1.0
+
+parquet_file: str = "/path/to/file.parquet"
+
+parquet_metadata = pq.read_metadata(parquet_file)
+
+for r in range(parquet_metadata.num_row_groups):
+    row_group = parquet_metadata.row_group(r)
+
+    for pos in range(parquet_metadata.num_columns):
+        column = row_group.column(pos)
+        if column.is_stats_set:
+            continue
+        else:
+            print(f"PyArrow statistics missing for column {pos}!")
+```
+If I am reading the [pyarrow source code correctly for `is_stats_set()`](https://github.com/apache/arrow/blob/main/cpp/src/parquet/metadata.cc#L254C15-L254C29), then I assume per [this `MakeStatistics()` function call](https://github.com/apache/arrow/blob/main/cpp/src/parquet/metadata.cc#L93) and [this `MakeStatistics()` function definition](https://github.com/apache/arrow/blob/main/cpp/src/parquet/statistics.h#L361), that `null_count`, `distinct_count`, `num_values`, `min_value`, and `max_value` need to be set in the parquet file's metadata in order to pass this check.
+
+After creating a few types of tables, exporting them to parquet, and checking their metadata with [`parquet_metadata()`](https://duckdb.org/docs/data/parquet/metadata#parquet-metadata), I found that these statistics some of these are missing from columns with an `ARRAY`, `LIST`, `MAP`, or `STRUCT` type when the table contains rows in which those columns are null.
+
+## TLDR
+After creating a few types of tables, exporting them to parquet, and checking their metadata with [`parquet_metadata()`](https://duckdb.org/docs/data/parquet/metadata#parquet-metadata), I found that these statistics some of these are missing from columns with an `ARRAY`, `LIST`, `MAP`, or `STRUCT` type when the table contains rows in which those columns are null.
+
+## Notes
+* [location in arrow src of `is_stats_set()`](https://github.com/apache/arrow/blob/main/cpp/src/parquet/metadata.cc#L254)
+* [`pyiceberg.table.Table.add_files()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/table/__init__.py#L1641)'s call sequence to [`pyiceberg.io.pyarrow.data_file_statistics_from_parquet_metadata()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L1838) goes:
+    1. [`pyiceberg.table.Table.add_files()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/table/__init__.py#L1641)
+    2. [`pyiceberg.table.Transaction.add_files()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/table/__init__.py#L686C9-L686C18)
+    3. [`pyiceberg.table.Table._parquet_files_to_data_files()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/table/__init__.py#L3077)
+    4. [`pyiceberg.io.pyarrow.parquet_files_to_data_files()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L2035)
+    5. [`pyiceberg.io.pyarrow.data_file_statistics_from_parquet_metadata()`](https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L1838)
+* I removed the `INTERVAL` type, listed in [SQL Data Types](https://duckdb.org/docs/sql/data_types/overview#nested--composite-types), from my testing after finding that no statistics would be created for those columns whatsoever whether the values were null or not. For reference I used values like `INTERVAL '0' SECOND`, `INTERVAL '1' HOUR`, `INTERVAL '100' YEAR`, and `NULL` in ``INSERT INTO tbl VALUES (...);` queries and found that the would be represented as expected in `SELECT * FROM tbl;` queries. I am happy to submit an issue addressing this, although it I assume likeley is more a question of how to represent those values in stats and I really don't have any personal application for it's functionality.
+* I also removed the `BIT` type, listed in [SQL Data Types](https://duckdb.org/docs/sql/data_types/overview#nested--composite-types), from my testing after finding that `COPY tbl TO 'output.parquet' (FORMAT PARQUET);` raises a `Not implemented Error: Unimplemented type for Parquet "BIT"` when the column type is present in the table. Again, more than happy to submit an issue for it if that would be helpful.
+
+
+# To Reproduce
+
+## `v1.0.0` on `macOS` via `Command line`
+### Install and Start
+1. `mkdir expmt-duckdb-parquet-export-tbl-w-complex-types && cd expmt-duckdb-parquet-export-tbl-w-complex-types` 
+2. Installation per [DuckDB Installation](https://duckdb.org/docs/installation/?version=stable&environment=cli&platform=macos&download_method=direct) docs, `wget -q https://github.com/duckdb/duckdb/releases/download/v1.0.0/duckdb_cli-osx-universal.zip -O duckdb_cli-osx-universal.zip && unzip -q duckdb_cli-osx-universal.zip && mv duckdb duckdb_v1.0.0 && rm duckdb_cli-osx-universal.zip`
+3. `./duckdb_v1.0.0`
+### Test Parquet Export without Nulls
+1. CREATE TABLE (in duckdb shell) with all supported SQL data types, per [Data Types](https://duckdb.org/docs/sql/data_types/overview) docs
+```sql
+CREATE TABLE tbl_without_nulls (
+    bigint_int8_long_type BIGINT,
+    blob_bytea_binary_varbinary_type BLOB,
+    boolean_bool_logical_type BOOLEAN,
+    date_type DATE,
+    decimal_numeric_type DECIMAL(18,3),
+    double_float8_type DOUBLE,
+    hugeint_type HUGEINT,
+    integer_int4_int_signed_type INTEGER,
+    real_float4_float_type REAL,
+    smallint_int2_short_type SMALLINT,
+    time_type TIME,
+    timestamptz_type TIMESTAMPTZ,
+    timestamp_datetime_type TIMESTAMP,
+    tinyint_int1_type TINYINT,
+    ubigint_type UBIGINT,
+	  uhugeint_type UHUGEINT,
+	  uinteger_type UINTEGER,
+	  usmallint_type USMALLINT,
+	  utinyint_type UTINYINT,
+	  uuid_type UUID,
+    varchar_char_bpchar_text_string_type VARCHAR,
+    array_integer_type INTEGER[3],
+    list_integer_type INTEGER[],
+    map_integer_varchar_type MAP(INTEGER, VARCHAR),
+    struct_integer_varchar_type STRUCT(i INTEGER, j VARCHAR),
+    union_integer_varchar_type UNION(num INTEGER, text VARCHAR)
+);
+```
+2. NSERT INTO (in duckdb shell) non-null values, somewhat per [Numeric Types](https://duckdb.org/docs/sql/data_types/numeric.html) Docs
+```sql
+-- Insert min values
+INSERT INTO tbl_without_nulls VALUES
+(
+    -9223372036854775808,  -- min BIGINT
+    x'00',                 -- min BLOB
+    FALSE,                 -- min BOOLEAN
+    '0001-01-01',          -- min DATE
+    -999999999999.999,     -- min DECIMAL(18,3)
+    -1.7976931348623157E+308,  -- min DOUBLE
+    -170141183460469231731687303715884105728, -- min HUGEINT
+    -2147483648,           -- min INTEGER
+    -3.4028235E+38,        -- min REAL
+    -32768,                -- min SMALLINT
+    '00:00:00',            -- min TIME
+    '0001-01-01 00:00:00+00',  -- min TIMESTAMPTZ
+    '0001-01-01 00:00:00',     -- min TIMESTAMP
+    -128,                  -- min TINYINT
+    0,                     -- min UBIGINT
+    0,                     -- min UHUGEINT
+    0,                     -- min UINTEGER
+    0,                     -- min USMALLINT
+    0,                     -- min UTINYINT
+    '00000000-0000-0000-0000-000000000000',  -- min UUID
+    '',                    -- min VARCHAR
+    ARRAY[0, 0, 0],        -- min INTEGER[3]
+    ARRAY[],               -- min INTEGER[]
+    MAP([0, 1], ['a', 'b']),
+    {'i': 0, 'j': 'a'},
+    union_value(num := 0)
+);
+
+-- Insert middle-ish values
+INSERT INTO tbl_without_nulls VALUES
+(
+    0,                     -- middle BIGINT
+    x'01',                 -- middle BLOB
+    TRUE,                  -- middle BOOLEAN
+    '2024-01-01',          -- middle DATE
+    0.000,                 -- middle DECIMAL(18,3)
+    0.0,                   -- middle DOUBLE
+    0,                     -- middle HUGEINT
+    0,                     -- middle INTEGER
+    0.0,                   -- middle REAL
+    0,                     -- middle SMALLINT
+    '12:00:00',            -- middle TIME
+    '2024-01-01 12:00:00+00',  -- middle TIMESTAMPTZ
+    '2024-01-01 12:00:00',     -- middle TIMESTAMP
+    0,                     -- middle TINYINT
+    9223372036854775807,   -- middle UBIGINT (since it's unsigned)
+    170141183460469231731687303715884105727, -- middle UHUGEINT
+    2147483647,            -- middle UINTEGER
+    65535,                 -- middle USMALLINT
+    255,                   -- middle UTINYINT
+    '123e4567-e89b-12d3-a456-426614174000',  -- middle UUID
+    'Middle Text',         -- middle VARCHAR
+    ARRAY[1, 2, 3],        -- middle INTEGER[3]
+    ARRAY[1, 2, 3, 4],     -- middle INTEGER[]
+    MAP([1, 2], ['a', 'b']),
+    {'i': 42, 'j': 'a'},
+    union_value(num := 2)
+);
+
+-- Insert max values
+INSERT INTO tbl_without_nulls VALUES
+(
+    9223372036854775807,   -- max BIGINT
+    x'FF',                 -- max BLOB (just assuming 1-byte length)
+    TRUE,                  -- max BOOLEAN
+    '9999-12-31',          -- max DATE
+    999999999999.999,      -- max DECIMAL(18,3)
+    1.7976931348623157E+308, -- max DOUBLE
+    170141183460469231731687303715884105727, -- max HUGEINT
+    2147483647,            -- max INTEGER
+    3.4028235E+38,         -- max REAL
+    32767,                 -- max SMALLINT
+    '23:59:59',            -- max TIME
+    '9999-12-31 23:59:59+00', -- max TIMESTAMPTZ
+    '9999-12-31 23:59:59',    -- max TIMESTAMP
+    127,                   -- max TINYINT
+    18446744073709551615,  -- max UBIGINT
+    34028236692093846346337, -- not-max UHUGEINT
+    4294967295,            -- max UINTEGER
+    65535,                 -- max USMALLINT
+    255,                   -- max UTINYINT
+    'ffffffff-ffff-ffff-ffff-ffffffffffff', -- max UUID
+    'Maximim Text',            -- max VARCHAR
+    ARRAY[2147483647, 2147483647, 2147483647], -- max INTEGER[3]
+    ARRAY[2147483647, 2147483647, 2147483647, 2147483647], -- max INTEGER[]
+    MAP([2147483647, 2147483646], ['max1', 'max2']),
+    {'i': 2147483647, 'j': 'Max Text'},
+    union_value(num := 3)
+);
+```
+3. `SELECT * FROM tbl_without_nulls;` just to make sure they are there
+4. `COPY tbl_without_nulls TO 'tbl_without_nulls.duckdb_v1.0.0.parquet' (FORMAT PARQUET);` ,per [Parquet Export](https://duckdb.org/docs/guides/file_formats/parquet_export.html) Docs
+5. `SELECT column_id, type, stats_min, stats_max, stats_null_count, stats_distinct_count, stats_min_value, stats_max_value FROM parquet_metadata('tbl_without_nulls.duckdb_v1.0.0.parquet');`
+6. `python pyarrow_read_metadata.py tbl_without_nulls.duckdb_v1.0.0.parque` (the python snippet mentioned in `What happens?`) ⇒ no output expected
+
+### Test Parquet Export with Nulls
+1. CREATE TABLE (in duckdb shell) with all supported SQL data types, per [Data Types](https://duckdb.org/docs/sql/data_types/overview) docs
+```sql
+CREATE TABLE tbl_without_nulls (
+    bigint_int8_long_type BIGINT,
+    blob_bytea_binary_varbinary_type BLOB,
+    boolean_bool_logical_type BOOLEAN,
+    date_type DATE,
+    decimal_numeric_type DECIMAL(18,3),
+    double_float8_type DOUBLE,
+    hugeint_type HUGEINT,
+    integer_int4_int_signed_type INTEGER,
+    real_float4_float_type REAL,
+    smallint_int2_short_type SMALLINT,
+    time_type TIME,
+    timestamptz_type TIMESTAMPTZ,
+    timestamp_datetime_type TIMESTAMP,
+    tinyint_int1_type TINYINT,
+    ubigint_type UBIGINT,
+	  uhugeint_type UHUGEINT,
+	  uinteger_type UINTEGER,
+	  usmallint_type USMALLINT,
+	  utinyint_type UTINYINT,
+	  uuid_type UUID,
+    varchar_char_bpchar_text_string_type VARCHAR,
+    array_integer_type INTEGER[3],
+    list_integer_type INTEGER[],
+    map_integer_varchar_type MAP(INTEGER, VARCHAR),
+    struct_integer_varchar_type STRUCT(i INTEGER, j VARCHAR),
+    union_integer_varchar_type UNION(num INTEGER, text VARCHAR)
+);
+```
+2. INSERT INTO (in duckdb shell) null values, somewhat per [Numeric Types](https://duckdb.org/docs/sql/data_types/numeric.html) Docs
+```sql
+-- Insert Null Values
+INSERT INTO tbl_with_nulls VALUES
+(
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+);
+INSERT INTO tbl_with_nulls VALUES
+(
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+);
+INSERT INTO tbl_with_nulls VALUES
+(
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+);
+```
+3. `SELECT * FROM tbl_with_nulls;` just to make sure they are there
+4. `COPY tbl_with_nulls TO 'tbl_with_nulls.duckdb_v1.0.0.parquet' (FORMAT PARQUET);` ,per [Parquet Export](https://duckdb.org/docs/guides/file_formats/parquet_export.html) Docs
+5. `SELECT column_id, type, stats_min, stats_max, stats_null_count, stats_distinct_count, stats_min_value, stats_max_value FROM parquet_metadata('tbl_with_nulls.duckdb_v1.0.0.parquet');`
+6. `python pyarrow_read_metadata.py tbl_with_nulls.duckdb_v1.0.0.parquet` (the python snippet mentioned in `What happens?`)
+    1. expected to output:
+        ```
+        PyArrow statistics missing for column 21!
+        PyArrow statistics missing for column 22!
+        PyArrow statistics missing for column 23!
+        PyArrow statistics missing for column 24!
+        ```
+    2. which correlates to:
+        ```
+        array_integer_type INTEGER[3],
+        list_integer_type INTEGER[],
+        map_integer_varchar_type MAP(INTEGER, VARCHAR),
+        struct_integer_varchar_type STRUCT(i INTEGER, j VARCHAR),
+       ```
+## Also tested within the following environments and received the same results:
+* cli, duckdb nightly v1.0.1-dev2472, aarch64 MacOS v14.5
+* python api, duckdb v1.0.0, python v3.12.3, aarch64 MacOS v14.5
+* python api, duckdb v1.0.0, python v3.11.8, aarch64 MacOS v14.5
+* python api, duckdb v1.0.0, python:3.11.8-slim container via rancher-desktop, aarch64 MacOS v14.5
+* cli, duckdb v1.0.0, x86 Windows 10 Enterprise Version 22H2 OS build 19045.4529
+* cli, duckdb nightly v1.0.1-dev2472, x86 Windows 10 Enterprise Version 22H2 OS build 19045.4529
+
+## OS:
+
+aarch64 MacOS v14.5 via rancher-desktop
+
+## DuckDB Version:
+
+1.0.0, but also tested on nighty v1.0.1-dev2472
+
+## DuckDB Client:
+
+CLI, but also tested via Python API
+
+## Full Name:
+
+Mitchell Ciupak
+
+## Affiliation:
+
+Comcast
+
+## What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+## Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+## Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+## Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

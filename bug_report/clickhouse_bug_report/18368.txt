@@ -1,0 +1,85 @@
+ID: 18368
+Title: Cannot access the joined table's columns after `GROUP BY` in case first table's engine is Merge
+Description:
+**Describe the bug**
+Cannot aggregate data after joining Merge table with MergeTree (with results of subquery execution in our case actually) table. "DB::Exception: Not found column ..." error occurs. See details below.
+
+There is similar issue #11755 which has been already closed by #16993. Unfortunately that pull request doesn't fix this particular problem. 
+
+We are using 20.8 LTS. Can we expect that the problem would be fixed in that version (it seems that #16993 hasn't been backported in 20.8 for some reason)?
+
+
+**How to reproduce**
+It was tested on **20.8.5.45** and **20.12.3.3**
+
+Create tables an fill data:
+```sql
+CREATE TABLE test_table (Id Int32, Foo Int32) ENGINE = MergeTree ORDER BY Id;
+
+CREATE TABLE test_table_merge AS test_table ENGINE = Merge(currentDatabase(), 'test_table');
+
+INSERT INTO test_table (Id, Foo) VALUES (1, 1);
+```
+
+Tests on **20.8.5.45**:
+```sql
+-- Left table has Merge engine
+SELECT any(t2.Foo)
+FROM test_table_merge AS t1
+LEFT JOIN test_table AS t2 ON t1.Id = t2.Id
+GROUP BY t1.Id
+
+/*
+Received exception from server (version 20.8.5):
+Code: 10. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Not found column t2.Foo in block. There are only columns: Id.
+
+0 rows in set. Elapsed: 0.003 sec.
+*/
+
+-- Left table hasn't Merge engine
+SELECT any(t2.Foo)
+FROM test_table AS t1
+LEFT JOIN test_table AS t2 ON t1.Id = t2.Id
+GROUP BY t1.Id
+
+/*
+┌─any(t2.Foo)─┐
+│           1 │
+└─────────────┘
+
+1 rows in set. Elapsed: 0.016 sec.
+*/
+```
+
+Tests on **20.12.3.3**:
+```sql
+-- Left table has Merge engine
+SELECT any(t2.Foo)
+FROM test_table_merge AS t1
+LEFT JOIN test_table AS t2 ON t1.Id = t2.Id
+GROUP BY t1.Id
+
+/*
+Received exception from server (version 20.12.3):
+Code: 47. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Unknown identifier (in aggregate function 'any'): t2.Foo.
+
+0 rows in set. Elapsed: 0.003 sec.
+*/
+
+-- Left table hasn't Merge engine
+SELECT any(t2.Foo)
+FROM test_table AS t1
+LEFT JOIN test_table AS t2 ON t1.Id = t2.Id
+GROUP BY t1.Id
+
+/*
+┌─any(t2.Foo)─┐
+│           1 │
+└─────────────┘
+
+1 rows in set. Elapsed: 0.013 sec.
+*/
+```
+
+**Expected behavior**
+Can access the joined table's columns after `GROUP BY`.

@@ -1,0 +1,24 @@
+ID: 15092
+Title: Addressing over-eager constraint checking with delete indexes
+Description:
+This PR introduces a new component to duckdb's transaction-local storage: delete indexes.
+
+Let's look at the following snippet: `INSERT OR REPLACE` fails with a constraint exception. We do not support out-of-place table updates with `UNIQUE` constraints, such as a primary key. An out-of-place update turns an `UPDATE` into `DELETE + UPDATE`.
+```sql
+CREATE TABLE tbl (i INT PRIMARY KEY, payload INT[]);
+INSERT INTO tbl VALUES(1, [1, 2, 3]);
+-- the LIST turns this UPDATE into a DELETE + INSERT
+INSERT OR REPLACE INTO tbl VALUES(1, [4, 5, 6]);
+-- throws with a constraint exception
+```
+
+The longstanding limitation of duckdb's over-eager constraint-checking causing this behavior is documented here: https://duckdb.org/docs/sql/indexes.html#over-eager-unique-constraint-checking.
+
+> Due to the presence of transactions, data can only be removed from the index after (1) the transaction that performed the delete is committed, and (2) no further transactions exist that refer to the old entry still present in the index. As a result of this – transactions that perform deletions followed by insertions may trigger unexpected unique constraint violations, as the deleted tuple has not actually been removed from the index yet.
+
+To solve this issue, this PR introduces transaction-local delete indexes. When attempting to remove any data from the global index, we now store this change in the local index. We can not remove the data yet, as other transactions may still depend on it. Subsequent operations within the same local context are then aware of the deletion of that entry. Thus, before throwing a constraint violation, they double-check if the value is still there by performing a lookup against the local delete index.
+
+There are still some limitations to this approach. I.e., concurrent changes of the same key will likely cause a write-write conflict but will no longer cause a constraint violation.
+
+
+

@@ -1,0 +1,100 @@
+ID: 16925
+Title: Bad size of marks file on Index
+Description:
+**Describe the bug**
+Hello, 
+I've been trying to setup a clickhouse server on multiple nodes and while it is working well most of the time, sometimes the SELECT is not working.
+```
+SELECT max(timestamp)
+FROM dns.requests
+WHERE (timestamp >= '2020-11-09 23:00:00') AND (timestamp <= '2020-11-09 23:59:59')
+
+
+Received exception from server (version 20.10.3):
+Code: 246. DB::Exception: Received from xxxx:9000. DB::Exception: Received from xxxx:9000. DB::Exception: Bad size of marks file '/var/lib/clickhouse/store/0a0/0a0b87aa-c65c-4c7c-a3ce-cedd7d5e964a/20201109_3333225_3410146_61/skp_idx_timestamp_idx.mrk3': 48, must be: 72. 
+```
+There is no problem when I insert data, there is almost 3B rows in the cluster and some requests are working and some are not.
+
+**How to reproduce**
+ClickHouse server version 20.10.3.30 (official build).
+The configs I'm using on the cluster are the following : 
+```
+CREATE DATABASE shard;
+CREATE TABLE shard.requests
+(
+    timestamp DateTime('UTC'),
+    name String,
+    products Array(String),
+    INDEX timestamp_idx timestamp TYPE minmax GRANULARITY 4
+)
+ENGINE = MergeTree()
+ORDER BY (name, timestamp, intHash32(timestamp))
+SAMPLE BY intHash32(timestamp)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL timestamp + INTERVAL 60 DAY TO VOLUME 'cold_volume', 
+    timestamp + INTERVAL 180 DAY DELETE
+SETTINGS storage_policy='policy_hot_and_cold';
+
+CREATE DATABASE items;
+CREATE TABLE items.requests
+(
+    timestamp DateTime('UTC'),
+    name String,
+    products Array(String),
+)
+ENGINE = Distributed('items_cluster', '', requests, rand());
+```
+The request I use is the following : 
+```
+SELECT max(timestamp)
+FROM items.requests
+WHERE (timestamp >= '2020-11-09 23:00:00') AND (timestamp <= '2020-11-09 23:59:59')
+```
+However it can works with other timestamps...
+
+**Expected behavior**
+The request should work with whatever timestamp I use.
+
+**Error message and/or stacktrace**
+In clickhouse log files, I have the following error :
+```
+2020.11.12 11:26:59.925027 [ 29404 ] {f0852a67-868b-44a5-a41f-376ef2be3eaf} <Error> TCPHandler: Code: 246, e.displayText() = DB::Exception: Received from xxxx:9000. DB::Exception: Bad size of marks file '/var/lib/clickhouse/store/0a0/0a0b87aa-c65c-4c7c-a3ce-cedd7d5e964a/20201109_3333225_3410146_61/skp_idx_timestamp_idx.mrk3': 48, must be: 72. Stack trace:
+
+0. DB::MergeTreeMarksLoader::loadMarksImpl() @ 0xe3facdc in /usr/bin/clickhouse
+1. DB::MergeTreeMarksLoader::loadMarks() @ 0xe3f9f99 in /usr/bin/clickhouse
+2. DB::MergeTreeReaderStream::MergeTreeReaderStream(std::__1::shared_ptr<DB::IDisk>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> > const&, DB::MergeTreeReaderSettings const&, DB::MarkCache*, DB::UncompressedCache*, unsigned long, DB::MergeTreeIndexGranularityInfo const*, std::__1::function<void (DB::ReadBufferFromFileBase::ProfileInfo)> const&, int) @ 0xe4014e1 in /usr/bin/clickhouse
+3. DB::MergeTreeIndexReader::MergeTreeIndexReader(std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::shared_ptr<DB::IMergeTreeDataPart const>, unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> > const&, DB::MergeTreeReaderSettings) @ 0xe3b3e15 in /usr/bin/clickhouse
+4. DB::MergeTreeDataSelectExecutor::filterMarksUsingIndex(std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::shared_ptr<DB::IMergeTreeIndexCondition>, std::__1::shared_ptr<DB::IMergeTreeDataPart const>, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> > const&, DB::Settings const&, DB::MergeTreeReaderSettings const&, Poco::Logger*) @ 0xe39eefb in /usr/bin/clickhouse
+5. ? @ 0xe392c4e in /usr/bin/clickhouse
+6. ? @ 0xe3a3c47 in /usr/bin/clickhouse
+7. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x7b8c17d in /usr/bin/clickhouse
+8. std::__1::__function::__func<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'(), std::__1::allocator<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()>, void ()>::operator()() @ 0x7b8e67a in /usr/bin/clickhouse
+9. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7b8963d in /usr/bin/clickhouse
+10. ? @ 0x7b8d153 in /usr/bin/clickhouse
+11. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+12. clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+: While executing Remote, Stack trace:
+
+0. DB::readException(DB::ReadBuffer&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x7ba1f7f in /usr/bin/clickhouse
+1. DB::Connection::receiveException() @ 0xe4e9134 in /usr/bin/clickhouse
+2. DB::Connection::receivePacket() @ 0xe4efc5c in /usr/bin/clickhouse
+3. DB::MultiplexedConnections::receivePacketUnlocked() @ 0xe50081a in /usr/bin/clickhouse
+4. DB::MultiplexedConnections::receivePacket() @ 0xe500742 in /usr/bin/clickhouse
+5. DB::RemoteQueryExecutor::read() @ 0xd7327fa in /usr/bin/clickhouse
+6. DB::RemoteSource::generate() @ 0xe716b16 in /usr/bin/clickhouse
+7. DB::ISource::work() @ 0xe5b3a5a in /usr/bin/clickhouse
+8. DB::SourceWithProgress::work() @ 0xe71c51a in /usr/bin/clickhouse
+9. ? @ 0xe5ed84c in /usr/bin/clickhouse
+10. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xe5ea4d6 in /usr/bin/clickhouse
+11. ? @ 0xe5efa3b in /usr/bin/clickhouse
+12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7b8963d in /usr/bin/clickhouse
+13. ? @ 0x7b8d153 in /usr/bin/clickhouse
+14. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+15. clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+```
+
+**Additional context**
+I can see the file /`var/lib/clickhouse/store/0a0/0a0b87aa-c65c-4c7c-a3ce-cedd7d5e964a/20201109_3333225_3410146_61/skp_idx_timestamp_idx.mrk3':` in one of my clickhouse node and if I delete it it seems to be working but I don't know what I'm losing when I do that and it doesn't look very stable that way.
+
+Perhaps I misunderstood something when I created the Index and the configuration I used is not safe ? 
+Thank you for your help.

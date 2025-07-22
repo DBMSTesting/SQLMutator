@@ -1,0 +1,40 @@
+ID: 33806
+Title: RESTORE REPLICA fails with "It's a bug: replica is not readonly" 
+Description:
+Under some circumstances, an attempt to `RESTORE REPLICA` will fail with the log message `It's a bug: replica is not readonly` even though the table shows as `read_only` in the `system.replicas` table. 
+
+**Expected behavior**
+
+The expected behavior is that RESTORE REPLICA will either execute as expected if the table is `read_only` in the system.replicas table, or the fail with the correct error/log message, such as `Replica path is present at {} -- nothing to restore. `
+
+
+**Additional context**
+
+There are two ways for this scenario to occur:
+
+(1)  The mostly likely path:
+
+The ClickHouse server starts, but zookeeper is not available, so the StorageReplicatedMergeTree field `is_read_only` is set`true` for this table.  However, the SRMT field `has_metadata_in_zookeeper` keeps its default value of `true`.
+
+Zookeeper subsequently becomes available, but the expected zookeeper path does not exist, so the RESTORE REPLICA command appears to be valid, and passes the checks in function `InterpreterSystemQuery::restoreReplica()`
+
+Because `has_metadata_in_zookeeper` retains its initial `true` value, this final check in `StorageReplicatedMergeTree::restoreMetadataInZooKeeper()` fails:
+
+```
+if (!is_readonly || has_metadata_in_zookeeper)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "It's a bug: replica is not readonly");
+```
+
+(2)  Another path where the user is trying clearing zookeeper for some reason
+
+ClickHouse connects to zookeeper, and finds some data about the replica table in the zookeeper path.  In that case the StorageReplicatedMergeTree member variable `has_metadata_in_zookeeper` will keep its default value of `true`, and the SRMT member variable `is_read_only` will keep its default value of `false`
+
+The user, for whatever reason, manually deletes the replica path from zookeeper. 
+
+Perhaps during the previous operation, ClickHouse loses its zookeeper connection.  The `ReplicatedMergeTreeRestartingThread ` discovers that zookeeper is down, and set the `is_read_only` flag to true.  However, again, `has_metadata_in_zookeeper` remains true.
+
+In both cases the zookeeper path is indeed empty and the table is correctly marked `read_only`, but the `has_metadata_in_zookeeper` field has the incorrect `true` value.
+
+The simplest workaround is to restart ClickHouse and `has_metadata_in_zookeeper` will be correctly set to false when attempting to initially attach the table.  However, this value could also be set correctly in the process of executing the RESTORE REPLICA query.
+
+The other potential issue in this area is that the `InterpreterSystemQuery::restoreReplica()` function checks the system/context zookeeper and could return incorrect results if the replicated table is using an alternative zookeeper.

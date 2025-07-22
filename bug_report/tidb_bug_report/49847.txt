@@ -1,0 +1,107 @@
+ID: 49847
+Title: cached table can't hit cache sometimes when used in "begin" transaction
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+mysql>  show create table t;
++-------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                                    |
++-------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t     | CREATE TABLE `t` (
+  `id` int(11) NOT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /* CACHED ON */ |
++-------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+
+
+mysql> begin;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> trace select  * from t where id > 323;
++-------------------------------------------------------------------------+-----------------+------------+
+| operation                                                               | startTS         | duration   |
++-------------------------------------------------------------------------+-----------------+------------+
+| trace                                                                   | 17:07:30.699986 | 1.514745ms |
+|   ├─session.ExecuteStmt                                                 | 17:07:30.699994 | 881.645µs  |
+|   │ ├─executor.Compile                                                  | 17:07:30.700001 | 307.305µs  |
+|   │ └─session.runStmt                                                   | 17:07:30.700328 | 529.138µs  |
+|   │   └─UnionScanExec.Open                                              | 17:07:30.700388 | 427.247µs  |
+|   │     ├─TableReaderExecutor.Open                                      | 17:07:30.700389 | 393.716µs  |
+|   │     │ └─distsql.Select                                              | 17:07:30.700404 | 368.266µs  |
+|   │     │   ├─loadRegion                                                | 17:07:30.700415 | 312.435µs  |
+|   │     │   └─regionRequest.SendReqCtx                                  | 17:07:30.700866 | 566.549µs  |
+|   │     │     └─rpcClient.SendRequest, region ID: 22, type: Cop         | 17:07:30.700893 | 526.259µs  |
+|   │     │       └─tikv.RPC                                              | 17:07:30.700894 | 278.984µs  |
+|   │     │         ├─tikv.Wait                                           | 17:07:30.700894 | 128.352µs  |
+|   │     │         │ └─tikv.GetSnapshot                                  | 17:07:30.700894 | 100.931µs  |
+|   │     │         └─tikv.Process                                        | 17:07:30.701022 | 42.641µs   |
+|   │     └─buildMemTableReader                                           | 17:07:30.700798 | 5.27µs     |
+|   └─*executor.UnionScanExec.Next                                        | 17:07:30.700881 | 600.6µs    |
+|     └─*executor.TableReaderExecutor.Next                                | 17:07:30.700885 | 580.719µs  |
++-------------------------------------------------------------------------+-----------------+------------+
+17 rows in set (0.00 sec)
+
+mysql> trace select  * from t where id > 323;
++-------------------------------------------------------------------------+-----------------+------------+
+| operation                                                               | startTS         | duration   |
++-------------------------------------------------------------------------+-----------------+------------+
+| trace                                                                   | 17:07:47.184987 | 1.16632ms  |
+|   ├─session.ExecuteStmt                                                 | 17:07:47.184991 | 370.687µs  |
+|   │ ├─executor.Compile                                                  | 17:07:47.184998 | 197.353µs  |
+|   │ └─session.runStmt                                                   | 17:07:47.185209 | 138.502µs  |
+|   │   └─UnionScanExec.Open                                              | 17:07:47.185261 | 55.791µs   |
+|   │     ├─TableReaderExecutor.Open                                      | 17:07:47.185261 | 39.761µs   |
+|   │     │ └─distsql.Select                                              | 17:07:47.185274 | 23.541µs   |
+|   │     │   └─regionRequest.SendReqCtx                                  | 17:07:47.185413 | 671.952µs  |
+|   │     │     └─rpcClient.SendRequest, region ID: 22, type: Cop         | 17:07:47.185436 | 631.97µs   |
+|   │     │       └─tikv.RPC                                              | 17:07:47.185437 | 289.845µs  |
+|   │     │         ├─tikv.Wait                                           | 17:07:47.185437 | 68.981µs   |
+|   │     │         │ └─tikv.GetSnapshot                                  | 17:07:47.185437 | 35.361µs   |
+|   │     │         └─tikv.Process                                        | 17:07:47.185506 | 53.861µs   |
+|   │     └─buildMemTableReader                                           | 17:07:47.185306 | 2.93µs     |
+|   └─*executor.UnionScanExec.Next                                        | 17:07:47.185367 | 770.423µs  |
+|     └─*executor.TableReaderExecutor.Next                                | 17:07:47.185370 | 754.302µs  |
++-------------------------------------------------------------------------+-----------------+------------+
+16 rows in set (0.01 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+I expect when execute select on a cached table the second time, cache can be used.
+
+### 3. What did you see instead (Required)
+
+There are tikv.RPC in the trace, means that cache is not hit.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master
+
+```
+mysql>  select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                             |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.6.0-alpha-568-g5f6ef18b7d-dirty
+Edition: Community
+Git Commit Hash: 5f6ef18b7dc69f1be011b2d12d87b687341148cb
+Git Branch: master
+UTC Build Time: 2023-12-27 09:06:55
+GoVersion: go1.21.0
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.01 sec)
+```

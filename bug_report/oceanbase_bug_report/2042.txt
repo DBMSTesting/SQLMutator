@@ -1,0 +1,118 @@
+ID: 2042
+Title: [Bug]: 二级分区表基于 CONSTRAINT 约束进行分区裁剪的优化问题
+Description:
+**Environment**
+OceanBase CE 4.2.1.7 （ CentOS 8.2 ）
+  
+
+**Fast Reproduce Steps(Required)**
+
+```sql
+-- 创建二级分区表（ LIST(32) * HASH(32) ）
+CREATE TABLE `tc` (
+    `id` bigint unsigned NOT NULL COMMENT '主键ID',
+    `merchant_id` int unsigned NOT NULL COMMENT '商户ID',
+    `user_id` int unsigned NOT NULL COMMENT '用户ID',   
+    `mid` SMALLINT UNSIGNED GENERATED ALWAYS AS ( (id & 992) >> 5 ) VIRTUAL,
+    `uid` TINYINT UNSIGNED GENERATED ALWAYS AS ( id & 31 ) VIRTUAL,
+    PRIMARY KEY (`id`) USING BTREE
+) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+PARTITION BY LIST (mid)
+SUBPARTITION BY HASH (uid) SUBPARTITIONS 32
+(
+PARTITION P0 VALUES IN ( 0 )
+,PARTITION P1 VALUES IN ( 1 )
+,PARTITION P2 VALUES IN ( 2 )
+,PARTITION P3 VALUES IN ( 3 )
+,PARTITION P4 VALUES IN ( 4 )
+,PARTITION P5 VALUES IN ( 5 )
+,PARTITION P6 VALUES IN ( 6 )
+,PARTITION P7 VALUES IN ( 7 )
+,PARTITION P8 VALUES IN ( 8 )
+,PARTITION P9 VALUES IN ( 9 )
+,PARTITION P10 VALUES IN ( 10 )
+,PARTITION P11 VALUES IN ( 11 )
+,PARTITION P12 VALUES IN ( 12 )
+,PARTITION P13 VALUES IN ( 13 )
+,PARTITION P14 VALUES IN ( 14 )
+,PARTITION P15 VALUES IN ( 15 )
+,PARTITION P16 VALUES IN ( 16 )
+,PARTITION P17 VALUES IN ( 17 )
+,PARTITION P18 VALUES IN ( 18 )
+,PARTITION P19 VALUES IN ( 19 )
+,PARTITION P20 VALUES IN ( 20 )
+,PARTITION P21 VALUES IN ( 21 )
+,PARTITION P22 VALUES IN ( 22 )
+,PARTITION P23 VALUES IN ( 23 )
+,PARTITION P24 VALUES IN ( 24 )
+,PARTITION P25 VALUES IN ( 25 )
+,PARTITION P26 VALUES IN ( 26 )
+,PARTITION P27 VALUES IN ( 27 )
+,PARTITION P28 VALUES IN ( 28 )
+,PARTITION P29 VALUES IN ( 29 )
+,PARTITION P30 VALUES IN ( 30 )
+,PARTITION P31 VALUES IN ( 31 )
+);
+
+-- 添加分片键与业务列的映射关系约束
+ALTER TABLE tc ADD CONSTRAINT cst_tc_uid CHECK ( uid = (user_id & 31) );
+ALTER TABLE tc ADD CONSTRAINT cst_tc_mid CHECK ( mid = (merchant_id & 31) );
+
+-- 插入测试数据
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436302718261,329,684021 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436302783728,7,179376 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436302849858,218,506178 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436302915290,918,240506 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436302980209,35,743057 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436303046502,955,477094 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436303111186,480,124594 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436303176752,33,361264 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436303243014,824,969254 );
+INSERT INTO tc (id, merchant_id, user_id) VALUES ( 77550436303307883,163,267083 );
+
+-- 查看执行计划
+EXPLAIN SELECT * FROM tc WHERE merchant_id = 329 AND user_id = 684021 ;
+EXPLAIN SELECT * FROM tc WHERE merchant_id = 918 AND user_id = 240506;
+```
+
+执行上述脚本，查看输出的两个查询计划，发现都会命中2个分区（第一个查询计划的结果如下所示）。
+```
+=============================================================
+|ID|OPERATOR                 |NAME    |EST.ROWS|EST.TIME(us)|
+-------------------------------------------------------------
+|0 |PX COORDINATOR           |        |1       |11          |
+|1 |└─EXCHANGE OUT DISTR     |:EX10000|1       |10          |
+|2 |  └─PX PARTITION ITERATOR|        |1       |8           |
+|3 |    └─TABLE FULL SCAN    |tc      |1       |8           |
+=============================================================
+Outputs & filters:
+-------------------------------------
+  0 - output([INTERNAL_FUNCTION(tc.id, tc.merchant_id, tc.user_id, column_conv(SMALLINT UNSIGNED,PS:(5,0),NULL,cast((T_OP_BIT_RIGHT_SHIFT, cast((T_OP_BIT_AND,
+       cast(tc.id, BIGINT(-1, 0)), 992), BIGINT(-1, 0)), 5), SMALLINT UNSIGNED(-1, 0))), column_conv(TINYINT UNSIGNED,PS:(3,0),NULL,cast((T_OP_BIT_AND, cast(tc.id,
+       BIGINT(-1, 0)), 31), TINYINT UNSIGNED(-1, 0))))]), filter(nil), rowset=16
+  1 - output([INTERNAL_FUNCTION(tc.id, tc.merchant_id, tc.user_id, column_conv(SMALLINT UNSIGNED,PS:(5,0),NULL,cast((T_OP_BIT_RIGHT_SHIFT, cast((T_OP_BIT_AND,
+       cast(tc.id, BIGINT(-1, 0)), 992), BIGINT(-1, 0)), 5), SMALLINT UNSIGNED(-1, 0))), column_conv(TINYINT UNSIGNED,PS:(3,0),NULL,cast((T_OP_BIT_AND, cast(tc.id,
+       BIGINT(-1, 0)), 31), TINYINT UNSIGNED(-1, 0))))]), filter(nil), rowset=16
+      dop=1
+  2 - output([tc.id], [column_conv(SMALLINT UNSIGNED,PS:(5,0),NULL,cast((T_OP_BIT_RIGHT_SHIFT, cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1, 0)), 992), BIGINT(-1,
+       0)), 5), SMALLINT UNSIGNED(-1, 0)))], [column_conv(TINYINT UNSIGNED,PS:(3,0),NULL,cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1, 0)), 31), TINYINT UNSIGNED(-1,
+       0)))], [tc.user_id], [tc.merchant_id]), filter(nil), rowset=16
+      force partition granule
+  3 - output([tc.id], [column_conv(SMALLINT UNSIGNED,PS:(5,0),NULL,cast((T_OP_BIT_RIGHT_SHIFT, cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1, 0)), 992), BIGINT(-1,
+       0)), 5), SMALLINT UNSIGNED(-1, 0)))], [column_conv(TINYINT UNSIGNED,PS:(3,0),NULL,cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1, 0)), 31), TINYINT UNSIGNED(-1,
+       0)))], [tc.user_id], [tc.merchant_id]), filter([tc.merchant_id = 329], [tc.user_id = 684021], [column_conv(TINYINT UNSIGNED,PS:(3,0),NULL,cast((T_OP_BIT_AND,
+       cast(tc.id, BIGINT(-1, 0)), 31), TINYINT UNSIGNED(-1, 0))) IS NULL OR column_conv(TINYINT UNSIGNED,PS:(3,0),NULL,cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1,
+       0)), 31), TINYINT UNSIGNED(-1, 0))) = (T_OP_BIT_AND, cast(cast(684021, INT UNSIGNED(10, 0)), BIGINT(-1, 0)), 31)], [column_conv(SMALLINT UNSIGNED,PS:(5,
+      0),NULL,cast((T_OP_BIT_RIGHT_SHIFT, cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1, 0)), 992), BIGINT(-1, 0)), 5), SMALLINT UNSIGNED(-1, 0))) IS NULL OR column_conv(SMALLINT 
+      UNSIGNED,PS:(5,0),NULL,cast((T_OP_BIT_RIGHT_SHIFT, cast((T_OP_BIT_AND, cast(tc.id, BIGINT(-1, 0)), 992), BIGINT(-1, 0)), 5), SMALLINT UNSIGNED(-1, 0))) 
+      = (T_OP_BIT_AND, cast(cast(329, INT UNSIGNED(10, 0)), BIGINT(-1, 0)), 31)]), rowset=16
+      access([tc.id], [tc.user_id], [tc.merchant_id]), partitions(p9sp0, p9sp21)
+      is_index_back=false, is_global_index=false, filter_before_indexback[false,false,false,false], 
+      range_key([tc.id]), range(MIN ; MAX)always true
+```
+
+**Expected behavior**
+按理来说，应该只命中一个分区 `p9sp21` 才更合理，分区 `p9sp0` 似乎是多余的 ？
+
+**Actual Behavior**
+实际命中了2个分区，不知这是分区裁剪优化的代码存在缺陷，还是有什么特殊考虑呢 ？

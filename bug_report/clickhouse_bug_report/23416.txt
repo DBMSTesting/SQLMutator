@@ -1,0 +1,86 @@
+ID: 23416
+Title: Join Engine - Cannot find column `xxx` in source stream
+Description:
+**Describe the bug**
+
+I'm using Join Engine.
+I can use it with joinGet:
+```
+select *, joinGet('kafka.umts_join', 'OFFSET', TOPIC, PARTITION)  from kafka.umts u limit 10;
+...
+10 rows in set. Elapsed: 0.082 sec.
+```
+
+But when I'm trying 
+
+```
+select * from kafka.umts u any left join `kafka`.`umts_join` using (TOPIC, PARTITION) limit 10;
+```
+I'm getting exception:
+```
+Code: 8. DB::Exception: Received from localhost:9000. DB::Exception: Cannot find column `umts_join.OFFSET` in source stream.
+```
+
+**Does it reproduce on recent release?**
+Yes. I'm using 21.4.4.30 with revision 54449
+
+**How to reproduce**
+* Which ClickHouse server version to use 21.4.4.30 with revision 54449
+* Which interface to use, if matters clickhouse-client
+* Non-default settings, if any: I'm using distrubuted env on K8s started with clickhouse-operator.
+* `CREATE TABLE` statements for all tables involved
+```
+create table test (TOPIC String, PARTITION UInt64, OFFSET UInt64, ID UInt64) ENGINE ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/test', '{replica}') ORDER BY (TOPIC, PARTITION, OFFSET)
+
+create table test_join (TOPIC String, PARTITION UInt64, OFFSET UInt64)  ENGINE = Join(ANY, LEFT, `TOPIC`, `PARTITION`) SETTINGS join_any_take_last_row = 1;
+
+insert into test values('abc',0,0,0);
+
+insert into test_join values('abc',0,1);
+
+select *, joinGet('test_join', 'OFFSET', TOPIC, PARTITION) from test;
+┌─TOPIC─┬─PARTITION─┬─OFFSET─┬─ID─┬─joinGet('test_join', 'OFFSET', TOPIC, PARTITION)─┐
+│ abc   │         0 │      0 │  0 │                                                1 │
+└───────┴───────────┴────────┴────┴──────────────────────────────────────────────────┘
+
+select * from test any left join test_join using (TOPIC, PARTITION);
+
+Code: 8. DB::Exception: Received from localhost:9000. DB::Exception: Cannot find column `test_join.OFFSET` in source stream.
+``` 
+* Queries to run that lead to unexpected result
+
+**Expected behavior**
+Join should work.
+
+**Error message and/or stacktrace**
+```
+2021.04.21 06:22:45.714913 [ 38 ] {490ff41b-6d1f-4502-ab11-45045e7cf1b1} <Error> executeQuery: Code: 8, e.displayText() = DB::Exception: Cannot find column `.inner.umts_join.OFFSET` in source stream (version 21.4.4.30 (official build)) (from [::ffff:127.0.0.1]:44682) (in query: select * from kafka.umts u any left join `kafka`.`umts_join` using (TOPIC, PARTITION) limit 10;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x8914f0a in /usr/bin/clickhouse
+1. DB::ActionsDAG::makeConvertingActions(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, DB::ActionsDAG::MatchColumnsMode, bool, bool, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > >*) @ 0xf2bc3a4 in /usr/bin/clickhouse
+2. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf4dac89 in /usr/bin/clickhouse
+3. ? @ 0xfb7db5e in /usr/bin/clickhouse
+4. DB::ClusterProxy::SelectStreamFactory::createForShard(DB::Cluster::ShardInfo const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context> const&, std::__1::shared_ptr<DB::Throttler> const&, DB::SelectQueryInfo const&, std::__1::vector<std::__1::unique_ptr<DB::QueryPlan, std::__1::default_delete<DB::QueryPlan> >, std::__1::allocator<std::__1::unique_ptr<DB::QueryPlan, std::__1::default_delete<DB::QueryPlan> > > >&, std::__1::vector<DB::Pipe, std::__1::allocator<DB::Pipe> >&, std::__1::vector<DB::Pipe, std::__1::allocator<DB::Pipe> >&, Poco::Logger*) @ 0xfb7aa61 in /usr/bin/clickhouse
+5. DB::ClusterProxy::executeQuery(DB::QueryPlan&, DB::ClusterProxy::IStreamFactory&, Poco::Logger*, std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryInfo const&) @ 0xfb8348f in /usr/bin/clickhouse
+6. DB::StorageDistributed::read(DB::QueryPlan&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xfb6aee8 in /usr/bin/clickhouse
+7. DB::StorageMaterializedView::read(DB::QueryPlan&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xfbf3314 in /usr/bin/clickhouse
+8. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&) @ 0xf4e669e in /usr/bin/clickhouse
+9. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>) @ 0xf4dbdf1 in /usr/bin/clickhouse
+10. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf4dac0b in /usr/bin/clickhouse
+11. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf801db3 in /usr/bin/clickhouse
+12. DB::InterpreterSelectWithUnionQuery::execute() @ 0xf802f3e in /usr/bin/clickhouse
+13. ? @ 0xf9a4ec2 in /usr/bin/clickhouse
+14. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0xf9a3803 in /usr/bin/clickhouse
+15. DB::TCPHandler::runImpl() @ 0x1015b04d in /usr/bin/clickhouse
+16. DB::TCPHandler::run() @ 0x1016d5c9 in /usr/bin/clickhouse
+17. Poco::Net::TCPServerConnection::start() @ 0x1282790f in /usr/bin/clickhouse
+18. Poco::Net::TCPServerDispatcher::run() @ 0x12829321 in /usr/bin/clickhouse
+19. Poco::PooledThread::run() @ 0x1295fa49 in /usr/bin/clickhouse
+20. Poco::ThreadImpl::runnableEntry(void*) @ 0x1295b8aa in /usr/bin/clickhouse
+21. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+22. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+
+2021.04.21 06:22:45.715339 [ 38 ] {490ff41b-6d1f-4502-ab11-45045e7cf1b1} <Error> TCPHandler: Code: 8, e.displayText() = DB::Exception: Cannot find column `umts_join.OFFSET` in source stream, Stack trace:
+```
+
+

@@ -1,0 +1,72 @@
+ID: 31813
+Title: prepare plan cache is different from the execution plan of query
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+drop table if exists t;
+create table t ( c_int int, c_str varchar(40) character set ascii collate ascii_bin, c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6), c_enum enum('blue','green','red','yellow','white','orange','purple'), c_set set ('blue','green','red','yellow','white','orange','purple') , primary key(c_int, c_enum) , unique key(c_int) , unique key(c_str(40))  , key(c_datetime)  , key(c_enum) , key(c_set) );
+insert into t values(40,'friendly bouman'      ,'2020-04-29 09:32:40','2020-04-11 11:44:07',18.438403,8.795000,'purple','red'   );
+/* test */ /* t04:214 */ begin;
+/* test */ /* t01:008 */ update t set c_enum = "purple" where c_int = 40;
+/* test */ /* t01:002 */ prepare stmt7 from "select count(*) from t where c_enum between ? and ? ";
+/* test */ /* t04:226 */ set @v0 = "green";
+/* test */ /* t04:226 */ set @v1 = "yellow";
+/* test:query */ /* t04:226 */ execute stmt7 using @v0, @v1;
+select connection_id();
+explain for connection 1167;
+explain select count(*) from t where c_enum between "green" and "yellow";
+```
+
+### 2. What did you expect to see? (Required)
+
+`the same execution plan`
+
+### 3. What did you see instead (Required)
+
+```
+different execution plans
+
+mysql> explain select count(*) from t where c_enum between "green" and "yellow";-- explain
++-----------------------------+---------+-----------+-------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                          | estRows | task      | access object                 | operator info                                                                                                                                            |
++-----------------------------+---------+-----------+-------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| StreamAgg_8                 | 1.00    | root      |                               | funcs:count(1)->Column#9                                                                                                                                 |
+| └─UnionScan_9               | 1.00    | root      |                               | ge(test1.t.c_enum, "green"), le(test1.t.c_enum, "yellow")                                                                                                |
+|   └─IndexReader_11          | 1.00    | root      |                               | index:IndexRangeScan_10                                                                                                                                  |
+|     └─IndexRangeScan_10     | 1.00    | cop[tikv] | table:t, index:c_enum(c_enum) | range:["green","green"], ["red","red"], ["yellow","yellow"], ["white","white"], ["orange","orange"], ["purple","purple"], keep order:false, stats:pseudo |
++-----------------------------+---------+-----------+-------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------+
+4 rows in set (0.01 sec)
+
+mysql> explain for connection 1167;
++--------------------------------+----------+---------+-----------+-------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------+--------+------+
+| id                             | estRows  | actRows | task      | access object                 | execution info                                                                                                                                                                                                                                                                                                                                | operator info                                             | memory | disk |
++--------------------------------+----------+---------+-----------+-------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------+--------+------+
+| HashAgg_7                      | 1.00     | 1       | root      |                               | time:1.63ms, loops:2, partial_worker:{wall_time:1.577339ms, concurrency:5, task_num:1, tot_wait:6.94105ms, tot_exec:6.17µs, tot_time:6.957145ms, max:1.412618ms, p95:1.412618ms}, final_worker:{wall_time:2.004257ms, concurrency:5, task_num:1, tot_wait:7.155969ms, tot_exec:49.931µs, tot_time:7.210293ms, max:1.46755ms, p95:1.46755ms}   | funcs:count(1)->Column#9                                  | N/A    | N/A  |
+| └─UnionScan_9                  | 60.00    | 2       | root      |                               | time:1.43ms, loops:2                                                                                                                                                                                                                                                                                                                          | ge(test1.t.c_enum, "green"), le(test1.t.c_enum, "yellow") | N/A    | N/A  |
+|   └─Selection_17               | 60.00    | 1       | root      |                               | time:1.38ms, loops:3                                                                                                                                                                                                                                                                                                                          | ge(test1.t.c_enum, "green"), le(test1.t.c_enum, "yellow") | N/A    | N/A  |
+|     └─IndexReader_16           | 60.00    | 1       | root      |                               | time:1.29ms, loops:4, cop_task: {num: 1, max: 1.18ms, proc_keys: 1, rpc_num: 1, rpc_time: 1.11ms, copr_cache_hit_ratio: 0.00}                                                                                                                                                                                                                 | index:Selection_15                                        | N/A    | N/A  |
+|       └─Selection_15           | 60.00    | 1       | cop[tikv] |                               | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_process_keys_size: 60, total_keys: 2, rocksdb: {delete_skipped_count: 0, key_skipped_count: 11, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}                                                                                                     | ge(test1.t.c_enum, "green"), le(test1.t.c_enum, "yellow") | N/A    | N/A  |
+|         └─IndexFullScan_14     | 10000.00 | 1       | cop[tikv] | table:t, index:c_int_2(c_int) | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                                                                                                                                  | keep order:false, stats:pseudo                            | N/A    | N/A  |
++--------------------------------+----------+---------+-----------+-------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------+--------+------+
+6 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.5.0-alpha
+Edition: Community
+Git Commit Hash: 2207b26e19b69ea17ab297d189c35b8c9e786ca6
+Git Branch: heads/refs/tags/v5.5.0-alpha
+UTC Build Time: 2022-01-18 14:55:52
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

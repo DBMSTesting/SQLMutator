@@ -1,0 +1,97 @@
+ID: 9501
+Title: Stuck DELETE mutation
+Description:
+CH version: `20.1.2.4`
+OS: Ubuntu 16.04
+
+**How to reproduce**
+```
+CREATE TABLE tmp.tbl (
+ `field1` Int64,
+ `field2` UInt64,
+ `field3` UInt32,
+ `field4` String,
+ `field5` Date,
+ `field6` DateTime,
+ `field7` Float32,
+ `field8` Float32,
+ `field9` Float32,
+ `field10` Float32,
+ `field11` UInt32,
+ `field12` DateTime) 
+ENGINE = MergeTree(field5, (field5, field2, field3), 8192);
+```
+
+Put data(Values format) into `data.values` file:
+```
+(758386305623133741,17338,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,209,0.912,90,2,'2020-01-02 00:44:44'),(758386305623133741,17338,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,209,0.912,63.26,2,'2020-01-02 08:02:27'),(758386305623133741,49163,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,18.9,0.256,7.8,2,'2020-01-02 00:44:39'),(758386305623133741,49163,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,18.9,0.256,4.41,2,'2020-01-02 08:03:05'),(758386305623133741,56489,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,19.6,0.294,7.3,2,'2020-01-02 00:44:49'),(758386305623133741,56489,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,19.6,0.294,4.76,2,'2020-01-02 08:02:59'),(758386305623133741,59853,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,47.9,1.304,32.2,2,'2020-01-02 00:44:50'),(758386305623133741,131089,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,39,1,0,2,'2020-01-02 00:44:41'),(758386305623133741,459285,1847,'17386','2020-01-01','2020-01-01 22:21:21',308.57,5.9,1,0,2,'2020-01-02 00:44:54')
+```
+
+Import data:
+```
+clickhouse-client --query="INSERT INTO tmp.tbl FORMAT Values" < data.values
+```
+
+Check that we have duplicates by field1, field2, field9, field8, field7:
+```
+SELECT 
+    field1, 
+    field2, 
+    field9, 
+    field8, 
+    field7, 
+    max(field12)
+FROM tmp.tbl
+GROUP BY 
+    field1, 
+    field2, 
+    field9, 
+    field8, 
+    field7
+HAVING max(field12) > min(field12)
+
+┌─────────────field1─┬─field2─┬─field9─┬─field8─┬─field7─┬────────max(field12)─┐
+│ 758386305623133741 │  17338 │  0.912 │    209 │ 308.57 │ 2020-01-02 08:02:27 │
+│ 758386305623133741 │  49163 │  0.256 │   18.9 │ 308.57 │ 2020-01-02 08:03:05 │
+│ 758386305623133741 │  56489 │  0.294 │   19.6 │ 308.57 │ 2020-01-02 08:02:59 │
+└────────────────────┴────────┴────────┴────────┴────────┴─────────────────────┘
+```
+
+Run mutation to delete it:
+```
+ALTER TABLE tmp.tbl
+DELETE WHERE (field1, field2, field9, field8, field7, field12)
+IN (
+    SELECT field1, field2, field9, field8, field7, max(field12)
+    FROM tmp.tbl
+    GROUP BY field1, field2, field9, field8, field7
+    HAVING max(field12) > min(field12)
+)
+```
+....wait a lot of time.....
+
+
+Check state of mutation:
+```
+SELECT *
+FROM system.mutations
+WHERE (is_done = 0) AND (table = 'tbl')
+
+┌─database─┬─table─┬─mutation_id────┬─command─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬─────────create_time─┬─block_numbers.partition_id─┬─block_numbers.number─┬─parts_to_do_names───────────┬─parts_to_do─┬─is_done─┬─latest_failed_part─┬────latest_fail_time─┬─latest_fail_reason─┐
+│ tmp      │ tbl   │ mutation_2.txt │ DELETE WHERE (field1, field2, field9, field8, field7, field12) IN (SELECT field1, field2, field9, field8, field7, max(field12) FROM tmp.tbl GROUP BY field1, field2, field9, field8, field7 HAVING max(field12) > min(field12)) │ 2020-03-03 05:15:06 │ ['']                       │ [2]                  │ ['20200101_20200101_1_1_0'] │           1 │       0 │                    │ 0000-00-00 00:00:00 │                    │
+└──────────┴───────┴────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────┴────────────────────────────┴──────────────────────┴─────────────────────────────┴─────────────┴─────────┴────────────────────┴─────────────────────┴────────────────────┘
+
+1 rows in set. Elapsed: 0.002 sec. 
+```
+
+No merges:
+```
+SELECT *
+FROM system.merges
+
+Ok.
+
+0 rows in set. Elapsed: 0.002 sec. 
+```
+
+No errors in logs.

@@ -1,0 +1,66 @@
+ID: 55569
+Title: point query on unique index will make estimation row count inconsistent
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+create a table, inserting some rows. Make sure that there's modify_count after analyze.
+
+Run a query that contains PointGet in normal execution.
+like
+```
+CREATE TABLE `t` (
+  `a` varchar(20) NOT NULL,
+  `b` int(11) DEFAULT NULL,
+  `c` int(11) DEFAULT NULL,
+  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */
+);
+
+explain select /*+ HASH_JOIN(t1, t2) */ * from t t1, t t2 where t1.c=t2.c and t1.a='1' and t1.b > 1;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> explain select /*+ HASH_JOIN(t1, t2) */ * from t t1, t t2 where t1.c=t2.c and t1.a='1' and t1.b > 1;
++-----------------------------+---------+-----------+-------------------------------------+--------------------------------------------+
+| id                          | estRows | task      | access object                       | operator info                              |
++-----------------------------+---------+-----------+-------------------------------------+--------------------------------------------+
+| HashJoin_9                  | 1.00    | root      |                                     | inner join, equal:[eq(test.t.c, test.t.c)] |
+| ├─Selection_11(Build)       | 1.00    | root      |                                     | gt(test.t.b, 1), not(isnull(test.t.c))     |
+| │ └─Point_Get_10            | 1.00    | root      | table:t, clustered index:PRIMARY(a) |                                            |
+| └─TableReader_14(Probe)     | 1536.00 | root      |                                     | data:Selection_13                          |
+|   └─Selection_13            | 1536.00 | cop[tikv] |                                     | not(isnull(test.t.c))                      |
+|     └─TableFullScan_12      | 1536.00 | cop[tikv] | table:t2                            | keep order:false                           |
++-----------------------------+---------+-----------+-------------------------------------+--------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> explain select /*+ HASH_JOIN(t1, t2) */ * from t t1, t t2 where t1.c=t2.c and t1.a='1' and t1.b > 1;
++-----------------------------+---------+-----------+-------------------------------------+--------------------------------------------+
+| id                          | estRows | task      | access object                       | operator info                              |
++-----------------------------+---------+-----------+-------------------------------------+--------------------------------------------+
+| HashJoin_9                  | 1.50    | root      |                                     | inner join, equal:[eq(test.t.c, test.t.c)] |
+| ├─Selection_11(Build)       | 1.50    | root      |                                     | gt(test.t.b, 1), not(isnull(test.t.c))     |
+| │ └─Point_Get_10            | 1.00    | root      | table:t, clustered index:PRIMARY(a) |                                            |
+| └─TableReader_14(Probe)     | 1536.00 | root      |                                     | data:Selection_13                          |
+|   └─Selection_13            | 1536.00 | cop[tikv] |                                     | not(isnull(test.t.c))                      |
+|     └─TableFullScan_12      | 1536.00 | cop[tikv] | table:t2                            | keep order:false                           |
++-----------------------------+---------+-----------+-------------------------------------+--------------------------------------------+
+6 rows in set (0.00 sec)
+```
+Selection_11 got an estimation larger than PointGet_10
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master still has this problem.

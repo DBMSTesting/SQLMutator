@@ -1,0 +1,135 @@
+ID: 64735
+Title: SSL Handshake errors after upgrading to 24.5.1.1763
+Description:
+**Describe what's wrong**
+3-node cluster and after upgrading 2 nodes to 24.5.1.1763 from 23.7.1.2470, haproxy started reporting a L6RSP (SSL Handshake failure). Certificates are publicly signed, not expired, and working configs for the past 9 months. 
+
+Chrome also reports a SSL_PROTOCOL_ERROR on occasion when connecting directly to a node but it also keeps a connection alive unlike haproxy so it's harder to reproduce.
+
+openssl from the load balancer reports everything as fine.
+`openssl s_client -connect _myhoustname_:8443 < /dev/null`
+![image](https://github.com/ClickHouse/ClickHouse/assets/5738532/d70db724-7a7a-4418-94fe-bdc8f696aaf7)
+
+**Does it reproduce on the most recent release?**
+Yes
+
+**Enable crash reporting**
+Not crashing.
+
+**How to reproduce**
+Honestly, no idea. I don't think our setup is that unique as we followed the SSL-TLS Guide
+
+**Expected behavior**
+No handshake errors?
+
+**Error message and/or stacktrace**
+I found this around the times that was a handshake error. It's pretty frequent but the clickhouse servers don't appear to have an issue talking to each other.
+```
+2024.06.02 20:00:19.335772 [ 8478 ] {} <Error> ServerErrorHandler: Code: 210. DB::NetException: SSL Exception: error:0A000115:SSL routines::session id context uninitialized, while reading from socket (peer: 172.18.11.105:40784, local: 172.18.11.107:8443). (NETWORK_ERROR), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c5c4fbb
+1. DB::NetException::NetException<String, String, String>(int, FormatStringHelperImpl<std::type_identity<String>::type, std::type_identity<String>::type, std::type_identity<String>::type>, String&&, String&&, String&&) @ 0x000000000c6ff8be
+2. DB::ReadBufferFromPocoSocket::nextImpl() @ 0x000000000c6ff39a
+3. DB::HTTPServerRequest::HTTPServerRequest(std::shared_ptr<DB::IHTTPContext>, DB::HTTPServerResponse&, Poco::Net::HTTPServerSession&, StrongTypedef<unsigned long, ProfileEvents::EventTag> const&) @ 0x0000000011ea76c2
+4. DB::HTTPServerConnection::run() @ 0x0000000011ea5ef8
+5. Poco::Net::TCPServerConnection::start() @ 0x0000000014768447
+6. Poco::Net::TCPServerDispatcher::run() @ 0x00000000147688d9
+7. Poco::PooledThread::run() @ 0x000000001485ed41
+8. Poco::ThreadImpl::runnableEntry(void*) @ 0x000000001485d31d
+9. ? @ 0x00007fbe57780ac3
+10. ? @ 0x00007fbe57812850
+ (version 24.5.1.1763 (official build))
+```
+
+> If applicable, add screenshots to help explain your problem.
+
+**Additional context**
+Fully patched ubuntu servers (22.04.4 LTS)
+Certificates are publicly signed, not expired, and are wildcard certificates.
+
+Haproxy ssl config
+```
+ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+        ssl-default-bind-options prefer-client-ciphers no-sslv3 no-tlsv10 no-tlsv11 no-tlsv12 no-tls-tickets
+
+        ssl-default-server-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+        ssl-default-server-options no-sslv3 no-tlsv10 no-tlsv11 no-tlsv12 no-tls-tickets
+```
+
+Clickhouse openssl config. I tried both `cachesession true and false with the same result, I was desperate.
+```
+<clickhouse>
+  <openSSL>
+    <server>
+        <loadDefaultCAFile>true</loadDefaultCAFile>
+        <certificateFile>/etc/clickhouse-server/certs/****************.crt</certificateFile>
+        <privateKeyFile>/etc/clickhouse-server/certs/************.key</privateKeyFile>
+        <verificationMode>relaxed</verificationMode>
+        <caConfig>/etc/clickhouse-server/certs/*********_ca.crt</caConfig>
+        <cacheSessions>true</cacheSessions>
+        <disableProtocols>sslv2,sslv3</disableProtocols>
+        <preferServerCiphers>true</preferServerCiphers>
+    </server>
+    <client>
+        <loadDefaultCAFile>false</loadDefaultCAFile>
+        <caConfig>/etc/clickhouse-server/certs/********_ca.crt</caConfig>
+        <cacheSessions>true</cacheSessions>
+        <disableProtocols>sslv2,sslv3</disableProtocols>
+        <preferServerCiphers>true</preferServerCiphers>
+        <verificationMode>relaxed</verificationMode>
+        <invalidCertificateHandler>
+                        <name>RejectCertificateHandler</name>
+        </invalidCertificateHandler>
+     </client>
+  </openSSL>
+</clickhouse>
+```
+
+with cacheSession false
+
+```
+<clickhouse>
+  <openSSL>
+    <server>
+        <loadDefaultCAFile>true</loadDefaultCAFile>
+        <certificateFile>/etc/clickhouse-server/certs/****************.crt</certificateFile>
+        <privateKeyFile>/etc/clickhouse-server/certs/************.key</privateKeyFile>
+        <verificationMode>relaxed</verificationMode>
+        <caConfig>/etc/clickhouse-server/certs/*********_ca.crt</caConfig>
+        <cacheSessions>false</cacheSessions>
+        <disableProtocols>sslv2,sslv3</disableProtocols>
+        <preferServerCiphers>true</preferServerCiphers>
+    </server>
+    <client>
+        <loadDefaultCAFile>false</loadDefaultCAFile>
+        <caConfig>/etc/clickhouse-server/certs/********_ca.crt</caConfig>
+        <cacheSessions>true</cacheSessions>
+        <disableProtocols>sslv2,sslv3</disableProtocols>
+        <preferServerCiphers>false</preferServerCiphers>
+        <verificationMode>relaxed</verificationMode>
+        <invalidCertificateHandler>
+                        <name>RejectCertificateHandler</name>
+        </invalidCertificateHandler>
+     </client>
+  </openSSL>
+</clickhouse>
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

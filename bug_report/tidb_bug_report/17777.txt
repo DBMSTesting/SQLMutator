@@ -1,0 +1,81 @@
+ID: 17777
+Title: P0-[4.0 bug hunting]-[TiDB]-Wrong result may return when processs empty string
+Description:
+Bug Hunter issue tidb-challenge-program/bug-hunting-issue#46
+
+---
+
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. What did you do?
+```sql
+insert lots of data into a table but leave one column = ''
+select count(*) from xxx where column='';
+select * from xxx where column='';
+```
+
+### 2. What did you expect to see?
+matched record should return.
+
+### 3. What did you see instead?
+`count(*) = 0`
+
+Right:
+I found if I use `TableReaderExecutor`, result will return:
+```
++--------------------------------------------+-----------------+--------------+
+| operation                                  | startTS         | duration     |
++--------------------------------------------+-----------------+--------------+
+| trace                                      | 10:23:59.678179 | 150.74143ms  |
+|   ├─session.Execute                        | 10:23:59.678183 | 1.242804ms   |
+|   │ ├─session.ParseSQL                     | 10:23:59.678188 | 10.995µs     |
+|   │ ├─executor.Compile                     | 10:23:59.678230 | 1.082961ms   |
+|   │ │ └─session.getTxnFuture               | 10:23:59.678234 | 1.779µs      |
+|   │ └─session.runStmt                      | 10:23:59.679324 | 77.23µs      |
+|   │   ├─TableReaderExecutor.Open           | 10:23:59.679345 | 35.619µs     |
+|   │   │ └─distsql.Select                   | 10:23:59.679356 | 19.278µs     |
+|   │   │   └─rpcClient.SendRequest          | 10:23:59.679427 | 148.58105ms  |
+|   │   └─session.CommitTxn                  | 10:23:59.679389 | 8.497µs      |
+|   │     └─session.doCommitWitRetry         | 10:23:59.679391 | 2.289µs      |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.679441 | 148.941292ms |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828406 | 39.51µs      |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828455 | 33.4µs       |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828497 | 34.289µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828540 | 35.983µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828583 | 46.773µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828638 | 39.962µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828686 | 36.291µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828730 | 34.087µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828772 | 47.719µs     |
+|   ├─*executor.TableReaderExecutor.Next     | 10:23:59.828827 | 6.461µs      |
+|   └─*executor.TableReaderExecutor.Next     | 10:23:59.828842 | 2.526µs      |
++--------------------------------------------+-----------------+--------------+
+```
+
+Wrong:
+select count(*) will use `IndexReaderExecutor` and result is wrong.
+```
++------------------------------------------------+-----------------+--------------+
+| operation                                      | startTS         | duration     |
++------------------------------------------------+-----------------+--------------+
+| trace                                          | 10:23:55.114496 | 109.172499ms |
+|   ├─session.Execute                            | 10:23:55.114502 | 491.249µs    |
+|   │ ├─session.ParseSQL                         | 10:23:55.114508 | 11.372µs     |
+|   │ ├─executor.Compile                         | 10:23:55.114550 | 309.901µs    |
+|   │ │ └─session.getTxnFuture                   | 10:23:55.114557 | 2.283µs      |
+|   │ └─session.runStmt                          | 10:23:55.114868 | 104.613µs    |
+|   │   ├─distsql.Select                         | 10:23:55.114922 | 23.98µs      |
+|   │   │ └─rpcClient.SendRequest                | 10:23:55.115036 | 108.412091ms |
+|   │   └─session.CommitTxn                      | 10:23:55.114957 | 11.022µs     |
+|   │     └─session.doCommitWitRetry             | 10:23:55.114960 | 2.272µs      |
+|   ├─*executor.StreamAggExec.Next               | 10:23:55.115002 | 108.508503ms |
+|   │ ├─*executor.IndexReaderExecutor.Next       | 10:23:55.115004 | 108.486841ms |
+|   │ └─*executor.IndexReaderExecutor.Next       | 10:23:55.223504 | 1.338µs      |
+|   └─*executor.StreamAggExec.Next               | 10:23:55.223519 | 430ns        |
++------------------------------------------------+-----------------+--------------+
+```
+
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+[hot fix](https://github.com/pingcap/tidb/tree/pd-hotfix-stale)

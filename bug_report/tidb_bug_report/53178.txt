@@ -1,0 +1,85 @@
+ID: 53178
+Title: The estRows is inaccurate when there is data skew.
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+1. create table like this:
+CREATE TABLE `tb` (
+  `id` int(11) NOT NULL,
+  `f1` int(11) DEFAULT NULL,
+  `f2` int(11) DEFAULT NULL,
+  `f3` int(11) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_f1` (`f1`) ,
+  KEY `idx_f2` (`f2`) 
+) partition by hash(id)
+(partition `p0`,
+partition `p1`,
+partition `p2`);
+2. insert data:
+step 1: insert one million records by the following script:
+```
+#!/bin/bash    
+HOST="127.0.0.1"    
+PORT="xxxx"    
+USER="xxxx"    
+DB="test"    
+TABLE="tb"    
+    
+TOTAL_ROWS=1000000  
+     
+COUNTER=0    
+  
+BATCH_SIZE=10000    
+  
+generate_data() {    
+    local sql="INSERT INTO $TABLE (id, f1, f2, f3) VALUES "    
+    for i in $(seq 1 $BATCH_SIZE); do    
+        local id=$((COUNTER + i))    
+        if ((id > TOTAL_ROWS)); then   
+            break  
+        fi  
+        local f1=$((RANDOM % 1000))    
+        local f2=$((RANDOM % 1000))    
+        local f3=$((RANDOM % 1000))    
+      
+        if [[ $i -ne 1 ]]; then    
+            sql+=","    
+        fi    
+        sql+="($id, $f1, $f2, $f3)"    
+    done
+}    
+    
+while ((COUNTER < TOTAL_ROWS)); do    
+    DATA=$(generate_data)    
+    
+    COUNTER=$((COUNTER + BATCH_SIZE))    
+ 
+    sleep 1
+done 
+```
+step 2: Insert the following data to construct a data skew
+insert into tb (id,f1,f2,f3) values(10000001,10000,102,10000),(20000001,20000,103,20000);
+3. Execute analyze table
+step 1: analyze table tb;
+step 2: analyze table tb update histogram on id,f1,f2;
+4. Execute Query
+![image](https://github.com/pingcap/tidb/assets/9462431/0714658f-7c20-4908-888a-41284cb723b9)
+The estRows above is incorrect.
+
+However, what's puzzling is that if we insert 1000 records[Still using the previous script, modifyvariable TOTAL_ROWS to 1000], you will get the correct estRows:
+![image](https://github.com/pingcap/tidb/assets/9462431/f8d67d4c-fc2c-403e-9558-13bdf7c1c1cc)
+
+### 2. What did you expect to see?
+![image](https://github.com/pingcap/tidb/assets/9462431/1d699818-5207-4464-b534-7558554e1706)
+
+### 3. What did you see instead
+![image](https://github.com/pingcap/tidb/assets/9462431/8e0c0270-1aac-45e2-bcad-fa41c97d5a8a)
+
+### 4. What is your TiDB version? 
+pd instance:v8.0.0
+tikv instance:v8.0.0
+tidb instance:v8.0.0
+tiflash instance:v8.0.0
+

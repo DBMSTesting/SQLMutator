@@ -1,0 +1,136 @@
+ID: 24227
+Title: JDBC ResultSetMetaData.getColumnName for view query returns the attribute name defined in the table instead of the one defined in the view
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Just query a view with renamed attribute and print `ResultSetMetaData.getColumnName`.
+#### Code for reproduce
+The [sample code](https://github.com/lpypl/RSMDTest.git) is as follows, and you can get it from <https://github.com/lpypl/RSMDTest.git>.
+```java
+import lombok.Cleanup;
+
+import java.sql.*;
+
+public class Main {
+    public static void main(String[] args) throws SQLException {
+        String url = "jdbc:mysql://localhost:3306?serverTimezone=UTC&useServerPrepStmts=true&cachePrepStmts=true";
+        String username = "root";
+        String password = "root";
+
+        String dropDatabase = "drop database if exists RSMDTestDB;";
+        String createDatabase = "create database RSMDTestDB;";
+        String useDatabase = "use RSMDTestDB;";
+        String createTable0 = "create table table0(t0c0 int, t0c1 int, t0c2 int);";
+        String createView0 = "create view view0(v0c0, v0c1, v0c2) as select t0c0, t0c1, t0c2 from table0;";
+        String selectView0 = "select * from view0;";
+        String selectView0WithAlias = "select v0c0 as alias_v0c0, v0c1 as alias_v0c1, v0c2 as alias_v0c2 from view0;";
+
+        @Cleanup
+        Connection conn = DriverManager.getConnection(url, username, password);
+        Statement stat = conn.createStatement();
+        stat.execute(dropDatabase);
+        stat.execute(createDatabase);
+        stat.execute(useDatabase);
+        stat.execute(createTable0);
+        stat.execute(createView0);
+
+        // print DBMS info
+        DatabaseMetaData dbMD = conn.getMetaData();
+        System.out.println(dbMD.getDatabaseProductVersion());
+
+        // select from view without alias
+        ResultSet rs = stat.executeQuery(selectView0);
+        ResultSetMetaData md = rs.getMetaData();
+        System.out.println("SELECT WITHOUT ALIAS");
+        System.out.printf("%-10s\t%-10s\t%-10s\n", "Index", "ColName", "ColLabel");
+        for(int ind=1; ind <= md.getColumnCount(); ind++) {
+            System.out.printf("%-10d\t%-10s\t%-10s\n", ind, md.getColumnName(ind), md.getColumnLabel(ind));
+        }
+        rs.close();
+
+        // select from view with alias
+        rs = stat.executeQuery(selectView0WithAlias);
+        md = rs.getMetaData();
+        System.out.println("SELECT WITH ALIAS");
+        System.out.printf("%-10s\t%-10s\t%-10s\n", "Index", "ColName", "ColLabel");
+        for(int ind=1; ind <= md.getColumnCount(); ind++) {
+            System.out.printf("%-10d\t%-10s\t%-10s\n", ind, md.getColumnName(ind), md.getColumnLabel(ind));
+        }
+        rs.close();
+
+        // drop database
+        stat.execute(dropDatabase);
+    }
+}
+``` 
+
+#### Table and View defination
+```sql
+create table table0(t0c0 int, t0c1 int, t0c2 int);
+create view view0(v0c0, v0c1, v0c2) as select t0c0, t0c1, t0c2 from table0;
+```
+
+#### Query SQL
+```sql
+/* without alias*/
+select * from view0;
+/* with alias*/
+select v0c0 as alias_v0c0, v0c1 as alias_v0c1, v0c2 as alias_v0c2 from view0;
+```
+
+### 2. What did you expect to see? (Required)
+
+#### Output in MySQL
+`ResultSetMetaData.getColumnName` returns the name of a column defined in the view, and `ResultSetMetaData.getColumnLabel` returns the alias given in the query.
+```text
+8.0.23-0ubuntu0.20.10.1
+SELECT WITHOUT ALIAS
+Index     	ColName   	ColLabel  
+1         	v0c0      	v0c0      
+2         	v0c1      	v0c1      
+3         	v0c2      	v0c2      
+SELECT WITH ALIAS
+Index     	ColName   	ColLabel  
+1         	v0c0      	alias_v0c0
+2         	v0c1      	alias_v0c1
+3         	v0c2      	alias_v0c2
+```
+
+### 3. What did you see instead (Required)
+
+#### Output in TiDB
+`ResultSetMetaData.getColumnName` returns the name of a column defined in the table instead of in the view, while `ResultSetMetaData.getColumnLabel` returns the alias given in the query.
+However, considering that when users query a view, they treat it as an abstract table, and do not care whether it is a table or a view. Perhaps it is more reasonable to return the name of the attribute listed in the view definition. This is the behavior of MySQL. 
+Moreover, if the user uses the as keyword to alias a attribute when querying the view, it seems that the attribute name defined in the view cannot be obtained from ResultSetMetaData.
+```text
+5.7.25-TiDB-v5.0.0
+SELECT WITHOUT ALIAS
+Index     	ColName   	ColLabel  
+1         	t0c0      	v0c0      
+2         	t0c1      	v0c1      
+3         	t0c2      	v0c2      
+SELECT WITH ALIAS
+Index     	ColName   	ColLabel  
+1         	t0c0      	alias_v0c0
+2         	t0c1      	alias_v0c1
+3         	t0c2      	alias_v0c2
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```text
+Release Version: v5.0.0
+Edition: Community
+Git Commit Hash: bdac0885cd11bdf571aad9353bfc24e13554b91c
+Git Branch: heads/refs/tags/v5.0.0
+UTC Build Time: 2021-04-06 16:36:29
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

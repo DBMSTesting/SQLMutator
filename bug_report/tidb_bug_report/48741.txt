@@ -1,0 +1,62 @@
+ID: 48741
+Title: unexpected cpu usage caused by tidb_server_memory_gc_trigger
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. set global tidb_server_memory_limit = "760MB"
+2. set global tidb_server_memory_limit_sess_min_size=107374182400
+3. modify the tidb code to forbid pointget 
+``` diff
+diff --git a/planner/optimize.go b/planner/optimize.go
+index b0c5b0070d..76da86e391 100644
+--- a/planner/optimize.go
++++ b/planner/optimize.go
+@@ -211,6 +211,7 @@ func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
+                        fp = fpv.Plan
+                } else {
+                        fp = core.TryFastPlan(sctx, node)
++                       fp = nil
+                }
+                if fp != nil {
+                        return fp, fp.OutputNames(), nil
+```
+4. import tpcc warehouse 20 data
+5. tiup bench tpcc run --db tpcc20wh --threads 16 --host --port --statusPort 
+6. check the grafana, we can see the cpu usage is high as the **what I see instead** part of following image show
+7. modify the tidb code , and we can see the cpu usage is normal as the **expect to see** part of following image show 
+``` diff
+
+diff --git a/util/gctuner/memory_limit_tuner.go b/util/gctuner/memory_limit_tuner.go
+index 204c569c0c..0e7d0d3ec4 100644
+--- a/util/gctuner/memory_limit_tuner.go
++++ b/util/gctuner/memory_limit_tuner.go
+@@ -128,6 +128,9 @@ func (t *memoryLimitTuner) GetPercentage() float64 {
+ // UpdateMemoryLimit updates the memory limit.
+ // This function should be called when `tidb_server_memory_limit` or `tidb_server_memory_limit_gc_trigger` is modified.
+ func (t *memoryLimitTuner) UpdateMemoryLimit() {
++       if t.waitingReset.Load() {
++               return
++       }
+        var memoryLimit = t.calcMemoryLimit(t.GetPercentage())
+        if memoryLimit == math.MaxInt64 {
+                t.isTuning.Store(false)
+```
+
+![image](https://github.com/pingcap/tidb/assets/9039012/e49d5a45-8d55-43e2-9eba-64b6fce79db9)
+
+
+Analysis：
+1. The tidb-server utilizes `tidb_server_memory_limit_gc_trigger` to set the memory threshold that actively triggers the golang garbage collection (GC). When the `heapInUse` memory reaches the threshold of `tidb_server_memory_limit * tidb_server_memory_limit_gc_trigger`, it actively triggers a golang GC. To avoid overly frequent GC, in the code implementation, after this threshold is touched once, it is adjusted from the default value of 0.7 to 1.1, and after 1 minute, it is reset back to 0.7.
+
+2. Due to the periodic update of global system variables by tidb-server, the operation of increasing `tidb_server_memory_limit_gc_trigger` from 0.7 to 1.1 to reduce the GC frequency is almost ineffective. Therefore, when the `heapInUse` of tidb-server remains above the threshold of `tidb_server_memory_limit * tidb_server_memory_limit_gc_trigger` for an extended period, a high-frequency GC phenomenon occurs, leading to the CPU being in a near-maximum utilization state for an extended duration.
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+v7.3.0

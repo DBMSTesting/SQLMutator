@@ -1,0 +1,189 @@
+ID: 19892
+Title: different behaviour of NO_ZERO_DATE with mysql 
+Description:
+## Description
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+The [`NO_ZERO_DATE`](https://dev.mysql.com/doc/refman/5.7/en/sql-mode.html#sqlmode_no_zero_date) define as below:
+
+> The NO_ZERO_DATE mode affects whether the server permits '0000-00-00' as a valid date. Its effect also depends on whether strict SQL mode is enabled.
+> If this mode is not enabled, '0000-00-00' is permitted and inserts produce no warning.
+>
+>If this mode is enabled, '0000-00-00' is permitted and inserts produce a warning.
+>
+> If this mode and strict mode are enabled, '0000-00-00' is not permitted and inserts produce an error, unless IGNORE is given as well. For INSERT IGNORE and UPDATE IGNORE, '0000-00-00' is permitted and inserts produce a warning.
+
+BUT, in TiDB's implemention, the SQL mode doesn't work.
+
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table dd(i datetime)
+insert into dd('0000-00-00')
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+in MySQL 8.0
+
+```sql
+mysql admin@127.0.0.1:app> create table dd(i datetime);
+Query OK, 0 rows affected
+Time: 0.114s
+
+-- sql_mode to none
+mysql admin@127.0.0.1:app> show variables like 'sql_mode';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| sql_mode      |       |
++---------------+-------+
+1 row in set
+Time: 0.031s
+mysql admin@127.0.0.1:app> show global variables like 'sql_mode';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| sql_mode      |       |
++---------------+-------+
+
+mysql admin@127.0.0.1:app> insert into dd values ('0000-00-00');
+Query OK, 1 row affected
+Time: 0.005s
+mysql admin@127.0.0.1:app> show warnings;
++-------+------+---------+
+| Level | Code | Message |
++-------+------+---------+
+0 rows in set
+Time: 0.021s
+
+
+-- set to NO_ZERO_DATE
+mysql admin@127.0.0.1:app> set sql_mode='NO_ZERO_DATE';
+Query OK, 0 rows affected
+Time: 0.002s
+mysql admin@127.0.0.1:app> insert into dd values ('0000-00-00');
+Query OK, 1 row affected
+Time: 0.008s
+mysql admin@127.0.0.1:app> show warnings;
++---------+------+--------------------------------------------+
+| Level   | Code | Message                                    |
++---------+------+--------------------------------------------+
+| Warning | 1264 | Out of range value for column 'i' at row 1 |
++---------+------+--------------------------------------------+
+1 row in set
+Time: 0.041s
+
+-- set to NO_ZERO_DATE,STRICT_TRANS_TABLES
+mysql admin@127.0.0.1:app> set sql_mode='NO_ZERO_DATE,STRICT_TRANS_TABLES';
+Query OK, 0 rows affected
+Time: 0.003s
+mysql admin@127.0.0.1:app> insert into dd values ('0000-00-00');
+(1292, "Incorrect datetime value: '0000-00-00' for column 'i' at row 1")
+mysql admin@127.0.0.1:app> show warnings;
++-------+------+----------------------------------------------------------------+
+| Level | Code | Message                                                        |
++-------+------+----------------------------------------------------------------+
+| Error | 1292 | Incorrect datetime value: '0000-00-00' for column 'i' at row 1 |
++-------+------+----------------------------------------------------------------+
+```
+
+### 3. What did you see instead (Required)
+
+```sql
+mysql admin@127.0.0.1:app> create table dd(i datetime);
+Query OK, 0 rows affected
+Time: 0.114s
+
+-- sql_mode to none
+mysql admin@127.0.0.1:app> show variables like 'sql_mode';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| sql_mode      |       |
++---------------+-------+
+1 row in set
+Time: 0.031s
+mysql admin@127.0.0.1:app> show global variables like 'sql_mode';
++---------------+-------+
+| Variable_name | Value |
++---------------+-------+
+| sql_mode      |       |
++---------------+-------+
+
+mysql admin@127.0.0.1:app> insert into dd values ('0000-00-00');
+Query OK, 1 row affected
+Time: 0.005s
+mysql admin@127.0.0.1:app> show warnings;
++-------+------+---------+
+| Level | Code | Message |
++-------+------+---------+
+0 rows in set
+Time: 0.021s
+
+-- set to NO_ZERO_DATE
+mysql admin@127.0.0.1:app> set sql_mode='NO_ZERO_DATE';
+Query OK, 1 rows affected
+Time: 0.002s
+mysql admin@127.0.0.1:app> insert into dd values ('0000-00-00');
+Query OK, 1 row affected
+Time: 0.005s
+mysql admin@127.0.0.1:app> show warnings;
++-------+------+---------+
+| Level | Code | Message |
++-------+------+---------+
+0 rows in set
+Time: 0.021s
+
+-- set to NO_ZERO_DATE,STRICT_TRANS_TABLES
+mysql admin@127.0.0.1:app> set sql_mode='NO_ZERO_DATE,STRICT_TRANS_TABLES';
+Query OK, 0 rows affected
+Time: 0.003s
+mysql admin@127.0.0.1:app> insert into dd values ('0000-00-00');
+Query OK, 1 row affected
+Time: 0.005s
+mysql admin@127.0.0.1:app> show warnings;
++-------+------+---------+
+| Level | Code | Message |
++-------+------+---------+
+0 rows in set
+Time: 0.021s
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql root@127.0.0.1:(none)> select tidb_version() \G;
+***************************[ 1. row ]***************************
+tidb_version() | Release Version: v4.0.0-beta.2-1165-g726341146-dirty
+Edition: Community
+Git Commit Hash: 726341146b99485335a195b16a803b95e4875228
+Git Branch: master
+UTC Build Time: 2020-09-08 01:55:13
+GoVersion: go1.14.3
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+
+1 row in set
+Time: 0.009s
+```
+<!-- Paste the output of SELECT tidb_version() -->
+
+
+
+
+
+## SIG slack channel
+[#sig-exec](https://slack.tidb.io/invite?team=tidb-community&channel=sig-exec&ref=high-performance)
+
+## Score
+- 300
+
+## Mentor
+ * @qw4990

@@ -1,0 +1,74 @@
+ID: 28154
+Title: Confusing behaviors of FROM_BASE64 function in WHERE clause
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+/* init */ drop table if exists t;
+/* init */ create table t(a TEXT);
+/* init */ insert into t values('abc');
+
+tidb> select * from t where from_base64('');  -- 1
+tidb> update t set a = 'def' where from_base64('');  -- 2
+tidb> select * from t where from_base64('invalidbase64');  -- 3
+tidb> update t set a = 'hig' where from_base64('invalidbase64');  -- 4
+tidb> select * from t where from_base64('test');  -- 5
+tidb> update t set a = 'xyz' where from_base64('test');  -- 6
+```
+It should be noted that 'test' is a valid base64 string:
+```
+tidb> select from_base64('test');
++------------------------------------------+
+| from_base64('test')                      |
++------------------------------------------+
+| 0xB5EB2D                                 |
++------------------------------------------+
+1 row in set (0.00 sec)
+```
+### 2. What did you expect to see? (Required)
+
+If the argument of `FROM_BASE64()` is a invalid base64 string, the function should be evaluated as `NULL`, so the result of statement 1, 2, 3, 4 should be empty.
+
+If the argument of `FROM_BASE64()` is a valid base64 string, the function's result should be `0xB5EB2D`, so the  statement 4, 5 should cause warning and error respectively.
+
+
+### 3. What did you see instead (Required)
+```
+tidb> select * from t where from_base64('');  -- 1
+Empty set, 1 warning (0.00 sec)
+
+tidb> update t set a = 'def' where from_base64('');  -- 2
+Query OK, 1 row affected (0.06 sec)
+Rows matched: 1  Changed: 1  Warnings: 0
+
+tidb> select * from t where from_base64('invalidbase64');  -- 3
+Empty set (0.00 sec)
+
+tidb> update t set a = 'def' where from_base64('invalidbase64');  -- 4
+Query OK, 0 rows affected (0.00 sec)
+Rows matched: 0  Changed: 0  Warnings: 0
+
+tidb> select * from t where from_base64('test');  -- 5
+Empty set, 1 warning (0.01 sec)
+
+tidb> update t set a = 'xyz' where from_base64('test');  -- 6
+Query OK, 1 row affected (0.04 sec)
+Rows matched: 1  Changed: 1  Warnings: 0
+```
+
+As you can see, `from_base64()` with a empty string was evaluated as `False`(with a warning) in SELECT but was evaluated as `True` in UPDATE.  Besides, the results of statement 5 and 6 means that a valid base64 string in `from_base64()` will be evaluated as `False`(with a warning) in SELECT but will be evaluated as `True` in UPDATE. I think this inconsistent behaviors can cause terrible consequences. 
+
+### 4. What is your TiDB version? (Required)
+```
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v5.2.1 |
++--------------------+
+1 row in set (0.00 sec)
+```
+

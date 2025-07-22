@@ -1,0 +1,56 @@
+ID: 66447
+Title: Filtering by a field joined with ANY LEFT JOIN works incorrectly
+Description:
+**Describe what's wrong**
+
+Filtering by a field joined with `ANY LEFT JOIN` makes the query return only one matching row. This behavior was introduced in `v24.4`:
+
+- v24.3 (works as expected) - https://fiddle.clickhouse.com/f38e3be9-a1e7-451d-9fc3-6e1d51d9f4b9
+- v24.4 (doesn't work) - https://fiddle.clickhouse.com/5779a026-0d4d-44d4-98ef-2d842c9fbb50
+- latest release (doesn't work) - https://fiddle.clickhouse.com/198bb819-3d17-49c0-a485-3534050336e9
+
+```sql
+CREATE TABLE user_country (
+    user_id UInt64,
+    country String,
+    created_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(created_at)
+ORDER BY user_id;
+
+CREATE TABLE user_transactions (
+    user_id UInt64,
+    transaction_id String
+)
+ENGINE = MergeTree
+ORDER BY user_id;
+
+INSERT INTO user_country (user_id, country) VALUES (1, 'US');
+INSERT INTO user_transactions (user_id, transaction_id) VALUES (1, 'tx1'), (1, 'tx2'), (1, 'tx3'), (2, 'tx1');
+
+-- Expected 3 rows, got only 1. Removing 'ANY' and adding 'FINAL' fixes
+-- the issue (but it is not always possible). Moving filter by 'country' to
+-- an outer query doesn't help. Query without filter by 'country' works
+-- as expected (returns 3 rows).
+SELECT * FROM user_transactions
+ANY LEFT JOIN user_country USING (user_id)
+WHERE
+    user_id = 1
+    AND country = 'US';
+
+-- Expected
+-- 1,"tx1","US","2024-07-12 16:04:17"
+-- 1,"tx2","US","2024-07-12 16:04:17"
+-- 1,"tx3","US","2024-07-12 16:04:17"
+
+-- Got
+-- 1,"tx1","US","2024-07-12 16:05:10"
+```
+
+**Does it reproduce on the most recent release?**
+
+Yes
+
+**Expected behavior**
+
+Filter by a field joined with `ANY LEFT JOIN` returns all matching rows.

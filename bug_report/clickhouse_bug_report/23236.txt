@@ -1,0 +1,137 @@
+ID: 23236
+Title: Wrong behavior in dictionaries when key columns are not the first in column order
+Description:
+(you don't have to strictly follow this form)
+
+**Describe the bug**
+After upgrade to 21.3 below dictionaries stopped working properly (confirmed on layout hashed, Clickhouse and ODBC source). All other layouts and sources not tested. 
+
+**Does it reproduce on recent release?**
+Reproduces in 21.3.4.25
+
+**How to reproduce**
+
+Clickhouse source:
+
+```
+DROP table If exists default.dicTest;
+DROP DICTIONARY if exists default.testWorking;
+create table default.dicTest Engine=MergeTree order by tuple() as select cityHash64(number,1) k, cityHash64(number, 2) v from numbers(100) ;
+CREATE DICTIONARY default.testWorking ( k UInt64, v UInt64 )
+PRIMARY KEY k
+SOURCE(CLICKHOUSE(HOST 'localhost' PORT 9000 USER 'default' DB 'default' TABLE 'dicTest' ) )
+LIFETIME(MIN 300 MAX 360)
+LAYOUT(HASHED());
+
+CREATE DICTIONARY default.testBuggy ( k UInt64, v UInt64 )
+PRIMARY KEY v
+SOURCE(CLICKHOUSE(HOST 'localhost' PORT 9000 USER 'default' DB 'default' TABLE 'dicTest' ) )
+LIFETIME(MIN 300 MAX 360)
+LAYOUT(HASHED());
+select * from default.testWorking ;
+select * from default.testBuggy ; -- returns only one column, cannot query "v" - key column
+select v,k from default.testBuggy ; 
+-- DB::Exception: Missing columns: 'v' while processing query: 'SELECT v, k FROM default.testBuggy', required columns: 'v' 'k', maybe you meant: ['k','k'] (version 21.3.4.25 (official build))
+```
+
+ODBC:
+
+```
+----TEST_1 ( Key column is in first place )
+hostname :) CREATE DICTIONARY test_dictionary_1 (`XID` UInt8, `XNAME` String, `XSURNAME` String) PRIMARY KEY XID SOURCE(ODBC(CONNECTION_STRING 'DSN=MYODBCSRC' TABLE 'V_TEST_TEST' )) LIFETIME(MIN 300 MAX 86400) LAYOUT(HASHED())
+
+CREATE DICTIONARY test_dictionary_1
+(
+    `XID` UInt8,
+    `XNAME` String,
+    `XSURNAME` String
+)
+PRIMARY KEY XID
+SOURCE(ODBC(CONNECTION_STRING 'DSN=MYODBCSRC' TABLE 'V_TEST_TEST'))
+LIFETIME(MIN 300 MAX 86400)
+LAYOUT(HASHED())
+
+Query id: 360d6407-7049-44ff-b1db-946c3e78bdd8
+
+Ok.
+
+0 rows in set. Elapsed: 0.004 sec. 
+
+hostname :) select * from test_dictionary_1;
+
+SELECT *
+FROM test_dictionary_1
+
+Query id: 1ee658a0-8898-4ac9-bab1-e8c41ba4c102
+
+--- returns data
+1 rows in set. Elapsed: 4.580 sec. 
+
+tuna-clickhouse  :) select version();
+
+SELECT version()
+
+Query id: 8ba03bb1-c3b5-42d8-9396-cc8deb0da61f
+
+â”Œâ”€version()â”€â”
+â”‚ 21.3.4.25 â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+1 rows in set. Elapsed: 0.002 sec. 
+
+
+
+
+----TEST_2 ( Key column is not in first place )
+hostname :) CREATE DICTIONARY test_dictionary_2 (`XNAME` String, `XID` UInt8, `XSURNAME` String) PRIMARY KEY XID SOURCE(ODBC(CONNECTION_STRING 'DSN=MYODBCSRC' TABLE 'V_TEST_TEST_2' )) LIFETIME(MIN 300 MAX 86400) LAYOUT(HASHED())
+
+CREATE DICTIONARY test_dictionary_2
+(
+    `XNAME` String,
+    `XID` UInt8,
+    `XSURNAME` String
+)
+PRIMARY KEY XID
+SOURCE(ODBC(CONNECTION_STRING 'DSN=MYODBCSRC' TABLE 'V_TEST_TEST_2'))
+LIFETIME(MIN 300 MAX 86400)
+LAYOUT(HASHED())
+
+Query id: 64e06917-8040-41e5-8511-539d129e4c00
+
+Ok.
+
+0 rows in set. Elapsed: 0.003 sec. 
+
+hostname :) select * from test_dictionary_2 ;
+
+SELECT *
+FROM test_dictionary_2
+
+Query id: 02d070cd-ace7-45ec-b85d-bdcb693547d8
+
+
+0 rows in set. Elapsed: 2.013 sec. 
+
+Received exception from server (version 21.3.4):
+Code: 86. DB::Exception: Received from localhost:9000. 
+DB::Exception: Received error from remote server /?connection_string=DSN%3DMYODBCSRC&columns=columns%20format%20version%3A%201%0A3%20columns%3A%0A%60XNAME%60%20UInt64%0A%60XNAME%60%20String%0A%60XSURNAME%60%20String%0A&max_block_size=8192. 
+HTTP status code: 500 Internal Server Error, 
+body: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = Syntax error: Not a valid unsigned integer: textstring,
+
+hostname :) select version();
+
+SELECT version()
+
+Query id: 5c76be4b-9f34-45da-a712-847e8c006a54
+
+â”Œâ”€version()â”€â”
+â”‚ 21.3.4.25 â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+
+1 rows in set. Elapsed: 0.002 sec. 
+```
+
+**Expected behavior**
+Backward compatibility shall not be broken. All querying to dictionaries shall work exactly in the same way as in previous LTS version. 
+
+

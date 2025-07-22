@@ -1,0 +1,79 @@
+ID: 56273
+Title: optimizer choose wrong plan after there are a few writes to table
+Description:
+
+
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+mysql> show create table t\G
+*************************** 1. row ***************************
+       Table: t
+Create Table: CREATE TABLE `t` (
+  `id` bigint(20) unsigned NOT NULL,
+  `object_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `object_value` longblob DEFAULT NULL,
+  `version` int(11) unsigned NOT NULL,
+  PRIMARY KEY (`object_id`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_general_ci AUTO_INCREMENT=5944485 /*T![auto_id_cache] AUTO_ID_CACHE=1 */
+1 row in set (0.00 sec)
+
+mysql> show create table i\G
+*************************** 1. row ***************************
+       Table: i
+Create Table: CREATE TABLE `i` (
+  `object_id` bigint(20) unsigned NOT NULL,
+  `id` bigint(20) DEFAULT NULL,
+  `version` int(11) unsigned NOT NULL,
+  PRIMARY KEY (`object_id`) /*T![clustered_index] CLUSTERED */,
+  KEY `i_id` (`id`,`object_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_general_ci
+1 row in set (0.00 sec)
+
+explain SELECT
+       /*+ max_execution_time(2000) */
+       `t`.*
+     FROM
+       `i` FORCE INDEX (`i_id`)
+       LEFT JOIN `t` ON `i`.`object_id` = `t`.`object_id`
+     WHERE
+       `i`.`id` IN (1640946)
+     ORDER BY
+       `i`.`object_id`
+     LIMIT
+       100000;
+```
+
+### 2. What did you expect to see? (Required)
+The execution plan should use table `i` as the driving table in plan:
+```sql
++-------------------------------------+---------+-----------+------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                  | estRows | task      | access object                      | operator info                                                                                                                                    |
++-------------------------------------+---------+-----------+------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_12                       | 0.02    | root      |                                    | test.t.id, test.t.object_id, test.t.object_value, test.t.version                                                                                 |
+| └─TopN_15                           | 0.02    | root      |                                    | test.i.object_id, offset:0, count:100000                                                                                                         |
+|   └─IndexHashJoin_27                | 0.02    | root      |                                    | left outer join, inner:TableReader_22, outer key:test.i.object_id, inner key:test.t.object_id, equal cond:eq(test.i.object_id, test.t.object_id) |
+|     ├─TopN_51(Build)                | 0.01    | root      |                                    | test.i.object_id, offset:0, count:100000                                                                                                         |
+|     │ └─IndexReader_59              | 0.01    | root      |                                    | index:TopN_58                                                                                                                                    |
+|     │   └─TopN_58                   | 0.01    | cop[tikv] |                                    | test.i.object_id, offset:0, count:100000                                                                                                         |
+|     │     └─IndexRangeScan_39       | 0.01    | cop[tikv] | table:i, index:i_id(id, object_id) | range:[1640946,1640946], keep order:false, stats:pseudo                                                                                          |
+|     └─TableReader_22(Probe)         | 0.01    | root      |                                    | data:TableRangeScan_21                                                                                                                           |
+|       └─TableRangeScan_21           | 0.01    | cop[tikv] | table:t                            | range: decided by [test.i.object_id], keep order:false, stats:pseudo                                                                             |
++-------------------------------------+---------+-----------+------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------+
+
+```
+### 3. What did you see instead (Required)
+
+Execution plan mess up in production. Over a week, this table received no writes and the query plan behaved correctly. Then, around the time where the query plan got messed up the table received about ~10 writes.
+<img width="670" alt="Screenshot 2024-09-24 at 6 19 02 PM" src="https://github.com/user-attachments/assets/751502c7-8536-469b-968b-408ccbab375c">
+
+Also noticed negative estimate cost in slow query log.
+
+The issue is not reproducible.
+### 4. What is your TiDB version? (Required)
+
+v7.5.1
+

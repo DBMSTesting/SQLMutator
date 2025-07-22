@@ -1,0 +1,100 @@
+ID: 35307
+Title: Using Merge table engine and FINAL, columns specified in PREWHERE clause and not specified in SELECT section produces error
+Description:
+**Describe the unexpected behavior**
+When using MaterializedMySQL database engine and Merge table engine, columns specified in `WHERE` clause and not specified in `SELECT` section produces error:
+```
+Code: 10. DB::Exception: Received from localhost:9000. DB::Exception: Not found column column2 in block. (NOT_FOUND_COLUMN_IN_BLOCK)
+```
+
+**How to reproduce**
+
+versions:
+MySQL: Ver 8.0.28 for Linux on x86_64 (MySQL Community Server - GPL)
+ClickHouse: ClickHouse server version 22.2.2.1
+
+In MySQL:
+```
+create database db4;
+
+CREATE TABLE db4.table_1 (
+    id INT,
+    column1 VARCHAR(10),
+    column2 VARCHAR(10),
+	PRIMARY KEY (`id`),
+	KEY `table_1_column2_index` (`column2`)
+) ENGINE = InnoDB;
+
+insert into db4.table_1 
+(id, column1,column2) 
+VALUES 
+(1, 'abc', 'def');
+
+
+CREATE TABLE db4.table_2 (
+    id INT,
+    column1 VARCHAR(10),
+    column2 VARCHAR(10),
+	PRIMARY KEY (`id`),
+	KEY `table_2_column2_index` (`column2`)
+) ENGINE = InnoDB;
+
+insert into db4.table_2 
+(id, column1, column2) 
+VALUES 
+(2, 'uvw','xyz');
+```
+
+In ClickHouse:
+```
+set allow_experimental_database_materialized_mysql = 1;
+CREATE DATABASE db4_mysql ENGINE = MaterializedMySQL('192.168.1.248:3306', 'db4', 'clickhouse_user', 'ClickHouse_123');
+
+create database db5_merge;
+
+CREATE TABLE db5_merge.merge_table
+ as db4_mysql.table_1
+     ENGINE = Merge('db4_mysql', '^table_\\d+$');
+```
+
+**Expected behavior**
+query should be able to be executed with a different column specified than what is in `WHERE` clause:
+```
+ch_env_2 :) select column1 from db5_merge.merge_table where column2 = 'def';
+
+SELECT column1
+FROM db5_merge.merge_table
+WHERE column2 = 'def'
+
+Query id: 72c41db0-9006-4200-bbbb-d626aa1a9d9b
+
+┌─column1─┐
+│ abc     │
+└─────────┘
+
+1 rows in set. Elapsed: 0.038 sec.
+```
+
+**Error message and/or stacktrace**
+```
+ch_env_2 :) select column1 from db5_merge.merge_table where column2 = 'def';
+
+SELECT column1
+FROM db5_merge.merge_table
+WHERE column2 = 'def'
+
+Query id: f93bb8d4-8586-4b4f-8b6d-e1c2bc04b114
+
+
+0 rows in set. Elapsed: 0.011 sec.
+
+Received exception from server (version 22.2.2):
+Code: 10. DB::Exception: Received from localhost:9000. DB::Exception: Not found column column2 in block. (NOT_FOUND_COLUMN_IN_BLOCK)
+```
+
+**Additional context**
+Found the current behavior and workarounds:
+1.  add the column that you would like to use in the where clause to the `SELECT` portion if the query.
+2. remove the index key from the column you'd like to use in the `WHERE` portion of the query.
+
+thanks.

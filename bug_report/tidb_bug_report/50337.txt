@@ -1,0 +1,114 @@
+ID: 50337
+Title: goroutine leak when cte exceed mem_quota
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+drop table if exists t, t1, t2;
+create table t (id int,name varchar(10));
+insert into t values(1,'tt');
+create table t1(id int,name varchar(10),name1 varchar(10),name2 varchar(10));
+insert into t1 values(1,'tt','ttt','tttt'),(2,'dd','ddd','dddd');
+create table t2(id int,name varchar(10),name1 varchar(10),name2 varchar(10),`date1` date);
+insert into t2 values(1,'tt','ttt','tttt','2099-12-31'),(2,'dd','ddd','dddd','2099-12-31');
+set tidb_mem_quota_query = 7000;
+```
+Run the following sql 2000 times:
+```
+WITH bzzs AS (
+  SELECT 
+    count(1) AS bzn 
+  FROM 
+    t c
+), 
+tmp1 AS (
+  SELECT 
+    t1.* 
+  FROM 
+    t1 
+    LEFT JOIN bzzs ON 1 = 1 
+  WHERE 
+    name IN ('tt') 
+    AND bzn <> 1
+), 
+tmp2 AS (
+  SELECT 
+    tmp1.*, 
+    date('2099-12-31') AS endate 
+  FROM 
+    tmp1
+), 
+tmp3 AS (
+  SELECT 
+    * 
+  FROM 
+    tmp2 
+  WHERE 
+    endate > CURRENT_DATE 
+  UNION ALL 
+  SELECT 
+    '1' AS id, 
+    'ss' AS name, 
+    'sss' AS name1, 
+    'ssss' AS name2, 
+    date('2099-12-31') AS endate 
+  FROM 
+    bzzs t1 
+  WHERE 
+    bzn = 1
+) 
+SELECT 
+  c2.id, 
+  c3.id 
+FROM 
+  t2 db 
+  LEFT JOIN tmp3 c2 ON c2.id = '1' 
+  LEFT JOIN tmp3 c3 ON c3.id = '1';
+```
+### 2. What did you expect to see? (Required)
+No goroutine leak.
+### 3. What did you see instead (Required)
+```
+oroutine 218692 [semacquire, 2 minutes]:
+sync.runtime_Semacquire(0xc003ec0b40?)
+	/usr/local/go/src/runtime/sema.go:62 +0x25
+sync.(*WaitGroup).Wait(0xc008a442a0?)
+	/usr/local/go/src/sync/waitgroup.go:116 +0x48
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorTaskSender).run(0xc0073ae050, 0x0?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:912 +0x1d0
+created by github.com/pingcap/tidb/pkg/store/copr.(*copIterator).open in goroutine 218688
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:879 +0x405
+
+goroutine 86297 [select, 2 minutes]:
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).sendToRespCh(0x63b0670?, 0x5558620?, 0xc0001a1ed8?, 0x80?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1008 +0xa6
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleTask.func1()
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1127 +0x37d
+panic({0x5558620?, 0xc0001a1ed8?})
+	/usr/local/go/src/runtime/panic.go:914 +0x21f
+github.com/pingcap/tidb/pkg/util/memory.(*Tracker).Consume(0xc00acf8960?, 0xfa)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/util/memory/tracker.go:459 +0x285
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).sendToRespCh(0xc00b09f570, 0xc00acf8960, 0xc009f9b020, 0x0?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1006 +0x4c
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleCopResponse(0xc00b09f570, 0xc00ee83e58, 0xc00ac6eea0, 0xc00acf8960, {0xc00ac79600, 0xff, 0xff}, 0xc00e4d79f0?, 0xc00b084e00, 0xc009f9b020, ...)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1449 +0x776
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleCopPagingResult(0xc00b09f570, 0x0?, 0x2?, 0xc00acf8960, {0xc00ac79600?, 0xc00a4f5520?, 0x7fdaf442d008?}, 0xc000f5fa68?, 0xc00b084e00, 0xc009f9b020, ...)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1349 +0x59
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleTaskOnce(0xc00b09f570, 0xc00ee83e58, 0xc00b084e00, 0xc009f9b020?)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1282 +0x1094
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleTask(0xc00b09f570, {0x6403008, 0xc00b0b56e0}, 0xc00986efd0?, 0xc009f9b020)
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:1135 +0x18e
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).run(0xc00b09f570, {0x6403008, 0xc00b0b56e0})
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:817 +0xc5
+created by github.com/pingcap/tidb/pkg/store/copr.(*copIterator).open in goroutine 86294
+	/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/pkg/store/copr/coprocessor.go:861 +0x99
+```
+### 4. What is your TiDB version? (Required)
+6e10826f164eb13f6f86640e856b945539b57b0d
+<!-- Paste the output of SELECT tidb_version() -->
+

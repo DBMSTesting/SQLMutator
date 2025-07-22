@@ -1,0 +1,138 @@
+ID: 12674
+Title: Very slow performance for query targeting partitioned parquet files with WHERE clause for values inside another duckdb table
+Description:
+### What happens?
+
+When querying a relatively large partitioned file in Google Cloud Storage with a `WHERE` clause by the partitioned field, if  the comparison values are stored in another table, the performance is terrible (had to cancel the query as it would not complete after a few attempts).
+
+```sql
+D select * from read_parquet('gs://<bucket_name>/parquet/optimized/esa_worldcover_10m_v200/**/**.parquet', hive_partitioning = true) where h3_res3 IN (select h3_res3 from target_h3);
+  0% ▕                                                            ▏ ^CRun Time (s): real 82.328 user 43.695678 sys 3.850381
+INTERRUPT Error: Interrupted!
+```
+
+
+However, the same query runs well when the values are manually introduced in the `WHERE IN` statement clause.
+
+
+```sql
+select * from read_parquet('gs://<bucket_name>/parquet/optimized/esa_worldcover_10m_v200/**/**.parquet', hive_partitioning = true) where h3_res3 IN (592952464647389183, 592949509709889535, 592952602086342655, 591890611292864511);
+100% ▕████████████████████████████████████████████████████████████▏
+┌────────────────────┬────────────────────┬───────┐
+│      h3_res3       │      h3_res11      │ value │
+│       int64        │       int64        │ uint8 │
+├────────────────────┼────────────────────┼───────┤
+│ 591890611292864511 │ 636926579654101055 │    30 │
+│ 591890611292864511 │ 636926579654101311 │    30 │
+│ 591890611292864511 │ 636926579654101375 │    30 │
+│ 591890611292864511 │ 636926579654115455 │    30 │
+│ 591890611292864511 │ 636926579654115519 │    30 │
+│ 591890611292864511 │ 636926579654115583 │    30 │
+│ 591890611292864511 │ 636926579654115711 │    30 │
+│ 591890611292864511 │ 636926579654115903 │    30 │
+│ 591890611292864511 │ 636926579654115967 │    30 │
+│ 591890611292864511 │ 636926579654116031 │    30 │
+│ 591890611292864511 │ 636926579654116095 │    30 │
+│ 591890611292864511 │ 636926579654116159 │    30 │
+│ 591890611292864511 │ 636926579654116223 │    30 │
+│ 591890611292864511 │ 636926579654116287 │    30 │
+│ 591890611292864511 │ 636926579654116991 │    30 │
+│ 591890611292864511 │ 636926579654117247 │    30 │
+│ 591890611292864511 │ 636926579654117439 │    30 │
+│ 591890611292864511 │ 636926579654117503 │    30 │
+│ 591890611292864511 │ 636926579654117567 │    30 │
+│ 591890611292864511 │ 636926579654117631 │    30 │
+│          ·         │          ·         │     · │
+│          ·         │          ·         │     · │
+│          ·         │          ·         │     · │
+│ 591890611292864511 │ 636926589159565439 │    80 │
+│ 591890611292864511 │ 636926589159565503 │    80 │
+│ 591890611292864511 │ 636926589159565567 │    80 │
+│ 591890611292864511 │ 636926589159565631 │    80 │
+│ 591890611292864511 │ 636926589159565695 │    80 │
+│ 591890611292864511 │ 636926589159565759 │    80 │
+│ 591890611292864511 │ 636926589159565887 │    80 │
+│ 591890611292864511 │ 636926589159565951 │    80 │
+│ 591890611292864511 │ 636926589159566015 │    80 │
+│ 591890611292864511 │ 636926589159566079 │    80 │
+│ 591890611292864511 │ 636926589159566143 │    80 │
+│ 591890611292864511 │ 636926589159566207 │    80 │
+│ 591890611292864511 │ 636926589159566271 │    80 │
+│ 591890611292864511 │ 636926589159566399 │    80 │
+│ 591890611292864511 │ 636926589159566463 │    80 │
+│ 591890611292864511 │ 636926589159566527 │    80 │
+│ 591890611292864511 │ 636926589159566591 │    80 │
+│ 591890611292864511 │ 636926589159566655 │    80 │
+│ 591890611292864511 │ 636926589159566719 │    80 │
+│ 591890611292864511 │ 636926589159566783 │    80 │
+├────────────────────┴────────────────────┴───────┤
+│ 92256369 rows (40 shown)              3 columns │
+└─────────────────────────────────────────────────┘
+Run Time (s): real 8.930 user 3.854659 sys 0.516650
+```
+
+
+### To Reproduce
+
+While I cannot provide access to the underlying data and have not come up with a reproducible example that can be shared, I'll include the steps taken from my end to reproduce.
+
+1. Create the base table we want to query, partition it by the `h3_res3` field
+2. Create a table in duckdb with a set of target `h3_res3` field values that we want to compare 
+
+```sql
+create table target_h3 as (
+    select 592952464647389183 as h3_res3 
+    union all 
+    select 592949509709889535 as h3_res3 
+    union all 
+    select 592952602086342655 as h3_res3 
+    union all 
+    select 591890611292864511 as h3_res3
+);
+```
+
+3. Perform the following query:
+
+```sql
+select 
+    * 
+ from 
+    read_parquet('gs://<bucket_name>/parquet/optimized/esa_worldcover_10m_v200/**/**.parquet', hive_partitioning = true) 
+where h3_res3 IN (select h3_res3 from target_h3);             
+```
+
+### OS:
+
+MacOS arm64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+CLI
+
+### Full Name:
+
+Miguel Moncada
+
+### Affiliation:
+
+Cambium
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot easily share my data sets due to their large size
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

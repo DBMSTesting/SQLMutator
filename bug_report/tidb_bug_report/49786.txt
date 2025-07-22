@@ -1,0 +1,83 @@
+ID: 49786
+Title: Panic index out of range when `TraverseValuesLessThan` on a btree map
+Description:
+## Bug Report
+
+The following logs show TiDB panic on iterating a btree map, index of out range. It's a common issue when a btree map is being deleting and iterating concurrently.  
+
+Deleting: A goroutine calls `SetOnSuccessHook` on storeCollector.begin.
+Note: `ValueSortedFull.Merge` is proctected by the `checkpointsMu`.
+https://github.com/pingcap/tidb/blob/71e6696f020ccf42408976d4a82cafb95717a2e4/br/pkg/streamhelper/advancer.go#L142-L146
+
+Iterating: A goroutine calls `TraverseValuesLessThan` on OwnerDaemon.ownerTick.
+Note: `ValueSortedFull.TraverseValuesLessThan` is not being proctected by the `checkpointsMu`.
+https://github.com/pingcap/tidb/blob/71e6696f020ccf42408976d4a82cafb95717a2e4/br/pkg/streamhelper/daemon/owner_daemon.go#L69-L98
+
+```log
+[2023/12/23 08:48:59.041 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:48:59.042 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:10.724 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:10.724 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:22.963 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:22.963 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:43.002 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:43.002 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+[2023/12/23 08:49:45.522 +08:00] [WARN] [worker.go:130] ["PanicToErr: panicked, recovering and returning error"] [stack="runtime.gopanic
+	/usr/local/go/src/runtime/panic.go:884
+runtime.goPanicIndex
+	\/usr/local/go/src/runtime/panic.go:113
+github.com/google/btree.(*node[...]).iterate
+	\/go/pkg/mod/github.com/google/btree@v1.1.2/btree_generic.go:519
+github.com/google/btree.(*node[...]).iterate
+	\/go/pkg/mod/github.com/google/btree@v1.1.2/btree_generic.go:510
+github.com/google/btree.(*node[...]).iterate
+	\/go/pkg/mod/github.com/google/btree@v1.1.2/btree_generic.go:510
+github.com/google/btree.(*node[...]).iterate
+	\/go/pkg/mod/github.com/google/btree@v1.1.2/btree_generic.go:510
+github.com/google/btree.(*BTreeG[...]).AscendLessThan
+	\/go/pkg/mod/github.com/google/btree@v1.1.2/btree_generic.go:761
+github.com/google/btree.(*BTree).AscendLessThan
+	\/go/pkg/mod/github.com/google/btree@v1.1.2/btree_generic.go:1017
+github.com/pingcap/tidb/br/pkg/streamhelper/spans.(*ValueSortedFull).TraverseValuesLessThan
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/spans/value_sorted.go:62
+github.com/pingcap/tidb/br/pkg/streamhelper.(*CheckpointAdvancer).CalculateGlobalCheckpointLight
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/advancer.go:175
+github.com/pingcap/tidb/br/pkg/streamhelper.(*CheckpointAdvancer).optionalTick.func1
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/advancer.go:406
+github.com/pingcap/tidb/br/pkg/streamhelper.(*CheckpointAdvancer).advanceCheckpointBy
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/advancer.go:328
+github.com/pingcap/tidb/br/pkg/streamhelper.(*CheckpointAdvancer).optionalTick
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/advancer.go:405
+github.com/pingcap/tidb/br/pkg/streamhelper.(*CheckpointAdvancer).tick
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/advancer.go:426
+github.com/pingcap/tidb/br/pkg/streamhelper.(*CheckpointAdvancer).OnTick
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/advancer_daemon.go:26
+github.com/pingcap/tidb/br/pkg/streamhelper/daemon.(*OwnerDaemon).ownerTick
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/daemon/owner_daemon.go:62
+github.com/pingcap/tidb/br/pkg/streamhelper/daemon.(*OwnerDaemon).Begin.func1
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/br/pkg/streamhelper/daemon/owner_daemon.go:90
+github.com/pingcap/tidb/util.(*WaitGroupWrapper).Run.func1
+	\/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/wait_group_wrapper.go:33"] [error="panicked when executing, message: runtime error: index out of range [15] with length 15: [BR:Common:ErrUnknown]internal error"]
+    [2023/12/23 08:49:45.522 +08:00] [WARN] [owner_daemon.go:63] ["failed on tick"] [error="panicked when executing, message: runtime error: index out of range [15] with length 15: [BR:Common:ErrUnknown]internal error"]
+    [2023/12/23 08:49:57.701 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+    [2023/12/23 08:49:57.702 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0]
+    [2023/12/23 08:50:09.709 +08:00] [WARN] [advancer.go:315] ["failed to update global checkpoint: stale"] [old=446507892373454852] [new=0] 
+```
+
+
+
+### 1. Minimal reproduce step (Required)
+
+Unclear, reported by a user.
+
+### 2. What did you expect to see? (Required)
+
+No panic.
+
+### 3. What did you see instead (Required)
+
+Panic.
+
+### 4. What is your TiDB version? (Required)
+
+v6.5.3

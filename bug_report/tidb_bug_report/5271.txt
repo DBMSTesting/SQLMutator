@@ -1,0 +1,110 @@
+ID: 5271
+Title: select distinct decimal with integral part exceeding int64 reveals incorrect result
+Description:
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+``` sql
+mysql> show create table decimals;
++----------+------------------------------------------------------------------------------------------------------------+
+| Table    | Create Table                                                                                               |
++----------+------------------------------------------------------------------------------------------------------------+
+| decimals | CREATE TABLE `decimals` (
+  `a` decimal(20) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin |
++----------+------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> select * from decimals;
++-----------------------+
+| a                     |
++-----------------------+
+|  10000000000000000000 |
+| -10000000000000000000 |
+|                100000 |
+|                     1 |
++-----------------------+
+4 rows in set (0.01 sec)
+
+mysql> select distinct a from decimals;
+
+```
+
+2. What did you expect to see?
+``` sql
+mysql> select distinct a from decimals;
++-----------------------+
+| a                     |
++-----------------------+
+|  10000000000000000000 |
+| -10000000000000000000 |
+|                100000 |
+|                     1 |
++-----------------------+
+4 rows in set (0.01 sec)
+```
+
+
+3. What did you see instead?
+``` sql
+mysql> select distinct a from decimals;
++--------+
+| a      |
++--------+
+|     10 |
+|    -10 |
+| 100000 |
+|      1 |
++--------+
+4 rows in set (0.00 sec)
+```
+
+
+4. What version of TiDB are you using (`tidb-server -V`)?
+``` sql
+mysql> select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                         |
++----------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v1.0.3
+Git Commit Hash: b8bcf9c3d68dc16e2d75a99212686130f895b748
+Git Branch: HEAD
+UTC Build Time: 2017-11-29 07:58:32 |
++----------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+Here is the explained plan:
+``` sql
+mysql> explain select distinct a from decimals;
++---------------+-----------+---------------+------+--------------------------------------------------------------------------+-------+
+| id            | parents   | children      | task | operator info                                                            | count |
++---------------+-----------+---------------+------+--------------------------------------------------------------------------+-------+
+| TableScan_5   | HashAgg_4 |               | cop  | table:decimals, range:(-inf,+inf), keep order:false                      |     4 |
+| HashAgg_4     |           | TableScan_5   | cop  | type:complete, group by:test.decimals.a, funcs:firstrow(test.decimals.a) |     4 |
+| TableReader_7 | HashAgg_6 |               | root | data:HashAgg_4                                                           |     4 |
+| HashAgg_6     |           | TableReader_7 | root | type:final, group by:, funcs:firstrow(col_0)                             |     4 |
++---------------+-----------+---------------+------+--------------------------------------------------------------------------+-------+
+4 rows in set (0.00 sec)
+```
+
+Update: seems the scale is not where problem is.
+
+When the integral part of decimal exceeds int64, the error can be reproduced. 
+``` sql
+mysql> create table t3(c1 decimal(23,3));
+Query OK, 0 rows affected (0.08 sec)
+
+mysql> insert into t3 values(10000000000000000000.23), (119940040000000.422);
+Query OK, 2 rows affected (0.02 sec)
+
+mysql> select distinct c1 from t3;
++---------------------+
+| c1                  |
++---------------------+
+|              10.230 |
+| 119940040000000.422 |
++---------------------+
+2 rows in set (0.00 sec)
+```

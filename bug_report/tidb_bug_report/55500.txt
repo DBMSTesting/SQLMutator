@@ -1,0 +1,133 @@
+ID: 55500
+Title: jepsen test failed cause by query was killed and returned the wrong result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### jepsen test failed phenomena
+
+```log
+2024-08-16 16:44:17,833{GMT}	INFO	[jepsen test runner] jepsen.core: {:perf
+ {:latency-graph {:valid? true},
+  :rate-graph {:valid? true},
+  :valid? true},
+ :workload
+ {:reads-count 186126,
+  :early-read-count 2042,
+  :late-read-count 35061,
+  :valid? false,
+  :forks
+  ([{:f :read,
+     :value
+     [[:r 37258 nil]
+      [:r 37256 nil]
+      [:r 37254 nil]
+      [:r 37250 1]
+      [:r 37255 nil]
+      [:r 37253 nil]
+      [:r 37251 1]
+      [:r 37257 nil]
+      [:r 37259 nil]
+      [:r 37252 1]],
+     :type :ok,
+     :process 28,
+     :time 122689945960,
+     :txn-info {:start_ts 451890721177469215},
+     :index 214011}
+    {:f :read,
+     :value
+     [[:r 37250 1]
+      [:r 37258 nil]
+      [:r 37254 nil]
+      [:r 37251 nil]
+      [:r 37259 nil]
+      [:r 37252 1]
+      [:r 37255 nil]
+      [:r 37256 nil]
+      [:r 37257 nil]
+      [:r 37253 1]],
+     :type :ok,
+     :process 2,
+     :time 128823069854,
+     :txn-info {:start_ts 451890721177469226},
+     :index 225472}])},
+ :valid? false}
+
+
+Analysis invalid! (ﾉಥ益ಥ）ﾉ ┻━┻
+```
+
+And TiDB general log is following:
+
+```
+node-2.node-peer.jepsen-tps-7620074-1-272/db.log:[2024/08/16 16:38:24.612 +00:00] [INFO] [session.go:3920] [GENERAL_LOG] [conn=83886092] [session_alias=] [user=root@10.200.53.204] [schemaVersion=101] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=PESSIMISTIC] [sql="KILL QUERY 83886086"]
+node-2.node-peer.jepsen-tps-7620074-1-272/db.log:[2024/08/16 16:38:24.612 +00:00] [INFO] [session.go:3920] [GENERAL_LOG] [conn=83886086] [session_alias=] [user=root@10.200.53.204] [schemaVersion=101] [txnStartTS=451890721177469226] [forUpdateTS=451890721177469226] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select val from txn2 where sk = 37251 "]
+node-2.node-peer.jepsen-tps-7620074-1-272/db.log:[2024/08/16 16:38:24.612 +00:00] [INFO] [server.go:896] [kill] [conn=83886086] [query=true]
+```
+
+The problem is, the query result of `select val from txn2 where sk = 37251` with `txnStartTS=451890721177469226` should be `1`, but got `nil`, which is empty.
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+1. prepare data:
+
+```sql
+create table tkq (a int key, b int, index idx_b(b));
+insert into tkq values (1,1);
+```
+
+2.  In session-1, execute following query in a loop:
+
+```sql
+select a from tkq where b=1;
+```
+
+3. Concurrently in session-2, execute following SQL in a loop:
+
+```sql
+kill query {session-1-connection-id};
+```
+
+### 2. What did you expect to see? (Required)
+
+In session-1, the query result should be one of the following two result:
+
+result-1:
+
+```sql
++---+
+| a |
++---+
+| 1 |
++---+
+1 rows in set
+```
+
+result-2:
+
+```
+ERROR: Query execution was interrupted
+```
+
+### 3. What did you see instead (Required)
+
+In session-1, the query may return wrong result sometime, which is empty result without error:
+
+```sql
++---+
+| a |
++---+
++---+
+0 rows in set
+```
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v8.1.0
+

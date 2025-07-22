@@ -1,0 +1,85 @@
+ID: 15810
+Title: GROUP BY clause nondeterministically results in an incorrect result or error
+Description:
+Consider the following statements:
+
+```sql
+CREATE TABLE t0(c0 INT, c1 INT);
+CREATE TABLE t1(c0 INT, c1 INT);
+CREATE TABLE t2(c0 INT, c1 INT );
+INSERT INTO t1(c0) VALUES (8, 58), (19, 79);
+INSERT INTO t1 VALUES (22, 19), (91, 69);
+INSERT INTO t0 VALUES (29, 5), (11, NULL);
+INSERT INTO t1 VALUES (NULL, 60), (0, 49), (23, NULL);
+INSERT INTO t1(c1, c0) VALUES (58, 33), (11, 82);
+INSERT INTO t1 VALUES (18, 65), (33, 10), (31, 13), (98, 30);
+INSERT INTO t1(c0, c1) VALUES (NULL, 8), (17, 99), (70, 63), (22, 28);
+INSERT INTO t2(c0, c1) VALUES (90, NULL), (88, 89), (11, 26);
+INSERT INTO t0 VALUES (75, 68);
+INSERT INTO t0(c0, c1) VALUES (54, 19);
+INSERT INTO t1 VALUES (14, 53);
+INSERT INTO t1 VALUES (72, NULL);
+INSERT INTO t0 VALUES (29, 94), (48, 3);
+INSERT INTO t0(c0, c1) VALUES (29, 9), (66, 39);
+INSERT INTO t2 VALUES (92, 75);
+INSERT INTO t2(c1) VALUES (23), (67);
+INSERT INTO t1 VALUES (69, NULL), (NULL, 78);
+INSERT INTO t0(c0) VALUES (71), (59);
+INSERT INTO t2 VALUES (97, 8), (92, 45);
+INSERT INTO t1 VALUES (37, 57), (46, 89);
+INSERT INTO t1(c1) VALUES (51);
+INSERT INTO t0 VALUES (24, 70), (14, 87);
+INSERT INTO t2 VALUES (33, NULL), (77, 68);
+INSERT INTO t1 VALUES (48, 44);
+INSERT INTO t2(c0, c1) VALUES (56, 51), (80, NULL), (NULL, 27);
+INSERT INTO t0(c0) VALUES (88), (90), (58);
+INSERT INTO t2 VALUES (43, 16);
+ANALYZE TABLE t1, t2;
+SELECT t1.c0 LIKE t1.c0 FROM t1, t2, t0 GROUP BY t1.c0 LIKE t1.c0; -- non-deterministic result or "runtime error: index out of range [1] with length 1"
+```
+
+The `SELECT` sometimes produces an incorrect result or results in an error. Here are examples for outputs that I can reproduce locally:
+```
+mysql> SELECT t1.c0 LIKE t1.c0 FROM t1, t2, t0 GROUP BY t1.c0 LIKE t1.c0;
++------------------+
+| t1.c0 LIKE t1.c0 |
++------------------+
+|                1 |
+|             NULL |
+|                1 |
++------------------+
+3 rows in set (0.01 sec)
+
+mysql> SELECT t1.c0 LIKE t1.c0 FROM t1, t2, t0 GROUP BY t1.c0 LIKE t1.c0;
++------------------+
+| t1.c0 LIKE t1.c0 |
++------------------+
+|                1 |
+|             NULL |
++------------------+
+2 rows in set (0.00 sec)
+
+mysql> SELECT t1.c0 LIKE t1.c0 FROM t1, t2, t0 GROUP BY t1.c0 LIKE t1.c0;
+ERROR 1105 (HY000): runtime error: index out of range [1] with length 1
+```
+The first result set is incorrect, since `1` is contained twice. The second one seems to be correct, but in the third case, an error is caused. `tidb-server` logs the following error:
+```
+[2020/03/29 15:56:29.536 +02:00] [ERROR] [projection.go:443] ["projection executor panicked"] [error="runtime error: index out of range [1] with length 1"] [stack="goroutine 94351 [running]:\ngithub.com/pingcap/tidb/util.GetStack(...)\n\t/tidb/util/misc.go:72\ngithub.com/pingcap/tidb/executor.recoveryProjection(0xc00803c2e0, 0x27b3940, 0xc000d081a0)\n\t/tidb/executor/projection.go:442 +0x90\ngithub.com/pingcap/tidb/executor.(*projectionWorker).run.func1(0xc008906f88, 0xc0076c2280)\n\t/tidb/executor/projection.go:409 +0x70\npanic(0x27b3940, 0xc000d081a0)\n\t/usr/lib/go-1.13/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/util/stringutil.DoMatch(0xc00794a56c, 0x2, 0xc0029c7270, 0x2, 0x1, 0xc00247be7f, 0x1, 0x1, 0x2)\n\t/tidb/util/stringutil/string_util.go:243 +0xfb\ngithub.com/pingcap/tidb/util/collate.(*binPattern).DoMatch(0xc0078aefc0, 0xc00794a56c, 0x2, 0x5c)\n\t/tidb/util/collate/bin.go:69 +0x6f\ngithub.com/pingcap/tidb/expression.(*builtinLikeSig).vecEvalInt(0xc006729ec0, 0xc007690c80, 0xc00765aa10, 0x0, 0x0)\n\t/tidb/expression/builtin_like_vec.go:68 +0x6f9\ngithub.com/pingcap/tidb/expression.(*ScalarFunction).VecEvalInt(0xc0076a2f50, 0x2d045a0, 0xc004fea500, 0xc007690c80, 0xc00765aa10, 0x8, 0x8)\n\t/tidb/expression/scalar_function.go:51 +0x4b\ngithub.com/pingcap/tidb/expression.evalOneVec(0x2d045a0, 0xc004fea500, 0x2d33380, 0xc0076a2f50, 0xc007690c80, 0xc007690cd0, 0x1, 0xc00118bef0, 0x226f3b3)\n\t/tidb/expression/chunk_executor.go:123 +0x459\ngithub.com/pingcap/tidb/expression.(*defaultEvaluator).run(0xc0067ad440, 0x2d045a0, 0xc004fea500, 0xc007690c80, 0xc007690cd0, 0x0, 0x0)\n\t/tidb/expression/evaluator.go:51 +0x3be\ngithub.com/pingcap/tidb/expression.(*EvaluatorSuite).Run(0xc00781e960, 0x2d045a0, 0xc004fea500, 0xc007690c80, 0xc007690cd0, 0xc0074f29c0, 0xc00118bfb8)\n\t/tidb/expression/evaluator.go:123 +0xc9\ngithub.com/pingcap/tidb/executor.(*projectionWorker).run(0xc0076c2280, 0x2ccbee0, 0xc007155dd0)\n\t/tidb/executor/projection.go:426 +0x17b\ncreated by github.com/pingcap/tidb/executor.(*ProjectionExec).prepare\n\t/tidb/executor/projection.go:267 +0x7ac\n"]
+```
+Environment:
+```
+mysql> SELECT tidb_version();
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                               |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v4.0.0-beta.2-75-ga6de0e38d-dirty
+Git Commit Hash: a6de0e38d49c97671d316590c8c945eb518ca2b2
+Git Branch: master
+UTC Build Time: 2020-03-26 12:11:33
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

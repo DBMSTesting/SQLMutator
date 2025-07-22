@@ -1,0 +1,240 @@
+ID: 46639
+Title: ZLIB_INFLATE_FAILED using clickhouse client and INFILE on a csv.gz archive
+Description:
+**Describe what's wrong**
+
+following the steps on this [blog](https://clickhouse.com/blog/getting-data-into-clickhouse-part-1) I'm experiencing failure while trying to `INSERT` data from a .gz archive using clickhouse client and `INFILE` (can repro both on a local instance or on cloud).
+
+
+**Does it reproduce on recent release?**
+
+yes (`23.2.1.993`)
+
+
+**How to reproduce**
+
+1) download locally and get md5:
+
+```
+user@host sample_data % pwd
+/opt/sample_data
+
+user@host sample_data % wget https://datasets-documentation.s3.eu-west-3.amazonaws.com/hackernews/hacknernews.csv.gz
+
+--2023-02-21 10:09:10--  https://datasets-documentation.s3.eu-west-3.amazonaws.com/hackernews/hacknernews.csv.gz
+Resolving datasets-documentation.s3.eu-west-3.amazonaws.com (datasets-documentation.s3.eu-west-3.amazonaws.com)... 3.5.224.123
+Connecting to datasets-documentation.s3.eu-west-3.amazonaws.com (datasets-documentation.s3.eu-west-3.amazonaws.com)|3.5.224.123|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 4939387203 (4,6G) [text/csv]
+Saving to: ‘hacknernews.csv.gz’
+
+hacknernews.csv.gz                                                100%[============================================================================================================================================================>]   4,60G  32,7MB/s    in 2m 13s  
+
+2023-02-21 10:11:23 (35,5 MB/s) - ‘hacknernews.csv.gz’ saved [4939387203/4939387203]
+
+user@host sample_data % md5 hacknernews.csv.gz 
+MD5 (hacknernews.csv.gz) = c1f2298746f90c754c2f859498c49117
+```
+
+
+2) connect to cloud instance with clickhouse client and try to insert from file:
+
+```
+user@host /opt % clickhouse client --host XXXXXXXXXXX.clickhouse.cloud \
+                  --secure \
+                  --port 9440 \
+                  --password XXXXXXXXXXX
+ClickHouse client version 23.2.1.993 (official build).
+Connecting to XXXXXXXXXXX.clickhouse.cloud:9440 as user default.
+Connected to ClickHouse server version 22.13.1 revision 54461.
+
+ClickHouse server version is older than ClickHouse client. It may indicate that the server is out of date and can be upgraded.
+
+clickhouse-cloud :) CREATE TABLE hackernews
+                                        (
+                                            `id` UInt32,
+                                            `deleted` UInt8,
+                                            `type` Enum('story' = 1, 'comment' = 2, 'poll' = 3, 'pollopt' = 4, 'job' = 5),
+                                            `by` LowCardinality(String),
+                                            `time` DateTime,
+                                            `text` String,
+                                            `dead` UInt8,
+                                            `parent` UInt32,
+                                            `poll` UInt32,
+                                            `kids` Array(UInt32),
+                                            `url` String,
+                                            `score` Int32,
+                                            `title` String,
+                                            `parts` Array(UInt32),
+                                            `descendants` Int32
+                                        )
+                                        ENGINE = MergeTree
+                                        ORDER BY id
+                                        ;
+
+CREATE TABLE hackernews
+(
+    `id` UInt32,
+    `deleted` UInt8,
+    `type` Enum('story' = 1, 'comment' = 2, 'poll' = 3, 'pollopt' = 4, 'job' = 5),
+    `by` LowCardinality(String),
+    `time` DateTime,
+    `text` String,
+    `dead` UInt8,
+    `parent` UInt32,
+    `poll` UInt32,
+    `kids` Array(UInt32),
+    `url` String,
+    `score` Int32,
+    `title` String,
+    `parts` Array(UInt32),
+    `descendants` Int32
+)
+ENGINE = MergeTree
+ORDER BY id
+
+Query id: ffa0e480-566e-4021-abf9-16d39209fea7
+
+Ok.
+
+0 rows in set. Elapsed: 0.313 sec. 
+
+clickhouse-cloud :) INSERT INTO hackernews FROM INFILE '/opt/sample_data/hacknernews.csv.gz' FORMAT CSVWithNames;
+
+INSERT INTO hackernews FROM INFILE '/opt/sample_data/hacknernews.csv.gz' FORMAT CSVWithNames
+
+Query id: b775a269-b7d3-41f5-a74a-3c90ca891f2f
+
+Ok.
+Exception on client:
+Code: 354. DB::Exception: inflateReset failed: buffer error: While executing ParallelParsingBlockInputFormat: While executing File: data for INSERT was parsed from file. (ZLIB_INFLATE_FAILED)
+```
+
+3) inserting using `url` completes:
+
+```
+clickhouse-cloud :) CREATE TABLE hackernews_from_url
+                                        (
+                                            `id` UInt32,
+                                            `deleted` UInt8,
+                                            `type` Enum('story' = 1, 'comment' = 2, 'poll' = 3, 'pollopt' = 4, 'job' = 5),
+                                            `by` LowCardinality(String),
+                                            `time` DateTime,
+                                            `text` String,
+                                            `dead` UInt8,
+                                            `parent` UInt32,
+                                            `poll` UInt32,
+                                            `kids` Array(UInt32),
+                                            `url` String,
+                                            `score` Int32,
+                                            `title` String,
+                                            `parts` Array(UInt32),
+                                            `descendants` Int32
+                                        )
+                                        ENGINE = MergeTree
+                                        ORDER BY id
+                                        ;
+
+CREATE TABLE hackernews_from_url
+(
+    `id` UInt32,
+    `deleted` UInt8,
+    `type` Enum('story' = 1, 'comment' = 2, 'poll' = 3, 'pollopt' = 4, 'job' = 5),
+    `by` LowCardinality(String),
+    `time` DateTime,
+    `text` String,
+    `dead` UInt8,
+    `parent` UInt32,
+    `poll` UInt32,
+    `kids` Array(UInt32),
+    `url` String,
+    `score` Int32,
+    `title` String,
+    `parts` Array(UInt32),
+    `descendants` Int32
+)
+ENGINE = MergeTree
+ORDER BY id
+
+Query id: fd5483b6-aa25-4d3f-80c4-b2ca16fe5b91
+
+Ok.
+
+0 rows in set. Elapsed: 0.307 sec. 
+
+clickhouse-cloud :) INSERT INTO hackernews_from_url SELECT *
+                    FROM url('https://datasets-documentation.s3.eu-west-3.amazonaws.com/hackernews/hacknernews.csv.gz', 'CSVWithNames');
+
+INSERT INTO hackernews_from_url SELECT *
+FROM url('https://datasets-documentation.s3.eu-west-3.amazonaws.com/hackernews/hacknernews.csv.gz', 'CSVWithNames')
+
+Query id: e9afc956-e930-4278-ad4c-8a8889687ec5
+
+Ok.
+
+0 rows in set. Elapsed: 211.212 sec. Processed 28.74 million rows, 12.32 GB (136.06 thousand rows/s., 58.33 MB/s.)
+```
+
+
+4. the counts on both tables:
+
+```
+clickhouse-cloud :) SELECT count() FROM hackernews_from_url;
+
+SELECT count()
+FROM hackernews_from_url
+
+Query id: a3a711a5-0849-4aa0-b064-fe78cad13f5a
+
+┌──count()─┐
+│ 28737557 │
+└──────────┘
+
+1 row in set. Elapsed: 0.002 sec. 
+
+clickhouse-cloud :) SELECT count() FROM hackernews;
+
+SELECT count()
+FROM hackernews
+
+Query id: 3ae9ca81-59c7-458c-a621-9ce6d9e3a875
+
+┌─count()─┐
+│ 3541380 │
+└─────────┘
+
+1 row in set. Elapsed: 0.002 sec. 
+
+```
+
+
+
+**Expected behavior**
+
+`INSERT` statement execution completes
+
+**Error message and/or stacktrace**
+
+```
+Exception on client:
+Code: 354. DB::Exception: inflateReset failed: buffer error: While executing ParallelParsingBlockInputFormat: While executing File: data for INSERT was parsed from file. (ZLIB_INFLATE_FAILED)
+```
+
+**Additional context**
+
+the host I launch the commands from
+
+```
+user@host sample_data % uname -a
+Darwin host.local 22.3.0 Darwin Kernel Version 22.3.0: Thu Jan  5 20:48:54 PST 2023; root:xnu-8792.81.2~2/RELEASE_ARM64_T6000 arm64
+```
+
+
+for what is worth, seeing this other [issue](https://github.com/ClickHouse/ClickHouse/issues/46037)  the local archive here doesn't seem to be truncated or at least can decompress fine locally using `gunzip`:
+
+
+```
+user@host sample_data sample_data % gunzip -k hacknernews.csv.gz 
+user@host sample_data sample_data % wc -l hacknernews.csv
+ 32349022 hacknernews.csv
+```

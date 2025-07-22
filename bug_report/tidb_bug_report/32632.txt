@@ -1,0 +1,175 @@
+ID: 32632
+Title: Encounter Error 1242: Subquery returns more than 1 row when running TPCH Q11 with tidb_enforce_mpp=1
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+1. Deploy TiDB cluster with nightly version
+2. restore tpch 100g data
+3. alter tables set tiflash raplica 4
+4. set parameters
+```
+set @@tidb_enforce_mpp = 1;
+set @@tidb_isolation_read_engines='tiflash';
+set @@tidb_allow_mpp=1;
+set @@tidb_mem_quota_query = 10737418240;
+```
+5. connect to tidb and run Q11
+```
+explain analyze select
+	ps_partkey,
+	sum(ps_supplycost * ps_availqty) as value
+from
+	partsupp,
+	supplier,
+	nation
+where
+	ps_suppkey = s_suppkey
+	and s_nationkey = n_nationkey
+	and n_name = 'MOZAMBIQUE'
+group by
+	ps_partkey having
+		sum(ps_supplycost * ps_availqty) > (
+			select
+				sum(ps_supplycost * ps_availqty) * 0.0001000000
+			from
+				partsupp,
+				supplier,
+				nation
+			where
+				ps_suppkey = s_suppkey
+				and s_nationkey = n_nationkey
+				and n_name = 'MOZAMBIQUE'
+		)
+order by
+	value desc;
+```
+
+### 2. What did you expect to see? (Required)
+The query is executed without error.
+
+### 3. What did you see instead (Required)
+```
+[centos@ip-172-31-23-214 aws-test]$ mysql -h 127.0.0.1 -P 3390 -u root -D tpch
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Welcome to the MariaDB monitor.  Commands end with ; or \g.
+Your MySQL connection id is 17
+Server version: 5.7.25-TiDB-v5.5.0-alpha TiDB Server (Apache License 2.0) Community Edition, MySQL 5.7 compatible
+
+Copyright (c) 2000, 2018, Oracle, MariaDB Corporation Ab and others.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+MySQL [tpch]> set @@tidb_enforce_mpp = 1;
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [tpch]> set @@tidb_isolation_read_engines='tiflash';
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [tpch]> set @@tidb_allow_mpp=1;
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [tpch]> set @@tidb_mem_quota_query = 10737418240;
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [tpch]> explain analyze select
+    ->     ps_partkey,
+    ->     sum(ps_supplycost * ps_availqty) as value
+    -> from
+    ->     partsupp,
+    ->     supplier,
+    ->     nation
+    -> where
+    ->     ps_suppkey = s_suppkey
+    ->     and s_nationkey = n_nationkey
+    ->     and n_name = 'MOZAMBIQUE'
+    -> group by
+    ->     ps_partkey having
+    ->         sum(ps_supplycost * ps_availqty) > (
+    ->             select
+    ->                 sum(ps_supplycost * ps_availqty) * 0.0001000000
+    ->             from
+    ->                 partsupp,
+    ->                 supplier,
+    ->                 nation
+    ->             where
+    ->                 ps_suppkey = s_suppkey
+    ->                 and s_nationkey = n_nationkey
+    ->                 and n_name = 'MOZAMBIQUE'
+    ->         )
+    -> order by
+    ->     value desc;
+ERROR 1242 (21000): Subquery returns more than 1 row
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+| Release Version: v5.5.0-alpha
+Edition: Community
+Git Commit Hash: 171a35486036e8ea5b168c2d4d29f4639df1611d
+Git Branch: heads/refs/tags/v5.5.0-alpha
+UTC Build Time: 2022-02-20 14:56:04
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
+```
+
+topo file
+```
+server_configs:
+  tidb:
+    new_collations_enabled_on_first_bootstrap: true
+    performance.tcp-keep-alive: true
+    prepared-plan-cache.enabled: true
+  tiflash:
+    delta_index_cache_size: 3221225472
+    dt_segment_force_merge_delta_rows: 800000000
+    dt_segment_stop_write_delta_rows: 4000000000
+    mark_cache_size: 2147483648
+    minmax_index_cache_size: 2147483648
+    profiles.profiles.default.max_memory_usage: 137438953472
+    profiles.profiles.default.max_memory_usage_for_all_queries: 137438953472
+  tikv:
+    raftstore.apply-pool-size: 2
+    raftstore.store-pool-size: 2
+    rocksdb.defaultcf.max-write-buffer-number: 10
+    rocksdb.lockcf.max-write-buffer-number: 10
+    rocksdb.writecf.max-write-buffer-number: 10
+    server.grpc-concurrency: 3
+    server.max-grpc-send-msg-len: 100000000
+    storage.io-rate-limit.max-bytes-per-sec: 400MB
+tidb_servers:
+- host: 172.31.16.18
+- host: 172.31.45.225
+tiflash_servers:
+- config:
+    storage.io_rate_limit.max_bytes_per_sec: 625MB
+    storage.main.dir:
+    - /aws-test/data/tiflash
+  host: 172.31.31.73
+- config:
+    storage.io_rate_limit.max_bytes_per_sec: 625MB
+    storage.main.dir:
+    - /aws-test/data/tiflash
+  host: 172.31.35.128
+- config:
+    storage.io_rate_limit.max_bytes_per_sec: 625MB
+    storage.main.dir:
+    - /aws-test/data/tiflash
+  host: 172.31.10.122
+- config:
+    storage.io_rate_limit.max_bytes_per_sec: 625MB
+    storage.main.dir:
+    - /aws-test/data/tiflash
+  host: 172.31.54.53
+```
+

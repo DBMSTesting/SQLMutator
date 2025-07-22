@@ -1,0 +1,43 @@
+ID: 7650
+Title: GROUP BY with LIMIT on a HDFS Parquet table results in Memory limit Exception
+Description:
+I'm testing ClickHouse to see if it's a fit for our data. 
+
+I found that performing a GROUP BY with LIMIT query, results in `Memory limit (for query) exceeded`, even though `max_bytes_before_external_group_by` and `max_bytes_before_external_sort` are set.
+
+* ClickHouse server version : 19.16.2
+* Non-default settings :
+```
+set send_logs_level='debug'
+set max_memory_usage=20000000000
+set max_bytes_before_external_group_by=10000000000
+set max_bytes_before_external_sort=10000000000
+```
+* Table created using HDFS Engine :
+```
+CREATE TABLE hdfs_table (... some columns.. , high_cardinality_key_1 Nullable(Int64), high_cardinality_key_2 Nullable(Int64)) ENGINE=HDFS('hdfs://host:9000/some_dir/*', 'Parquet')
+```
+* The data directory contains about 3 billion rows, 100 GB.
+* Queries to run that lead to unexpected result :
+```
+1. select high_cardinality_key_1, count(high_cardinality_key_2) from hdfs_table group by high_cardinality_key_1 limit 1
+2. select count(distinct hour) from hdfs_table
+```
+I expected the query to spill to disk and return results even though memory is limited. 
+In the second query, hour is a very low cardinality column (only 24 distinct values) Is the whole data loaded in memory even though only some columns are needed?
+
+The debug logs for the first query:
+```
+<Debug> MemoryTracker: Current memory usage: 6.03 GiB.
+<Debug> MemoryTracker: Current memory usage: 10.00 GiB.
+<Debug> Aggregator: Writing part of aggregation data into temporary file /var/lib/clickhouse/tmp/tmp68165zfaaaa.
+...
+<Debug> MemoryTracker: Current memory usage: 16.01 GiB.
+...
+<Debug> Aggregator: Writing part of aggregation data into temporary file /var/lib/clickhouse/tmp/tmp68165yhaaaa.
+...
+Progress: 733.14 million rows, 64.52 GB (19.19 million rows/s., 1.69 GB/s.) <Error> executeQuery: Code: 241, e.displayText() = DB::Exception: Memory limit (for query) exceeded: would use 18.63 GiB (attempt to allocate chunk of 33554448 bytes), maximum: 18.63 GiB (version 19.16.2.2 (official build))
+```
+
+Any idea ?
+Thanks

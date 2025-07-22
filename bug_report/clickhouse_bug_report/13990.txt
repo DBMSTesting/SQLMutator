@@ -1,0 +1,65 @@
+ID: 13990
+Title: Code: 8. DB::Exception: Cannot find column xx in source stream
+Description:
+**Describe the bug**
+I created a table with engine = buffer and going to flush data to distributed table in shard. All things are done from create tables to insert data. I also select data by basic queries but it failed if I use sum, count and the following error shows:
+```
+SELECT sum(amount)
+FROM realtime.realtimebuff
+
+Received exception from server (version 20.6.3):
+Code: 8. DB::Exception: Received from 10.60.37.37:9000. DB::Exception: Cannot find column amount in source stream. 
+
+0 rows in set. Elapsed: 0.005 sec. "
+```
+**For basic queries as below:**
+```
+SELECT *
+FROM realtime.realtimebuff
+
+┌─amount─┬─transID─────────┬─userID──────────┬─appID─┬─appName─┬─transType─┬─orderSource─┬─nau─┬─fau─┬─transactionType─┬─supplier─┬─fMerchant─┬─bankConnCode─┬─────────────reqDate─┐
+│    100 │ 200312000295032 │ 200223000028708 │ 14    │ Data    │ 1         │ 20          │ 1   │ 0   │ 123             │ abc      │ 1234a     │ ZPVBIDV      │ 2020-08-24 15:09:43 │
+└────────┴─────────────────┴─────────────────┴───────┴─────────┴───────────┴─────────────┴─────┴─────┴─────────────────┴──────────┴───────────┴──────────────┴─────────────────────┘
+
+1 rows in set. Elapsed: 0.018 sec. 
+```
+**How to reproduce**
+****
+```sql
+/** 1. Create tables **/
+
+/* a. Create replicated table */ 
+CREATE TABLE realtimedrep(amount Int64,transID String,userID String,appID String,appName String,transType String,orderSource String,nau String,fau String,transactionType String,supplier String,fMerchant String,bankConnCode String,reqDate DateTime) ENGINE = ReplicatedMergeTree('/data/clickhouse/3/realtimedrep','2') PARTITION BY toDate(reqDate) ORDER BY transID SETTINGS index_granularity = 8192;
+
+/* b. Create Distributed table */
+CREATE TABLE realtimedistributed(amount Int64,transID String,userID String,appID String,appName String,transType String,orderSource String,nau String,fau String,transactionType String,supplier String,fMerchant String,bankConnCode String,reqDate DateTime) ENGINE = Distributed(cluster_two_shards, realtime, realtimedrep, rand());
+
+/* c. Create Buffer */
+CREATE TABLE realtimebuff(amount Int64,transID String,userID String,appID String,appName String,transType String,orderSource String,nau String,fau String,transactionType String,supplier String,fMerchant String,bankConnCode String,reqDate DateTime) ENGINE = Buffer('realtime', 'realtimedistributed', 16, 3600, 100, 10000, 1000000, 10000000, 100000000);
+
+/** 2. Insert data **/
+
+insert into realtimebuff (amount,transID,userID,appID,appName,transType,orderSource,nau,fau,transactionType,supplier,fMerchant,bankConnCode,reqDate) values (100, '200312000295032','200223000028708','14', 'Data','1', '20','1', '0','123','abc', '1234a','ZPVBIDV', 1598256583);
+```
+**3. Run queries**
+```sql
+select sum(amount) from realtime.realtimebuff;
+```
+**Which ClickHouse server version to use**
+Version 20.6.3
+
+**Expected behavior**
+It's a basic query and it should work.
+
+**Additional context**
+Even though the query above cannot work in buffer table but it works in distributed table. The following is results:
+```
+SELECT sum(amount)
+FROM realtimedistributed
+
+┌─sum(amount)─┐
+│         100 │
+└─────────────┘
+
+1 rows in set. Elapsed: 0.008 sec
+```

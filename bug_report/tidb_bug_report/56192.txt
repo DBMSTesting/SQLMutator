@@ -1,0 +1,78 @@
+ID: 56192
+Title: Incorrect plan when executing query with multi-valued indexes with tiflash
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Create a table with [Multi-valued indexes](https://docs.pingcap.com/tidb/stable/sql-statement-create-index#multi-valued-indexes)
+
+```sql
+CREATE TABLE t (col_json JSON,UNIQUE INDEX zips( (CAST(col_json->'$.zipcode' AS UNSIGNED ARRAY))));
+insert into t values('{"zipcode": [1,2]}');
+alter table t set tiflash replica 1;
+```
+
+### 2. What did you expect to see? (Required)
+
+```sql
+-- strict mode
+> set sql_mode='STRICT_TRANS_TABLES';
+> set session tidb_isolation_read_engines='tiflash';
+> delete from t where col_json = '[1,2,3]';
+(1815, "Internal : No access path for table 't' is found with 'tidb_isolation_read_engines' = 'tiflash', valid values can be 'tikv, tiflash'. Please check tiflash replica or check if the query is not readonly and sql mode is strict.")
+
+-- non strict mode
+> set sql_mode='';
+> set session tidb_isolation_read_engines='tiflash';
+> delete from t where col_json = '[1,2,3]';
+```
+
+### 3. What did you see instead (Required)
+
+```sql
+-- strict mode, an error message is returned. This is expected
+> set sql_mode='STRICT_TRANS_TABLES';
+> set session tidb_isolation_read_engines='tiflash';
+> delete from t where col_json = '[1,2,3]';
+(1815, "Internal : No access path for table 't' is found with 'tidb_isolation_read_engines' = 'tiflash', valid values can be 'tikv, tiflash'. Please check tiflash replica or check if the query is not readonly and sql mode is strict.")
+
+-- non strict mode, an error message is returned from the tiflash side. This is unexpected
+> set sql_mode='';
+> set session tidb_isolation_read_engines='tiflash';
+> delete from t where col_json = '[1,2,3]';
+(1105, 'other error for mpp stream: Code: 0, e.displayText() = DB::TiFlashException: The schema does not match the query, details: the column data type in the query is not the same as the current column, keyspace=4294967295 table_id=109 column_id=2 column_type=Nullable(UInt64) query_column_type=Nullable(String), e.what() = DB::TiFlashException,')
+
+> explain delete from t where col_json = '[1,2,3]';
++-------------------------+---------+--------------+---------------+----------------------------------------------------------+
+| id                      | estRows | task         | access object | operator info                                            |
++-------------------------+---------+--------------+---------------+----------------------------------------------------------+
+| Delete_4                | N/A     | root         |               | N/A                                                      |
+| └─TableReader_10        | 0.80    | root         |               | MppVersion: 2, data:ExchangeSender_9                     |
+|   └─ExchangeSender_9    | 0.80    | mpp[tiflash] |               | ExchangeType: PassThrough                                |
+|     └─Selection_8       | 0.80    | mpp[tiflash] |               | eq(test.t.col_json, cast("[1,2,3]", json BINARY))        |
+|       └─TableFullScan_7 | 1.00    | mpp[tiflash] | table:t       | pushed down filter:empty, keep order:false, stats:pseudo |
++-------------------------+---------+--------------+---------------+----------------------------------------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```sql
+> SELECT tidb_version() \G
+***************************[ 1. row ]***************************
+tidb_version() | Release Version: v8.1.1
+Edition: Community
+Git Commit Hash: a7df4f9845d5d6a590c5d45dad0dcc9f21aa8765
+Git Branch: HEAD
+UTC Build Time: 2024-08-22 05:50:03
+GoVersion: go1.21.13
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+```

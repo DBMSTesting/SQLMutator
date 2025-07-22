@@ -1,0 +1,71 @@
+ID: 40622
+Title: Branches with false conditions still evaluate, even with short_circuit_function_evaluation enabled
+Description:
+**Describe what's wrong**
+
+Running 22.3, with short_circuit_function_evaluation set to true (default) I found a case where it evaluates branches where the condition is false.
+
+**Does it reproduce on recent release?**
+
+Yes
+
+**How to reproduce**
+Make sure `short_circuit_function_evaluation` is set to enable (should be the default)
+```
+b0ac5f5dc40c :) select * from system.settings where name like '%short%' format Vertical;
+
+SELECT *
+FROM system.settings
+WHERE name LIKE '%short%'
+FORMAT Vertical
+
+Query id: 63fc879d-03c0-4a00-89c9-e424b9f539fa
+
+Row 1:
+──────
+name:        short_circuit_function_evaluation
+value:       enable
+changed:     0
+description: Setting for short-circuit function evaluation configuration. Possible values: 'enable' - use short-circuit function evaluation for functions that are suitable for it, 'disable' - disable short-circuit function evaluation, 'force_enable' - use short-circuit function evaluation for all functions.
+min:         ᴺᵁᴸᴸ
+max:         ᴺᵁᴸᴸ
+readonly:    0
+type:        ShortCircuitFunctionEvaluation
+```
+
+Execute this query:
+```
+SELECT multiIf(atype = 1, IPv4NumToString(reinterpretAsUInt32(reverse(s))), atype = 28, IPv6NumToString(toFixedString(s, 16)), s) FROM (SELECT 99 as atype, 'abcdefghijklmnopq' as s);
+```
+
+**Expected behavior**
+
+As per @Avogar description on https://github.com/ClickHouse/ClickHouse/pull/23367 I would expect this statement to return 's' and not cause an exception. 
+
+Instead, I get the exception `Code: 131. DB::Exception: Received from localhost:9000. DB::Exception: String too long for type FixedString(16). (TOO_LARGE_STRING_SIZE)` even though that condition is false (atype != 28).
+
+As a sanity check, I ran the example on the PR and that works fine, causing no exceptions:
+
+```
+b0ac5f5dc40c :) SELECT multiIf(number == 0, 0, number == 1, intDiv(1, number), number == 2, intDiv(1, number - 1), number == 3, intDiv(1, number - 2), intDiv(1, number - 3)) FROM numbers(10);
+
+SELECT multiIf(number = 0, 0, number = 1, intDiv(1, number), number = 2, intDiv(1, number - 1), number = 3, intDiv(1, number - 2), intDiv(1, number - 3))
+FROM numbers(10)
+
+Query id: e8510891-3158-4ab8-8b7e-29bfb29286e3
+
+┌─multiIf(equals(number, 0), 0, equals(number, 1), intDiv(1, number), equals(number, 2), intDiv(1, minus(number, 1)), equals(number, 3), intDiv(1, minus(number, 2)), intDiv(1, minus(number, 3)))─┐
+│                                                                                                                                                                                                0 │
+│                                                                                                                                                                                                1 │
+│                                                                                                                                                                                                1 │
+│                                                                                                                                                                                                1 │
+│                                                                                                                                                                                                1 │
+│                                                                                                                                                                                                0 │
+│                                                                                                                                                                                                0 │
+│                                                                                                                                                                                                0 │
+│                                                                                                                                                                                                0 │
+│                                                                                                                                                                                                0 │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+10 rows in set. Elapsed: 0.008 sec. 
+```

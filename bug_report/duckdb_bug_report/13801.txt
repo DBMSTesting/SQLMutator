@@ -1,0 +1,308 @@
+ID: 13801
+Title: Top-N is much slower than Sort operator
+Description:
+### What happens?
+
+From discussion #13688 
+
+I have a table like this which contains 50,000,000 rows of data near 6GB. I found that `Sort` is much faster than `Top-N` because `sorted_blocks`'s merge in `Sort` operator is calculated in parallel but in `Top-n` is not. 
+
+A possible solution is to design a struct similar to `OrderMergeEvent` to help `Top-N` do parallel merge sorting.
+
+Time cost:
+
+```sql   
+D explain analyze select * from t1 order by a;  
+100% ▕████████████████████████████████████████████████████████████▏   
+┌─────────────────────────────────────┐  
+│┌───────────────────────────────────┐│  
+││    Query Profiling Information    ││  
+│└───────────────────────────────────┘│  
+└─────────────────────────────────────┘  
+explain analyze select * from t1 order by a;  
+┌─────────────────────────────────────┐  
+│┌───────────────────────────────────┐│  
+││         Total Time: 18.52s        ││  
+│└───────────────────────────────────┘│  
+└─────────────────────────────────────┘  
+┌───────────────────────────┐  
+│         QUERY_ROOT        │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│             0             │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           0.00s           │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│      EXPLAIN_ANALYZE      │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│             0             │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           0.00s           │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│         PROJECTION        │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Projections:       │  
+│             #0            │  
+│__internal_decompress_strin│  
+│           g(#1)           │  
+│__internal_decompress_strin│  
+│           g(#2)           │  
+│__internal_decompress_strin│  
+│           g(#3)           │  
+│__internal_decompress_strin│  
+│           g(#4)           │  
+│__internal_decompress_strin│  
+│           g(#5)           │  
+│__internal_decompress_strin│  
+│           g(#6)           │  
+│__internal_decompress_strin│  
+│           g(#7)           │  
+│__internal_decompress_strin│  
+│           g(#8)           │  
+│__internal_decompress_strin│  
+│           g(#9)           │  
+│__internal_decompress_strin│  
+│           g(#10)          │  
+│__internal_decompress_strin│  
+│           g(#11)          │  
+│__internal_decompress_strin│  
+│           g(#12)          │  
+│__internal_decompress_strin│  
+│           g(#13)          │  
+│            #14            │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│          ORDER_BY         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│         Order By:         │  
+│          t1.a ASC         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│          50000000         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│          249.00s          │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│         PROJECTION        │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Projections:       │  
+│             #0            │  
+│__internal_compress_string_│  
+│        hugeint(#1)        │  
+│__internal_compress_string_│  
+│        ubigint(#2)        │  
+│__internal_compress_string_│  
+│        utinyint(#3)       │  
+│__internal_compress_string_│  
+│        uinteger(#4)       │  
+│__internal_compress_string_│  
+│        ubigint(#5)        │  
+│__internal_compress_string_│  
+│        hugeint(#6)        │  
+│__internal_compress_string_│  
+│        hugeint(#7)        │  
+│__internal_compress_string_│  
+│        ubigint(#8)        │  
+│__internal_compress_string_│  
+│        hugeint(#9)        │  
+│__internal_compress_string_│  
+│       uinteger(#10)       │  
+│__internal_compress_string_│  
+│        ubigint(#11)       │  
+│__internal_compress_string_│  
+│        ubigint(#12)       │  
+│__internal_compress_string_│  
+│        ubigint(#13)       │  
+│            #14            │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│         SEQ_SCAN          │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Stringified:       │  
+│             t1            │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Projections:       │  
+│             a             │  
+│             b             │  
+│             c             │  
+│             d             │  
+│             e             │  
+│             f             │  
+│             g             │  
+│             h             │  
+│             i             │  
+│             j             │  
+│             k             │  
+│             l             │  
+│             m             │  
+│             n             │  
+│             o             │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│   Estimated Cardinality:  │  
+│          50000000         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│          50000000         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           9.69s           │  
+└───────────────────────────┘  
+D explain analyze select * from t1 order by a limit 10 offset 10000000;  
+100% ▕████████████████████████████████████████████████████████████▏   
+┌─────────────────────────────────────┐  
+│┌───────────────────────────────────┐│  
+││    Query Profiling Information    ││  
+│└───────────────────────────────────┘│  
+└─────────────────────────────────────┘  
+explain analyze select * from t1 order by a limit 10 offset 10000000;  
+┌─────────────────────────────────────┐  
+│┌───────────────────────────────────┐│  
+││        Total Time: 119.89s        ││  
+│└───────────────────────────────────┘│  
+└─────────────────────────────────────┘  
+┌───────────────────────────┐  
+│         QUERY_ROOT        │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│             0             │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           0.00s           │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│      EXPLAIN_ANALYZE      │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│             0             │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           0.00s           │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│           TOP_N           │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│            Top:           │  
+│             10            │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Offset:          │  
+│          10000000         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│         Order By:         │  
+│          t1.a ASC         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│             10            │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           20.73s          │  
+└─────────────┬─────────────┘  
+┌─────────────┴─────────────┐  
+│         SEQ_SCAN          │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Stringified:       │  
+│             t1            │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Projections:       │  
+│             a             │  
+│             b             │  
+│             c             │  
+│             d             │  
+│             e             │  
+│             f             │  
+│             g             │  
+│             h             │  
+│             i             │  
+│             j             │  
+│             k             │  
+│             l             │  
+│             m             │  
+│             n             │  
+│             o             │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│   Estimated Cardinality:  │  
+│          50000000         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│        Cardinality:       │  
+│          50000000         │  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │  
+│          Timing:          │  
+│           7.94s           │  
+└───────────────────────────┘  
+```
+
+### To Reproduce
+
+1. Open a database and prepare this table with 50,000,000 rows of data near 6GB
+```sql
+CREATE TABLE t1
+(
+  a varchar(24) NOT NULL PRIMARY KEY 
+, b varchar(200) NOT NULL 
+, c varchar(100) default  NULL 
+, d varchar(1) NOT NULL 
+, e varchar(2) NOT NULL 
+, f varchar(4)  
+, g varchar(60) NOT NULL 
+, h varchar(60)  
+, i varchar(8)  
+, j varchar(8)  
+, k varchar(30)  
+, l varchar(32)  
+, m varchar(32)  
+, n varchar(32)  
+, o datetime  
+);
+```
+2. Run SQL
+```sql
+-- top-n
+explain analyze select * from t1 order by a limit 10 offset 1000000;
+-- sort
+explain analyze select * from t1 order by a;
+```
+
+### OS:
+
+Linux x86_64
+
+### DuckDB Version:
+
+DuckDB 1.0.0 "Nivis"
+
+### DuckDB Client:
+
+Self-compiled DuckDB
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Zehua Zou
+
+### Affiliation:
+
+Transwarp Technology
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

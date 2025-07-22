@@ -1,0 +1,52 @@
+ID: 9378
+Title: Kafka engine can lose data with replicated table and zookeeper issue
+Description:
+**Describe the bug or unexpected behaviour**
+I have the following pipeline: KafkaEngine => MV => replicated table. If Zookeeper service is unavailable for a moment, some Kafka messages may be lost when Zookeeper recovers.  
+
+**How to reproduce**
+- tested with Clickhouse 19.16.13.54 (official Docker image)
+- execute this script which starts Zookeeper, Kafka, Clickhouse and a data generator:
+[start.txt](https://github.com/ClickHouse/ClickHouse/files/4254809/start.txt)
+
+- simulate Zookeeper issues:
+`while true; do docker kill zk; sleep 5; docker start zk; sleep 10; done`
+
+- watch insertion result:
+`while true; do docker exec ch clickhouse-client -q "select max(key1),uniq(key1) from store"; sleep 10; done`
+
+you get something like this:
+```
+0       0
+0       0
+3       3
+4       4
+6       6
+9       8
+9       8
+12      11
+14      13
+15      14
+18      17
+```
+This shows that at some point messages are lost (sometimes after a long moment).
+
+**Expected behavior**
+No message should be lost. When messages cannot be inserted, Kafka messages should not be committed. This also means that messages could be inserted twice but this is expected.
+
+**Error message and/or stacktrace**
+Replicated table switches to readonly mode because of lost of Zookeeper connection and this triggers an error in StorageKafka::streamToViews but for some reason, messages are still committed in some case:
+
+`2020.02.26 10:05:26.393221 [ 20 ] {} <Error> void DB::StorageKafka::threadFunc(): Code: 242, e.displayText() = DB::Exception: Table is in readonly mode, Stack trace:
+
+0. 0x55fdbcd226a0 StackTrace::StackTrace() /usr/bin/clickhouse
+1. 0x55fdbcd22475 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /usr/bin/clickhouse
+2. 0x55fdbca8ce13 ? /usr/bin/clickhouse
+3. 0x55fdc02ffd59 DB::StorageReplicatedMergeTree::write(std::shared_ptr<DB::IAST> const&, DB::Context const&) /usr/bin/clickhouse
+4. 0x55fdc06ad27e DB::PushingToViewsBlockOutputStream::PushingToViewsBlockOutputStream(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<DB::IStorage> const&, DB::Context const&, std::shared_ptr<DB::IAST> const&, bool) /usr/bin/clickhouse
+5. 0x55fdc0081e01 DB::InterpreterInsertQuery::execute() /usr/bin/clickhouse
+6. 0x55fdc06adea4 DB::PushingToViewsBlockOutputStream::PushingToViewsBlockOutputStream(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::shared_ptr<DB::IStorage> const&, DB::Context const&, std::shared_ptr<DB::IAST> const&, bool) /usr/bin/clickhouse
+7. 0x55fdc0081e01 DB::InterpreterInsertQuery::execute() /usr/bin/clickhouse
+8. 0x55fdc05ef8c2 DB::StorageKafka::streamToViews() /usr/bin/clickhouse
+9. 0x55fdc05f0481 DB::StorageKafka::threadFunc() /usr/bin/clickhouse
+`

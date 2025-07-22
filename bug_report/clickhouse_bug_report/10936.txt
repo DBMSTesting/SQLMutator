@@ -1,0 +1,30 @@
+ID: 10936
+Title: ALTER REPLACE PARTITOIN + replication_alter_partitions_sync = 2 not work as expected
+Description:
+Version 19.17.5.8, 20.3.5.21
+
+`ALTER TABLE <TABLE_A> REPLACE PARTITION expr FROM <TABLE_B>`
+With `replication_alter_partitions_sync` = 2, I expected the alter should wait for all  INSERT statements earlier submitted to TABLE_B finished. But try this:
+
+Say there are 5 nodes, in a cluster named 'all_replica' with 'all_replica_replica' macros, and there are two nodes host named 'ch1' and 'ch2',   first creating tables:
+```
+clickhouse-client -hch1 -q "drop table test_table_for_replication_alter_partitions_sync on cluster all_replica"
+clickhouse-client -hch1 -q "drop table test_table_for_replication_alter_partitions_sync_temp on cluster all_replica"
+clickhouse-client -hch1 -q "create table test_table_for_replication_alter_partitions_sync on cluster all_replica (number Int64, v Float64, dt String) Engine=ReplicatedMergeTree('/clickhouse/test/table/replication_alter_partitions_sync/', '{all_replica_replica}') partition by dt order by number"
+clickhouse-client -hch1 -q "create table test_table_for_replication_alter_partitions_sync_temp on cluster all_replica (number Int64,v Float64, dt String) Engine=ReplicatedMergeTree('/clickhouse/test/table/replication_alter_partitions_sync_temp/', '{all_replica_replica}') partition by dt order by number"
+
+```
+Now we do insert + alter replace partition:
+```
+clickhouse-client -hch1 -q "truncate table test_table_for_replication_alter_partitions_sync_temp"
+clickhouse-client -hch1 -q "insert into test_table_for_replication_alter_partitions_sync_temp select number,rand(),'20200515' from system.numbers limit 1000000"
+clickhouse-client -hch2  --replication_alter_partitions_sync 2 -q "alter table test_table_for_replication_alter_partitions_sync replace partition '20200515' from test_table_for_replication_alter_partitions_sync_temp"
+clickhouse-client -hch2 -q "select count() from test_table_for_replication_alter_partitions_sync where dt='20200515'"
+```
+(I've already had `replication_alter_partitions_sync` = 2 in my profile, if I passed settings wrongly.)
+
+If the `replication_alter_partitions_sync` worked, we should always have the result of last statement to equal to `1000000`. But this group of statements can easily come to a result of `0`, which means the alter statement replaced the empty partition before insert replication finished.
+
+
+
+

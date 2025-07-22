@@ -1,0 +1,66 @@
+ID: 55106
+Title: count(*) incorrect value with IN clause
+Description:
+**Describe what's wrong**
+When querying a datetime64 keyed table it is possible to correctly query a row count with literal value filters on individual fields but when providing the literals within an `IN` clause the output is incorrect.
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+clickhouse-server:23.3.13.6 inside a docker container
+* Which interface to use, if matters
+I don't believe it matters, I was using HTTP
+* Non-default settings, if any
+None
+
+```
+CREATE TABLE events
+(
+    `dt` DateTime64(6, 'UTC'),
+    `type` Int32,
+    `event` Nullable(String)
+)
+    ENGINE = MergeTree()
+PARTITION BY (type, toStartOfWeek(dt))
+TTL toDateTime(dt) + INTERVAL 2 DAY
+-- order by is the non-unique PK
+ORDER BY dt;
+
+INSERT INTO events
+SELECT
+    toDateTime64('2022-12-12 12:00:00', 6) - (((12 + randPoisson(12)) * 60)),
+     floor(randUniform(5, 100)),
+    [null, '200', '404', '502'][toInt32(randBinomial(4, 0.1)) + 1]
+FROM numbers(50_000_000);
+
+-- find a dt and type pair with > 1 rows
+select *, toUnixTimestamp64Nano(dt) from events where dt = '2022-12-12T11:24:00' and type = 86;
+-- 19 rows for me locally
+
+select *
+from events
+where dt = '2022-12-12T11:24:00' and type = 86;
+-- 19
+
+select count(*)
+from events
+where dt = '2022-12-12T11:24:00' and type = 86;
+-- 19
+
+select count(*)
+from events
+where (type, dt) in (86, '2022-12-12T11:24:00');
+-- 18576
+
+-- works with the experimental analyzer
+Set allow_experimental_analyzer = 1;
+
+select count(*)
+from events
+where (type, dt) in (86, '2022-12-12T11:24:00');
+-- 19
+```
+
+**Expected behavior**
+the count output should remain the same in both cases
+

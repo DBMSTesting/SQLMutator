@@ -1,0 +1,305 @@
+ID: 13953
+Title: Dynamic filter pushdowns seem not to work for left joins, resulting in a much longer runtime than manually pre-filtering using a CTE
+Description:
+### What happens?
+
+I may be misunderstanding the meaning or scope of "dynamic filter pushdowns," but when I left join a table to a relatively small number of records in a much larger table, a traditional left join takes about 500 times longer to run than if I pre-filter the larger table using a CTE.
+
+### To Reproduce
+
+Create a small "patient" table (10K records) and a large "claims" table (1M records):
+```sql
+create or replace table patients as 
+  select id, 
+  date '2000-01-01' + (random()*3000)::integer as enroll_date 
+  from range(10000) patients(id);
+create or replace table claims as 
+  select (random() * 1000000)::integer as id, 
+  date '2000-01-01' + (random()*3000)::integer as claim_date 
+  from range(1000000);
+```
+
+Traditional left join:
+```sql
+explain analyze select patients.id, count() from patients left join claims 
+  on patients.id = claims.id and datediff('month',enroll_date,claim_date) between 1 and 12 
+  group by patients.id;
+```
+
+Results:
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze select patients.id, count() from patients left join claims on patients.id = claims.id and datediff('month',enroll_date,claim_date) between 1 and 12 group by patients.id;
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 5.17s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│__internal_decompress_integ│
+│     ral_bigint(#0, 0)     │
+│             #1            │
+│                           │
+│         10000 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│         Groups: #0        │
+│                           │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│         10000 Rows        │
+│          (0.01s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             id            │
+│                           │
+│         10045 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│__internal_compress_integra│
+│     l_usmallint(#2, 0)    │
+│             #3            │
+│                           │
+│         10045 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│     BLOCKWISE_NL_JOIN     │
+│    ────────────────────   │
+│      Join Type: RIGHT     │
+│                           │
+│         Condition:        │
+│ ((id = CAST(id AS BIGINT))│
+│   AND ((datediff('month', │
+│  enroll_date, claim_date) ├──────────────┐
+│ >= 1) AND (datediff('month│              │
+│ ', enroll_date, claim_date│              │
+│         ) <= 12)))        │              │
+│                           │              │
+│         10045 Rows        │              │
+│          (21.07s)         │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││         TABLE_SCAN        │
+│    ────────────────────   ││    ────────────────────   │
+│           claims          ││          patients         │
+│                           ││                           │
+│        Projections:       ││        Projections:       │
+│             id            ││             id            │
+│         claim_date        ││        enroll_date        │
+│                           ││                           │
+│        1000000 Rows       ││         10000 Rows        │
+│          (0.00s)          ││          (0.00s)          │
+└───────────────────────────┘└───────────────────────────┘
+```
+
+Left join with pre-filtering of large table using CTE:
+```sql
+explain analyze with cte as(
+  select claims.id from patients join claims on patients.id = claims.id 
+  and datediff('month',enroll_date,claim_date) between 1 and 12) 
+  select patients.id, count() from patients left join cte on patients.id = cte.id 
+  group by patients.id;
+```
+
+Results:
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze with cte as(select claims.id from patients join claims on patients.id = claims.id and datediff('month',enroll_date,claim_date) between 1 and 12) select patients.id, count() from patients left join cte on patients.id = cte.id group by patients.id;
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 0.0101s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│__internal_decompress_integ│
+│     ral_bigint(#0, 0)     │
+│             #1            │
+│                           │
+│         10000 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│         Groups: #0        │
+│                           │
+│        Aggregates:        │
+│        count_star()       │
+│                           │
+│         10000 Rows        │
+│          (0.01s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             id            │
+│                           │
+│         10045 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│__internal_compress_integra│
+│     l_usmallint(#0, 0)    │
+│             #1            │
+│                           │
+│         10045 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: LEFT      │
+│                           │
+│        Conditions:        ├──────────────┐
+│  id = CAST(id AS BIGINT)  │              │
+│                           │              │
+│         10045 Rows        │              │
+│          (0.01s)          │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││         PROJECTION        │
+│    ────────────────────   ││    ────────────────────   │
+│          patients         ││             #0            │
+│                           ││                           │
+│      Projections: id      ││                           │
+│                           ││                           │
+│         10000 Rows        ││         1149 Rows         │
+│          (0.00s)          ││          (0.00s)          │
+└───────────────────────────┘└─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │         PROJECTION        │
+                             │    ────────────────────   │
+                             │             #0            │
+                             │             #1            │
+                             │             #3            │
+                             │                           │
+                             │         1149 Rows         │
+                             │          (0.00s)          │
+                             └─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │           FILTER          │
+                             │    ────────────────────   │
+                             │     (datediff('month',    │
+                             │  enroll_date, claim_date) │
+                             │      BETWEEN 1 AND 12)    │
+                             │                           │
+                             │         1149 Rows         │
+                             │          (0.00s)          │
+                             └─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │         HASH_JOIN         │
+                             │    ────────────────────   │
+                             │      Join Type: INNER     │
+                             │                           │
+                             │        Conditions:        │
+                             │  CAST(id AS BIGINT) = id  │
+                             │                           ├──────────────┐
+                             │        Build Min: 0       │              │
+                             │      Build Max: 9999      │              │
+                             │                           │              │
+                             │         10077 Rows        │              │
+                             │          (0.01s)          │              │
+                             └─────────────┬─────────────┘              │
+                             ┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+                             │         TABLE_SCAN        ││         TABLE_SCAN        │
+                             │    ────────────────────   ││    ────────────────────   │
+                             │           claims          ││          patients         │
+                             │                           ││                           │
+                             │        Projections:       ││        Projections:       │
+                             │             id            ││             id            │
+                             │         claim_date        ││        enroll_date        │
+                             │                           ││                           │
+                             │        1000000 Rows       ││         10000 Rows        │
+                             │          (0.00s)          ││          (0.00s)          │
+                             └───────────────────────────┘└───────────────────────────┘
+```
+
+### OS:
+
+Windows Server 2016
+
+### DuckDB Version:
+
+v1.1.0
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+3GHz Xeon CPU, 48GB RAM, SSD drive
+
+### Full Name:
+
+Tod Mijanovich
+
+### Affiliation:
+
+New York University
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

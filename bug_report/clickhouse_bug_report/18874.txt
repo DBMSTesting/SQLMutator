@@ -1,0 +1,78 @@
+ID: 18874
+Title: Dropping of a part breaks deduplication of data blocks
+Description:
+20.12.5.14 `alter table ... drop part ...` removes from ZooKeeper all blocks for the partition.
+The same thing happens when CH cleans empty parts:
+```
+CREATE TABLE empty_parts 
+(
+  `k`   Int8,
+  `v`   Int8
+)
+ENGINE = ReplicatedSummingMergeTree ('/clickhouse/empty_parts','replica1')
+ORDER BY k;
+
+insert into empty_parts values (1, 15);
+insert into empty_parts values (1, -15);
+optimize table empty_parts;
+insert into empty_parts values (2, -15);
+
+select name, active, rows, modification_time from system.parts where table like 'empty_parts'
+
+name        | active | rows | modification_time  
+------------+--------+------+--------------------
+all_15_15_0 |      0 |    1 | 2021-01-07 21:54:05
+all_16_16_0 |      0 |    1 | 2021-01-08 20:13:00
+all_15_16_1 |      1 |    0 | 2021-01-08 20:13:46
+all_17_17_0 |      1 |    1 | 2021-01-08 20:13:47
+
+
+select name, value from system.zookeeper where path='/clickhouse/empty_parts/blocks/'
+
+name                                         | value      
+---------------------------------------------+------------
+all_9295045124109325217_14756667786308374723 | all_16_16_0
+all_18396465411487747783_4385790938943258888 | all_17_17_0
+```
+The next insert of the same block is deduplicated:
+```
+insert into empty_parts values (2, -15);
+
+2021.01.08 20:13:53.267392 <Information> empty_parts (Replicated OutputStream): Block with ID all_18396465411487747783_4385790938943258888 already exists locally as part all_17_17_0; ignoring it.
+```
+The empty part is getting dropped in background
+```
+2021.01.08 20:14:19.103462 <Trace> empty_parts: Will try to insert a log entry to DROP_RANGE for part: all_15_16_1
+```
+The next insert of the same block is NOT deduplicated:
+```
+insert into empty_parts values (2, -15);
+
+2021.01.08 20:16:19.145203 <Debug> executeQuery: (from [::1]:40824) insert into empty_parts values
+2021.01.08 20:16:19.146681 <Debug> empty_parts (Replicated OutputStream): Wrote block with ID 'all_18396465411487747783_4385790938943258888', 1 rows
+2021.01.08 20:16:19.181508 <Trace> empty_parts: Renaming temporary part tmp_insert_all_23_23_0 to all_18_18_0.
+
+
+select name, active, rows, modification_time from system.parts where table like 'empty_parts'
+
+name        | active | rows | modification_time  
+------------+--------+------+--------------------
+all_17_17_0 |      1 |    1 | 2021-01-08 16:13:47
+all_18_18_0 |      1 |    1 | 2021-01-08 16:16:19
+
+
+select name, value from system.zookeeper where path='/clickhouse/empty_parts/blocks/'
+
+name                                         | value      
+---------------------------------------------+------------
+all_18396465411487747783_4385790938943258888 | all_18_18_0
+
+SELECT _part, * FROM empty_parts
+
+┌─_part───────┬─k─┬──v─┐
+│ all_17_17_0 │ 1 │ 15 │
+└─────────────┴───┴────┘
+┌─_part───────┬─k─┬──v─┐
+│ all_18_18_0 │ 1 │ 15 │
+└─────────────┴───┴────┘
+```

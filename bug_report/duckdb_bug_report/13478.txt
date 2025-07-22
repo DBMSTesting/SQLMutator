@@ -1,0 +1,45 @@
+ID: 13478
+Title: Add support for opening `.tar` archives
+Description:
+### Summary
+
+This PR adds support for reading files within `.tar` archives, by prefixing the file paths with `tar://`.
+
+Since this is functionality is implemented as a "FileSystem" it automatically works with all DuckDB's existing readers and table functions, and also composes nicely with other filesystems such as httpfs (as long as they support seeking). 
+
+### Limitations
+
+Because tar files don't contain something like an entry index or central directory structure to get the byte offsets of each entry, globbing and reading multiple files from a single archive has quadratic complexity as opening the nth file requires reading the headers of and seeking past all of the (n-1), (n-2), ..., (n-n-1) files preceding it. However, if the DuckDB object cache is enabled, the offsets of each file is cached when globbing, leading to only a single seek being required when later opening the file.
+
+Because being able to seek within the tar archive is a requirement, it is currently __NOT__ possible to open/glob and read files within a compressed tar archive, such as `.tar.gz`. We have some ideas on how to make this possible in the future but it would require significant changes to how DuckDB handles compressed files and probably require investing in a more sophisticated file caching mechanism. 
+
+However, you can still read compressed files _within_ a tar archive, as long as the archive itself is not compressed.
+
+Additionally, there are some limitations regarding globbing - recursive/nested globbing is not supported (unless the crawl is at the absolute end of the pattern) and it is not possible to glob within nested tar files (i.e. tar files within other tar files), although you can read files from them if you pass an absolute path.
+
+### Example
+
+For example, given a tar file `ab.tar` containing two csv's, `a.csv` (1,2,3) and `b.csv` (4,5,6) you can do:
+
+Glob into a tar archive:
+```sql
+SELECT filename FROM read_blob('tar://data/csv/tar/ab.tar/*') ORDER BY ALL;
+----
+tar://data/csv/tar/ab.tar/a.csv
+tar://data/csv/tar/ab.tar/b.csv
+```
+
+Open a specific file inside of a tar archive:
+```sql
+SELECT * FROM read_csv('tar://data/csv/tar/ab.tar/a.csv') ORDER BY ALL;
+----
+1	2	3
+```
+
+Glob and open multiple files within the tar archive:
+```sql
+SELECT * FROM read_csv('tar://data/csv/tar/ab.tar/*') ORDER BY ALL;
+----
+1	2	3
+4	5	6
+```

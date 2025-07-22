@@ -1,0 +1,63 @@
+ID: 64337
+Title: startsWith on column with token-based bloom filter does not produce correct result
+Description:
+On 24.3 and before
+
+```sql
+CREATE TABLE startswith
+(
+    `id` Int64,
+    `message` String
+)
+ENGINE = MergeTree
+ORDER BY id
+
+insert into startswith values(1, 'Service is not ready');
+
+select * from startswith where startsWith(message, 'Ser')
+
+   ┌─id─┬─message──────────────┐
+1. │  1 │ Service is not ready │
+   └────┴──────────────────────┘
+```
+
+If token index is added to the message column, the above query does not find any record
+
+```sql
+ALTER TABLE startswith
+    ADD INDEX idx_message message TYPE tokenbf_v1(32768, 3, 2) GRANULARITY 1
+    
+    ALTER TABLE startswith
+    MATERIALIZE INDEX idx_message
+
+select * from startswith where startsWith(message, 'Ser')
+```
+
+the query plan shows that for such query, the skipping index is used. since the given pattern 'Ser' does not match any tokens in the index, the above quey give no output
+
+```text
+Expression ((Project names + Projection))
+  Expression
+    ReadFromMergeTree (default.startswith)
+    Indexes:
+      PrimaryKey
+        Condition: true
+        Parts: 1/1
+        Granules: 1/1
+      Skip
+        Name: idx_message
+        Description: tokenbf_v1 GRANULARITY 1
+        Parts: 0/1
+        Granules: 0/1
+```
+
+Only if a token is given to the startsWith, it outputs the result:
+
+```sql
+select * from startswith where startsWith(message, 'Service')
+   ┌─id─┬─message──────────────┐
+1. │  1 │ Service is not ready │
+   └────┴──────────────────────┘
+```
+
+from user's view, whether there's index, the output should be the same.

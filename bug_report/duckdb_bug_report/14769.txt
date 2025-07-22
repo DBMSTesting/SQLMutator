@@ -1,0 +1,263 @@
+ID: 14769
+Title: Window functions and projections that include list columns are slow
+Description:
+### What happens?
+
+When using a window function and the SELECT statement includes an list column like DOUBLE[] then the query is severely slower than just selecting everything except the list column.
+
+### To Reproduce
+
+The table has only a million rows.
+The window function used is LAG and the output is ORDERD BY a simple id.
+
+The following query includes the list column inside the SELECT statement:
+```
+SELECT "payload.enumList", prev FROM (SELECT *, lag("payload.source") OVER (PARTITION BY "payload.sourceTN" ORDER BY id ASC) AS prev FROM "flattened") WHERE prev != "payload.source" OR prev IS NULL ORDER BY id;
+```
+
+The EXPLAIN ANALYZE output is:
+```
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 27.69s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│          ORDER_BY         │
+│    ────────────────────   │
+│           #2 ASC          │
+│                           │
+│        500766 Rows        │
+│          (24.62s)         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│      payload.enumList     │
+│            prev           │
+│             id            │
+│                           │
+│        500766 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             id            │
+│      payload.enumList     │
+│            prev           │
+│                           │
+│        500766 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│             #2            │
+│             #4            │
+│                           │
+│        500766 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│ ((prev IS NULL) OR (prev !│
+│     = payload.source))    │
+│                           │
+│        500766 Rows        │
+│          (0.01s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│             #2            │
+│             #3            │
+│             #4            │
+│                           │
+│        1000000 Rows       │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           WINDOW          │
+│    ────────────────────   │
+│        Projections:       │
+│ LAG(payload.source) OVER  │
+│   (PARTITION BY payload   │
+│ .sourceTN ORDER BY id ASC │
+│         NULLS LAST)       │
+│                           │
+│        1000000 Rows       │
+│         (167.39s)         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         flattened         │
+│                           │
+│        Projections:       │
+│             id            │
+│      payload.enumList     │
+│       payload.source      │
+│      payload.sourceTN     │
+│                           │
+│        1000000 Rows       │
+│          (0.07s)          │
+└───────────────────────────┘
+```
+
+When leaving out the list column out of the SELECT statement
+```
+SELECT prev FROM (SELECT *, lag("payload.source") OVER (PARTITION BY "payload.sourceTN" ORDER BY id ASC) AS prev FROM "flattened") WHERE prev != "payload.source" OR prev IS NULL ORDER BY id;
+```
+then the EXPLAIN ANALYZE output shows that the query completes basically instantly
+```
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 0.0799s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│          ORDER_BY         │
+│    ────────────────────   │
+│           #1 ASC          │
+│                           │
+│        500766 Rows        │
+│          (0.07s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│            prev           │
+│             id            │
+│                           │
+│        500766 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             id            │
+│            prev           │
+│                           │
+│        500766 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│             #3            │
+│                           │
+│        500766 Rows        │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│ ((prev IS NULL) OR (prev !│
+│     = payload.source))    │
+│                           │
+│        500766 Rows        │
+│          (0.01s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│             #2            │
+│             #3            │
+│                           │
+│        1000000 Rows       │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           WINDOW          │
+│    ────────────────────   │
+│        Projections:       │
+│ LAG(payload.source) OVER  │
+│   (PARTITION BY payload   │
+│ .sourceTN ORDER BY id ASC │
+│         NULLS LAST)       │
+│                           │
+│        1000000 Rows       │
+│          (0.45s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         flattened         │
+│                           │
+│        Projections:       │
+│             id            │
+│       payload.source      │
+│      payload.sourceTN     │
+│                           │
+│        1000000 Rows       │
+│          (0.00s)          │
+└───────────────────────────┘
+```
+
+### OS:
+
+Windows 10 Home 22H2 1000.19060.1000.0, x64
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+Windows CLI
+
+### Hardware:
+
+AMD Ryzen 9 5900X 12-Core Processor 3.70 GHz, 32GB RAM
+
+### Full Name:
+
+Marius Yong
+
+### Affiliation:
+
+-
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,1349 @@
+ID: 44031
+Title: placement rule information lost after truncate partition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+CREATE PLACEMENT POLICY hisdata_ods_table_2constraints_1 LEADER_CONSTRAINTS="[+dc=nmlt]" FOLLOWER_CONSTRAINTS="{+dc=nmlt: 2}"
+
+create table t1(id int ,name char(10),salary varchar(10));
+create table t2(id int ,name char(10),salary int) partition by range (salary)(partition p1 values less than (5000),partition p2 values less than (10000));
+
+alter table t1 placement policy hisdata_ods_table_2constraints_1;
+alter table t2 placement policy hisdata_ods_table_2constraints_1;
+```
+
+```
+with tmp as (select a.DB_NAME,a.TABLE_NAME,b.REGION_ID,b.PEER_ID,b.STORE_ID,b.IS_LEADER, c.LABEL->>'$[3]' as label from TIKV_REGION_STATUS a, TIKV_REGION_PEERS b, TIKV_STORE_STATUS c where a.REGION_ID=b.REGION_ID and b.STORE_ID=c.STORE_ID and a.db_name='test' and lower(a.table_name)='t2' group by a.DB_NAME,a.TABLE_NAME,b.REGION_ID, b.PEER_ID,b.STORE_ID,b.IS_LEADER,c.LABEL ), tmp1 as ( select a.db_name ,a.table_name ,sum(case when a.label->>'$.value' = 'nmlt' and a.is_leader then 1 else 0 end) sum_nmlt_leader ,sum(case when a.label->>'$.value' <> 'nmlt' and a.is_leader then 1 else 0 end) sum_nmdx_leader ,sum(case when a.label->>'$.value' = 'nmlt' then 1 else 0 end) sum_nmlt ,sum(case when a.label->>'$.value' <> 'nmlt' then 1 else 0 end) sum_nmdx from tmp a group by 1,2 ) select db_name,table_name,sum_nmlt_leader,sum_nmdx_leader,sum_nmlt,sum_nmdx, sum_nmlt/sum_nmdx from tmp1 order by 1,2;
+```
+
+![image](https://github.com/pingcap/tidb/assets/1420062/ccd53b05-efb0-45d9-94b1-0435a023a257)
+![image](https://github.com/pingcap/tidb/assets/1420062/ee6cc72a-03a8-4b1d-93ef-1769deea9c6b)
+
+
+
+
+### 2. What did you expect to see? (Required)
+
+```
+truncate table test.t1;
+```
+![image](https://github.com/pingcap/tidb/assets/1420062/faee019a-9c49-4655-9640-97d0e578ccef)
+
+```
+alter table test.t2 truncate partition p2;
+```
+
+![image](https://github.com/pingcap/tidb/assets/1420062/c6571e1f-b15e-466a-8ef5-662c4c420e7a)
+
+
+### 3. What did you see instead (Required)
+
+I expect the placement rule work after truncate partition.
+But as you can see, after truncate, the new partition does not obey the placement rule.
+
+The root cause is that, the placement policy informaction is recored in the table info, not in the partition definition.
+After truncate, the new partition inherit the placement policy from the partition definition, so it's lost.
+
+See the ddl history info to verify that:
+
+
+```
+[bocs@vm10-2-103-13 ~]$ curl http://10.2.103.18:10084/ddl/history?limit=7
+[
+ {
+  "id": 435,
+  "type": 23,
+  "schema_id": 1,
+  "table_id": 428,
+  "schema_name": "test",
+  "table_name": "t2",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": [
+   [
+    430
+   ]
+  ],
+  "schema_state": 0,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579226251919373,
+  "start_ts": 441579226251919361,
+  "dependency_id": 0,
+  "query": "alter table test.t2 truncate partition p2",
+  "binlog": {
+   "SchemaVersion": 290,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 428,
+    "name": {
+     "O": "t2",
+     "L": "t2"
+    },
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_bin",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 2,
+      "name": {
+       "O": "name",
+       "L": "name"
+      },
+      "offset": 1,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 254,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 3,
+      "name": {
+       "O": "salary",
+       "L": "salary"
+      },
+      "offset": 2,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 5,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 3,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 441579226251919373,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": {
+     "type": 1,
+     "expr": "`salary`",
+     "columns": null,
+     "enable": true,
+     "definitions": [
+      {
+       "id": 429,
+       "name": {
+        "O": "p1",
+        "L": "p1"
+       },
+       "less_than": [
+        "5000"
+       ],
+       "in_values": null,
+       "policy_ref_info": null
+      },
+      {
+       "id": 436,
+       "name": {
+        "O": "p2",
+        "L": "p2"
+       },
+       "less_than": [
+        "10000"
+       ],
+       "in_values": null,
+       "policy_ref_info": null
+      }
+     ],
+     "adding_definitions": null,
+     "dropping_definitions": null,
+     "states": null,
+     "num": 2
+    },
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 5,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": {
+     "id": 1,
+     "name": {
+      "O": "hisdata_ods_table_2constraints_1",
+      "L": "hisdata_ods_table_2constraints_1"
+     }
+    },
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579226278133766,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 224,
+  "charset": "",
+  "collate": ""
+ },
+ {
+  "id": 434,
+  "type": 11,
+  "schema_id": 1,
+  "table_id": 424,
+  "schema_name": "test",
+  "table_name": "t1",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": [
+   "dIAAAAAAAAGo",
+   null
+  ],
+  "schema_state": 5,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579209907503119,
+  "start_ts": 441579209907503107,
+  "dependency_id": 0,
+  "query": "truncate table test.t1",
+  "binlog": {
+   "SchemaVersion": 289,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 433,
+    "name": {
+     "O": "t1",
+     "L": "t1"
+    },
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_bin",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 2,
+      "name": {
+       "O": "name",
+       "L": "name"
+      },
+      "offset": 1,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 254,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 3,
+      "name": {
+       "O": "salary",
+       "L": "salary"
+      },
+      "offset": 2,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 15,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 5,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 3,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 441579057470767107,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": null,
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 5,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": {
+     "id": 1,
+     "name": {
+      "O": "hisdata_ods_table_2constraints_1",
+      "L": "hisdata_ods_table_2constraints_1"
+     }
+    },
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579209933455366,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 223,
+  "charset": "",
+  "collate": ""
+ },
+ {
+  "id": 432,
+  "type": 56,
+  "schema_id": 1,
+  "table_id": 428,
+  "schema_name": "test",
+  "table_name": "t2",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": null,
+  "schema_state": 5,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579178515759110,
+  "start_ts": 441579178502389765,
+  "dependency_id": 0,
+  "query": "alter table t2 placement policy hisdata_ods_table_2constraints_1",
+  "binlog": {
+   "SchemaVersion": 288,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 428,
+    "name": {
+     "O": "t2",
+     "L": "t2"
+    },
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_bin",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 2,
+      "name": {
+       "O": "name",
+       "L": "name"
+      },
+      "offset": 1,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 254,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 3,
+      "name": {
+       "O": "salary",
+       "L": "salary"
+      },
+      "offset": 2,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 5,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 3,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 441579178515759110,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": {
+     "type": 1,
+     "expr": "`salary`",
+     "columns": null,
+     "enable": true,
+     "definitions": [
+      {
+       "id": 429,
+       "name": {
+        "O": "p1",
+        "L": "p1"
+       },
+       "less_than": [
+        "5000"
+       ],
+       "in_values": null,
+       "policy_ref_info": null
+      },
+      {
+       "id": 430,
+       "name": {
+        "O": "p2",
+        "L": "p2"
+       },
+       "less_than": [
+        "10000"
+       ],
+       "in_values": null,
+       "policy_ref_info": null
+      }
+     ],
+     "adding_definitions": null,
+     "dropping_definitions": null,
+     "states": null,
+     "num": 2
+    },
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 5,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": {
+     "id": 1,
+     "name": {
+      "O": "hisdata_ods_table_2constraints_1",
+      "L": "hisdata_ods_table_2constraints_1"
+     }
+    },
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579178541973509,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 222,
+  "charset": "",
+  "collate": ""
+ },
+ {
+  "id": 431,
+  "type": 3,
+  "schema_id": 1,
+  "table_id": 428,
+  "schema_name": "test",
+  "table_name": "t2",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": null,
+  "schema_state": 5,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579174006620163,
+  "start_ts": 441579173993512969,
+  "dependency_id": 0,
+  "query": "create table t2(id int ,name char(10),salary int) partition by range (salary)(partition p1 values less than (5000),partition p2 values less than (10000))",
+  "binlog": {
+   "SchemaVersion": 287,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 428,
+    "name": {
+     "O": "t2",
+     "L": "t2"
+    },
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_bin",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 2,
+      "name": {
+       "O": "name",
+       "L": "name"
+      },
+      "offset": 1,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 254,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 3,
+      "name": {
+       "O": "salary",
+       "L": "salary"
+      },
+      "offset": 2,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 5,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 3,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 441579174006620163,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": {
+     "type": 1,
+     "expr": "`salary`",
+     "columns": null,
+     "enable": true,
+     "definitions": [
+      {
+       "id": 429,
+       "name": {
+        "O": "p1",
+        "L": "p1"
+       },
+       "less_than": [
+        "5000"
+       ],
+       "in_values": null,
+       "policy_ref_info": null
+      },
+      {
+       "id": 430,
+       "name": {
+        "O": "p2",
+        "L": "p2"
+       },
+       "less_than": [
+        "10000"
+       ],
+       "in_values": null,
+       "policy_ref_info": null
+      }
+     ],
+     "adding_definitions": null,
+     "dropping_definitions": null,
+     "states": null,
+     "num": 2
+    },
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 5,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": null,
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579174019727365,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 221,
+  "charset": "",
+  "collate": ""
+ },
+ {
+  "id": 427,
+  "type": 4,
+  "schema_id": 1,
+  "table_id": 212,
+  "schema_name": "test",
+  "table_name": "t2",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": [
+   "dIAAAAAAAADU",
+   [],
+   [
+    "schema/test/t2"
+   ]
+  ],
+  "schema_state": 0,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579109453660161,
+  "start_ts": 441579109440815108,
+  "dependency_id": 0,
+  "query": "drop table t2",
+  "binlog": {
+   "SchemaVersion": 286,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 212,
+    "name": {
+     "O": "t2",
+     "L": "t2"
+    },
+    "charset": "gbk",
+    "collate": "gbk_chinese_ci",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 0,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 1,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 440607314893602820,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": null,
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 4,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": null,
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579109532303365,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 220,
+  "charset": "",
+  "collate": ""
+ },
+ {
+  "id": 426,
+  "type": 56,
+  "schema_id": 1,
+  "table_id": 424,
+  "schema_name": "test",
+  "table_name": "t1",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": null,
+  "schema_state": 5,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579057470767107,
+  "start_ts": 441579057457659908,
+  "dependency_id": 0,
+  "query": "alter table t1 placement policy hisdata_ods_table_2constraints_1",
+  "binlog": {
+   "SchemaVersion": 283,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 424,
+    "name": {
+     "O": "t1",
+     "L": "t1"
+    },
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_bin",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 2,
+      "name": {
+       "O": "name",
+       "L": "name"
+      },
+      "offset": 1,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 254,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 3,
+      "name": {
+       "O": "salary",
+       "L": "salary"
+      },
+      "offset": 2,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 15,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 5,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 3,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 441579057470767107,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": null,
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 5,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": {
+     "id": 1,
+     "name": {
+      "O": "hisdata_ods_table_2constraints_1",
+      "L": "hisdata_ods_table_2constraints_1"
+     }
+    },
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579057496719369,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 219,
+  "charset": "",
+  "collate": ""
+ },
+ {
+  "id": 425,
+  "type": 3,
+  "schema_id": 1,
+  "table_id": 424,
+  "schema_name": "test",
+  "table_name": "t1",
+  "state": 6,
+  "warning": null,
+  "err": null,
+  "err_count": 0,
+  "row_count": 0,
+  "raw_args": null,
+  "schema_state": 5,
+  "snapshot_ver": 0,
+  "real_start_ts": 441579051795087375,
+  "start_ts": 441579051795087363,
+  "dependency_id": 0,
+  "query": "create table t1(id int ,name char(10),salary varchar(10))",
+  "binlog": {
+   "SchemaVersion": 282,
+   "DBInfo": null,
+   "TableInfo": {
+    "id": 424,
+    "name": {
+     "O": "t1",
+     "L": "t1"
+    },
+    "charset": "utf8mb4",
+    "collate": "utf8mb4_bin",
+    "cols": [
+     {
+      "id": 1,
+      "name": {
+       "O": "id",
+       "L": "id"
+      },
+      "offset": 0,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 3,
+       "Flag": 0,
+       "Flen": 11,
+       "Decimal": 0,
+       "Charset": "binary",
+       "Collate": "binary",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 2,
+      "name": {
+       "O": "name",
+       "L": "name"
+      },
+      "offset": 1,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 254,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     },
+     {
+      "id": 3,
+      "name": {
+       "O": "salary",
+       "L": "salary"
+      },
+      "offset": 2,
+      "origin_default": null,
+      "origin_default_bit": null,
+      "default": null,
+      "default_bit": null,
+      "default_is_expr": false,
+      "generated_expr_string": "",
+      "generated_stored": false,
+      "dependences": null,
+      "type": {
+       "Tp": 15,
+       "Flag": 0,
+       "Flen": 10,
+       "Decimal": 0,
+       "Charset": "utf8mb4",
+       "Collate": "utf8mb4_bin",
+       "Elems": null,
+       "ElemsIsBinaryLit": null
+      },
+      "state": 5,
+      "comment": "",
+      "hidden": false,
+      "change_state_info": null,
+      "version": 2
+     }
+    ],
+    "index_info": null,
+    "constraint_info": null,
+    "fk_info": null,
+    "state": 5,
+    "pk_is_handle": false,
+    "is_common_handle": false,
+    "common_handle_version": 0,
+    "comment": "",
+    "auto_inc_id": 0,
+    "auto_id_cache": 0,
+    "auto_rand_id": 0,
+    "max_col_id": 3,
+    "max_idx_id": 0,
+    "max_fk_id": 0,
+    "max_cst_id": 0,
+    "update_timestamp": 441579051795087375,
+    "ShardRowIDBits": 0,
+    "max_shard_row_id_bits": 0,
+    "auto_random_bits": 0,
+    "auto_random_range_bits": 0,
+    "pre_split_regions": 0,
+    "partition": null,
+    "compression": "",
+    "view": null,
+    "sequence": null,
+    "Lock": null,
+    "version": 5,
+    "tiflash_replica": null,
+    "is_columnar": false,
+    "temp_table_type": 0,
+    "cache_table_status": 0,
+    "policy_ref_info": null,
+    "stats_options": null,
+    "exchange_partition_info": null,
+    "ttl_info": null
+   },
+   "FinishedTS": 441579051821301765,
+   "MultipleTableInfos": null
+  },
+  "version": 1,
+  "reorg_meta": null,
+  "multi_schema_info": null,
+  "priority": 0,
+  "seq_num": 218,
+  "charset": "",
+  "collate": ""
+ }
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

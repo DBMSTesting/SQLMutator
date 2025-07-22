@@ -1,0 +1,66 @@
+ID: 3286
+Title: RecordSet should use its own statement context
+Description:
+TiDB will reset statement context before evaluate the next one, and recordSet always use
+statement context from current session. When the input has multiple SQL statements, it may be wrong.
+
+For example, input is A; B
+
+```
+recordSet1 = runStmt(A);
+resetStmt()
+recordSet2 = runStmt(B)
+recordSet = append(recordSet1, recordSet2)
+recordSet.Next() // Evaluate A statement, but use B statement context
+```
+
+RecordSet should use its own statement context, instead of get current statement context from session.
+
+It also have race problem, because resetStmt and recordSet.Next() both modify statement context
+see also https://github.com/pingcap/tidb/pull/3284
+
+A race log attached:
+
+> ==================
+> WARNING: DATA RACE
+> Write at 0x00c421ec60c0 by goroutine 562:
+>   github.com/pingcap/tidb.resetStmtCtx()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/tidb.go:172 +0x112
+>   github.com/pingcap/tidb.(*session).Execute()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/session.go:583 +0x6ea
+>   github.com/pingcap/tidb/util/testkit.(*TestKit).Exec()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/util/testkit/testkit.go:100 +0xca
+>   github.com/pingcap/tidb/util/testkit.(*TestKit).MustExec()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/util/testkit/testkit.go:129 +0x91
+>   github.com/pingcap/tidb/executor_test.(*testSuite).TestUnion()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/executor/executor_test.go:438 +0x24d
+>   runtime.call32()
+>       /media/genius/OS/project/go/src/runtime/asm_amd64.s:514 +0x47
+>   reflect.Value.Call()
+>       /media/genius/OS/project/go/src/reflect/value.go:302 +0xc0
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.(*suiteRunner).forkTest.func1()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/check.go:784 +0xa71
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.(*suiteRunner).forkCall.func1()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/check.go:678 +0x89
+> 
+> Previous read at 0x00c421ec60c0 by goroutine 492:
+>   github.com/pingcap/tidb/executor.(*UnionExec).fetchData()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/executor/executor.go:764 +0x3c6
+> 
+> Goroutine 562 (running) created at:
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.(*suiteRunner).forkCall()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/check.go:679 +0x489
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.(*suiteRunner).forkTest()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/check.go:816 +0x133
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.(*suiteRunner).run()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/check.go:617 +0x22d
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.Run()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/run.go:94 +0x5a
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.RunAll()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/run.go:86 +0x14a
+>   github.com/pingcap/tidb/vendor/github.com/pingcap/check.TestingT()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/vendor/github.com/pingcap/check/run.go:74 +0x706
+>   github.com/pingcap/tidb/executor_test.TestT()
+>       /media/genius/OS/project/src/github.com/pingcap/tidb/executor/executor_test.go:44 +0x4f
+>   testing.tRunner()
+>       /media/genius/OS/project/go/src/testing/testing.go:657 +0x107

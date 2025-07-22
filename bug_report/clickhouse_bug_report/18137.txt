@@ -1,0 +1,109 @@
+ID: 18137
+Title: 20.12.3.3 Less amount of data is returned if "read backoff" is in effect.
+Description:
+Consider following: 
+
+1 master server with Distributed table (```tracking_distributed```), 2 shards, previously was 4 shards, but during chat discussion i've reduced them to 2 for easier debugging (including master server each having 1 replica with 1 MergeTree table ```tracking_shard```). Also a ```tracking``` table - which is an old table that i want to re-distribute and aggregate while doing inserts from it into ```tracking_distributed``` which is connected to MV on the same server, by doing following insert:
+
+```
+insert into tracking_distributed (date, datetime, col1, col2, col3, col4, col5,
+                                  col6, col7, col8, col9,
+                                  col10, col11, col12, col13, col14, col15, col16,
+                                  col17, col18, col19,
+                                  col20, col21, col22, col23,
+                                  col24, col25,
+                                  col26, col27, col28, col29, col30, col31)
+select date,
+          datetime,
+          1     as raw1,
+          0     as raw2,
+          col3,
+             col4,
+             col5,
+             col6,
+             col7,
+             col8,
+             col9,
+             col10,
+             col11,
+             col12,
+             col13,
+             col14,
+             col15,
+             col16,
+             col17,
+             col18,
+             col19,
+             col20,
+             col21,
+             col22,
+             col23,
+             col24,
+             col25,
+             [[]]  as raw3,
+             0     as raw4,
+             'RUB' as raw5,
+             []    as raw6,
+             0     as raw7,
+             []    as raw8
+      from tracking
+      where date > '2010-01-01'
+        and date <= '2019-07-01'
+```
+
+Data inside ```tracking``` are starting from 2019-01-08. After this insert i am checking that all rows are inserted correctly by doing following two queries:
+
+```
+select count(), concat(toString(toMonth(date)), '.', toString(toYear(date))) as dt
+from tracking_distributed
+where (date >= '2000-02-01')
+  AND (date < '2019-07-01')
+group by dt
+order by dt;
+
+select count(), concat(toString(toMonth(date)), '.', toString(toYear(date))) as dt
+from tracking
+where (date >= '2000-02-01')
+  AND (date < '2019-07-01')
+group by dt
+order by dt;
+```
+
+And getting very strange results:
+
+tracking_distributed:
+```
+78238,1.2019
+8406510,2.2019
+7700480,3.2019
+47273866,4.2019
+86705743,5.2019
+69612803,6.2019
+```
+
+tracking:
+```
+78238,1.2019
+8406510,2.2019
+21402619,3.2019
+47759435,4.2019
+89318991,5.2019
+76633611,6.2019
+```
+
+```tracking``` (csv, no column names) - [schema](https://pastebin.com/G5m6taU7) 
+```tracking_dsitributed``` (csv, no column names) - [schema](https://pastebin.com/RPXXn4w2)
+
+0) Before inserting on every shard is executed ```truncate table tracking_shard``` and additionally executed ```truncate table tracking_distributed``` 
+1) Logs does not have any errors on shards and on master
+2) If i am doing 6 separate queries for 6 month - i am getting CORRECT data inside ```tracking_distributed``` e.g. ```where date >= 2019-01-01 and date < 2019-02-01``` ```where date >= 2019-02-01 and date < 2019-03-01```
+3) I've tried stop distributed flushes, do insert then flush in one operation - same result
+4) Tried using insert_distributed_sync=1, same result but slower
+5) Tried wraping initial select with subselect e.g. select * from (select date, datetime ...), same results
+6) Servers and clickhouse-server on every shard have UTC datetime
+7) ```/var/lib/clickhouse/data/<db>/<distributed_table>``` location empty after insert is finished
+8) Trace log - https://pastebin.com/UThwL0XV
+9) Also tried removing default toDate(datetime) in distributed table - but no luck
+
+
+

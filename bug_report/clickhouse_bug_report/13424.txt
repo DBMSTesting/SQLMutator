@@ -1,0 +1,104 @@
+ID: 13424
+Title: Server crash on Merge-table join & filter condition
+Description:
+In (Merge -> Distributed -> MergeTree) tables structure server **crashes** on SELECT query when:
+1. Merge table is queried
+2. There is a filtration condition 
+3. There is JOIN on some other table (no matter what)
+
+**How to reproduce**
+Prerequisites: CH with 'clstr1' cluster created (I tested on 2 nodes cluster in docker)
+```
+CREATE TABLE  default.test1 ON CLUSTER clstr1
+(  id   Int64,  name String ) 
+ENGINE MergeTree PARTITION BY (id) ORDER BY (id);
+
+CREATE TABLE  default.test1_distributed ON CLUSTER clstr1 
+AS default.test1 
+ENGINE = Distributed(clstr1, default, test1);
+
+CREATE TABLE default.test_merge ON CLUSTER clstr1
+AS default.test1
+ENGINE = Merge('default', 'test1_distributed');
+```
+
+So with this structure following SELECT query crashes CH server (node which received query):
+```
+select count()
+    from default.test_merge
+         join ( select 'anystring' as name) as n USING name
+    WHERE id = 1
+```
+
+**Note** that if you remove either filter condition or join clause query works fine:
+```
+select count()
+    from default.test_merge
+         join ( select 'anystring' as name) as n USING name;
+
+select count()
+    from default.test_merge
+    WHERE id = 1;
+
+select count()
+  from default.test_merge
+     WHERE id = 1 and name in ( select 'anystring' as name);
+
+```
+Issue happens only when both filtration & join applied.
+
+**Note2:** Sometimes issue raise only on the second query execution. 
+
+
+**Logs before crash**
+```
+2020.08.06 18:03:42.923308 [ 66 ] {a0e71bd3-67ec-46d2-9a2f-a72bf53e109c} <Debug> executeQuery: (from 192.168.160.1:46103) SELECT count() FROM default.test_merge INNER JOIN (SELECT 'anystring' AS name) AS n USING (name) WHERE id = 1
+2020.08.06 18:03:42.923565 [ 66 ] {a0e71bd3-67ec-46d2-9a2f-a72bf53e109c} <Trace> AccessRightsContext (default): Access granted: SELECT(dummy) ON system.one
+2020.08.06 18:03:42.923823 [ 66 ] {a0e71bd3-67ec-46d2-9a2f-a72bf53e109c} <Trace> AccessRightsContext (default): Access granted: SELECT(dummy) ON system.one
+2020.08.06 18:03:42.923857 [ 66 ] {a0e71bd3-67ec-46d2-9a2f-a72bf53e109c} <Debug> Join: setSampleBlock: n.name String Const(size = 0, String(size = 1))
+2020.08.06 18:03:42.924451 [ 101 ] {} <Fatal> BaseDaemon: ########################################
+2020.08.06 18:03:42.924489 [ 101 ] {} <Fatal> BaseDaemon: (version 20.3.12.112 (official build)) (from thread 66) (query_id: a0e71bd3-67ec-46d2-9a2f-a72bf53e109c) Received signal Segmentation fault (11).
+2020.08.06 18:03:42.924516 [ 101 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Address not mapped to object.
+2020.08.06 18:03:42.924534 [ 101 ] {} <Fatal> BaseDaemon: Stack trace: 0xd4fd8c1 0xd500a1d 0xd4faa20 0xd4faa69 0xd4faa69 0xd4f87a1 0xd4fa09e 0xd4cdb14 0xd123ea5 0xd12521e 0xd1268bd 0xd6f2c65 0xd6f48fb 0xd15ce70 0xd160647 0xd122975 0xd3276b8 0xd539eba 0xd53a991 0x90327b9 0x90337a0 0xe390dfb 0xe39127d 0x105a7d47 0x105a3b4c 0x105a54ed 0x7f109626a6db 0x7f1096b4988f
+2020.08.06 18:03:42.963483 [ 101 ] {} <Fatal> BaseDaemon: 3. DB::PredicateRewriteVisitorData::rewriteSubquery(DB::ASTSelectQuery&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd4fd8c1 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963513 [ 101 ] {} <Fatal> BaseDaemon: 4. DB::PredicateRewriteVisitorData::visit(DB::ASTSelectWithUnionQuery&, std::__1::shared_ptr<DB::IAST>&) @ 0xd500a1d in /usr/bin/clickhouse
+2020.08.06 18:03:42.963535 [ 101 ] {} <Fatal> BaseDaemon: 5. DB::InDepthNodeVisitor<DB::OneTypeMatcher<DB::PredicateRewriteVisitorData, false, std::__1::shared_ptr<DB::IAST> >, true, std::__1::shared_ptr<DB::IAST> >::visit(std::__1::shared_ptr<DB::IAST>&) @ 0xd4faa20 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963552 [ 101 ] {} <Fatal> BaseDaemon: 6. DB::InDepthNodeVisitor<DB::OneTypeMatcher<DB::PredicateRewriteVisitorData, false, std::__1::shared_ptr<DB::IAST> >, true, std::__1::shared_ptr<DB::IAST> >::visit(std::__1::shared_ptr<DB::IAST>&) @ 0xd4faa69 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963570 [ 101 ] {} <Fatal> BaseDaemon: 7. DB::InDepthNodeVisitor<DB::OneTypeMatcher<DB::PredicateRewriteVisitorData, false, std::__1::shared_ptr<DB::IAST> >, true, std::__1::shared_ptr<DB::IAST> >::visit(std::__1::shared_ptr<DB::IAST>&) @ 0xd4faa69 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963594 [ 101 ] {} <Fatal> BaseDaemon: 8. DB::PredicateExpressionsOptimizer::tryRewritePredicatesToTables(std::__1::vector<std::__1::shared_ptr<DB::IAST>, std::__1::allocator<std::__1::shared_ptr<DB::IAST> > >&, std::__1::vector<std::__1::vector<std::__1::shared_ptr<DB::IAST>, std::__1::allocator<std::__1::shared_ptr<DB::IAST> > >, std::__1::allocator<std::__1::vector<std::__1::shared_ptr<DB::IAST>, std::__1::allocator<std::__1::shared_ptr<DB::IAST> > > > > const&) @ 0xd4f87a1 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963605 [ 101 ] {} <Fatal> BaseDaemon: 9. DB::PredicateExpressionsOptimizer::optimize(DB::ASTSelectQuery&) @ 0xd4fa09e in /usr/bin/clickhouse
+2020.08.06 18:03:42.963627 [ 101 ] {} <Fatal> BaseDaemon: 10. DB::SyntaxAnalyzer::analyzeSelect(std::__1::shared_ptr<DB::IAST>&, DB::SyntaxAnalyzerResult&&, DB::SelectQueryOptions const&, std::__1::vector<DB::TableWithColumnNamesAndTypes, std::__1::allocator<DB::TableWithColumnNamesAndTypes> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) const @ 0xd4cdb14 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963641 [ 101 ] {} <Fatal> BaseDaemon: 11. ? @ 0xd123ea5 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963656 [ 101 ] {} <Fatal> BaseDaemon: 12. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd12521e in /usr/bin/clickhouse
+2020.08.06 18:03:42.963666 [ 101 ] {} <Fatal> BaseDaemon: 13. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, DB::SelectQueryOptions const&) @ 0xd1268bd in /usr/bin/clickhouse
+2020.08.06 18:03:42.963687 [ 101 ] {} <Fatal> BaseDaemon: 14. DB::StorageMerge::getQueryHeader(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum) @ 0xd6f2c65 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963706 [ 101 ] {} <Fatal> BaseDaemon: 15. DB::StorageMerge::read(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xd6f48fb in /usr/bin/clickhouse
+2020.08.06 18:03:42.963719 [ 101 ] {} <Fatal> BaseDaemon: 16. void DB::InterpreterSelectQuery::executeFetchColumns<DB::QueryPipeline>(DB::QueryProcessingStage::Enum, DB::QueryPipeline&, std::__1::shared_ptr<DB::PrewhereInfo> const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::QueryPipeline&) @ 0xd15ce70 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963737 [ 101 ] {} <Fatal> BaseDaemon: 17. void DB::InterpreterSelectQuery::executeImpl<DB::QueryPipeline>(DB::QueryPipeline&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, DB::QueryPipeline&) @ 0xd160647 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963746 [ 101 ] {} <Fatal> BaseDaemon: 18. DB::InterpreterSelectQuery::executeWithProcessors() @ 0xd122975 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963761 [ 101 ] {} <Fatal> BaseDaemon: 19. DB::InterpreterSelectWithUnionQuery::executeWithProcessors() @ 0xd3276b8 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963777 [ 101 ] {} <Fatal> BaseDaemon: 20. ? @ 0xd539eba in /usr/bin/clickhouse
+2020.08.06 18:03:42.963790 [ 101 ] {} <Fatal> BaseDaemon: 21. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, bool) @ 0xd53a991 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963804 [ 101 ] {} <Fatal> BaseDaemon: 22. DB::TCPHandler::runImpl() @ 0x90327b9 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963813 [ 101 ] {} <Fatal> BaseDaemon: 23. DB::TCPHandler::run() @ 0x90337a0 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963823 [ 101 ] {} <Fatal> BaseDaemon: 24. Poco::Net::TCPServerConnection::start() @ 0xe390dfb in /usr/bin/clickhouse
+2020.08.06 18:03:42.963840 [ 101 ] {} <Fatal> BaseDaemon: 25. Poco::Net::TCPServerDispatcher::run() @ 0xe39127d in /usr/bin/clickhouse
+2020.08.06 18:03:42.963864 [ 101 ] {} <Fatal> BaseDaemon: 26. Poco::PooledThread::run() @ 0x105a7d47 in /usr/bin/clickhouse
+2020.08.06 18:03:42.963880 [ 101 ] {} <Fatal> BaseDaemon: 27. Poco::ThreadImpl::runnableEntry(void*) @ 0x105a3b4c in /usr/bin/clickhouse
+2020.08.06 18:03:42.963894 [ 101 ] {} <Fatal> BaseDaemon: 28. ? @ 0x105a54ed in /usr/bin/clickhouse
+2020.08.06 18:03:42.963905 [ 101 ] {} <Fatal> BaseDaemon: 29. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+2020.08.06 18:03:42.963916 [ 101 ] {} <Fatal> BaseDaemon: 30. clone @ 0x12188f in /lib/x86_64-linux-gnu/libc-2.27.so
+
+```
+
+------
+
+**Reproduced on**:
+- 20.5.4.40-stable
+- 20.3.12.112-lts
+- 20.3.11.97-lts
+
+Version 19.17.10.1 works fine.
+
+Will be happy to provide additional details if necessary!
+

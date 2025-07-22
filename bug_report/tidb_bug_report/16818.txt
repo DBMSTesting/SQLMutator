@@ -1,0 +1,143 @@
+ID: 16818
+Title: [plan cache] panic on `explain for connection`
+Description:
+## Bug Report
+
+I wrote a customer sysbench test, the lua script file is named issue.lua, and the content is:
+
+```lua
+#!/usr/bin/env sysbench
+
+function thread_init()
+    drv = sysbench.sql.driver()
+    con = drv:connect()
+    con:query([[
+        prepare stmt from "
+            select * from t1, t2
+            where t1.a = t2.a
+            and t2.a = ?
+            and t2.b = 'b'
+            and t2.c = 'c'
+        "
+    ]])
+end
+
+function thread_done()
+    con:disconnect()
+end
+
+function event()
+    con:query("set @a = 1")
+    con:query("execute stmt using @a")
+end
+
+function prepare()
+    local drv = sysbench.sql.driver()
+    local con = drv:connect()
+
+    con:query("DROP TABLE IF EXISTS t1")
+    con:query([[
+        CREATE TABLE t1 (
+            a     BIGINT,
+            b     VARCHAR(40),
+            col3  VARCHAR(40) DEFAULT NULL,
+            col4  VARCHAR(40) DEFAULT NULL,
+            col5  VARCHAR(40) DEFAULT NULL,
+            col6  VARCHAR(40) DEFAULT NULL,
+            col7  VARCHAR(40) DEFAULT NULL,
+            col8  VARCHAR(40) DEFAULT NULL,
+            col9  VARCHAR(40) DEFAULT NULL,
+            col10 VARCHAR(40) DEFAULT NULL,
+            PRIMARY KEY (a, b)
+        )
+    ]])
+
+    con:query([[INSERT INTO t1(a, b) VALUES (1, "1")]])
+    con:query([[INSERT INTO t1(a, b) VALUES (1, "2")]])
+    con:query([[INSERT INTO t1(a, b) VALUES (2, "1")]])
+    con:query([[INSERT INTO t1(a, b) VALUES (2, "2")]])
+    con:query([[INSERT INTO t1(a, b) VALUES (3, "1")]])
+    con:query([[INSERT INTO t1(a, b) VALUES (3, "2")]])
+
+    con:query("DROP TABLE IF EXISTS t2")
+    con:query([[
+        CREATE TABLE t2 (
+            a     BIGINT,
+            b     VARCHAR(40),
+            c     VARCHAR(40),
+            col4  VARCHAR(40) DEFAULT NULL,
+            col5  VARCHAR(40) DEFAULT NULL,
+            col6  VARCHAR(40) DEFAULT NULL,
+            col7  VARCHAR(40) DEFAULT NULL,
+            col8  VARCHAR(40) DEFAULT NULL,
+            col9  VARCHAR(40) DEFAULT NULL,
+            col10 VARCHAR(40) DEFAULT NULL,
+            UNIQUE KEY idx_a (a)
+        )
+    ]])
+
+    con:query([[INSERT INTO t2(a, b, c) VALUES(1, "b", "c")]])
+    con:query([[INSERT INTO t2(a, b, c) VALUES(2, "b", "c")]])
+    con:query([[INSERT INTO t2(a, b, c) VALUES(3, "b", "c")]])
+end
+
+function cleanup()
+    local drv = sysbench.sql.driver()
+    local con = drv:connect()
+    con:query("DROP TABLE IF EXISTS t1")
+    con:query("DROP TABLE IF EXISTS t2")
+end
+```
+
+**NOTE**: the content is different from it described in #16817.
+
+### 1. What did you do?
+
+- step 1: step 1: start a tidb-server with mocktikv and **plan cache enabled**
+
+- step 2: prepare table and data via the sysbench test:
+
+```sh
+sysbench --report-interval=1 --time=300 --threads=4 --mysql-host=127.0.0.1 --mysql-port=4000 --mysql-user=root --mysql-db=test --db-driver=mysql issue prepare
+```
+
+- step 3: run the sysbench test:
+
+```sh
+sysbench --report-interval=1 --time=300 --threads=4 --mysql-host=127.0.0.1 --mysql-port=4000 --mysql-user=root --mysql-db=test --db-driver=mysql issue run
+```
+
+- step 4: got one of the connection id through log file, open a MySQL client and run `explain for connection xx` to see the execution plan on that connection, I got an error in the return result:
+
+```sql
+TiDB(root@127.0.0.1:test) > explain for connection 2;
+ERROR 1105 (HY000): runtime error: index out of range [0] with length 0
+```
+
+and the panic stack in tidb log file is:
+
+```
+[2020/04/25 17:24:11.449 +08:00] [ERROR] [adapter.go:123] ["execute sql panic"] [conn=6] [sql="explain for connection 2"] [stack="github.com/pingcap/tidb/executor.(*recordSet).Next.func1\n\t/Users/jianzhang.zj/Code/tidb/executor/adapter.go:123\nruntime.gopanic\n\t/opt/goroot/src/runtime/panic.go:679\nruntime.goPanicIndex\n\t/opt/goroot/src/runtime/panic.go:75\ngithub.com/pingcap/tidb/expression.(*ParamMarker).GetUserVar\n\t/Users/jianzhang.zj/Code/tidb/expression/constant.go:80\ngithub.com/pingcap/tidb/expression.(*Constant).getLazyDatum\n\t/Users/jianzhang.zj/Code/tidb/expression/constant.go:186\ngithub.com/pingcap/tidb/expression.(*Constant).EvalString\n\t/Users/jianzhang.zj/Code/tidb/expression/constant.go:264\ngithub.com/pingcap/tidb/expression.(*builtinCastStringAsRealSig).evalReal\n\t/Users/jianzhang.zj/Code/tidb/expression/builtin_cast.go:1158\ngithub.com/pingcap/tidb/expression.(*ScalarFunction).EvalReal\n\t/Users/jianzhang.zj/Code/tidb/expression/scalar_function.go:354\ngithub.com/pingcap/tidb/expression.(*ScalarFunction).Eval\n\t/Users/jianzhang.zj/Code/tidb/expression/scalar_function.go:323\ngithub.com/pingcap/tidb/expression.(*Constant).getLazyDatum\n\t/Users/jianzhang.zj/Code/tidb/expression/constant.go:190\ngithub.com/pingcap/tidb/expression.(*Constant).Eval\n\t/Users/jianzhang.zj/Code/tidb/expression/constant.go:199\ngithub.com/pingcap/tidb/expression.(*Constant).ExplainInfo\n\t/Users/jianzhang.zj/Code/tidb/expression/explain.go:65\ngithub.com/pingcap/tidb/expression.(*ScalarFunction).explainInfo\n\t/Users/jianzhang.zj/Code/tidb/expression/explain.go:38\ngithub.com/pingcap/tidb/expression.(*ScalarFunction).ExplainInfo\n\t/Users/jianzhang.zj/Code/tidb/expression/explain.go:28\ngithub.com/pingcap/tidb/expression.sortedExplainExpressionList\n\t/Users/jianzhang.zj/Code/tidb/expression/explain.go:119\ngithub.com/pingcap/tidb/expression.SortedExplainExpressionList\n\t/Users/jianzhang.zj/Code/tidb/expression/explain.go:109\ngithub.com/pingcap/tidb/planner/core.(*PhysicalSelection).ExplainInfo\n\t/Users/jianzhang.zj/Code/tidb/planner/core/explain.go:282\ngithub.com/pingcap/tidb/planner/core.(*Explain).prepareOperatorInfo\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:953\ngithub.com/pingcap/tidb/planner/core.(*Explain).explainPlanInRowFormat\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:839\ngithub.com/pingcap/tidb/planner/core.(*Explain).explainPlanInRowFormat\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:903\ngithub.com/pingcap/tidb/planner/core.(*Explain).explainPlanInRowFormat\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:886\ngithub.com/pingcap/tidb/planner/core.(*Explain).explainPlanInRowFormat\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:886\ngithub.com/pingcap/tidb/planner/core.(*Explain).explainPlanInRowFormat\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:928\ngithub.com/pingcap/tidb/planner/core.(*Explain).RenderResult\n\t/Users/jianzhang.zj/Code/tidb/planner/core/common_plans.go:821\ngithub.com/pingcap/tidb/executor.(*ExplainExec).generateExplainInfo\n\t/Users/jianzhang.zj/Code/tidb/executor/explain.go:106\ngithub.com/pingcap/tidb/executor.(*ExplainExec).Next\n\t/Users/jianzhang.zj/Code/tidb/executor/explain.go:53\ngithub.com/pingcap/tidb/executor.Next\n\t/Users/jianzhang.zj/Code/tidb/executor/executor.go:249\ngithub.com/pingcap/tidb/executor.(*recordSet).Next\n\t/Users/jianzhang.zj/Code/tidb/executor/adapter.go:126\ngithub.com/pingcap/tidb/server.(*tidbResultSet).Next\n\t/Users/jianzhang.zj/Code/tidb/server/driver_tidb.go:369\ngithub.com/pingcap/tidb/server.(*clientConn).writeChunks\n\t/Users/jianzhang.zj/Code/tidb/server/conn.go:1436\ngithub.com/pingcap/tidb/server.(*clientConn).writeResultset\n\t/Users/jianzhang.zj/Code/tidb/server/conn.go:1402\ngithub.com/pingcap/tidb/server.(*clientConn).handleStmt\n\t/Users/jianzhang.zj/Code/tidb/server/conn.go:1309\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery\n\t/Users/jianzhang.zj/Code/tidb/server/conn.go:1278\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch\n\t/Users/jianzhang.zj/Code/tidb/server/conn.go:901\ngithub.com/pingcap/tidb/server.(*clientConn).Run\n\t/Users/jianzhang.zj/Code/tidb/server/conn.go:715\ngithub.com/pingcap/tidb/server.(*Server).onConn\n\t/Users/jianzhang.zj/Code/tidb/server/server.go:415"]
+```
+
+### 2. What did you expect to see?
+
+no panic, executes successfully.
+
+### 3. What did you see instead?
+
+the error and panic described in the above.
+
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+
+```sh
+➜ ./bin/tidb-server -V
+Release Version: v4.0.0-beta.2-352-g5ede18f10
+Git Commit Hash: 5ede18f10eedfe2e3690d7728dec3ffa4b0af2d5
+Git Branch: master
+UTC Build Time: 2020-04-25 08:41:26
+GoVersion: go1.13.10
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

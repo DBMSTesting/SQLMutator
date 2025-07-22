@@ -1,0 +1,18 @@
+ID: 14149
+Title: Move `core_functions` to a separate extension
+Description:
+This PR moves the `core_functions` to a separate extension, instead of sitting inline in the main source tree. The `core_functions` library is statically shipped with (almost) all clients, similar to how the `parquet` client is shipped. The main idea here is that for the WASM build we can leave out the `core_functions` of the main binary distribution - and load it only later when one of the functions is referenced. This decreases the size of the initial WASM payload.
+
+For testing purposes, the `core_functions` extension is always loaded currently, as many tests rely on core functions being present and adding the correct `requires` and fixing all of the C++ tests is a lot of work. This should be done at some point - in particular to test the auto-loading fully.
+
+#### Moving Functions To Main
+
+As part of this PR, we must make sure that there are no references to `core_functions` from within the main library. This PR accomplishes that by moving a number of functions out of `core_functions` and into the main library. At some point we should revisit this - as likely several functions can be moved back out of the main library and into `core_functions` with more careful planning.
+
+#### Auto-Loading Function Overloads
+
+One side-effect of moving `core_functions` to a separate extension is that there are now functions that are defined in multiple extensions. For example, the `year` function is defined in both `icu` and `core_functions`, but with different overloads. Our auto-loading functionality is currently based on auto-loading entire functions - so that if a function is not found in the catalog, the extension is auto-loaded. With different overloads in different extensions this becomes ambiguous (which one do you auto-load?). In addition, the auto-loading causes weird behavior if only one of the two extensions are loaded - since the correct overload might not be present.
+
+This PR solves this by extending the auto-loading to function overloads. This is accomplished by adding an `EXTENSION_FUNCTION_OVERLOADS` - which includes *specific overloads*  for functions. On start-up, the extension overloads are registered using a dummy function. In the bind of this dummy function the extension auto-load is attempted - and if successful, the function is loaded from the extension. This also fixes a long-standing issue around auto-loading of ICU that was mainly present in WASM, as ICU introduces a lot of overloads for existing functions which would then result in a binding error when used without ICU, instead of resulting in ICU itself being loaded.
+
+The `EXTENSION_FUNCTION_OVERLOADS` are automatically generated similar to the functions. If the same function exists in multiple extensions - it is added to `EXTENSION_FUNCTION_OVERLOADS` instead of to `EXTENSION_FUNCTIONS` with the corresponding overloads.

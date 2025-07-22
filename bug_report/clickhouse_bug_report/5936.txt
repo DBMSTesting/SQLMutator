@@ -1,0 +1,85 @@
+ID: 5936
+Title: Fix problem with executing request with sampling on distributed table
+Description:
+**Describe the bug**
+Query finished with error. Executing query on Distributed table over one MergeTree table works. Executing query over two nodes fails with error
+
+**How to reproduce**
+* Which ClickHouse server version to use
+version 19.9.2.4 (official build)
+* Which interface to use, if matters
+clickhouse-client, jdbc
+* Non-default settings, if any
+```xml
+<err_cluster>
+	<shard>
+		<replica>
+			<host>localhost</host>
+			<port>9000</port>
+		</replica>
+	</shard>
+	<shard>
+		<replica>
+			<host>192.168.1.2</host>
+			<port>9000</port>
+		</replica>
+	</shard>
+</err_cluster>
+```
+* `CREATE TABLE` statements for all tables involved
+```sql
+CREATE TABLE IF NOT EXISTS err_schema.data
+(
+    event_date Date,
+    ip_src     UInt32,
+    ip_dst     UInt32
+) Engine = MergeTree()
+    PARTITION BY toYYYYMM(event_date)
+    ORDER BY (intHash32(ip_src))
+    PRIMARY KEY (intHash32(ip_src))
+    SAMPLE BY intHash32(ip_src);
+
+
+
+CREATE TABLE IF NOT EXISTS err_schema_distributed.data
+(
+    event_date Date,
+    ip_src     UInt32,
+    ip_dst     UInt32
+) Engine = Distributed(err_cluster, err_schema, data);
+```
+* Sample data for all these tables
+Fails on data with 1m rows
+* Queries to run that lead to unexpected result
+```sql
+SELECT DISTINCT ip_src as ip
+FROM pf_store_fm_data_distributed.data_ipv4
+         SAMPLE 1 / ? OFFSET ? / ?
+WHERE event_date = ?
+```
+
+**Error message and/or stacktrace**
+2019.07.08 17:47:16.262607 [ 44 ] {9dfd7edb-6761-441b-929e-63fc914b9048} <Error> HTTPHandler: Code: 8, e.displayText() = DB::Exception: Cannot find column `less(intHash32(ip_src), 1073741824)` in source stream, Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x7285206]
+1. /usr/bin/clickhouse-server(DB::ConvertingBlockInputStream::ConvertingBlockInputStream(DB::Context const&, std::shared_ptr<DB::IBlockInputStream> const&, DB::Block const&, DB::ConvertingBlockInputStream::MatchColumnsMode)+0x225d) [0x6b5a72d]
+2. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::unifyStreams(DB::InterpreterSelectQuery::Pipeline&)+0x128) [0x66d6138]
+3. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeUnion(DB::InterpreterSelectQuery::Pipeline&)+0x59) [0x66d8e59]
+4. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeImpl(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, bool)+0xb66) [0x66e1526]
+5. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeWithMultipleStreams()+0x4f) [0x66e3c1f]
+6. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams()+0x6c) [0x66ef17c]
+7. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::execute()+0x38) [0x66efa18]
+8. /usr/bin/clickhouse-server(DB::InterpreterInsertQuery::execute()+0xaaa) [0x66ca8ea]
+9. /usr/bin/clickhouse-server() [0x67e8c9f]
+10. /usr/bin/clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x134) [0x67eaac4]
+11. /usr/bin/clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x1902) [0x39bd5e2]
+12. /usr/bin/clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x3f1) [0x39c00f1]
+13. /usr/bin/clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x32c) [0x7398e9c]
+14. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x7393dbf]
+15. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0xe9) [0x73944f9]
+16. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x81) [0x7445171]
+17. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0x7441578]
+18. /usr/bin/clickhouse-server() [0xb1a1c9f]
+19. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76ba) [0x7f9294a676ba]
+20. /lib/x86_64-linux-gnu/libc.so.6(clone+0x6d) [0x7f929408841d]
+

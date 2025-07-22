@@ -1,0 +1,60 @@
+ID: 49685
+Title: Setting do_not_merge_across_partitions_select_final = 1 does not filter deleted rows in ReplacingMergeTree
+Description:
+We are using Clickhouse 23.3.2 version and we have a few `ReplacingMergeTree` tables defined like below:
+
+```
+CREATE TABLE subscriptions_replacing
+(
+    `subscription_id` UInt64,
+    `account_id` UInt64,
+    ...
+    `_is_deleted` UInt8,
+    `_version` UInt64
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/{cluster}/tables/{database}/{table}', '{replica}', _version, _is_deleted)
+PRIMARY KEY (account_id, subscription_id)
+ORDER BY (account_id, subscription_id)
+SETTINGS min_age_to_force_merge_seconds = 300, min_age_to_force_merge_on_partition_only = 1, index_granularity = 8192
+```
+
+When we are querying with `FINAL`, we get different results if we add the setting `do_not_merge_across_partitions_select_final = 1`. It seems like it skips filtering the deleted rows:
+
+```
+$ select count(), _is_deleted from subscriptions_replacing group by _is_deleted
+
+┌─count()─┬─_is_deleted─┐
+│ 1096219 │           0 │
+│  264359 │           1 │
+└─────────┴─────────────┘
+
+2 rows in set. Elapsed: 0.010 sec. Processed 1.36 million rows, 1.36 MB (139.59 million rows/s., 139.59 MB/s.)
+
+$ select count() from subscriptions_replacing final 
+
+┌─count()─┐
+│ 1096219 │
+└─────────┘
+
+1 row in set. Elapsed: 0.066 sec. Processed 1.37 million rows, 34.22 MB (20.85 million rows/s., 521.13 MB/s.)
+
+$ select count() from subscriptions_replacing final SETTINGS do_not_merge_across_partitions_select_final = 1
+
+┌─count()─┐
+│ 1360578 │
+└─────────┘
+
+1 row in set. Elapsed: 0.019 sec. Processed 1.36 million rows, 34.01 MB (72.04 million rows/s., 1.80 GB/s.)
+
+$ select count() from subscriptions_replacing final where _is_deleted=0 SETTINGS do_not_merge_across_partitions_select_final = 1 
+
+┌─count()─┐
+│ 1096219 │
+└─────────┘
+
+1 row in set. Elapsed: 0.021 sec. Processed 1.36 million rows, 34.01 MB (65.00 million rows/s., 1.62 GB/s.)
+```
+
+Unfortunately I couldn't reproduce in a local setup. 
+
+Is it expected that this setting affects the latest behaviour of `ReplacingMergeTrees` which filters the deleted rows, or is this a bug? 

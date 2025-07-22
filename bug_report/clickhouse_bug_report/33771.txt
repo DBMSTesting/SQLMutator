@@ -1,0 +1,125 @@
+ID: 33771
+Title: Segmentation fault on ECS Fargate when reading from S3
+Description:
+**Describe what's wrong**
+
+I am trying to execute `select * from s3(…)` and ClickHouse dies with the following output:
+
+```
+SELECT *
+FROM s3('…', 'TSV', 'root String')
+
+Query id: 86972283-b218-493b-a56b-c1125f083ce6
+
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.066552 [ 251 ] <Fatal> BaseDaemon: ########################################
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.066602 [ 251 ] <Fatal> BaseDaemon: (version 21.12.3.32 (official build), build id: FA4A7F489F3FF6E3) (from thread 97) (query_id: 86972283-b218-493b-a56b-c1125f083ce6) Received signal Segmentation fault (11)
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.066622 [ 251 ] <Fatal> BaseDaemon: Address: 0x7f2172f7a5c0 Access: read. Attempted access has violated the permissions assigned to the memory area.
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.066636 [ 251 ] <Fatal> BaseDaemon: Stack trace: 0x1257420f 0x7f2207ded3c0
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.066666 [ 251 ] <Fatal> BaseDaemon: 0. ? @ 0x1257420f in /usr/bin/clickhouse
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.066700 [ 251 ] <Fatal> BaseDaemon: 1. ? @ 0x7f2207ded3c0 in ?
+[85b9a88609d0454f8fb03fa59362654d-2580379071] 2022.01.19 07:46:56.194581 [ 251 ] <Fatal> BaseDaemon: Calculated checksum of the binary: 5BEBF5792A40F7E345921EDA3698245B. There is no information about the reference checksum.
+Exception on client:
+Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from 10.0.1.32:9000. (ATTEMPT_TO_READ_AFTER_EOF)
+
+Connecting to 10.0.1.32:9000 as user default.
+Code: 210. DB::NetException: Connection refused (10.0.1.32:9000). (NETWORK_ERROR)
+```
+
+**Does it reproduce on recent release?**
+
+I use Docker image `yandex/clickhouse-server:21.12.3.32`.
+
+**How to reproduce**
+
+I have defined the following Dockerfile:
+
+```
+FROM yandex/clickhouse-server:21.12.3.32
+RUN echo '<clickhouse><s3><s3><endpoint>https://s3.eu-central-1.amazonaws.com/my-bucket/some/prefix/</endpoint><use_environment_credentials>true</use_environment_credentials></s3></s3></clickhouse>' \
+        > /etc/clickhouse-server/config.d/s3.xml
+```
+
+All it does is sets `use_environment_credentials=true` for my bucket in `eu-central-1` AWS region. This is required since I am running ClickHouse on ECS Fargate (in a container) with an IAM role attached to a task.
+
+Here is service definition in Terraform:
+```terraform
+locals {
+  clickhouse-server-http-port   = 8123
+  clickhouse-server-native-port = 9000
+}
+
+resource "aws_ecs_task_definition" "clickhouse-server" {
+  family                   = "clickhouse-server"
+  cpu                      = 2048
+  memory                   = 8192
+  network_mode             = "awsvpc"
+  execution_role_arn       = aws_iam_role.ecs-exec.arn
+  requires_compatibilities = ["FARGATE"]
+  task_role_arn            = aws_iam_role.clickhouse-access-s3.arn  # HERE I ATTACH A ROLE TO USE TO ACCESS S3
+  container_definitions    = jsonencode([
+    {
+      name             = "clickhouse-server"
+      image            = # my custom image
+      portMappings     = [
+        { containerPort = local.clickhouse-server-http-port },
+        { containerPort = local.clickhouse-server-native-port },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options   = {
+          awslogs-group         = aws_cloudwatch_log_group.clickhouse-server.name
+          awslogs-region        = data.aws_region.current.name
+          awslogs-stream-prefix = "clickhouse-server"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_iam_role" "clickhouse-access-s3" {
+  name               = "clickhouse-access-s3"
+  assume_role_policy = data.aws_iam_policy_document.assume-ecs-execution-role.json
+  inline_policy {
+    name   = "clickhouse-access-s3"
+    policy = data.aws_iam_policy_document.clickhouse-access-s3.json
+  }
+}
+data "aws_iam_policy_document" "clickhouse-access-s3" {
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:*"]
+    resources = []  # proper S3 permissions here
+  }
+}
+
+resource "aws_ecs_cluster" "clickhouse-server" {
+  name = "clickhouse-server"
+}
+
+resource "aws_ecs_service" "clickhouse-server" {
+  name            = "clickhouse-server"
+  launch_type     = "FARGATE"
+  desired_count   = 1
+  task_definition = aws_ecs_task_definition.clickhouse-server.arn
+  cluster         = aws_ecs_cluster.clickhouse-server.arn
+  # proper network_configuration {…}
+}
+
+resource "aws_cloudwatch_log_group" "clickhouse-server" {
+  name = "clickhouse-server"
+}
+```
+
+When using s3 table function without config file (running container from pure `yandex/clickhouse-server:21.12.3.32` image without my custom Dockerfile), I was able to read this file from S3 by providing explicit AWS credentials. Now, when configuration is added, the operation fails even with AWS credentials explicitly provided. The error is the same: see traceback above, ClickHouse container dies.
+
+Solution also works when container is run using `docker run` simply on an EC2 instance (without Fargate service). No error also appears if the service is run without task role attached (`task_role_arn=null` above).
+
+**Expected behavior**
+
+I expect s3 table function to use `$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` when `use_environment_credentials` enabled, and looks like codebase supports it:
+
+https://github.com/ClickHouse/ClickHouse/blob/35883e0dae7be1ffa8948e5c56a168262fc7366f/src/IO/S3Common.cpp#L524-L526
+
+[AWS documentation](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html) on AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
+
+S3 endpoint settings [documentation](https://clickhouse.com/docs/en/engines/table-engines/integrations/s3/#endpoint-settings).

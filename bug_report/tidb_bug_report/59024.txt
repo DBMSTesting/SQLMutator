@@ -1,0 +1,91 @@
+ID: 59024
+Title: Async load cannot delete unnecessary items when there is no histogram metadata for the table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. Find the unit test: `TestNoNeedIndexStatsLoading`
+```go
+func TestNoNeedIndexStatsLoading(t *testing.T) {
+	store, dom := realtikvtest.CreateMockStoreAndDomainAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t;")
+	// 1. Create a table and the statsHandle.Update(do.InfoSchema()) will load this table into the stats cache.
+	tk.MustExec("create table if not exists t(a int, b int, index ia(a));")
+	// 2. Drop the stats of the stats, it will clean up all system table records for this table.
+	tk.MustExec("drop stats t;")
+	// 3. Insert some data and wait for the modify_count and the count is not null in the mysql.stats_meta.
+	tk.MustExec("insert into t value(1,1), (2,2);")
+	h := dom.StatsHandle()
+	require.NoError(t, h.DumpStatsDeltaToKV(true))
+	require.NoError(t, h.Update(context.Background(), dom.InfoSchema()))
+	// 4. Try to select some data from this table by ID, it would trigger an async load.
+	tk.MustExec("set tidb_opt_objective='determinate';")
+	tk.MustQuery("select * from t where a = 1 and b = 1;").Check(testkit.Rows("1 1"))
+	table, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("t"))
+	require.NoError(t, err)
+	checkTableIDInItems(t, table.Meta().ID)
+}
+```
+2. Add a single line to the test:
+```diff
+func TestNoNeedIndexStatsLoading(t *testing.T) {
+	store, dom := realtikvtest.CreateMockStoreAndDomainAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t;")
+	// 1. Create a table and the statsHandle.Update(do.InfoSchema()) will load this table into the stats cache.
+	tk.MustExec("create table if not exists t(a int, b int, index ia(a));")
+	// 2. Drop the stats of the stats, it will clean up all system table records for this table.
+	tk.MustExec("drop stats t;")
+	// 3. Insert some data and wait for the modify_count and the count is not null in the mysql.stats_meta.
+	tk.MustExec("insert into t value(1,1), (2,2);")
+	h := dom.StatsHandle()
+	require.NoError(t, h.DumpStatsDeltaToKV(true))
+	require.NoError(t, h.Update(context.Background(), dom.InfoSchema()))
+	// 4. Try to select some data from this table by ID, it would trigger an async load.
+	tk.MustExec("set tidb_opt_objective='determinate';")
+	tk.MustQuery("select * from t where a = 1 and b = 1;").Check(testkit.Rows("1 1"))
++	require.NoError(t, h.Update(context.Background(), dom.InfoSchema()))
+	table, err := dom.InfoSchema().TableByName(context.Background(), ast.NewCIStr("test"), ast.NewCIStr("t"))
+	require.NoError(t, err)
+	checkTableIDInItems(t, table.Meta().ID)
+}
+```
+3. Start a TiDB cluster but without any TiDB nodes:
+```console
+tiup playground nightly --db 0
+```
+4. Change the test case to use the real TiKV:
+```diff
+-	WithRealTiKV = flag.Bool("with-real-tikv", false, "whether tests run with real TiKV")
++	WithRealTiKV = flag.Bool("with-real-tikv", true, "whether tests run with real TiKV")
+```
+5. Run the test:
+```console
+go test -timeout 10m -tags intest -run ^TestNoNeedIndexStatsLoading$ github.com/pingcap/tidb/tests/realtikvtest/statisticstest -count=1
+```
+
+### 2. What did you expect to see? (Required)
+It passed.
+
+### 3. What did you see instead (Required)
+It kept failing.
+
+```console
+--- FAIL: TestNoNeedIndexStatsLoading (60.28s)
+    testkit.go:123: RefreshSession rand seed: 1737128106368940000
+    testkit.go:123: RefreshSession rand seed: 1737128106446542000
+    statistics_test.go:304: Timeout: Table ID was not removed from items within the time limit
+FAIL
+FAIL    github.com/pingcap/tidb/tests/realtikvtest/statisticstest       61.582s
+FAIL
+```
+
+### 4. What is your TiDB version? (Required)
+
+master
+

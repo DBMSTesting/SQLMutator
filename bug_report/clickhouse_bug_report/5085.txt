@@ -1,0 +1,59 @@
+ID: 5085
+Title: Kafka client problems kill or hang clickhouse-server process or prevent restart
+Description:
+After enabling SSL connections, some Kafka table clients are failing. This appears to demonstrate where those client failures cause problems in the parent clickhouse-server process.
+
+**Describe the bug**
+
+With Kafka table receiving initially messages as expected and successfully writing through materialized views, failures in the clients sometimes cause the server process to become unresponsive or terminate, and restarts of the clickhouse-server daemon sometimes fail.
+
+The only messages that appear in the clickhouse-server.err.log are:
+
+```
+2019.04.22 23:50:02.805504 [ 1 ] {} <Error> Application: Caught exception while loading metadata: std::exception. Code: 1001, type: cppkafka::Exception, e.what() = Failed to create consumer handle: ssl.certificate.location failed: No error
+2019.04.22 23:50:02.806111 [ 1 ] {} <Error> Application: Failed to create consumer handle: ssl.certificate.location failed: No error
+2019.04.22 23:51:53.390405 [ 1 ] {} <Error> Application: Caught exception while loading metadata: std::exception. Code: 1001, type: cppkafka::Exception, e.what() = Failed to create consumer handle: ssl.certificate.location failed: No error
+2019.04.22 23:51:53.390904 [ 1 ] {} <Error> Application: Failed to create consumer handle: ssl.certificate.location failed: No error
+```
+
+Only known way to start server is to remove metadata files for Kafka tables, start server and recreate consumer views.
+
+**How to reproduce**
+1) ClickHouse server version 19.1.14 on CentOS Linux release 7.4.1708 (Core)
+
+```
+CREATE TABLE kafka_1
+(
+    hash String,
+    date UInt64,
+    time UInt64,
+    ...
+)
+ENGINE = Kafka
+SETTINGS kafka_broker_list = 'msg1.*.com, msg2.*.com ,msg3.*.com, msg4.*.com', kafka_topic_list = 'logs', kafka_group_name = 'clickhouse0', kafka_format = 'JSONEachRow', kafka_row_delimiter = '\n', kafka_skip_broken_messages = 1, kafka_num_consumers = 1;
+```
+
+2) Verify messages can be recieved by `SELECT * LIMIT 1` from the above view.
+3) Stop server with `service clickhouse-server stop`
+4) Attempt to restart server with `service clickhouse-server start`
+5) Note daemon is not running and see messages above emitted in logs
+
+**Expected behavior**
+Other nodes in this 4 node cluster start as expected and resume consuming messages
+
+**Kafka configuration**
+
+/etc/clickhouse-server/config.xml:
+
+    <kafka>
+        <max_poll_interval_ms>60000</max_poll_interval_ms>
+        <session_timeout_ms>60000</session_timeout_ms>
+        <heartbeat_interval_ms>10000</heartbeat_interval_ms>
+        <reconnect_backoff_ms>5000</reconnect_backoff_ms>
+        <reconnect_backoff_max_ms>60000</reconnect_backoff_max_ms>
+        <security_protocol>SSL</security_protocol>
+        <ssl_ca_location>/etc/clickhouse-server/ssl/kafka-ca-qa.crt</ssl_ca_location>
+        <ssl_certificate_location>/etc/clickhouse-server/ssl/client_clickhouse_client.pem</ssl_certificate_location>
+        <ssl_key_location>/etc/clickhouse-server/ssl/client_clickhouse_client.key</ssl_key_location>
+        <ssl_key_password>pass</ssl_key_password>
+    </kafka>

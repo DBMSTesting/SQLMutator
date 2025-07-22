@@ -1,0 +1,99 @@
+ID: 73117
+Title: Crash with new join and distributed tables
+Description:
+https://s3.amazonaws.com/clickhouse-test-reports/73045/173c409d3e8ab13eddcc30637498f1c16bb367b8/ast_fuzzer__debug_.html
+
+Repro with **debug** build:
+
+```
+CREATE TABLE source_table1 (a Int64, b String) ENGINE = Memory;
+CREATE TABLE source_table2 (c Int64, d String) ENGINE = Memory;
+
+INSERT INTO source_table1 VALUES (42, 'qwe');
+INSERT INTO source_table2 VALUES (42, 'qwe');
+
+CREATE TABLE distributed_table1 AS source_table1
+ENGINE = Distributed('test_shard_localhost', currentDatabase(), source_table1);
+
+CREATE TABLE distributed_table2 AS source_table2
+ENGINE = Distributed('test_shard_localhost', currentDatabase(), source_table2);
+
+SELECT 1 FROM distributed_table1 AS t1 GLOBAL INNER JOIN distributed_table2 AS t2 ON toUInt128(materialize(1)) = t1.a LIMIT 1048575
+```
+
+Crash/std assert:
+
+```
+[Mordor] 2024.12.11 14:14:56.698886 [ 2976595 ] {90bd1633-1817-42f7-beea-adbedbb1b390} <Fatal> : Logical error: 'std::exception. Code: 1001, type: std::out_of_range, e.what() = unordered_map::at: key not found (version 24.12.1.1), Stack trace:
+
+0. /mnt/ch/ClickHouse/contrib/llvm-project/libcxx/include/exception:141: std::logic_error::logic_error(char const*) @ 0x000000001b646694
+1. /mnt/ch/ClickHouse/contrib/llvm-project/libcxx/include/stdexcept:166: std::out_of_range::out_of_range[abi:v15007](char const*) @ 0x00000000075b23e9
+2. /mnt/ch/ClickHouse/contrib/llvm-project/libcxx/include/stdexcept:268: std::__throw_out_of_range[abi:v15007](char const*) @ 0x00000000075b239f
+3. /mnt/ch/ClickHouse/contrib/llvm-project/libcxx/include/unordered_map:1863: DB::buildQueryTreeForShard(std::shared_ptr<DB::PlannerContext> const&, std::shared_ptr<DB::IQueryTreeNode>) @ 0x0000000014b8d25a
+4. /mnt/ch/ClickHouse/src/Storages/StorageDistributed.cpp:827: DB::StorageDistributed::read(DB::QueryPlan&, std::vector<String, std::allocator<String>> const&, std::shared_ptr<DB::StorageSnapshot> const&, DB::SelectQueryInfo&, std::shared_ptr<DB::Context const>, DB::QueryProcessingStage::Enum, unsigned long, unsigned long) @ 0x000000001487f53e
+5. /mnt/ch/ClickHouse/src/Planner/PlannerJoinTree.cpp:939: DB::(anonymous namespace)::buildQueryPlanForTableExpression(std::shared_ptr<DB::IQueryTreeNode>, std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions const&, std::shared_ptr<DB::PlannerContext>&, bool, bool) @ 0x000000001381817d
+6. /mnt/ch/ClickHouse/src/Planner/PlannerJoinTree.cpp:2006: DB::buildJoinTreeQueryPlan(std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions&, std::unordered_set<String, std::hash<String>, std::equal_to<String>, std::allocator<String>> const&, std::shared_ptr<DB::PlannerContext>&) @ 0x0000000013811169
+7. /mnt/ch/ClickHouse/src/Planner/Planner.cpp:1546: DB::Planner::buildPlanForQueryNode() @ 0x00000000137fb96e
+8. /mnt/ch/ClickHouse/src/Planner/Planner.cpp:1300: DB::Planner::buildQueryPlanIfNeeded() @ 0x00000000137f8352
+9. /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQueryAnalyzer.cpp:241: DB::InterpreterSelectQueryAnalyzer::getQueryPlan() @ 0x00000000137f61ed
+10. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:1317: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000013b19d3d
+11. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:1535: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x0000000013b15253
+12. /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:656: DB::TCPHandler::runImpl() @ 0x00000000154b1006
+13. /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:2598: DB::TCPHandler::run() @ 0x00000000154c9cca
+14. /mnt/ch/ClickHouse/base/poco/Net/src/TCPServerConnection.cpp:40: Poco::Net::TCPServerConnection::start() @ 0x00000000193c7d47
+15. /mnt/ch/ClickHouse/base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x00000000193c8225
+16. /mnt/ch/ClickHouse/base/poco/Foundation/src/ThreadPool.cpp:205: Poco::PooledThread::run() @ 0x000000001936771f
+17. /mnt/ch/ClickHouse/base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000019364f94
+18. ? @ 0x000075d75c02d39d
+19. ? @ 0x000075d75c0b249c
+'.
+[Mordor] 2024.12.11 14:14:56.704669 [ 2976595 ] {90bd1633-1817-42f7-beea-adbedbb1b390} <Fatal> : Stack trace (when copying this message, always include the lines below):
+
+0. /mnt/ch/ClickHouse/src/Common/StackTrace.cpp:380: StackTrace::tryCapture() @ 0x000000000d5c9f32
+1. /mnt/ch/ClickHouse/src/Common/Exception.cpp:53: DB::abortOnFailedAssertion(String const&) @ 0x000000000d593084
+2. /mnt/ch/ClickHouse/src/Common/Exception.cpp:495: DB::getCurrentExceptionMessageAndPattern(bool, bool, bool) @ 0x000000000d598edb
+3. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:709: DB::logExceptionBeforeStart(String const&, std::shared_ptr<DB::Context const>, std::shared_ptr<DB::IAST>, std::shared_ptr<DB::OpenTelemetry::SpanHolder> const&, unsigned long) @ 0x0000000013b14060
+4. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:1517: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000013b1cfcb
+5. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:1535: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x0000000013b15253
+6. /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:656: DB::TCPHandler::runImpl() @ 0x00000000154b1006
+7. /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:2598: DB::TCPHandler::run() @ 0x00000000154c9cca
+8. /mnt/ch/ClickHouse/base/poco/Net/src/TCPServerConnection.cpp:40: Poco::Net::TCPServerConnection::start() @ 0x00000000193c7d47
+9. /mnt/ch/ClickHouse/base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x00000000193c8225
+10. /mnt/ch/ClickHouse/base/poco/Foundation/src/ThreadPool.cpp:205: Poco::PooledThread::run() @ 0x000000001936771f
+11. /mnt/ch/ClickHouse/base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000019364f94
+12. ? @ 0x000075d75c02d39d
+13. ? @ 0x000075d75c0b249c
+
+[Mordor] 2024.12.11 14:14:56.705095 [ 2977411 ] <Fatal> BaseDaemon: ########################################
+[Mordor] 2024.12.11 14:14:56.705135 [ 2977411 ] <Fatal> BaseDaemon: (version 24.12.1.1, build id: B285AA3C6DC85CEF730AF1A5BB6D1DBFF14863A9, git hash: 130a2b16aac39a4e9686bd382a27e856741bfb2e) (from thread 2976595) (query_id: 90bd1633-1817-42f7-beea-adbedbb1b390) (query: SELECT 1 FROM distributed_table1 AS t1 GLOBAL INNER JOIN distributed_table2 AS t2 ON toUInt128(materialize(1)) = t1.a LIMIT 1048575) Received signal Aborted (6)
+[Mordor] 2024.12.11 14:14:56.705154 [ 2977411 ] <Fatal> BaseDaemon: 
+[Mordor] 2024.12.11 14:14:56.705175 [ 2977411 ] <Fatal> BaseDaemon: Stack trace: 0x000000000d5c9e88 0x000000000d8929d1 0x000075d75bfd61d0 0x000075d75c02f3f5 0x000075d75bfd6120 0x000075d75bfbd4c3 0x000000000d59300b 0x000000000d5930b7 0x000000000d598edb 0x0000000013b14060 0x0000000013b1cfcb 0x0000000013b15253 0x00000000154b1006 0x00000000154c9cca 0x00000000193c7d47 0x00000000193c8225 0x000000001936771f 0x0000000019364f94 0x000075d75c02d39d 0x000075d75c0b249c
+[Mordor] 2024.12.11 14:14:56.713466 [ 2977411 ] <Fatal> BaseDaemon: 0.0. inlined from /mnt/ch/ClickHouse/src/Common/StackTrace.cpp:380: StackTrace::tryCapture()
+[Mordor] 2024.12.11 14:14:56.713493 [ 2977411 ] <Fatal> BaseDaemon: 0. /mnt/ch/ClickHouse/src/Common/StackTrace.cpp:349: StackTrace::StackTrace(ucontext_t const&) @ 0x000000000d5c9e88
+[Mordor] 2024.12.11 14:14:56.722393 [ 2977411 ] <Fatal> BaseDaemon: 1. /mnt/ch/ClickHouse/src/Common/SignalHandlers.cpp:102: signalHandler(int, siginfo_t*, void*) @ 0x000000000d8929d1
+[Mordor] 2024.12.11 14:14:56.722422 [ 2977411 ] <Fatal> BaseDaemon: 2. ? @ 0x000075d75bfd61d0
+[Mordor] 2024.12.11 14:14:56.722435 [ 2977411 ] <Fatal> BaseDaemon: 3. ? @ 0x000075d75c02f3f5
+[Mordor] 2024.12.11 14:14:56.722445 [ 2977411 ] <Fatal> BaseDaemon: 4. ? @ 0x000075d75bfd6120
+[Mordor] 2024.12.11 14:14:56.722458 [ 2977411 ] <Fatal> BaseDaemon: 5. ? @ 0x000075d75bfbd4c3
+[Mordor] 2024.12.11 14:14:56.737157 [ 2977411 ] <Fatal> BaseDaemon: 6. /mnt/ch/ClickHouse/src/Common/Exception.cpp:48: DB::abortOnFailedAssertion(String const&, void* const*, unsigned long, unsigned long) @ 0x000000000d59300b
+[Mordor] 2024.12.11 14:14:56.751577 [ 2977411 ] <Fatal> BaseDaemon: 7. /mnt/ch/ClickHouse/src/Common/Exception.cpp:54: DB::abortOnFailedAssertion(String const&) @ 0x000000000d5930b7
+[Mordor] 2024.12.11 14:14:56.767092 [ 2977411 ] <Fatal> BaseDaemon: 8. /mnt/ch/ClickHouse/src/Common/Exception.cpp:495: DB::getCurrentExceptionMessageAndPattern(bool, bool, bool) @ 0x000000000d598edb
+[Mordor] 2024.12.11 14:14:56.805903 [ 2977411 ] <Fatal> BaseDaemon: 9. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:709: DB::logExceptionBeforeStart(String const&, std::shared_ptr<DB::Context const>, std::shared_ptr<DB::IAST>, std::shared_ptr<DB::OpenTelemetry::SpanHolder> const&, unsigned long) @ 0x0000000013b14060
+[Mordor] 2024.12.11 14:14:56.836865 [ 2977411 ] <Fatal> BaseDaemon: 10. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:1517: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000013b1cfcb
+[Mordor] 2024.12.11 14:14:56.872241 [ 2977411 ] <Fatal> BaseDaemon: 11. /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:1535: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x0000000013b15253
+[Mordor] 2024.12.11 14:14:56.893928 [ 2977411 ] <Fatal> BaseDaemon: 12. /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:656: DB::TCPHandler::runImpl() @ 0x00000000154b1006
+[Mordor] 2024.12.11 14:14:56.928866 [ 2977411 ] <Fatal> BaseDaemon: 13. /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:2598: DB::TCPHandler::run() @ 0x00000000154c9cca
+[Mordor] 2024.12.11 14:14:56.930007 [ 2977411 ] <Fatal> BaseDaemon: 14. /mnt/ch/ClickHouse/base/poco/Net/src/TCPServerConnection.cpp:40: Poco::Net::TCPServerConnection::start() @ 0x00000000193c7d47
+[Mordor] 2024.12.11 14:14:56.931900 [ 2977411 ] <Fatal> BaseDaemon: 15. /mnt/ch/ClickHouse/base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x00000000193c8225
+[Mordor] 2024.12.11 14:14:56.933953 [ 2977411 ] <Fatal> BaseDaemon: 16. /mnt/ch/ClickHouse/base/poco/Foundation/src/ThreadPool.cpp:205: Poco::PooledThread::run() @ 0x000000001936771f
+[Mordor] 2024.12.11 14:14:56.935929 [ 2977411 ] <Fatal> BaseDaemon: 17. /mnt/ch/ClickHouse/base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000019364f94
+[Mordor] 2024.12.11 14:14:56.935944 [ 2977411 ] <Fatal> BaseDaemon: 18. ? @ 0x000075d75c02d39d
+[Mordor] 2024.12.11 14:14:56.935956 [ 2977411 ] <Fatal> BaseDaemon: 19. ? @ 0x000075d75c0b249c
+[Mordor] 2024.12.11 14:14:56.935967 [ 2977411 ] <Fatal> BaseDaemon: Integrity check of the executable skipped because the reference checksum could not be read.
+[Mordor] 2024.12.11 14:14:57.150681 [ 2977411 ] <Fatal> BaseDaemon: This ClickHouse version is not official and should be upgraded to the official build.
+[Mordor] 2024.12.11 14:14:57.150809 [ 2977411 ] <Fatal> BaseDaemon: Changed settings: max_threads = 16, use_uncompressed_cache = false, compile_aggregate_expressions = false, insert_deduplicate = true, distributed_ddl_task_timeout = 120, joined_subquery_requires_alias = false, max_bytes_before_external_group_by = 1442450940, max_execution_time = 0., max_expanded_ast_elements = 50000, join_algorithm = 'hash', memory_usage_overcommit_max_wait_microseconds = 50000, log_query_threads = false, max_partitions_per_insert_block = 100, enable_global_with_statement = true, database_replicated_initial_query_timeout_sec = 120, database_replicated_enforce_synchronous_settings = true, database_replicated_always_detach_permanently = true, distributed_ddl_output_mode = 'none', insert_keeper_max_retries = 10, insert_keeper_retry_initial_backoff_ms = 100, insert_keeper_retry_max_backoff_ms = 100, insert_keeper_fault_injection_probability = 0., allow_experimental_analyzer = true, allow_experimental_bfloat16_type = true, allow_experimental_database_replicated = true, input_format_null_as_default = false
+Error on processing query: Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from clickhouse-01:49000. (ATTEMPT_TO_READ_AFTER_EOF) (version 24.12.1.1)
+
+Connecting to clickhouse-01:49000 as user default.
+Code: 210. DB::NetException: Connection refused (clickhouse-01:49000). (NETWORK_ERROR)
+```

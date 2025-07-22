@@ -1,0 +1,41 @@
+ID: 49103
+Title: Potential deadlock between `checkFlushLock` and `chunkCpChan` after context cancel, causing Lightning unable to exit after error
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+No concrete repro steps, but the cause is quite obvious from the code itself.
+
+1. https://github.com/pingcap/tidb/blob/b21bb3e7a71d493ed09606e5171572e90b7001dc/br/pkg/lightning/importer/table_import.go#L678-L691 when the `ctx` is canceled (line 688) through `setError()` (line 695), `chunkCpChan` is not closed/consumed, and there is no longer any receiver for the channel `chunkCpChan`.
+2. https://github.com/pingcap/tidb/blob/b21bb3e7a71d493ed09606e5171572e90b7001dc/br/pkg/lightning/importer/table_import.go#L710-L722 after 16 sends to `chunkCpChan` (line 716), the channel will block any further sends. This caused the lock `checkFlushLock` engaged forever.
+3. https://github.com/pingcap/tidb/blob/b21bb3e7a71d493ed09606e5171572e90b7001dc/br/pkg/lightning/importer/table_import.go#L800-L806 the deadlock further blocks other goroutines, and prevent WorkGroup from reaching Done(), eventually freezing up the entire program.
+
+We saw this likely caused by an unexpected SIGHUP during batch split & scatter
+
+```
+[2023/11/21 15:40:13.963 +08:00] [ERROR] [local.go:1684] ["split & scatter ranges failed"] [uuid=11179292-5139-5f2c-b043-e453f373d9c4] [error="batch split regions failed: rpc error: code = Canceled desc = Cancelled"]
+...
+[2023/11/21 16:00:37.569 +08:00] [WARN] [table_restore.go:662] ["flush all chunk checkpoints failed before manually exits"] [error="context canceled"] [errorVerbose="context canceled\n«snip»"]
+...
+[2023/11/23 11:46:46.667 +08:00] [ERROR] [local.go:1684] ["split & scatter ranges failed"] [uuid=10998eba-d5ff-5fef-b7eb-e9e75f07006f] [error="batch split regions failed: rpc error: code = Canceled desc = Cancelled"]
+```
+
+### 2. What did you expect to see? (Required)
+
+Lightning exit cleanly after cancellation.
+
+### 3. What did you see instead (Required)
+
+Lightning continues idling, not making any progress.
+
+### 4. What is your TiDB version? (Required)
+
+Lightning v6.5.3
+
+(pretty sure this affects every version of Lightning)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,220 @@
+ID: 21516
+Title: SPM: multiple tidb instances sync bindings failed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+cluster config:
+2 tidb
+1 pd
+1 tikv
+
+```
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	_ "github.com/go-sql-driver/mysql"
+	"strconv"
+	"sync"
+	"time"
+)
+
+var (
+	dsns = []string{
+		"root:@tcp(192.168.228.83:4000)/test?charset=utf8&parseTime=True",
+		"root:@tcp(192.168.228.83:4001)/test?charset=utf8&parseTime=True",
+	}
+)
+
+func main() {
+	for {
+		ctx, cancel := context.WithCancel(context.Background())
+		wg := sync.WaitGroup{}
+		for i := range dsns {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				run(ctx, name, i)
+			}(dsns[i])
+		}
+
+		time.Sleep(3 * time.Second)
+		cancel()
+		wg.Wait()
+		time.Sleep(3 * time.Second)
+		for _, item := range dsns {
+			check(item)
+		}
+	}
+}
+
+func check(dsn string) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	c, err := db.Conn(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	defer c.Close()
+
+	rows, err := c.QueryContext(context.Background(), "select count(*) from mysql.bind_info where status != 'deleted'")
+	if err != nil {
+		panic(err)
+	}
+	count := 0
+	rows.Next()
+	if err := rows.Scan(&count); err != nil {
+		panic(err)
+	}
+	if err := rows.Err(); err != nil {
+		panic(err)
+	}
+	rows.Close()
+
+	fmt.Println(count)
+	rows, err = c.QueryContext(context.Background(), "show global bindings")
+	if err != nil {
+		panic(err)
+	}
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		panic(err)
+	}
+
+	if count != n {
+		panic(fmt.Sprintf("unexpected count, %d, %d, %s\n", count, n, dsn))
+	}
+}
+
+func run(ctx context.Context, dsn string, index int) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			c, err := db.Conn(context.Background())
+			if err != nil {
+				panic(err)
+			}
+			defer c.Close()
+
+			name := "t" + strconv.Itoa(index*1000+i)
+			fmt.Println(name)
+			if _, err := c.ExecContext(context.Background(), fmt.Sprintf("create table if not exists %s(a int, b int, index idx(a))", name)); err != nil {
+				panic(err)
+			}
+
+			for {
+
+				ss := []string{
+					fmt.Sprintf("create global binding for select * from %s using select * from %s;", name, name),
+					fmt.Sprintf("create global binding for update %s set a = a + 1 using update %s set a = a + 1;", name, name),
+					fmt.Sprintf("create global binding for delete from %s where a < 10 using delete from %s where a < 10", name, name),
+					//fmt.Sprintf("select * from %s use index(idx);", name),
+					//fmt.Sprintf("select * from %s ignore index(idx);;;", name),
+					//fmt.Sprintf("update %s use index(idx) set a = a + 1;", name),
+					//fmt.Sprintf("update %s ignore index(idx) set a = a + 1", name),
+					//fmt.Sprintf("delete from %s use index(idx) where a < 5", name),
+					//fmt.Sprintf("delete from %s ignore index(idx) where a < 5;;", name),
+					fmt.Sprintf("drop global binding for select * from %s", name),
+					fmt.Sprintf("drop global binding for update %s set a = a + 1", name),
+					fmt.Sprintf("drop global binding for delete from %s where a < 10", name),
+				}
+				for _, s := range ss {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						fmt.Println(s, time.Now())
+						if _, err := c.ExecContext(context.Background(), s); err != nil {
+							panic(err)
+						}
+					}
+				}
+			}
+
+		}(i)
+	}
+	wg.Wait()
+}
+```
+
+```
+show global bindings;
+select count(*) from mysql.bind_info where status != "deleted";
+```
+
+### 2. What did you expect to see? (Required)
+```
+mysql> show global bindings;
++-------------------------------+--------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| Original_sql                  | Bind_sql                       | Default_db | Status | Create_time             | Update_time             | Charset | Collation | Source |
++-------------------------------+--------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| select * from t1002           | select * from t1002            | test       | using  | 2020-12-06 22:07:02.257 | 2020-12-06 22:07:02.257 | utf8    | utf8_bin  | manual |
+......
+| select * from t1004           | select * from t1004            | test       | using  | 2020-12-06 22:07:02.357 | 2020-12-06 22:07:02.357 | utf8    | utf8_bin  | manual |
++-------------------------------+--------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+29 rows in set (0.00 sec)
+mysql> select count(*) from mysql.bind_info where status != "deleted";
++----------+
+| count(*) |
++----------+
+|       29 |
++----------+
+1 row in set (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> show global bindings;
++-------------------------------+--------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| Original_sql                  | Bind_sql                       | Default_db | Status | Create_time             | Update_time             | Charset | Collation | Source |
++-------------------------------+--------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+| select * from t1002           | select * from t1002            | test       | using  | 2020-12-06 22:07:02.257 | 2020-12-06 22:07:02.257 | utf8    | utf8_bin  | manual |
+......
+| select * from t1004           | select * from t1004            | test       | using  | 2020-12-06 22:07:02.357 | 2020-12-06 22:07:02.357 | utf8    | utf8_bin  | manual |
++-------------------------------+--------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------+--------+
+17 rows in set (0.00 sec)
+mysql> select count(*) from mysql.bind_info where status != "deleted";
++----------+
+| count(*) |
++----------+
+|       29 |
++----------+
+1 row in set (0.01 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+Release Version: v4.0.0-beta.2-1734-g62fd2b735
+Edition: Community
+Git Commit Hash: 62fd2b735934e67580fefade0584e9eeb63f32d3
+Git Branch: master
+UTC Build Time: 2020-12-04 12:32:58
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

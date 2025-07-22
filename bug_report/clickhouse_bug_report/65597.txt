@@ -1,0 +1,323 @@
+ID: 65597
+Title: `cast` in where clause causes unexpected result.
+Description:
+**Describe what's wrong**
+`cast` in where clause causes unexpected result.
+
+**How to reproduce**
+
+* Which ClickHouse server version to use: `24.5.3.5`
+* Which interface to use, if it matters: `MySQL Shell`
+* Non-default settings, if any: `distributed_product_mode='allow'`
+
+* init database:
+```sql
+create database ch_main on cluster default;
+use ch_main;
+
+create table __t_nj on cluster default ( 
+  c_g Int32 primary key ,
+  c_e Float64 ,
+  c_g7v String ,
+  c_yrfy8nx4 Float64 ,
+  );
+
+create table t_nj on cluster default as __t_nj ENGINE = Distributed(default, ch_main, __t_nj, c_g);
+
+alter table __t_nj on cluster default add index t_lt9tkh6q2__idx_1 c_g type bloom_filter;
+
+insert into t_nj (c_g, c_e, c_g7v, c_yrfy8nx4) values 
+  (239104964, 95.49, 'oqj16wxvc', 67.95), 
+  (-1249485531, 52.94, 'm01ot', 60.20), 
+  (794862521, -9223372036854775809.7, 'kmvejx2', 9.20), 
+  (-1342938736, 68.38, 'th2xm', -32768.0);
+
+```
+
+* Queries to run that lead to an unexpected result
+```sql
+SELECT
+  1 as c10
+FROM
+  t_nj as ref_0
+WHERE
+ cast(
+  (ref_0.c_yrfy8nx4 <= 0.0) or (123456789 = ref_0.c_g)
+    as Bool);
+```
+
+previous SQL produces:
+```
+mysql> SELECT
+    ->   1 as c10
+    -> FROM
+    ->   t_nj as ref_0
+    -> WHERE
+    ->  cast(
+    ->   (ref_0.c_yrfy8nx4 <= 0.0) or (123456789 = ref_0.c_g)
+    ->     as Bool);
+Empty set (0.01 sec)
+Read 0 rows, 0.00 B in 0.007112 sec., 0 rows/sec., 0.00 B/sec.
+```
+
+**Expected behavior**
+Because there is a line that can meet the condition `ref_0.c_yrfy8nx4 <= 0.0`
+```
+mysql> select * from t_nj;
++-------------+----------------------+-----------+------------+
+| c_g         | c_e                  | c_g7v     | c_yrfy8nx4 |
++-------------+----------------------+-----------+------------+
+| -1342938736 |                68.38 | th2xm     |     -32768 |
+|   239104964 |                95.49 | oqj16wxvc |      67.95 |
+| -1249485531 |                52.94 | m01ot     |       60.2 |
+|   794862521 | -9223372036854776000 | kmvejx2   |        9.2 |
++-------------+----------------------+-----------+------------+
+4 rows in set (0.01 sec)
+Read 4 rows, 142.00 B in 0.006967 sec., 574 rows/sec., 19.90 KiB/sec.
+```
+Therefore, the result shoule be:
+```
+mysql> SELECT
+    ->   1 as c10
+    -> FROM
+    ->   t_nj as ref_0
+    -> WHERE
+    ->  cast(
+    ->   (ref_0.c_yrfy8nx4 <= 0.0) or (123456789 = ref_0.c_g)
+    ->     as Bool);
++------+
+| c10  |
++------+
+|    1 |
++------+
+1 row in set (0.00 sec)
+Read 4 rows, 48.00 B in 0.002082 sec., 1921 rows/sec., 22.51 KiB/sec.
+```
+
+
+**Additional context**
+docker compose config:
+```
+version: '3.8'
+services:
+  clickhouse-01:
+    image: "clickhouse/clickhouse-server:${CHVER:-latest}"
+    user: "101:101"
+    container_name: clickhouse-01
+    hostname: clickhouse-01
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 10.0.7.1
+    volumes:
+      - ${PWD}/fs/volumes/clickhouse-01/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ${PWD}/fs/volumes/clickhouse-01/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-02:
+    image: "clickhouse/clickhouse-server:${CHVER:-latest}"
+    user: "101:101"
+    container_name: clickhouse-02
+    hostname: clickhouse-02
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 10.0.7.2
+    volumes:
+      - ${PWD}/fs/volumes/clickhouse-02/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ${PWD}/fs/volumes/clickhouse-02/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    depends_on:
+      - clickhouse-keeper-01
+      - clickhouse-keeper-02
+      - clickhouse-keeper-03
+  clickhouse-keeper-01:
+    image: "clickhouse/clickhouse-keeper:${CHKVER:-latest-alpine}"
+    user: "101:101"
+    container_name: clickhouse-keeper-01
+    hostname: clickhouse-keeper-01
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 10.0.7.5
+    volumes:
+      - ${PWD}/fs/volumes/clickhouse-keeper-01/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+
+  clickhouse-keeper-02:
+    image: "clickhouse/clickhouse-keeper:${CHKVER:-latest-alpine}"
+    user: "101:101"
+    container_name: clickhouse-keeper-02
+    hostname: clickhouse-keeper-02
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 10.0.7.6
+    volumes:
+      - ${PWD}/fs/volumes/clickhouse-keeper-02/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+
+  clickhouse-keeper-03:
+    image: "clickhouse/clickhouse-keeper:${CHKVER:-latest-alpine}"
+    user: "101:101"
+    container_name: clickhouse-keeper-03
+    hostname: clickhouse-keeper-03
+    networks:
+      cluster_2S_1R:
+        ipv4_address: 10.0.7.7
+    volumes:
+      - ${PWD}/fs/volumes/clickhouse-keeper-03/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+
+networks:
+  cluster_2S_1R:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.7.0/24
+          gateway: 10.0.7.254
+```
+
+config.xml
+```xml
+<clickhouse replace="true">
+    <logger>
+        <level>debug</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>1000M</size>
+        <count>3</count>
+    </logger>
+    <display_name>cluster_2S_1R node 1</display_name>
+    <listen_host>0.0.0.0</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <mysql_port>9004</mysql_port>
+    <postgresql_port>9005</postgresql_port>
+    <user_directories>
+        <users_xml>
+            <path>users.xml</path>
+        </users_xml>
+        <local_directory>
+            <path>/var/lib/clickhouse/access/</path>
+        </local_directory>
+    </user_directories>
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+    <remote_servers>
+        <default>
+            <shard>
+                <replica>
+                    <host>clickhouse-01</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>clickhouse-02</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </default>
+    </remote_servers>
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper-01</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-02</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-03</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+    <macros>
+        <shard>01</shard>
+        <replica>01</replica>
+    </macros>
+</clickhouse>
+```
+users.xml
+```xml
+<?xml version="1.0"?>
+<clickhouse replace="true">
+    <profiles>
+        <default>
+            <max_memory_usage>10000000000</max_memory_usage>
+            <use_uncompressed_cache>0</use_uncompressed_cache>
+            <load_balancing>in_order</load_balancing>
+            <log_queries>1</log_queries>
+            <distributed_product_mode>allow</distributed_product_mode>
+        </default>
+    </profiles>
+    <users>
+        <default>
+            <access_management>1</access_management>
+            <profile>default</profile>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <password></password>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+            <show_named_collections>1</show_named_collections>
+            <show_named_collections_secrets>1</show_named_collections_secrets>
+        </default>
+    </users>
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>
+```
+keeper_config.xml:
+```xml
+<clickhouse replace="true">
+    <logger>
+        <level>information</level>
+        <log>/var/log/clickhouse-keeper/clickhouse-keeper.log</log>
+        <errorlog>/var/log/clickhouse-keeper/clickhouse-keeper.err.log</errorlog>
+        <size>1000M</size>
+        <count>3</count>
+    </logger>
+    <listen_host>::</listen_host>
+    <max_thread_pool_size>10000</max_thread_pool_size>
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>3</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <raft_logs_level>information</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>clickhouse-keeper-01</hostname>
+                <port>9234</port>
+            </server>
+            <server>
+                <id>2</id>
+                <hostname>clickhouse-keeper-02</hostname>
+                <port>9234</port>
+            </server>
+            <server>
+                <id>3</id>
+                <hostname>clickhouse-keeper-03</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+</clickhouse>
+```
+#### about us
+We are the BASS team from the School of Cyber Science and Technology at Beihang University. Our main focus is on system software security, operating systems, and program analysis research, as well as the development of automated program testing frameworks for detecting software defects. Using our self-developed database vulnerability testing tool, we have identified the potential above-mentioned vulnerability that may lead to database logic error.

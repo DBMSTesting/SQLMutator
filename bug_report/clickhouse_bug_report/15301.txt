@@ -1,0 +1,82 @@
+ID: 15301
+Title: 20.3.19 SEGV from libunwind
+Description:
+20.3.19 dies silently w/o any info in logs (the same issue happened once per few wees on prev 20.3 subversions too). 
+
+I've got a core dump (seems unfull `BFD: warning: /tmp/core.ParalInputsProc.103943 is truncated: expected core file size >= 364188540928, found: 123735351296`)
+
+It looks like:
+* writeTraceInfo were creating StackTrace, it called libunwind, and some segfault happened inside (in evaluateExpression)
+* ClickHouse did catch that segfault and during the processing of it he tried to create StackTrace again (which call libunwind again, and new segfault happened, and this time Linux didn't allow to catch it one more time)
+
+```
+Program terminated with signal SIGSEGV, Segmentation fault.
+#0  0x000000000ed3adf1 in libunwind::DwarfInstructions<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::evaluateExpression (expression=<optimized out>, addressSpace=..., registers=..., 
+    initialStackValue=initialStackValue@entry=0) at ../contrib/libc-headers/x86_64-linux-gnu/bits/string_fortified.h:34
+
+(gdb) bt
+#0  0x000000000ed3adf1 in libunwind::DwarfInstructions<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::evaluateExpression (expression=<optimized out>, addressSpace=..., registers=..., 
+    initialStackValue=initialStackValue@entry=0) at ../contrib/libc-headers/x86_64-linux-gnu/bits/string_fortified.h:34
+#1  0x000000000ed3b4c3 in libunwind::DwarfInstructions<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::getCFA (registers=..., prolog=..., addressSpace=...)
+    at ../contrib/libunwind/src/DwarfInstructions.hpp:66
+#2  libunwind::DwarfInstructions<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::stepWithDwarf (addressSpace=..., pc=173128391, fdeStart=fdeStart@entry=129006336, registers=...)
+    at ../contrib/libunwind/src/DwarfInstructions.hpp:171
+#3  0x000000000ed32caa in libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::stepWithDwarfFDE (this=0x7fc6e978ff30) at ../contrib/libunwind/src/Registers.hpp:343
+#4  libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::step (this=0x7fc6e978ff30) at ../contrib/libunwind/src/UnwindCursor.hpp:1987
+#5  libunwind::UnwindCursor<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::step (this=0x7fc6e978ff30) at ../contrib/libunwind/src/UnwindCursor.hpp:1975
+#6  __unw_step (cursor=0x7fc6e978ff30) at ../contrib/libunwind/src/libunwind.cpp:161
+#7  0x000000000ed32e72 in unw_backtrace (buffer=buffer@entry=0x7fc6e9790140, size=size@entry=32) at ../contrib/libunwind/src/libunwind.cpp:297
+#8  0x0000000008579c44 in StackTrace::tryCapture (this=0x7fc6e9790130) at ../contrib/libcxx/include/array:206
+#9  StackTrace::StackTrace (this=0x7fc6e9790130, signal_context=...) at ../src/Common/StackTrace.cpp:197
+#10 0x0000000008784cde in signalHandler (sig=<optimized out>, info=0x7fc6e9790d30, context=0x7fc6e9790c00) at ../base/daemon/src/BaseDaemon.cpp:123
+#11 0x00007ffff7a48960 in ?? ()
+#12 0x0000000000000007 in ?? ()
+#13 0x0000000000000000 in ?? ()
+
+
+(gdb) f 10
+#10 0x0000000008784cde in signalHandler (sig=<optimized out>, info=0x7fc6e9790d30, context=0x7fc6e9790c00) at ../base/daemon/src/BaseDaemon.cpp:123
+warning: Source file is more recent than executable.
+123	    const StackTrace stack_trace(signal_context);
+
+
+(gdb) i args
+sig = <optimized out>
+info = 0x7fc6e9790d30
+context = 0x7fc6e9790c00
+(gdb) info locals  
+saved_errno = 0
+buf = '\000' <repeats 1471 times>
+out = <incomplete type>
+signal_context = {uc_flags = 7, uc_link = 0x0, uc_stack = {ss_sp = 0x0, ss_flags = 2, ss_size = 0}, uc_mcontext = {gregs = {140492297279744, 140492297282032, 121359832, -1, 121360416, 121360644, -40, 
+      6, 129006386, 129006386, 121360568, 121360492, 248753646, 4252017623993, 6, 140492297279728, 248753649, 66054, 12103423998558259, 4, 14, 6144, 4252017623993}, fpregs = 0x7fc6e9790dc0, 
+    __reserved1 = {0, 0, 0, 0, 0, 0, 0, 0}}, uc_sigmask = {__val = {6144, 11, 1, 4252017623993, 0 <repeats 12 times>}}, __fpregs_mem = {cwd = 0, swd = 0, ftw = 0, fop = 0, rip = 0, rdp = 0, 
+    mxcsr = 895, mxcr_mask = 0, _st = {{significand = {0, 0, 0, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}, {significand = {8064, 0, 65535, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}, {
+        significand = {0, 0, 0, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}, {significand = {0, 0, 0, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}, {significand = {0, 0, 0, 0}, exponent = 0, 
+        __glibc_reserved1 = {0, 0, 0}}, {significand = {0, 0, 0, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}, {significand = {0, 0, 0, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}, {
+        significand = {0, 0, 0, 0}, exponent = 0, __glibc_reserved1 = {0, 0, 0}}}, _xmm = {{element = {0, 0, 0, 0}}, {element = {0, 0, 129006336, 0}}, {element = {139554816, 0, 173124560, 0}}, {
+        element = {173133759, 0, 173128391, 0}}, {element = {3216369600, 32766, 3216369608, 32766}}, {element = {3216369792, 32766, 993, 990}}, {element = {3917034792, 32710, 1210282752, 32767}}, {
+        element = {1210346112, 32767, 1210346224, 32767}}, {element = {95, 0, 6, 0}}, {element = {0, 0, 0, 0}}, {element = {0, 0, 0, 0}}, {element = {0, 0, 0, 0}}, {element = {0, 0, 0, 0}}, {element = {
+          0, 0, 0, 0}}, {element = {0, 0, 0, 0}}, {element = {0, 0, 0, 0}}}, __glibc_reserved1 = {0 <repeats 18 times>, 1179670611, 2692, 255, 0, 2688, 0}}}
+
+stack_trace = {static capacity = 32, size = 0, offset = 0, frames = {__elems_ = {
+      0x8579c44 <StackTrace::StackTrace(ucontext_t const&)+52>,
+      0x8784cde <signalHandler(int, siginfo_t*, void*)+142>, 
+      0x7ffff7a48960, 
+      0xed3adf1 <libunwind::DwarfInstructions<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::evaluateExpression(unsigned long, libunwind::LocalAddressSpace&, libunwind::Registers_x86_64 const&, unsigned long)+2529>, 
+      0xed3b4c3 <libunwind::DwarfInstructions<libunwind::LocalAddressSpace, libunwind::Registers_x86_64>::stepWithDwarf(libunwind::LocalAddressSpace&, unsigned long, unsigned long, libunwind::Registers_x86_64&)+163>, 0xed32caa <__unw_step(unw_cursor_t*)+154>, 0xed32e72 <unw_backtrace(void**, int)+194>, 0x8579c44 <StackTrace::StackTrace(ucontext_t const&)+52>, 0x858a05d
+     <DB::(anonymous namespace)::writeTraceInfo(DB::TraceType, siginfo_t*, void*, int)+125>, 0x7ffff7a48960, 0xd744b40
+     <re2_st::DFA::InlinedSearchLoop(re2_st::DFA::SearchParams*, bool, bool, bool)+416>, 0xa51bac7 <nfaExecLimEx256_Stream_CB+3831>, 0x0 <repeats 20 times>}}}
+query_id = <optimized out>
+```
+
+```
+cat /etc/redhat-release
+CentOS Linux release 8.1.1911 (Core)
+
+uname -r
+4.18.0-147.8.1.el8_1.x86_64
+
+rpm -qa glibc
+glibc-2.28-72.el8_1.1.x86_64
+```

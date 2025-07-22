@@ -1,0 +1,65 @@
+ID: 30255
+Title: Validation Functions can not call vars.GlobalVarsAccessor.GetGlobalSysVar safely
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Start a tidb server with the following config:
+
+```
+[performance]
+feedback-probability = 0.05
+```
+
+Because of https://github.com/pingcap/tidb/pull/29594 it will cause the server to crash within a few seconds:
+
+```
+[2021/11/29 21:21:24.783 -07:00] [WARN] [memory_usage_alarm.go:140] ["tidb-server has the risk of OOM. Running SQLs and heap profile will be recorded in record path"] ["is server-memory-quota set"=false] ["system memory total"=67354476544] ["system memory usage"=54284972032] ["tidb-server memory usage"=283271120] [memory-usage-alarm-ratio=0.8] ["record path"="/tmp/1002_tidb/MC4wLjAuMDo0MDAwLzAuMC4wLjA6MTAwODA=/tmp-storage/record"]
+runtime: goroutine stack exceeds 1000000000-byte limit
+runtime: sp=0xc031c0a380 stack=[0xc031c0a000, 0xc051c0a000]
+fatal error: stack overflow
+
+runtime stack:
+runtime.throw(0x3db7367, 0xe)
+	/usr/local/go/src/runtime/panic.go:1117 +0x72
+runtime.newstack()
+	/usr/local/go/src/runtime/stack.go:1069 +0x7ed
+runtime.morestack()
+	/usr/local/go/src/runtime/asm_amd64.s:458 +0x8f
+
+goroutine 809 [running]:
+runtime.mapaccess1(0x39155e0, 0xc0115e6390, 0xc031c0a3c0, 0x0)
+	/usr/local/go/src/runtime/map.go:394 +0x24d fp=0xc031c0a390 sp=0xc031c0a388 pc=0x129ed2d
+github.com/pingcap/tidb/session.(*session).Value(0xc010754c00, 0x42addc0, 0x3ec0d50, 0x0, 0x0)
+	/home/morgo/go/src/github.com/morgo/tidb/session/session.go:2165 +0x77 fp=0xc031c0a3e0 sp=0xc031c0a390 pc=0x341e557
+github.com/pingcap/tidb/session.(*session).GetGlobalSysVar(0xc010754c00, 0x3dcc2cf, 0x14, 0xc011828c37, 0x1, 0xc01162e000, 0xc011828c37)
+	/home/morgo/go/src/github.com/morgo/tidb/session/session.go:1092 +0x5b fp=0xc031c0a590 sp=0xc031c0a3e0 pc=0x341325b
+github.com/pingcap/tidb/sessionctx/variable.glob..func250(0xc01162e000, 0xc011828c37, 0x1, 0xc011828c37, 0x1, 0xc011828c01, 0x1, 0x0, 0x0, 0xc0115e6390)
+	/home/morgo/go/src/github.com/morgo/tidb/sessionctx/variable/sysvar.go:1721 +0xa9 fp=0xc031c0a5f0 sp=0xc031c0a590 pc=0x2123869
+github.com/pingcap/tidb/sessionctx/variable.(*SysVar).ValidateWithRelaxedValidation(0x58aff60, 0xc01162e000, 0xc011828c37, 0x1, 0x1, 0x0, 0x0)
+	/home/morgo/go/src/github.com/morgo/tidb/sessionctx/variable/sysvar.go:339 +0x19e fp=0xc031c0a680 sp=0xc031c0a5f0 pc=0x211225e
+github.com/pingcap/tidb/session.(*session).GetGlobalSysVar(0xc010754c00, 0x3dcc2cf, 0x14, 0xc011828c37, 0x1, 0xc01162e000, 0xc011828c37)
+	/home/morgo/go/src/github.com/morgo/tidb/session/session.go:1121 +0x5e5 fp=0xc031c0a830 sp=0xc031c0a680 pc=0x34137e5
+github.com/pingcap/tidb/sessionctx/variable.glob..func250(0xc01162e000, 0xc011828c37, 0x1, 0xc011828c37, 0x1, 0xc011828c01, 0x1, 0x0, 0x0, 0xc0115e6390)
+	/home/morgo/go/src/github.com/morgo/tidb/sessionctx/variable/sysvar.go:1721 +0xa9 fp=0xc031c0a890 sp=0xc031c0a830 pc=0x2123869
+..
+````
+
+The root cause is because the validation function on `TiDBAnalyzeVersion` calls `vars.GlobalVarsAccessor.GetGlobalSysVar(TiDBAnalyzeVersion)`, which causes recursion, because the `GetGlobalSysVar()` func will in turn call the validation function.
+
+There are 3 other occurences of `vars.GlobalVarsAccessor.GetGlobalSysVar` being used in a validation function, but these don't lead to recursion. It is only this instance.
+
+### 2. What did you expect to see? (Required)
+
+No crash
+
+### 3. What did you see instead (Required)
+
+Crash
+
+### 4. What is your TiDB version? (Required)
+
+master

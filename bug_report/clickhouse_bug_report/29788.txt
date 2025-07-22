@@ -1,0 +1,154 @@
+ID: 29788
+Title: Startup crash: STSResourceClient Address: NULL pointer. Access: read. Address not mapped to object.
+Description:
+**Describe what's wrong**
+
+Clickhouse server crashes with a traceback on startup in my deployment when I add an S3 storage policy to the /etc/clickhouse-server/config.d folder. 
+
+**Does it reproduce on recent release?**
+
+Also happens on clickhouse-server:21.9.4.35
+
+**Enable crash reporting**
+
+I duplicated the issue with crash reporting turned on
+```
+2021.10.05 20:01:21.677155 [ 198 ] {} <Fatal> BaseDaemon: 24. _start @ 0x932d1ee in /usr/bin/clickhouse
+2021.10.05 20:01:21.793893 [ 198 ] {} <Fatal> BaseDaemon: Checksum of the binary: BEA07E96B6BEBA1591FE837CF53C7591, integrity check passed.
+2021.10.05 20:01:21.803314 [ 198 ] {} <Information> SentryWriter: Sending crash report
+```
+
+**How to reproduce**
+
+I am deploying clickhouse in kubernetes using altinity/clickhouse-operator:0.15.0 and yandex/clickhouse-server:21.9.2.17. 
+I have a single clickhouse-server pod in my cluster associated with a service account defined by 
+```
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    eks.amazonaws.com/role-arn: <RoleARN>
+  labels:
+    app: olap-clichouse
+  name: olap-clickhouse-sa
+  namespace: my-namespace
+```
+The ARN links to an IAM role with read/write/list permissions on my S3 bucket.
+
+The expected env variables from the service account appear in the pod
+```
+AWS_DEFAULT_REGION=us-west-2
+AWS_REGION=us-west-2
+AWS_ROLE_ARN=<RoleARN>
+AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token
+```
+
+The config definition for storage is being set to 
+```
+    <yandex>
+        <storage_configuration>
+            <disks>
+                <s3_storage_disk>
+                    <type>s3</type>
+                    <endpoint>https://my-bucker.s3.us-west-2.amazonaws.com/data-backups/</endpoint>
+                    <use_environment_credentials>true</use_environment_credentials>
+                    <region>us-west-2</region>
+                </s3_storage_disk>
+            </disks>
+            <policies>
+                <s3_storage_policy>
+                    <volumes>
+                        <s3_main_volume>
+                            <disk>s3_storage_disk</disk>
+                        </s3_main_volume>
+                    </volumes>
+                </s3_storage_policy>
+            </policies>
+        </storage_configuration>
+    </yandex>
+```
+
+**Expected behavior**
+
+The server should start without a crash and I should be able to read/write data from/to S3.
+
+**Error message and/or stacktrace**
+
+Pod logs including traceback.
+```
+Merging configuration file '/etc/clickhouse-server/conf.d/chop-generated-zookeeper.xml'.
+Merging configuration file '/etc/clickhouse-server/users.d/01-clickhouse-user.xml'.
+Merging configuration file '/etc/clickhouse-server/users.d/02-clickhouse-default-profile.xml'.
+Merging configuration file '/etc/clickhouse-server/users.d/03-database-ordinary.xml'.
+Merging configuration file '/etc/clickhouse-server/users.d/chop-generated-users.xml'.
+Saved preprocessed configuration to '/var/lib/clickhouse/preprocessed_configs/users.xml'.
+2021.10.05 19:29:27.455634 [ 1 ] {} <Debug> ConfigReloader: Loaded config '/etc/clickhouse-server/users.xml', performing update on configuration
+2021.10.05 19:29:27.456171 [ 1 ] {} <Debug> ConfigReloader: Loaded config '/etc/clickhouse-server/users.xml', performed update on configuration
+2021.10.05 19:29:27.456455 [ 1 ] {} <Debug> Access(user directories): Added users.xml access storage 'users.xml', path: /etc/clickhouse-server/users.xml
+2021.10.05 19:29:27.456562 [ 1 ] {} <Warning> Access(local directory): File /var/lib/clickhouse/access/users.list doesn't exist
+2021.10.05 19:29:27.456590 [ 1 ] {} <Warning> Access(local directory): Recovering lists in directory /var/lib/clickhouse/access/
+2021.10.05 19:29:27.456736 [ 1 ] {} <Debug> Access(user directories): Added local directory access storage 'local directory', path: /var/lib/clickhouse/access/
+2021.10.05 19:29:27.457170 [ 1 ] {} <Information> Application: Loading metadata from /var/lib/clickhouse/
+2021.10.05 19:29:27.459290 [ 1 ] {} <Information> DatabaseAtomic (system): Total 0 tables and 0 dictionaries.
+2021.10.05 19:29:27.459312 [ 1 ] {} <Information> DatabaseAtomic (system): Starting up tables.
+2021.10.05 19:29:27.462096 [ 1 ] {} <Information> DatabaseCatalog: Found 0 partially dropped tables. Will load them and retry removal.
+2021.10.05 19:29:27.463533 [ 1 ] {} <Information> DatabaseOrdinary (default): Total 0 tables and 0 dictionaries.
+2021.10.05 19:29:27.463553 [ 1 ] {} <Information> DatabaseOrdinary (default): Starting up tables.
+2021.10.05 19:29:27.463576 [ 1 ] {} <Information> BackgroundSchedulePool/BgSchPool: Create BackgroundSchedulePool with 128 threads
+2021.10.05 19:29:27.470583 [ 1 ] {} <Debug> Application: Loaded metadata.
+2021.10.05 19:29:27.481421 [ 1 ] {} <Information> Application: It looks like the process has no CAP_SYS_NICE capability, the setting 'os_thread_priority' will have no effect. It could happen due to incorrect ClickHouse package installation. You could resolve the problem manually with 'sudo setcap cap_sys_nice=+ep /usr/bin/clickhouse'. Note that it will not work on 'nosuid' mounted filesystems.
+2021.10.05 19:29:27.481866 [ 1 ] {} <Warning> Application: Listen [::]:8123 failed: Poco::Exception. Code: 1000, e.code() = 0, DNS error: EAI: Address family for hostname not supported (version 21.9.4.35 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2021.10.05 19:29:27.482017 [ 1 ] {} <Warning> Application: Listen [::]:9000 failed: Poco::Exception. Code: 1000, e.code() = 0, DNS error: EAI: Address family for hostname not supported (version 21.9.4.35 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2021.10.05 19:29:27.482158 [ 1 ] {} <Warning> Application: Listen [::]:9009 failed: Poco::Exception. Code: 1000, e.code() = 0, DNS error: EAI: Address family for hostname not supported (version 21.9.4.35 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2021.10.05 19:29:27.482290 [ 1 ] {} <Warning> Application: Listen [::]:9004 failed: Poco::Exception. Code: 1000, e.code() = 0, DNS error: EAI: Address family for hostname not supported (version 21.9.4.35 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2021.10.05 19:29:27.482416 [ 1 ] {} <Warning> Application: Listen [::]:9005 failed: Poco::Exception. Code: 1000, e.code() = 0, DNS error: EAI: Address family for hostname not supported (version 21.9.4.35 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2021.10.05 19:29:27.482552 [ 1 ] {} <Information> Application: Listening for http://0.0.0.0:8123
+2021.10.05 19:29:27.505362 [ 1 ] {} <Information> Application: Listening for connections with native protocol (tcp): 0.0.0.0:9000
+2021.10.05 19:29:27.505440 [ 1 ] {} <Information> Application: Listening for replica communication (interserver): http://0.0.0.0:9009
+2021.10.05 19:29:27.552577 [ 1 ] {} <Information> Application: Listening for MySQL compatibility protocol: 0.0.0.0:9004
+2021.10.05 19:29:27.552634 [ 1 ] {} <Information> Application: Listening for PostgreSQL compatibility protocol: 0.0.0.0:9005
+2021.10.05 19:29:27.553384 [ 1 ] {} <Warning> AWSClient: ClientConfiguration: Retry Strategy will use the default max attempts.
+2021.10.05 19:29:27.553497 [ 1 ] {} <Information> AWSClient: Aws::Config::AWSConfigFileProfileConfigLoader: Initializing config loader against fileName /var/lib/clickhouse/.aws/credentials and using profilePrefix = 0
+2021.10.05 19:29:27.553522 [ 1 ] {} <Information> AWSClient: ProfileConfigFileAWSCredentialsProvider: Setting provider to read credentials from /var/lib/clickhouse/.aws/credentials for credentials file and /var/lib/clickhouse/.aws/config for the config file , for use with profile default
+2021.10.05 19:29:27.553532 [ 1 ] {} <Information> AWSClient: ProcessCredentialsProvider: Setting process credentials provider to read config from default
+2021.10.05 19:29:27.553548 [ 1 ] {} <Warning> AWSClient: ClientConfiguration: Retry Strategy will use the default max attempts.
+2021.10.05 19:29:27.553565 [ 1 ] {} <Information> AWSClient: STSResourceClient: Creating AWSHttpResourceClient with max connections 25 and scheme https
+2021.10.05 19:29:27.553917 [ 197 ] {} <Fatal> BaseDaemon: ########################################
+2021.10.05 19:29:27.553971 [ 197 ] {} <Fatal> BaseDaemon: (version 21.9.4.35 (official build), build id: 5F55EEF74E2818F777B4052BF503DF5BA7BFD787) (from thread 1) (no query) Received signal Segmentation fault (11)
+2021.10.05 19:29:27.554000 [ 197 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Address not mapped to object.
+2021.10.05 19:29:27.554025 [ 197 ] {} <Fatal> BaseDaemon: Stack trace: 0xff535ff 0xff58310 0x13df6e2e 0x13dfcaa1 0x13dc0bb3 0xff46d6a 0xff4037f 0x10638594 0x10635477 0x10633c6e 0x10619691 0x10615903 0x1072eadf 0x1070ed0b 0x1070efcb 0x106cb7ca 0x106c1aa0 0x93f18f5 0x1438e0a3 0x93e1d6f 0x93e0113 0x9364b1e 0x7f92677850b3 0x932d1ee
+2021.10.05 19:29:27.554075 [ 197 ] {} <Fatal> BaseDaemon: 1. DB::S3::PocoHTTPClient::PocoHTTPClient(DB::S3::PocoHTTPClientConfiguration const&) @ 0xff535ff in /usr/bin/clickhouse
+2021.10.05 19:29:27.554105 [ 197 ] {} <Fatal> BaseDaemon: 2. DB::S3::PocoHTTPClientFactory::CreateHttpClient(Aws::Client::ClientConfiguration const&) const @ 0xff58310 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554127 [ 197 ] {} <Fatal> BaseDaemon: 3. Aws::Internal::AWSHttpResourceClient::AWSHttpResourceClient(Aws::Client::ClientConfiguration const&, char const*) @ 0x13df6e2e in /usr/bin/clickhouse
+2021.10.05 19:29:27.554149 [ 197 ] {} <Fatal> BaseDaemon: 4. Aws::Internal::STSCredentialsClient::STSCredentialsClient(Aws::Client::ClientConfiguration const&) @ 0x13dfcaa1 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554167 [ 197 ] {} <Fatal> BaseDaemon: 5. Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider::STSAssumeRoleWebIdentityCredentialsProvider() @ 0x13dc0bb3 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554183 [ 197 ] {} <Fatal> BaseDaemon: 6. ? @ 0xff46d6a in /usr/bin/clickhouse
+2021.10.05 19:29:27.554211 [ 197 ] {} <Fatal> BaseDaemon: 7. DB::S3::ClientFactory::create(DB::S3::PocoHTTPClientConfiguration const&, bool, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::vector<DB::HttpHeader, std::__1::allocator<DB::HttpHeader> >, bool, bool) @ 0xff4037f in /usr/bin/clickhouse
+2021.10.05 19:29:27.554244 [ 197 ] {} <Fatal> BaseDaemon: 8. ? @ 0x10638594 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554256 [ 197 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10635477 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554269 [ 197 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10633c6e in /usr/bin/clickhouse
+2021.10.05 19:29:27.554291 [ 197 ] {} <Fatal> BaseDaemon: 11. DB::DiskFactory::create(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context const>, std::__1::map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IDisk>, std::__1::less<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IDisk> > > > const&) const @ 0x10619691 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554319 [ 197 ] {} <Fatal> BaseDaemon: 12. DB::DiskSelector::DiskSelector(Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context const>) @ 0x10615903 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554345 [ 197 ] {} <Fatal> BaseDaemon: 13. void std::__1::allocator<DB::DiskSelector>::construct<DB::DiskSelector, Poco::Util::AbstractConfiguration const&, char const* const&, std::__1::shared_ptr<DB::Context const> >(DB::DiskSelector*, Poco::Util::AbstractConfiguration const&, char const* const&, std::__1::shared_ptr<DB::Context const>&&) @ 0x1072eadf in /usr/bin/clickhouse
+2021.10.05 19:29:27.554368 [ 197 ] {} <Fatal> BaseDaemon: 14. DB::Context::getDiskSelector(std::__1::lock_guard<std::__1::mutex>&) const @ 0x1070ed0b in /usr/bin/clickhouse
+2021.10.05 19:29:27.554381 [ 197 ] {} <Fatal> BaseDaemon: 15. DB::Context::getDisksMap() const @ 0x1070efcb in /usr/bin/clickhouse
+2021.10.05 19:29:27.554401 [ 197 ] {} <Fatal> BaseDaemon: 16. DB::AsynchronousMetrics::update(std::__1::chrono::time_point<std::__1::chrono::system_clock, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000000l> > >) @ 0x106cb7ca in /usr/bin/clickhouse
+2021.10.05 19:29:27.554415 [ 197 ] {} <Fatal> BaseDaemon: 17. DB::AsynchronousMetrics::start() @ 0x106c1aa0 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554435 [ 197 ] {} <Fatal> BaseDaemon: 18. DB::Server::main(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x93f18f5 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554455 [ 197 ] {} <Fatal> BaseDaemon: 19. Poco::Util::Application::run() @ 0x1438e0a3 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554477 [ 197 ] {} <Fatal> BaseDaemon: 20. DB::Server::run() @ 0x93e1d6f in /usr/bin/clickhouse
+2021.10.05 19:29:27.554495 [ 197 ] {} <Fatal> BaseDaemon: 21. mainEntryClickHouseServer(int, char**) @ 0x93e0113 in /usr/bin/clickhouse
+2021.10.05 19:29:27.554513 [ 197 ] {} <Fatal> BaseDaemon: 22. main @ 0x9364b1e in /usr/bin/clickhouse
+2021.10.05 19:29:27.554534 [ 197 ] {} <Fatal> BaseDaemon: 23. __libc_start_main @ 0x270b3 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+2021.10.05 19:29:27.554547 [ 197 ] {} <Fatal> BaseDaemon: 24. _start @ 0x932d1ee in /usr/bin/clickhouse
+2021.10.05 19:29:27.672810 [ 197 ] {} <Fatal> BaseDaemon: Checksum of the binary: BEA07E96B6BEBA1591FE837CF53C7591, integrity check passed.
+2021.10.05 19:29:27.673015 [ 197 ] {} <Information> SentryWriter: Not sending crash report
+2021.10.05 19:29:28.460715 [ 66 ] {} <Debug> SystemLog (system.crash_log): Creating new table system.crash_log for CrashLog
+2021.10.05 19:29:34.960697 [ 59 ] {} <Debug> SystemLog (system.metric_log): Creating new table system.metric_log for MetricLog
+2021.10.05 19:29:34.960808 [ 61 ] {} <Debug> SystemLog (system.trace_log): Creating new table system.trace_log for TraceLog
+```
+
+**Additional context**
+
+If I deploy without the storage.xml file the clickhouse-server container will run. I was able to open a bash shell in the container, install the AWS CLI app, and push/pull objects from S3 without issues just using the service account env vars for authentication.

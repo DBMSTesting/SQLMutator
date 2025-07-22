@@ -1,0 +1,81 @@
+ID: 57081
+Title: TYPE_MISMATCH exception is thrown when optimize_skip_unused_shards is turned on
+Description:
+**Describe what's wrong**
+
+On 23.3.
+
+There's a distributed table that has a complex sharding key.
+
+```sql
+CREATE TABLE upp_tag_str_bitmap_1_sg_d_all ON CLUSTER cluster_mkplalgo_regss_account_udp_online
+(
+    `data_version` UInt64,
+    `tag_id` UInt64,
+    `ref_id` UInt64,
+    `tag_value` String,
+    `shard_id` UInt32,
+    `mapping_id_bitmap` AggregateFunction(groupBitmap, UInt32),
+    `create_time` DateTime DEFAULT now()
+)
+ENGINE = Distributed('cluster_mkplalgo_regss_account_udp_online', 
+'regss_account_udp_udtag', 'upp_tag_str_bitmap_1_sg_d', 
+cityHash64(concat(toString(tag_value), toString(ref_id), toString(shard_id))))
+```
+
+And when the `optimize_skip_unused_shards` is turned on, 
+
+```sql
+SELECT argMax(mapping_id_bitmap, create_time) AS mapping_id_bitmap FROM upp_tag_str_bitmap_1_sg_d_all
+				WHERE data_version = 2023112101 AND tag_id = 19 AND ref_id = 0 AND tag_value IN ('Deleted','Banned','Frozen')
+		 AND shard_id = 36 GROUP BY (data_version, tag_id, ref_id, tag_value, shard_id) 
+		 SETTINGS optimize_skip_unused_shards = 1
+```
+
+An exception is thrown 
+
+```text
+Code: 53. DB::Exception: Cannot convert string Deleted to type UInt64: While processing tag_value IN ('Deleted', 'Banned', 'Frozen'). (TYPE_MISMATCH) (version 23.3.3.1)
+```
+
+We have to add `optimize_skip_unused_shards_rewrite_in=0` to make the SQL work.
+
+The exception stack is:
+
+```
+stack_trace:                           0. Poco::Exception::Exception(String const&, int) @ 0x190f323a in /home/clickhouse/programs/clickhouse
+1. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x104d6ab5 in /home/clickhouse/programs/clickhouse
+2. DB::Exception::Exception<String const&, String>(int, FormatStringHelperImpl<std::type_identity<String const&>::type, std::type_identity<String>::type>, String const&, String&&) @ 0xc0d317e in /home/clickhouse/programs/clickhouse
+3. DB::(anonymous namespace)::convertFieldToTypeImpl(DB::Field const&, DB::IDataType const&, DB::IDataType const*) @ 0x15d2992e in /home/clickhouse/programs/clickhouse
+4. DB::convertFieldToType(DB::Field const&, DB::IDataType const&, DB::IDataType const*) @ 0x15d269ef in /home/clickhouse/programs/clickhouse
+5. (anonymous namespace)::shardContains(DB::Field, String const&, DB::OptimizeShardingKeyRewriteInMatcher::Data const&) @ 0x1611b396 in /home/clickhouse/programs/clickhouse
+6. DB::OptimizeShardingKeyRewriteInMatcher::visit(DB::ASTFunction&, DB::OptimizeShardingKeyRewriteInMatcher::Data&) @ 0x1611aee3 in /home/clickhouse/programs/clickhouse
+7. DB::InDepthNodeVisitor<DB::OptimizeShardingKeyRewriteInMatcher, true, false, std::shared_ptr<DB::IAST>>::doVisit(std::shared_ptr<DB::IAST>&) @ 0x1611a235 in /home/clickhouse/programs/clickhouse
+8. void DB::InDepthNodeVisitor<DB::OptimizeShardingKeyRewriteInMatcher, true, false, std::shared_ptr<DB::IAST>>::visitChildren<false>(std::shared_ptr<DB::IAST>&) @ 0x1611a359 in /home/clickhouse/programs/clickhouse
+9. void DB::InDepthNodeVisitor<DB::OptimizeShardingKeyRewriteInMatcher, true, false, std::shared_ptr<DB::IAST>>::visitChildren<false>(std::shared_ptr<DB::IAST>&) @ 0x1611a364 in /home/clickhouse/programs/clickhouse
+10. void DB::InDepthNodeVisitor<DB::OptimizeShardingKeyRewriteInMatcher, true, false, std::shared_ptr<DB::IAST>>::visitChildren<false>(std::shared_ptr<DB::IAST>&) @ 0x1611a364 in /home/clickhouse/programs/clickhouse
+11. DB::ClusterProxy::executeQuery(DB::QueryPlan&, DB::Block const&, DB::QueryProcessingStage::Enum, DB::StorageID const&, std::shared_ptr<DB::IAST> const&, DB::ClusterProxy::SelectStreamFactory&, Poco::Logger*, std::shared_ptr<DB::IAST> const&, std::shared_ptr<DB::Context const>, DB::SelectQueryInfo const&, std::shared_ptr<DB::ExpressionActions> const&, String const&, std::shared_ptr<DB::Cluster> const&, std::function<std::shared_ptr<DB::IAST> (unsigned long)>) @ 0x161171cc in /home/clickhouse/programs/clickhouse
+12. DB::StorageDistributed::read(DB::QueryPlan&, std::vector<String, std::allocator<String>> const&, std::shared_ptr<DB::StorageSnapshot> const&, DB::SelectQueryInfo&, std::shared_ptr<DB::Context const>, DB::QueryProcessingStage::Enum, unsigned long, unsigned long) @ 0x160fd992 in /home/clickhouse/programs/clickhouse
+13. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&) @ 0x159fcdcf in /home/clickhouse/programs/clickhouse
+14. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::optional<DB::Pipe>) @ 0x159f61a6 in /home/clickhouse/programs/clickhouse
+15. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0x159f594d in /home/clickhouse/programs/clickhouse
+16. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0x15a77a43 in /home/clickhouse/programs/clickhouse
+17. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&) @ 0x159fc584 in /home/clickhouse/programs/clickhouse
+18. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::optional<DB::Pipe>) @ 0x159f61a6 in /home/clickhouse/programs/clickhouse
+19. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0x159f594d in /home/clickhouse/programs/clickhouse
+20. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0x15a77a43 in /home/clickhouse/programs/clickhouse
+21. DB::InterpreterSelectWithUnionQuery::execute() @ 0x15a78498 in /home/clickhouse/programs/clickhouse
+22. DB::ExecuteScalarSubqueriesMatcher::visit(DB::ASTSubquery const&, std::shared_ptr<DB::IAST>&, DB::ExecuteScalarSubqueriesMatcher::Data&) @ 0x15d01fc7 in /home/clickhouse/programs/clickhouse
+23. DB::ExecuteScalarSubqueriesMatcher::visit(std::shared_ptr<DB::IAST>&, DB::ExecuteScalarSubqueriesMatcher::Data&) @ 0x15d01a05 in /home/clickhouse/programs/clickhouse
+24. DB::InDepthNodeVisitor<DB::ExecuteScalarSubqueriesMatcher, true, false, std::shared_ptr<DB::IAST>>::doVisit(std::shared_ptr<DB::IAST>&) @ 0x15cb79f5 in /home/clickhouse/programs/clickhouse
+25. void DB::InDepthNodeVisitor<DB::ExecuteScalarSubqueriesMatcher, true, false, std::shared_ptr<DB::IAST>>::visitChildren<false>(std::shared_ptr<DB::IAST>&) @ 0x15cb7b19 in /home/clickhouse/programs/clickhouse
+26. DB::ExecuteScalarSubqueriesMatcher::visit(DB::ASTFunction const&, std::shared_ptr<DB::IAST>&, DB::ExecuteScalarSubqueriesMatcher::Data&) @ 0x15d050e3 in /home/clickhouse/programs/clickhouse
+27. DB::InDepthNodeVisitor<DB::ExecuteScalarSubqueriesMatcher, true, false, std::shared_ptr<DB::IAST>>::doVisit(std::shared_ptr<DB::IAST>&) @ 0x15cb79f5 in /home/clickhouse/programs/clickhouse
+28. void DB::InDepthNodeVisitor<DB::ExecuteScalarSubqueriesMatcher, true, false, std::shared_ptr<DB::IAST>>::visitChildren<false>(std::shared_ptr<DB::IAST>&) @ 0x15cb7b19 in /home/clickhouse/programs/clickhouse
+29. DB::ExecuteScalarSubqueriesMatcher::visit(DB::ASTFunction const&, std::shared_ptr<DB::IAST>&, DB::ExecuteScalarSubqueriesMatcher::Data&) @ 0x15d050e3 in /home/clickhouse/programs/clickhouse
+30. DB::InDepthNodeVisitor<DB::ExecuteScalarSubqueriesMatcher, true, false, std::shared_ptr<DB::IAST>>::doVisit(std::shared_ptr<DB::IAST>&) @ 0x15cb79f5 in /home/clickhouse/programs/clickhouse
+31. void DB::InDepthNodeVisitor<DB::ExecuteScalarSubqueriesMatcher, true, false, std::shared_ptr<DB::IAST>>::visitChildren<false>(std::shared_ptr<DB::IAST>&) @ 0x15cb7b19 in /home/clickhouse/programs/clickhouse
+```
+
+I think the `optimize_skip_unused_shards_rewrite_in` currently does not handle the complex sharding key expression very well.
+Report this issue first.

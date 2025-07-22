@@ -1,0 +1,55 @@
+ID: 24427
+Title: ddl: reorg handle's update txn is conflict with the ddl job's txn
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+mysql> create table t(a int);
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> alter table t add index(a);
+Query OK, 0 rows affected (2.52 sec)
+
+mysql> set @@sql_mode="";
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into t values(128),(129);
+Query OK, 2 rows affected (0.00 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+mysql> set @@tidb_enable_change_column_type=1;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> alter table t modify column a tinyint;
+Query OK, 0 rows affected (5.02 sec)
+
+```
+
+Attention 2:
+1: why it takes 2.5s( 1pc wait duration ) * 2? 
+2: why there are no truncate warnings?
+
+Reason:
+because when DDL is done, the txn is committed fail caused by write conflicts. So it lost the current job state including the job warnings. So next round the job is fetched up again, waiting for another 2.5s and starting from the last element. In this round, since the reorg handle is the same as the stored, so the internal independent txn will do nothing. The DDL job can be successfully committed.
+
+Proof
+```
+[2021/05/06 16:41:35.902 +08:00] [WARN] [ddl_worker.go:179] ["[ddl] handle DDL job failed"] [worker="worker 1, tp general"] [error="[kv:9007]Write conflict, txnStartTS=424749431101325314, conflictStartTS=424749431757209604, conflictCommitTS=424749431757471744, key=[]byte{0x6d, 0x44, 0x44, 0x4c, 0x4a, 0x6f, 0x62, 0x52, 0x65, 0xff, 0x6f, 0x72, 0x67, 0x0, 0x0, 0x0, 0x0, 0x0, 0xfa, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x48} primary=[]byte(nil) [try again later]"]
+```
+
+### 2. What did you expect to see? (Required)
+1: the executing time should be around the 2.5s
+2: there should be some warnings counts.
+
+### 3. What did you see instead (Required)
+As mentioned above.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master, 5.0

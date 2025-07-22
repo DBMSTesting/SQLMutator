@@ -1,0 +1,52 @@
+ID: 6457
+Title: Problem with replication. Can not add more replicas
+Description:
+We have some replicated tables for over a year now. Currently we have 1 master server with about 150 tables, 2 identical replicas with about 30 tables, and 1 more replica with another 2 tables.
+We began to run out of disk space on our master instance. Few weeks ago we decided to move all our tables to ReplicatedMergeTree engine and add another one replica with all our tables. We did it. Then we add new ClickHouse instance, configured it, and created all tables. Replication process was started and everything was working well, but we saw such error messages in logs:
+
+> <Error> prod.KtHistoryItem: Code: 40, e.displayText() = DB::Exception: Checksums of parts don't match: hash of uncompressed files doesn't match (version 19.11.5.28 (official build)). Data after merge is not byte-identical to data on another replicas. There could be several reasons: 1. Using newer version of compression library after server update. 2. Using another compression method. 3. Non-deterministic compression algorithm (highly unlikely). 4. Non-deterministic merge algorithm due to logical error in code. 5. Data corruption in memory due to bug in code. 6. Data corruption in memory due to hardware issue. 7. Manual modification of source data after server startup. 8. Manual modification of checksums stored in ZooKeeper. We will download merged part from replica to force byte-identical result.
+
+I was able to see at least 3-5 such errors in error logs. But DB was working well and we hoped that it's just temporary and everything would synchronize soon and we would stop to see those errors in logs.
+I about a week we stopped an instance that was a master before we added the new replica with all of our tables. Thus we moved the data to a new instance with a larger disk size without any downtime. By the way we have more that 4TB of data.
+
+We continue to see error like I posted above. Next step was to add one more replica with all of our tables for data loss prevention. From the very beginning we created backups by moving data to Amazon S3. But there is more and more data, and we decided to have replica and to do snapshots once in a week instead of copying data to S3.
+
+But after creating new replica real problems started. We started to see such messages in error logs:
+
+> 2019.08.08 23:08:29.831283 [ 19 ] {} <Error> prod.KtHistoryItem: Code: 40, e.displayText() = DB::Exception: Checksums of parts don't match: hash of uncompressed files doesn't match (version 19.11.5.28 (official build)). Data after merge is not byte-identical to data on another replicas. There could be several reasons: 1. Using newer version of compression library after server update. 2. Using another compression method. 3. Non-deterministic compression algorithm (highly unlikely). 4. Non-deterministic merge algorithm due to logical error in code. 5. Data corruption in memory due to bug in code. 6. Data corruption in memory due to hardware issue. 7. Manual modification of source data after server startup. 8. Manual modification of checksums stored in ZooKeeper. We will download merged part from replica to force byte-identical result.
+
+> 2019.08.08 23:08:29.840746 [ 11 ] {} <Error> prod.KtHistoryItem: DB::StorageReplicatedMergeTree::queueTask()::<lambda(DB::StorageReplicatedMergeTree::LogEntryPtr&)>: Code: 226, e.displayText() = DB::Exception: Marks file '/data/clickhouse/data/prod/KtHistoryItem/tmp_fetch_20190808_20190808_181798_181813_3/eventDate.mrk' doesn't exist, Stack trace:
+> 
+> 0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x30) [0x7d257f0]
+> 1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x25) [0x3bb81d5]
+> 2. /usr/bin/clickhouse-server() [0x3966c8e]
+> 3. /usr/bin/clickhouse-server(DB::MergeTreeDataPart::loadColumnsChecksumsIndexes(bool, bool)+0x4f) [0x6f0ff7f]
+> 4. /usr/bin/clickhouse-server(DB::DataPartsExchange::Fetcher::fetchPart(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int, DB::ConnectionTimeouts const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)+0x18b3) [0x6ebe903]
+> 5. /usr/bin/clickhouse-server() [0x6e51fe5]
+> 6. /usr/bin/clickhouse-server(DB::StorageReplicatedMergeTree::fetchPart(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool, unsigned long)+0x8b1) [0x6e70a11]
+> 7. /usr/bin/clickhouse-server(DB::StorageReplicatedMergeTree::executeFetch(DB::ReplicatedMergeTreeLogEntry&)+0x974) [0x6e72f54]
+> 8. /usr/bin/clickhouse-server(DB::StorageReplicatedMergeTree::executeLogEntry(DB::ReplicatedMergeTreeLogEntry&)+0x273) [0x6e7a073]
+> 9. /usr/bin/clickhouse-server() [0x6e7a561]
+> 10. /usr/bin/clickhouse-server(DB::ReplicatedMergeTreeQueue::processEntry(std::function<std::shared_ptr<zkutil::ZooKeeper> ()>, std::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&, std::function<bool (std::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&)>)+0x61) [0x6f94a51]
+> 11. /usr/bin/clickhouse-server(DB::StorageReplicatedMergeTree::queueTask()+0x17f) [0x6e55b4f]
+> 12. /usr/bin/clickhouse-server(DB::BackgroundProcessingPool::threadFunction()+0x544) [0x6eb84b4]
+> 13. /usr/bin/clickhouse-server() [0x6eb8e2a]
+> 14. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1a6) [0x76833c6]
+> 15. /usr/bin/clickhouse-server() [0xb7f7a80]
+> 16. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f7eed8836db]
+> 17. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7f7eed00a88f]
+>  (version 19.11.5.28 (official build))
+
+And we start to get **Too many parts** errors for tables with more intensive inserts. At the same time we saw a lot of records in the _system.replication_queue_ table. It seemed like merging of parts was broken because of something. Only deleting tables on the new replica was helped. After running  DROP TABLE ... query, all errors related to that table was gone, also all records in  system.replication_queue related to that table was gone, and as a result **Too many parts** errors was gone and everything works well.
+
+We tried to create different instances and create different tables on those new instances. The problem appears with any table.
+
+Maybe it was caused because of different versions. I don't remember what ClickHouse version exactly we had on our old master, but I believe it was 18. On our new master initially was installed ClickHouse with version 19.9.2. Then after we notice a problems ClickHouse on all our replicas was updated to 19.11.5. So at that moment we had 4 instances, all of them had version 19.11.5. One of replicas was created on Feb 2019, 2 replicas were created on May 2019, and new master was created at the end of June 2019. Replication process works well with those 4 instances.
+
+Also when we were trying to deal with the problem, we noticed that for few tables we had few nodes in ZooKeeper that point to replicas which don't exist anymore. So we fix that and after that we don't see such errors anymore:
+`<Error> prod.KtHistoryItem: Code: 40, e.displayText() = DB::Exception: Checksums of parts don't match: hash of uncompressed files doesn't match (version 19.11.5.28 (official build)). Data after merge is not byte-identical to data on another replicas. There could be several reasons: 1. Using newer version of compression library after server update. 2. Using another compression method. 3. Non-deterministic compression algorithm (highly unlikely). 4. Non-deterministic merge algorithm due to logical error in code. 5. Data corruption in memory due to bug in code. 6. Data corruption in memory due to hardware issue. 7. Manual modification of source data after server startup. 8. Manual modification of checksums stored in ZooKeeper. We will download merged part from replica to force byte-identical result.`
+
+So everything is working perfect until we try to add new replica.
+
+Also we tried following:
+Create new replica with ClickHouse version 18. Create one table on that replica. In this case it looks like replication works well. After that we upgraded ClickHouse and replication still worked well. There were no new error in error logs. But when we try to create another one table, we started to see errors for both of tables.

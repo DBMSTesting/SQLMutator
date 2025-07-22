@@ -1,0 +1,56 @@
+ID: 9722
+Title: wrong row count estimation for filters containing correlated column
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+```
+mysql> create table t(a int primary key, b int, c int, d int, index idx(b,c,d));
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> insert into t values(1,1,1,1),(2,2,2,2),(3,2,2,2),(4,2,2,2),(5,2,2,2);
+Query OK, 5 rows affected (0.01 sec)
+Records: 5  Duplicates: 0  Warnings: 0
+
+mysql> analyze table t;
+Query OK, 0 rows affected (0.04 sec)
+
+mysql> explain select t.c in (select count(*) from t s use index(idx), t t1 where s.b = 1 and s.c = 1 and s.d = t.a and s.a = t1.a) from t;
++------------------------------+-------+------+-------------------------------------------------------------------------------------------------------+
+| id                           | count | task | operator info                                                                                         |
++------------------------------+-------+------+-------------------------------------------------------------------------------------------------------+
+| Projection_11                | 5.00  | root | 9_aux_0                                                                                               |
+| └─Apply_13                   | 5.00  | root | left outer semi join, inner:StreamAgg_20, other cond:eq(test.t.c, 7_col_0)                            |
+|   ├─TableReader_15           | 5.00  | root | data:TableScan_14                                                                                     |
+|   │ └─TableScan_14           | 5.00  | cop  | table:t, range:[-inf,+inf], keep order:false                                                          |
+|   └─StreamAgg_20             | 1.00  | root | funcs:count(1)                                                                                        |
+|     └─IndexJoin_23           | 0.00  | root | inner join, inner:TableReader_22, outer key:s.a, inner key:t1.a                                       |
+|       ├─IndexReader_27       | 2.50  | root | index:IndexScan_26                                                                                    |
+|       │ └─IndexScan_26       | 2.50  | cop  | table:s, index:b, c, d, range: decided by [eq(s.b, 1) eq(s.c, 1) eq(s.d, test.t.a)], keep order:false |
+|       └─TableReader_22       | 1.00  | root | data:TableScan_21                                                                                     |
+|         └─TableScan_21       | 1.00  | cop  | table:t1, range: decided by [s.a], keep order:false                                                   |
++------------------------------+-------+------+-------------------------------------------------------------------------------------------------------+
+```
+
+2. What did you expect to see?
+
+Estimated row count of `IndexScan_26` should be less or at least equal to 1.00.
+
+3. What did you see instead?
+
+Estimated row count of `IndexScan_26` is 2.50, which is `RowCount(5) / NDV(2)`.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+```
+Release Version: v3.0.0-beta-211-g09beefbe0
+Git Commit Hash: 09beefbe045011e3c77608c9ed33da87c11efa94
+Git Branch: master
+UTC Build Time: 2019-03-14 07:58:08
+GoVersion: go version go1.12 darwin/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false
+```

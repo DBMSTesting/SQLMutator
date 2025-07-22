@@ -1,0 +1,64 @@
+ID: 17113
+Title: semantic of `/*+ read_from_storage(tiflash[t1 partition(p0)]) */` is confusing
+Description:
+prerequisite:
+``` sql
+CREATE TABLE `t1` (
+  `a` int(11) DEFAULT NULL,
+  `b` varchar(128) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+PARTITION BY RANGE ( `a` ) (
+  PARTITION `p0` VALUES LESS THAN (3),
+  PARTITION `p1` VALUES LESS THAN (7)
+);
+ALTER TABLE t1 SET TIFLASH REPLICA 1;
+```
+
+- sql1:
+``` sql
+tidb> explain select /*+ read_from_storage(tiflash[t1 partition(p0)]) */ * from t1;
++----------------------------+---------+--------------+------------------------+--------------------------------+
+| id                         | estRows | task         | access object          | operator info                  |
++----------------------------+---------+--------------+------------------------+--------------------------------+
+| Union_7                    | 4.00    | root         |                        |                                |
+| ├─TableReader_11           | 2.00    | root         |                        | data:TableFullScan_10          |
+| │ └─TableFullScan_10       | 2.00    | cop[tiflash] | table:t1, partition:p0 | keep order:false, stats:pseudo |
+| └─TableReader_15           | 2.00    | root         |                        | data:TableFullScan_14          |
+|   └─TableFullScan_14       | 2.00    | cop[tiflash] | table:t1, partition:p1 | keep order:false, stats:pseudo |
++----------------------------+---------+--------------+------------------------+--------------------------------+
+5 rows in set (0.00 sec)
+
+```
+
+- sql2:
+``` sql
+tidb> explain select /*+ read_from_storage(tiflash[t1]) */ * from t1;
++---------------------------+---------+--------------+------------------------+--------------------------------+
+| id                        | estRows | task         | access object          | operator info                  |
++---------------------------+---------+--------------+------------------------+--------------------------------+
+| Union_7                   | 4.00    | root         |                        |                                |
+| ├─TableReader_9           | 2.00    | root         |                        | data:TableFullScan_8           |
+| │ └─TableFullScan_8       | 2.00    | cop[tiflash] | table:t1, partition:p0 | keep order:false, stats:pseudo |
+| └─TableReader_11          | 2.00    | root         |                        | data:TableFullScan_10          |
+|   └─TableFullScan_10      | 2.00    | cop[tiflash] | table:t1, partition:p1 | keep order:false, stats:pseudo |
++---------------------------+---------+--------------+------------------------+--------------------------------+
+5 rows in set (0.00 sec)
+```
+
+- The result of `sql1` is the same as `sql2` for now which is unexpected.
+- The semantic of `/*+ read_from_storage(tiflash[t1 partition(p0)]) */` is not well-defined. 
+- A suggestion of the semantic of `/*+ read_from_storage(tiflash[t1 partition(p0)]) */` is as follows:
+``` sql
+tidb> explain select /*+ read_from_storage(tiflash[t1 partition(p0)]) */ * from t1;
++----------------------------+---------+--------------+------------------------+--------------------------------+
+| id                         | estRows | task         | access object          | operator info                  |
++----------------------------+---------+--------------+------------------------+--------------------------------+
+| Union_7                    | 4.00    | root         |                        |                                |
+| ├─TableReader_11           | 2.00    | root         |                        | data:TableFullScan_10          |
+| │ └─TableFullScan_10       | 2.00    | cop[tiflash] | table:t1, partition:p0 | keep order:false, stats:pseudo |
+| └─TableReader_15           | 2.00    | root         |                        | data:TableFullScan_14          |
+|   └─TableFullScan_14       | 2.00    | cop[tikv] | table:t1, partition:p1 | keep order:false, stats:pseudo |
++----------------------------+---------+--------------+------------------------+--------------------------------+
+5 rows in set (0.00 sec)
+
+```

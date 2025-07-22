@@ -1,0 +1,238 @@
+ID: 32846
+Title: TiDB may data races when executor call planner's code.
+Description:
+## Bug Report
+
+see https://prow.pingcap.net/view/gs/pingcapprow/logs/tidb_race/1499693834865479680 for more details
+
+for example:
+```
+=== FAIL: executor TestPartitionTableIndexJoinIndexLookUp (32.26s)
+[2022/03/04 10:41:00.419 +00:00] [INFO] [tidb.go:72] ["new domain"] [store=0609f5d9-7e9b-49e2-9c3e-fdf7f0c51791] ["ddl lease"=0s] ["stats lease"=-1ns] ["index usage sync lease"=0s]
+[2022/03/04 10:41:00.425 +00:00] [INFO] [domain.go:169] ["full load InfoSchema success"] [currentSchemaVersion=0] [neededSchemaVersion=0] ["start time"=4.858485ms]
+[2022/03/04 10:41:00.425 +00:00] [INFO] [domain.go:429] ["full load and reset schema validator"]
+[2022/03/04 10:41:00.425 +00:00] [INFO] [ddl.go:371] ["[ddl] start DDL"] [ID=63db6d9c-a361-435b-b007-6d0f2267c62f] [runWorker=true]
+[2022/03/04 10:41:00.426 +00:00] [INFO] [ddl.go:360] ["[ddl] start delRangeManager OK"] ["is a emulator"=true]
+
+==================
+WARNING: DATA RACE
+Read at 0x00c003d21320 by goroutine 47:
+  github.com/pingcap/tidb/planner/core.PartitionPruning()
+      /go/tidb/planner/core/partition_prune.go:35 +0x504
+  github.com/pingcap/tidb/executor.partitionPruning()
+      /go/tidb/executor/builder.go:4701 +0x11e
+  github.com/pingcap/tidb/executor.prunePartitionForInnerExecutor()
+      /go/tidb/executor/builder.go:3322 +0x1f1
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildIndexLookUpReaderForIndexJoin()
+      /go/tidb/executor/builder.go:4173 +0x5cd
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal()
+      /go/tidb/executor/builder.go:3841 +0x16f
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin()
+      /go/tidb/executor/builder.go:3830 +0x327
+  github.com/pingcap/tidb/executor.(*innerWorker).fetchInnerResults()
+      /go/tidb/executor/index_lookup_join.go:684 +0x136
+  github.com/pingcap/tidb/executor.(*innerWorker).handleTask()
+      /go/tidb/executor/index_lookup_join.go:523 +0x1bb
+  github.com/pingcap/tidb/executor.(*innerWorker).run()
+      /go/tidb/executor/index_lookup_join.go:497 +0x1d9
+  github.com/pingcap/tidb/executor.(*IndexLookUpJoin).startWorkers·dwrap·52()
+      /go/tidb/executor/index_lookup_join.go:195 +0x64
+Previous write at 0x00c003d21320 by goroutine 130:
+  github.com/pingcap/tidb/planner/core.PartitionPruning()
+      /go/tidb/planner/core/partition_prune.go:36 +0x565
+  github.com/pingcap/tidb/executor.partitionPruning()
+      /go/tidb/executor/builder.go:4701 +0x11e
+  github.com/pingcap/tidb/executor.prunePartitionForInnerExecutor()
+      /go/tidb/executor/builder.go:3322 +0x1f1
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildIndexLookUpReaderForIndexJoin()
+      /go/tidb/executor/builder.go:4173 +0x5cd
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal()
+      /go/tidb/executor/builder.go:3841 +0x16f
+  github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin()
+      /go/tidb/executor/builder.go:3830 +0x327
+  github.com/pingcap/tidb/executor.(*innerWorker).fetchInnerResults()
+      /go/tidb/executor/index_lookup_join.go:684 +0x136
+  github.com/pingcap/tidb/executor.(*innerWorker).handleTask()
+      /go/tidb/executor/index_lookup_join.go:523 +0x1bb
+  github.com/pingcap/tidb/executor.(*innerWorker).run()
+      /go/tidb/executor/index_lookup_join.go:497 +0x1d9
+  github.com/pingcap/tidb/executor.(*IndexLookUpJoin).startWorkers·dwrap·52()
+      /go/tidb/executor/index_lookup_join.go:195 +0x64
+Goroutine 47 (running) created at:
+  github.com/pingcap/tidb/executor.(*IndexLookUpJoin).startWorkers()
+      /go/tidb/executor/index_lookup_join.go:195 +0x3b3
+  github.com/pingcap/tidb/executor.(*IndexLookUpJoin).Open()
+      /go/tidb/executor/index_lookup_join.go:177 +0x58c
+  github.com/pingcap/tidb/executor.(*ExecStmt).Exec()
+      /go/tidb/executor/adapter.go:407 +0x82a
+  github.com/pingcap/tidb/session.runStmt()
+      /go/tidb/session/session.go:1986 +0x6eb
+  github.com/pingcap/tidb/session.(*session).ExecuteStmt()
+      /go/tidb/session/session.go:1863 +0xd93
+  github.com/pingcap/tidb/testkit.(*TestKit).Exec()
+      /go/tidb/testkit/testkit.go:215 +0x6bc
+  github.com/pingcap/tidb/testkit.(*TestKit).MustQuery()
+      /go/tidb/testkit/testkit.go:107 +0x13c
+  github.com/pingcap/tidb/executor_test.TestPartitionTableIndexJoinIndexLookUp()
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+Goroutine 130 (running) created at:
+  github.com/pingcap/tidb/executor.(*IndexLookUpJoin).startWorkers()
+      /go/tidb/executor/index_lookup_join.go:195 +0x3b3
+  github.com/pingcap/tidb/executor.(*IndexLookUpJoin).Open()
+      /go/tidb/executor/index_lookup_join.go:177 +0x58c
+  github.com/pingcap/tidb/executor.(*ExecStmt).Exec()
+      /go/tidb/executor/adapter.go:407 +0x82a
+  github.com/pingcap/tidb/session.runStmt()
+      /go/tidb/session/session.go:1986 +0x6eb
+  github.com/pingcap/tidb/session.(*session).ExecuteStmt()
+      /go/tidb/session/session.go:1863 +0xd93
+  github.com/pingcap/tidb/testkit.(*TestKit).Exec()
+      /go/tidb/testkit/testkit.go:215 +0x6bc
+  github.com/pingcap/tidb/testkit.(*TestKit).MustQuery()
+      /go/tidb/testkit/testkit.go:107 +0x13c
+  github.com/pingcap/tidb/executor_test.TestPartitionTableIndexJoinIndexLookUp()
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c00411fd20 by goroutine 47:
+  github.com/pingcap/tidb/expression.pushNotAcrossExpr()
+      /go/tidb/expression/util.go:489 +0xb7
+  github.com/pingcap/tidb/expression.PushDownNot()
+      /go/tidb/expression/util.go:537 +0x52d
+93 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c00411fd38 by goroutine 47:
+  github.com/pingcap/tidb/expression.(*ScalarFunction).GetArgs()
+      /go/tidb/expression/scalar_function.go:83 +0x116
+  github.com/pingcap/tidb/expression.pushNotAcrossExpr()
+      /go/tidb/expression/util.go:491 +0x41
+95 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c003d55a30 by goroutine 47:
+  github.com/pingcap/tidb/expression.(*baseBuiltinFunc).getArgs()
+      /go/tidb/expression/builtin.go:260 +0x34
+  github.com/pingcap/tidb/expression.(*builtinUnaryNotIntSig).getArgs()
+      <autogenerated>:1 +0x37
+101 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c009c67d00 by goroutine 47:
+  github.com/pingcap/tidb/expression.pushNotAcrossExpr()
+      /go/tidb/expression/util.go:491 +0x145
+  github.com/pingcap/tidb/expression.PushDownNot()
+      /go/tidb/expression/util.go:537 +0x52d
+95 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c003d55a48 by goroutine 47:
+  github.com/pingcap/tidb/expression.(*baseBuiltinFunc).getCtx()
+      /go/tidb/expression/builtin.go:386 +0x34
+  github.com/pingcap/tidb/expression.(*builtinUnaryNotIntSig).getCtx()
+      <autogenerated>:1 +0x37
+101 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c0029855d0 by goroutine 47:
+  github.com/pingcap/tidb/session.(*session).ParseSQL()
+      /go/tidb/session/session.go:1375 +0x574
+  github.com/pingcap/tidb/expression.ParseSimpleExprsWithNames()
+      /go/tidb/expression/simple_rewriter.go:89 +0x125
+97 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c002716b50 by goroutine 65:
+  github.com/pingcap/tidb/planner/core.(*PlanBuilder).Init()
+      /go/tidb/planner/core/planbuilder.go:636 +0x93
+  github.com/pingcap/tidb/planner/core.rewriteAstExpr()
+      /go/tidb/planner/core/expression_rewriter.go:73 +0x3ec
+103 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c002829238 by goroutine 65:
+  github.com/pingcap/tidb/planner/core.(*partitionProcessor).findUsedPartitions()
+      /go/tidb/planner/core/rule_partition_processor.go:135 +0x28b
+  github.com/pingcap/tidb/planner/core.(*partitionProcessor).pruneHashPartition()
+      /go/tidb/planner/core/rule_partition_processor.go:278 +0x12b
+85 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c0041c9ec8 by goroutine 216:
+  github.com/pingcap/tidb/expression.(*ScalarFunction).CharsetAndCollation()
+      /go/tidb/expression/scalar_function.go:580 +0x34
+  github.com/pingcap/tidb/util/ranger.getPotentialEqOrInColOffset()
+      /go/tidb/util/ranger/detacher.go:107 +0xab
+105 skipped lines...
+      /go/tidb/executor/distsql_test.go:418 +0x5a4
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:1259 +0x22f
+  testing.(*T).Run·dwrap·21()
+      /usr/local/go/src/testing/testing.go:1306 +0x47
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c001394768 by goroutine 216:
+  github.com/pingcap/tidb/expression.(*collationInfo).CharsetAndCollation()
+      /go/tidb/expression/collation.go:73 +0x36
+  github.com/pingcap/tidb/expression.(*builtinUnaryNotIntSig).CharsetAndCollation()
+      <autogenerated>:1 +0x3b
+```
+

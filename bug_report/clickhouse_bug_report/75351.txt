@@ -1,0 +1,138 @@
+ID: 75351
+Title: clickhouse-client does not correctly verify the server certificate
+Description:
+### Company or project name
+
+_No response_
+
+### Describe what's wrong
+
+It seams that `clickhouse-client` does not ensure that the server certificate matches its hostname when connecting using SSL.
+
+### Does it reproduce on the most recent release?
+
+Yes
+
+### How to reproduce
+
+generate CA and cert files (with CN and SAN DNS name `my_clickhouse`) using :
+```sh
+CA_KEY="ca.key"
+CA_CERT="ca.crt"
+SERVER_KEY="my_clickhouse.key"
+SERVER_CSR="my_clickhouse.csr"
+SERVER_CERT="my_clickhouse.crt"
+
+HOSTNAME="my_clickhouse"
+
+openssl genrsa -out "$CA_KEY" 4096
+openssl req -x509 -new -nodes -key "$CA_KEY" -sha256 -days 3650 -out "$CA_CERT" \
+  -subj "/C=US/ST=CA/L=San Francisco/O=MyOrg/OU=CA/CN=MyCA"
+
+openssl genrsa -out "$SERVER_KEY" 4096
+openssl req -new -key "$SERVER_KEY" -out "$SERVER_CSR" \
+  -subj "/C=US/ST=CA/L=San Francisco/O=MyOrg/OU=Server/CN=$HOSTNAME"
+EXT_FILE="my_clickhouse.ext"
+cat > "$EXT_FILE" <<EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = $HOSTNAME
+EOF
+
+openssl x509 -req -in "$SERVER_CSR" -CA "$CA_CERT" -CAkey "$CA_KEY" -CAcreateserial \
+  -out "$SERVER_CERT" -days 365 -sha256 -extfile "$EXT_FILE"
+```
+networking.xml :
+```xml
+<clickhouse>
+    <listen_host>0.0.0.0</listen_host>
+    <https_port>8443</https_port>
+    <tcp_port_secure>9440</tcp_port_secure>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/x509/my_clickhouse.crt</certificateFile>
+            <privateKeyFile>/etc/x509/my_clickhouse.key</privateKeyFile>
+            <caConfigFile>/usr/local/share/ca-certificates/my_ca.crt</caConfigFile>
+            <loadDefaultCAFile>false</loadDefaultCAFile>
+        </server>
+    </openSSL>
+</clickhouse>
+```
+users.xml :
+```xml
+<clickhouse>
+    <users>
+        <default>
+            <ip>::/0</ip>
+        </default>
+    </users>
+</clickhouse>
+```
+Dockerfile :
+```dockerfile
+FROM clickhouse/clickhouse-server:latest
+
+COPY --chown=clickhouse:clickhouse --chmod=0444 ./my_clickhouse.crt /etc/x509/my_clickhouse.crt
+COPY --chown=clickhouse:clickhouse --chmod=0400 ./my_clickhouse.key /etc/x509/my_clickhouse.key
+COPY --chown=clickhouse:clickhouse --chmod=0644 ./networking.xml /etc/clickhouse-server/config.d/networking.xml
+COPY --chown=clickhouse:clickhouse --chmod=0644 ./users.xml /etc/clickhouse-server/users.d/users.xml
+COPY --chown=root:root --chmod=0444 ./ca.crt /usr/local/share/ca-certificates/my_ca.crt
+
+RUN update-ca-certificates
+
+EXPOSE 8443
+EXPOSE 9440
+```
+build and run docker containers :
+```sh
+docker build -t my_clickhouse -f Dockerfile .
+
+docker network create my_network
+
+docker run -d --rm --name my_clickhouse --network my_network my_clickhouse
+docker run -d --rm --name my_clickhouse_wrong_hostname --network my_network my_clickhouse
+
+docker run -it --rm --name my_client --network my_network --entrypoint bash --mount "type=bind,src=$(pwd)/ca.crt,dst=/etc/x509/ca.crt" clickhouse/clickhouse-server:latest
+```
+then on the my_client container :
+```sh
+echo "<config><secure>True</secure><openSSL><client><caConfig>/etc/x509/ca.crt</caConfig></client></openSSL></config>" > clickhouse-client-config.xml
+
+apt update; apt install -y curl
+
+curl 'http://my_clickhouse:8123/?query=SELECT%201'
+# 1
+
+curl --cacert /etc/x509/ca.crt 'https://my_clickhouse:8443/?query=SELECT%201'
+# 1
+
+clickhouse-client -c clickhouse-client-config.xml --host my_clickhouse -q "select 1"
+# 1
+
+curl 'http://my_clickhouse_wrong_hostname:8123/?query=SELECT%201'
+# 1
+
+curl --cacert /etc/x509/ca.crt 'https://my_clickhouse_wrong_hostname:8443/?query=SELECT%201'
+# curl: (60) SSL: no alternative certificate subject name matches target host name 'my_clickhouse_wrong_hostname
+
+clickhouse-client -c clickhouse-client-config.xml --host my_clickhouse_wrong_hostname -q "select 1"
+# 1
+```
+
+
+### Expected behavior
+
+`clickhouse-client -c clickhouse-client-config.xml --host my_clickhouse_wrong_hostname -q "select 1"` should fail as the server certificate does not match the requested hostname
+
+### Error message and/or stacktrace
+
+_No response_
+
+### Additional context
+
+_No response_

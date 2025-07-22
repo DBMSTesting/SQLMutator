@@ -1,0 +1,91 @@
+ID: 15020
+Title: `rowid` filter pushdown
+Description:
+This PR adds support for pushing down static and dynamic filters on the `rowid` column into table scans.
+
+The rowid column is not a real stored column and doesn't have statistics, but since row-ids are sequential within a row group we can always trivially create fake statistics on-the-fly to feed to the table filters. We also create dummy stats and filter for each vector when doing a partial scan of a row-group in order to avoid materializing the row-ids and actually evaluate the filter expression fully when there are no matches.
+
+This opens up new possibilities for query-rewrites and optimizations.
+
+## Benchmarks:
+
+Here are some microbenchmarks, all run on **TPC-H sf=10**
+
+### Static Filter Pushdown
+
+This benchmark just does a point-lookup, with or without the filter pushdown optimizer enabled.
+
+```sql
+CALL dbgen(sf=10);
+SELECT * FROM lineitem where rowid = 500;
+```
+
+**Results**:
+
+Without rowid pushdown:
+```
+benchmark/micro/pushdown/rowid_no_pushdown.benchmark
+name    run     timing
+benchmark/micro/pushdown/rowid_no_pushdown.benchmark    1       0.292741
+benchmark/micro/pushdown/rowid_no_pushdown.benchmark    2       0.291047
+benchmark/micro/pushdown/rowid_no_pushdown.benchmark    3       0.292847
+benchmark/micro/pushdown/rowid_no_pushdown.benchmark    4       0.297395
+benchmark/micro/pushdown/rowid_no_pushdown.benchmark    5       0.292097
+```
+
+With rowid pushdown:
+```
+benchmark/micro/pushdown/rowid_pushdown.benchmark   
+name    run     timing
+benchmark/micro/pushdown/rowid_pushdown.benchmark       1       0.000455
+benchmark/micro/pushdown/rowid_pushdown.benchmark       2       0.000462
+benchmark/micro/pushdown/rowid_pushdown.benchmark       3       0.000586
+benchmark/micro/pushdown/rowid_pushdown.benchmark       4       0.000522
+benchmark/micro/pushdown/rowid_pushdown.benchmark       5       0.000428
+```
+
+### Dynamic Filter Pushdown
+
+Here we're rewriting a Top-N style query to instead produce a dynamic filter on the rowid as a result of the comparison join produced by the IN clause. In the future we may want to rewrite this query automatically to benefit from this optimization when a lot of columns are returned. 
+
+```sql
+-- The "naive" Top-N
+SELECT * FROM lineitem ORDER BY l_orderkey DESC LIMIT 5;
+
+-- Is equivalent to this rewritten query:
+SELECT * FROM lineitem WHERE rowid IN (SELECT rowid FROM lineitem ORDER BY l_orderkey DESC LIMIT 5);
+
+``` 
+
+**Results**:
+
+Naive Top-N
+```
+benchmark/micro/pushdown/rowid_no_pushdown_dynamic.benchmark    1       0.381389
+benchmark/micro/pushdown/rowid_no_pushdown_dynamic.benchmark    2       0.372278
+benchmark/micro/pushdown/rowid_no_pushdown_dynamic.benchmark    3       0.372439
+benchmark/micro/pushdown/rowid_no_pushdown_dynamic.benchmark    4       0.379967
+benchmark/micro/pushdown/rowid_no_pushdown_dynamic.benchmark    5       0.372103
+```
+
+Rewritten Top-N with manual row filtering (on this branch, with rowid pushdown):
+```
+benchmark/micro/pushdown/rowid_pushdown_dynamic.benchmark   
+name    run     timing
+benchmark/micro/pushdown/rowid_pushdown_dynamic.benchmark       1       0.101268
+benchmark/micro/pushdown/rowid_pushdown_dynamic.benchmark       2       0.101460
+benchmark/micro/pushdown/rowid_pushdown_dynamic.benchmark       3       0.101515
+benchmark/micro/pushdown/rowid_pushdown_dynamic.benchmark       4       0.104626
+benchmark/micro/pushdown/rowid_pushdown_dynamic.benchmark       5       0.101839
+```
+
+Rewritten Top-N with manual row filtering, on main branch (without rowid pushdown):
+```
+./build/release/benchmark/benchmark_runner benchmark/micro/pushdown/main_dynamic_rowid_pushdown.benchmark 
+name    run     timing
+benchmark/micro/pushdown/main_dynamic_rowid_pushdown.benchmark  1       0.414385
+benchmark/micro/pushdown/main_dynamic_rowid_pushdown.benchmark  2       0.411004
+benchmark/micro/pushdown/main_dynamic_rowid_pushdown.benchmark  3       0.403185
+benchmark/micro/pushdown/main_dynamic_rowid_pushdown.benchmark  4       0.405434
+benchmark/micro/pushdown/main_dynamic_rowid_pushdown.benchmark  5       0.409918
+```

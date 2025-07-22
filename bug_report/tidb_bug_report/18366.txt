@@ -1,0 +1,63 @@
+ID: 18366
+Title: clustered index tpcc check failed after prepare.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. start a localhost tidb-server
+2. `set @@global.tidb_enable_clustered_index = 1`
+3. `go-tpc tpcc  -warehouses 1 -threads 1 prepare`
+
+### 2. What did you expect to see? (Required)
+No error
+
+### 3. What did you see instead (Required)
+```
+execute check failed, err check warehouse 1 at condition 3.3.2.2 failed POWER((d_next_o_id -1 - mo), 2) + POWER((d_next_o_id -1 - mno),2) != 0 in warehouse 1, but got 8994001.000000
+```
+
+### 4. Affected version (Required)
+
+master (2020.07.04)
+
+### 5. Root Cause Analysis
+
+Wait for a while, run `go-tpc tpcc  -warehouses 1 -threads 1 prepare` can pass, because the plan changed.
+
+The plan that produces correct result:
+```
+| Projection_17                       | 0.01     | root      |                 | plus(power(cast(minus(minus(test.district.d_next_o_id, 1), Column#20), double BINARY), 2), power(cast(minus(minus(test.district.d_next_o_id, 1), Column#24), double BINARY), 2))->Column#25 |
+| └─HashJoin_19                       | 0.01     | root      |                 | inner join, equal:[eq(test.district.d_id, test.orders.o_d_id)]                                                                                                                              |
+|   ├─HashJoin_31(Build)              | 0.01     | root      |                 | inner join, equal:[eq(test.district.d_id, test.new_order.no_d_id)]                                                                                                                          |
+|   │ ├─TableReader_41(Build)         | 0.01     | root      |                 | data:TableRangeScan_40                                                                                                                                                                      |
+|   │ │ └─TableRangeScan_40           | 0.01     | cop[tikv] | table:dis       | range:[1,1], keep order:false, stats:pseudo                                                                                                                                                 |
+|   │ └─HashAgg_36(Probe)             | 10.00    | root      |                 | group by:test.new_order.no_d_id, funcs:max(Column#27)->Column#24, funcs:firstrow(test.new_order.no_d_id)->test.new_order.no_d_id                                                            |
+|   │   └─TableReader_37              | 10.00    | root      |                 | data:HashAgg_32                                                                                                                                                                             |
+|   │     └─HashAgg_32                | 10.00    | cop[tikv] |                 | group by:test.new_order.no_d_id, funcs:max(test.new_order.no_o_id)->Column#27                                                                                                               |
+|   │       └─TableRangeScan_35       | 8996.00  | cop[tikv] | table:new_order | range:[1,1], keep order:false                                                                                                                                                               |
+|   └─HashAgg_49(Probe)               | 10.00    | root      |                 | group by:test.orders.o_d_id, funcs:max(Column#29)->Column#20, funcs:firstrow(test.orders.o_d_id)->test.orders.o_d_id                                                                        |
+|     └─TableReader_50                | 10.00    | root      |                 | data:HashAgg_42                                                                                                                                                                             |
+|       └─HashAgg_42                  | 10.00    | cop[tikv] |                 | group by:test.orders.o_d_id, funcs:max(test.orders.o_id)->Column#29                                                                                                                         |
+|         └─TableRangeScan_47         | 29987.00 | cop[tikv] | table:orders    | range:[1,1], keep order:false      |
+```
+
+The plan that produces wrong result:
+```
+| Projection_17                       | 10.00   | root      |                                                             | plus(power(cast(minus(minus(test.district.d_next_o_id, 1), Column#20), double BINARY), 2), power(cast(minus(minus(test.district.d_next_o_id, 1), Column#24), double BINARY), 2))->Column#25 |
+| └─HashJoin_18                       | 10.00   | root      |                                                             | inner join, equal:[eq(test.district.d_id, test.new_order.no_d_id)]                                                                                                                          |
+|   ├─HashAgg_56(Build)               | 8.00    | root      |                                                             | group by:test.new_order.no_d_id, funcs:max(Column#31)->Column#24, funcs:firstrow(test.new_order.no_d_id)->test.new_order.no_d_id                                                            |
+|   │ └─TableReader_57                | 8.00    | root      |                                                             | data:HashAgg_52                                                                                                                                                                             |
+|   │   └─HashAgg_52                  | 8.00    | cop[tikv] |                                                             | group by:test.new_order.no_d_id, funcs:max(test.new_order.no_o_id)->Column#31                                                                                                               |
+|   │     └─TableRangeScan_55         | 10.00   | cop[tikv] | table:new_order                                             | range:[1,1], keep order:false, stats:pseudo                                                                                                                                                 |
+|   └─IndexJoin_26(Probe)             | 10.00   | root      |                                                             | inner join, inner:TableReader_22, outer key:test.orders.o_d_id, inner key:test.district.d_id                                                                                                |
+|     ├─StreamAgg_46(Build)           | 8.00    | root      |                                                             | group by:test.orders.o_d_id, funcs:max(Column#29)->Column#20, funcs:firstrow(test.orders.o_d_id)->test.orders.o_d_id                                                                        |
+|     │ └─IndexReader_47              | 8.00    | root      |                                                             | index:StreamAgg_35                                                                                                                                                                          |
+|     │   └─StreamAgg_35              | 8.00    | cop[tikv] |                                                             | group by:test.orders.o_d_id, funcs:max(test.orders.o_id)->Column#29                                                                                                                         |
+|     │     └─IndexRangeScan_45       | 10.00   | cop[tikv] | table:orders, index:idx_order(o_w_id, o_d_id, o_c_id, o_id) | range:[1,1], keep order:true, stats:pseudo                                                                                                                                                  |
+|     └─TableReader_22(Probe)         | 0.00    | root      |                                                             | data:Selection_21                                                                                                                                                                           |
+|       └─Selection_21                | 0.00    | cop[tikv] |                                                             | eq(test.district.d_w_id, 1)                                                                                                                                                                 |
+|         └─TableRangeScan_20         | 1.00    | cop[tikv] | table:dis                                                   | range: decided by [test.orders.o_d_id], keep order:false, stats:pseudo
+```

@@ -1,0 +1,101 @@
+ID: 40240
+Title: Circular dependency in rebuildSysVarCache leading to deadlock on mutex.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Triggered by test TestIssue28073.
+
+Issue is that in [rebuildSysVarCache](https://github.com/pingcap/tidb/blob/ea29db50c39f5dd177c5b63e9cfa9b23502ff1ae/domain/sysvar_cache.go#L146) it calls ValidateWithRelaxedValidation, ... which calls rebuildSysVarCache again (which already has taken the mutex, and it deadlocks. See stack trace below. This seems to be triggered from the loadPrivilegeLoop.
+
+Test log (enhanced with some debug and stack traces):
+```
+[2022/12/30 00:12:37.948 +08:00] [WARN] [sysvar_cache.go:50] ["sysvar cache is empty, triggering rebuild"]
+[2022/12/30 00:12:37.948 +08:00] [INFO] [sysvar_cache.go:125] ["rebuilding sysvar cache"] [stack="github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCache\n\tdomain/sysvar_cache.go:125\ngithub.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCacheIfNeeded\n\tdomain/sysvar_cache.go:51\ngithub.com/pingcap/tidb/domain.(*Domain).GetSessionCache\n\tdomain/sysvar_cache.go:63\ngithub.com/pingcap/tidb/session.(*session).loadCommonGlobalVariablesIfNeeded\n\tsession/session.go:3652\ngithub.com/pingcap/tidb/session.(*session).ExecuteStmt\n\tsession/session.go:2140\ngithub.com/pingcap/tidb/session.(*session).ExecuteInternal\n\tsession/session.go:1674\ngithub.com/pingcap/tidb/domain.(*Domain).LoadPrivilegeLoop\n\tdomain/domain.go:1310\ngithub.com/pingcap/tidb/session.BootstrapSession\n\tsession/session.go:3330\ngithub.com/pingcap/tidb/testkit.bootstrap\n\ttestkit/mockstore.go:84\ngithub.com/pingcap/tidb/testkit.CreateMockStoreAndDomain\n\ttestkit/mockstore.go:69\ngithub.com/pingcap/tidb/testkit.CreateMockStore\n\ttestkit/mockstore.go:61\ngithub.com/pingcap/tidb/executor_test.TestIssue28073\n\texecutor/union_scan_test.go:428\ntesting.tRunner\n\tGOROOT/src/testing/testing.go:1446"]
+[2022/12/30 00:12:39.947 +08:00] [INFO] [info.go:1068] [SetTiFlashGroupConfig]
+[2022/12/30 00:12:40.950 +08:00] [WARN] [sysvar_cache.go:50] ["sysvar cache is empty, triggering rebuild"]
+2022/12/30 00:12:56 Injected timeout, dumping all goroutines:
+...
+goroutine 72223 [semacquire]:
+sync.runtime_SemacquireMutex(0x18e3ae7?, 0x30?, 0x4d63240?)
+	GOROOT/src/runtime/sema.go:77 +0x25
+sync.(*Mutex).lockSlow(0xc00e83bd30)
+	GOROOT/src/sync/mutex.go:171 +0x165
+sync.(*Mutex).Lock(...)
+	GOROOT/src/sync/mutex.go:90
+github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCache(0xc00e83bc80, {0x0, 0x0})
+	domain/sysvar_cache.go:122 +0x1b5
+github.com/pingcap/tidb/domain.(*Domain).NotifyUpdateSysVarCache(0x58aa4c8?)
+	domain/domain.go:2199 +0x266
+github.com/pingcap/tidb/session.(*session).replaceGlobalVariablesTableValue(0x4f53be0?, {0x5838480?, 0xc00022c000?}, {0x4f53be0, 0x18}, {0x4f9c4eb, 0x1})
+	session/session.go:1450 +0x1d4
+github.com/pingcap/tidb/session.(*session).SetGlobalSysVarOnly(0xc00feb8280, {0x5838480, 0xc00022c000}, {0x4f53be0, 0x18}, {0x4f9c4eb, 0x1})
+	session/session.go:1528 +0x117
+github.com/pingcap/tidb/sessionctx/variable.updatePasswordValidationLength(0xc00fec5800, 0x4)
+	sessionctx/variable/varsutil.go:536 +0x82
+github.com/pingcap/tidb/sessionctx/variable.glob..func109(0xc00df31c72?, {0xc00df31e62, 0x1}, {0x18e9177?, 0x4997180?}, 0xf0?)
+	sessionctx/variable/sysvar.go:553 +0xa7
+github.com/pingcap/tidb/sessionctx/variable.(*SysVar).ValidateWithRelaxedValidation(0xc00ff7b960, 0xc00fec5800, {0xc00df31e62, 0x1}, 0x2?)
+	sessionctx/variable/variable.go:361 +0x13f
+github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCache(0xc00e83bc80, {0x0, 0x0})
+	domain/sysvar_cache.go:149 +0x965
+github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCacheIfNeeded(0xc00e83bc80)
+	domain/sysvar_cache.go:51 +0x187
+github.com/pingcap/tidb/domain.(*Domain).GetSessionCache(0xc00e83bc80)
+	domain/sysvar_cache.go:63 +0x4c
+github.com/pingcap/tidb/session.(*session).loadCommonGlobalVariablesIfNeeded(0xc00f496f00)
+	session/session.go:3652 +0xaa
+github.com/pingcap/tidb/session.(*session).ExecuteStmt(0xc00f496f00, {0x58384f0, 0xc033d43950}, {0x5852038?, 0xc00f999b60?})
+	session/session.go:2140 +0x285
+github.com/pingcap/tidb/session.(*session).ExecuteInternal(0xc00f496f00, {0x58384f0, 0xc033d43950}, {0x4f3d60e, 0x14}, {0x0, 0x0, 0x0})
+	session/session.go:1674 +0x42b
+github.com/pingcap/tidb/domain.(*Domain).LoadPrivilegeLoop(0xc00e83bc80, {0x58aa4c8, 0xc00f496f00})
+	domain/domain.go:1310 +0xc6
+github.com/pingcap/tidb/session.BootstrapSession({0x5862550, 0xc00c008380})
+	session/session.go:3330 +0x65c
+github.com/pingcap/tidb/testkit.bootstrap({0x586aa40?, 0xc00bca1d40}, {0x5862550?, 0xc00c008380}, 0x0?)
+	testkit/mockstore.go:84 +0xb1
+github.com/pingcap/tidb/testkit.CreateMockStoreAndDomain({0x586aa40?, 0xc00bca1d40}, {0x0?, 0x3?, 0x80?})
+	testkit/mockstore.go:69 +0xb6
+github.com/pingcap/tidb/testkit.CreateMockStore({0x586aa40?, 0xc00bca1d40}, {0x0, 0x0, 0x0})
+	testkit/mockstore.go:61 +0x2f0
+github.com/pingcap/tidb/executor_test.TestIssue28073(0x14?)
+	executor/union_scan_test.go:428 +0x147
+testing.tRunner(0xc00bca1d40, 0x512f350)
+	GOROOT/src/testing/testing.go:1446 +0x10b
+created by testing.(*T).Run
+	GOROOT/src/testing/testing.go:1493 +0x35f
+...
+goroutine 74367 [semacquire]:
+sync.runtime_SemacquireMutex(0x18e3ae7?, 0x30?, 0x4d63240?)
+	GOROOT/src/runtime/sema.go:77 +0x25
+sync.(*Mutex).lockSlow(0xc00e83bd30)
+	GOROOT/src/sync/mutex.go:171 +0x165
+sync.(*Mutex).Lock(...)
+	GOROOT/src/sync/mutex.go:90
+github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCache(0xc00e83bc80, {0x0, 0x0})
+	domain/sysvar_cache.go:122 +0x1b5
+github.com/pingcap/tidb/domain.(*Domain).rebuildSysVarCacheIfNeeded(0xc00e83bc80)
+	domain/sysvar_cache.go:51 +0x187
+github.com/pingcap/tidb/domain.(*Domain).GetGlobalVar(0xc00e83bc80, {0x4f65859, 0x1b})
+	domain/sysvar_cache.go:76 +0x6d
+github.com/pingcap/tidb/domain.(*Domain).globalBindHandleWorkerLoop.func1()
+	domain/domain.go:1541 +0x3e5
+created by github.com/pingcap/tidb/domain.(*Domain).globalBindHandleWorkerLoop
+	domain/domain.go:1517 +0xb5
+```
+
+### 2. What did you expect to see? (Required)
+No hang :)
+
+### 3. What did you see instead (Required)
+Test fails with timeout.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+Consistently happens in https://github.com/pingcap/tidb/pull/38738 during development, like in https://github.com/pingcap/tidb/commit/3f6dcc57aafab88613940dfb784932f27aaba350 (but only in CI?!?)

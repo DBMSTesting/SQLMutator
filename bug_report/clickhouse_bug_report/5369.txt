@@ -1,0 +1,66 @@
+ID: 5369
+Title: LFAlloc exhaust vma limit (vm.max_map_count)
+Description:
+After LFAlloc has been added (#4995) clickhouse starts to eat too much vma's (for `SELECT` load):
+
+```
+  # pmap -p $(pgrep clickhouse ) | wc -l
+  65518
+
+  # pmap -p $(pgrep clickhouse ) | fgrep -c ' 72K'
+  51130
+```
+
+So as you can see there are tons of vma's with size 72k, which is very very suboptimal and this will finally lead to `MAP_FAILED`.
+
+And looks like this is where 72K allocations goes from:
+```
+  0  __GI_raise (sig=sig@entry=6) at ../sysdeps/unix/sysv/linux/raise.c:50
+  1  0x00007fcd2f666535 in __GI_abort () at abort.c:79
+  2  0x000000000325fbca in NMalloc::AbortFromCorruptedAllocator () at ../contrib/lfalloc/src/lfmalloc.h:12
+  3  0x0000000006d66266 in VerifyMmapResult (result=<optimized out>) at ../contrib/lfalloc/src/lf_allocX64.h:280
+  4  AllocWithMMap (sz=73728, mode=<optimized out>) at ../contrib/lfalloc/src/lf_allocX64.h:373
+  5  0x0000000006d664e6 in LargeBlockAlloc (_nSize=<optimized out>, counter=<optimized out>) at ../contrib/lfalloc/src/lf_allocX64.h:480
+  6  0x0000000006a0710b in DB::Memory<DB::LFAllocator>::alloc (this=<optimized out>) at ../dbms/src/IO/BufferWithOwnMemory.h:95
+  7  DB::Memory<DB::LFAllocator>::resize (new_size=<optimized out>, this=<optimized out>) at ../dbms/src/IO/BufferWithOwnMemory.h:78
+  8  DB::CachedCompressedReadBuffer::nextImpl (this=0x7fccdcd10080) at ../dbms/src/Compression/CachedCompressedReadBuffer.cpp:53
+  9  0x0000000006a060ad in DB::CachedCompressedReadBuffer::seek (this=0x7fccdcd10080, offset_in_compressed_file=<optimized out>, offset_in_decompressed_block=<optimized out>)
+     at ../dbms/src/Compression/CachedCompressedReadBuffer.cpp:99
+  10 0x0000000006622d98 in DB::MergeTreeReaderStream::seekToMark (this=this@entry=0x7fccdcd97a00, index=<optimized out>)
+     at ../dbms/src/Storages/MergeTree/MergeTreeReaderStream.cpp:185
+  11 0x000000000696a498 in DB::MergeTreeReader::<lambda(bool)>::<lambda(const SubstreamPath&)>::operator() (substream_path=..., __closure=0x7fccdcc01dd0)
+     at ../dbms/src/Storages/MergeTree/MergeTreeReader.cpp:215
+  12 std::_Function_handler<DB::ReadBuffer*(const std::vector<DB::IDataType::Substream, std::allocator<DB::IDataType::Substream> >&), DB::MergeTreeReader::readData(const String&, con$t DB::IDataType&, DB::IColumn&, size_t, bool, size_t, bool)::<lambda(bool)>::<lambda(const SubstreamPath&)> >::_M_invoke(const std::_Any_data &, const std::vector<DB::IDataType::Sub$tream, std::allocator<DB::IDataType::Substream> > &) (__functor=..., __args#0=...) at /usr/include/c++/8/bits/std_function.h:282
+  13 0x000000000340b5f8 in DB::IDataType::deserializeBinaryBulkWithMultipleStreams(DB::IColumn&, unsigned long, DB::IDataType::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::IDa$aType::DeserializeBinaryBulkState>&) const () at /usr/include/c++/8/bits/char_traits.h:287
+  14 0x000000000696b6ba in DB::MergeTreeReader::readData (this=0x7fccdcc52a00, name=..., type=..., column=..., from_mark=<optimized out>, continue_reading=<optimized out>,
+     max_rows_to_read=8192, with_offsets=<optimized out>) at ../dbms/src/Storages/MergeTree/MergeTreeReader.cpp:234
+  15 0x000000000696bcae in DB::MergeTreeReader::readRows (this=0x7fccdcc52a00, from_mark=<optimized out>, continue_reading=false, max_rows_to_read=<optimized out>,
+     max_rows_to_read@entry=8192, res=...) at /usr/include/c++/8/bits/shared_ptr_base.h:1018
+  16 0x0000000006966d06 in DB::MergeTreeRangeReader::DelayedStream::readRows (num_rows=8192, block=..., this=0x7fccdccfd190)
+     at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:34
+  17 DB::MergeTreeRangeReader::DelayedStream::readRows (num_rows=8192, block=..., this=0x7fccdccfd190) at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:30
+  18 DB::MergeTreeRangeReader::DelayedStream::finalize (this=0x7fccdccfd190, block=...) at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:106
+  19 0x00000000069685f7 in DB::MergeTreeRangeReader::Stream::finalize (block=..., this=0x7fccdccfd160) at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:597
+  20 DB::MergeTreeRangeReader::startReadingChain (this=0x7fccdccfd118, max_rows=<optimized out>, ranges=...) at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:597
+  21 0x0000000006969a89 in DB::MergeTreeRangeReader::read (this=0x7fccdccfd118, max_rows=<optimized out>, ranges=...) at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:526
+  22 0x00000000069696c4 in DB::MergeTreeRangeReader::read (this=this@entry=0x7fccdccfd068, max_rows=max_rows@entry=8192, ranges=...)
+     at ../dbms/src/Storages/MergeTree/MergeTreeRangeReader.cpp:482
+  23 0x000000000695a5b7 in DB::MergeTreeBaseSelectBlockInputStream::readFromPart (this=0x7fcc3770c510) at ../dbms/src/Storages/MergeTree/MergeTreeBaseSelectBlockInputStream.cpp:158
+  24 0x000000000695bb59 in DB::MergeTreeBaseSelectBlockInputStream::readImpl (this=0x7fcc3770c510) at ../dbms/src/Storages/MergeTree/MergeTreeBaseSelectBlockInputStream.cpp:58
+  25 0x00000000061f5595 in DB::IBlockInputStream::read (this=0x7fcc3770c510) at ../dbms/src/DataStreams/IBlockInputStream.cpp:56
+  26 0x000000000678d4c6 in DB::FilterBlockInputStream::readImpl (this=0x7fcd22261010) at /usr/include/c++/8/bits/shared_ptr_base.h:1018
+  27 0x00000000061f5595 in DB::IBlockInputStream::read (this=0x7fcd22261010) at ../dbms/src/DataStreams/IBlockInputStream.cpp:56
+  28 0x000000000678c94a in DB::ExpressionBlockInputStream::readImpl (this=0x7fcd22228a90) at /usr/include/c++/8/bits/shared_ptr_base.h:1018
+  29 0x00000000061f5595 in DB::IBlockInputStream::read (this=0x7fcd22228a90) at ../dbms/src/DataStreams/IBlockInputStream.cpp:56
+  30 0x00000000061fa7c5 in DB::LimitBlockInputStream::readImpl (this=<optimized out>) at /usr/include/c++/8/bits/shared_ptr_base.h:1018
+  31 0x00000000061f5595 in DB::IBlockInputStream::read (this=0x7fcd22228d10) at ../dbms/src/DataStreams/IBlockInputStream.cpp:56
+  32 0x00000000061ee1d3 in DB::AsynchronousBlockInputStream::calculate (this=0x7fa76f4cd920) at /usr/include/c++/8/bits/shared_ptr_base.h:1018
+  33 0x00000000061ee561 in DB::AsynchronousBlockInputStream::<lambda()>::operator() (__closure=0x7fccdcd96b00) at ../dbms/src/DataStreams/AsynchronousBlockInputStream.cpp:59
+  34 std::_Function_handler<void(), DB::AsynchronousBlockInputStream::next()::<lambda()> >::_M_invoke(const std::_Any_data &) (__functor=...)
+     at /usr/include/c++/8/bits/std_function.h:297
+  35 0x0000000006d7aadf in std::function<void ()>::operator()() const (this=0x7fa762eb8ac0) at /usr/include/c++/8/bits/std_function.h:682
+  36 ThreadPoolImpl<ThreadFromGlobalPool>::worker (this=<optimized out>, thread_it=...) at ../dbms/src/Common/ThreadPool.cpp:169
+  37 0x0000000006d7bc7d in ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()yandex#3}::operator()() const (
+```
+
+After disabling it (68b45cfb12dfa0affd08ede3db1d76c0c0cd288d) every thing goes back to normal.

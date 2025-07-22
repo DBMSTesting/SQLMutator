@@ -1,0 +1,120 @@
+ID: 18714
+Title: doDDLJob may retry and enter dead loop
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+add failpoint in `doDDLJob` around line 490 
+```go
+        for {
+		failpoint.Inject("storeCloseInLoop", func(val failpoint.Value) {
+			v := val.(int)
+			time.Sleep(time.Duration(v) * time.Second)
+		})
+		select {
+		case <-d.ddlJobDoneCh:
+		case <-ticker.C:
+```
+
+```go
+func (s *testSessionSuite) TestDoDDLJobQuit(c *C) {
+	store, err := mockstore.NewMockStore(mockstore.WithStoreType(mockstore.MockTiKV))
+	c.Assert(err, IsNil)
+	session.SetSchemaLease(10 * time.Millisecond)
+	dom, err := session.BootstrapSession(store)
+	c.Assert(err, IsNil)
+	se, err := session.CreateSession(store)
+	c.Assert(err, IsNil)
+
+	c.Assert(failpoint.Enable("github.com/pingcap/tidb/ddl/storeCloseInLoop", `return(2)`), IsNil)
+	go func() {
+		time.Sleep(time.Second)
+		se.Close()
+		dom.Close()
+		store.Close()
+	}()
+	// this DDL call will enter deadloop
+	c.Assert(dom.DDL().CreateSchema(se, model.NewCIStr("testschema"), nil), IsNil)
+	c.Assert(failpoint.Disable("github.com/pingcap/tidb/ddl/storeCloseInLoop"), IsNil)
+}
+```
+
+### 2. What did you expect to see? (Required)
+function returns in proper time.
+
+### 3. What did you see instead (Required)
+block and print log forever.
+```
+[2020-07-21T08:37:23.331Z] [2020/07/21 16:37:22.114 +08:00] [ERROR] [ddl.go:523] ["[ddl] get history DDL job failed, check again"] [component="ddl tracker"] [error="tikv aborts txn: leveldb: closed"] [errorVerbose="tikv aborts txn: leveldb: closed\ngithub.com/pingcap/tidb/store/tikv.extractKeyErr\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:442\ngithub.com/pingcap/tidb/store/tikv.extractLockFromKeyErr\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:423\ngithub.com/pingcap/tidb/store/tikv.(*tikvSnapshot).get\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:368\ngithub.com/pingcap/tidb/store/tikv.(*tikvSnapshot).Get\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:298\ngithub.com/pingcap/tidb/kv.(*unionStore).Get\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/kv/union_store.go:113\ngithub.com/pingcap/tidb/store/tikv.(*tikvTxn).Get\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/txn.go:142\ngithub.com/pingcap/tidb/structure.(*TxStructure).HGet\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/structure/hash.go:59\ngithub.com/pingcap/tidb/meta.(*Meta).getHistoryDDLJob\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/meta/meta.go:743\ngithub.com/pingcap/tidb/meta.(*Meta).GetHistoryDDLJob\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/meta/meta.go:756\ngithub.com/pingcap/tidb/ddl.(*ddl).getHistoryDDLJob.func1\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_worker.go:263\ngithub.com/pingcap/tidb/kv.RunInNewTxn\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/kv/txn.go:47\ngithub.com/pingcap/tidb/ddl.(*ddl).getHistoryDDLJob\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_worker.go:260\ngithub.com/pingcap/tidb/ddl.(*ddl).doDDLJob\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl.go:521\ngithub.com/pingcap/tidb/ddl.(*ddl).DropTable\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_api.go:3689\ngithub.com/pingcap/dm/pkg/schema.(*Tracker).DropTable\n\t/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/pkg/schema/tracker.go:199\ngithub.com/pingcap/dm/syncer.(*RemoteCheckPoint).Rollback\n\t/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/checkpoint.go:559\ngithub.com/pingcap/dm/syncer.(*Syncer).Process\n\t/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/syncer.go:559\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1357"] [stack="github.com/pingcap/tidb/ddl.(*ddl).doDDLJob\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl.go:523\ngithub.com/pingcap/tidb/ddl.(*ddl).DropTable\n\t/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_api.go:3689\ngithub.com/pingcap/dm/pkg/schema.(*Tracker).DropTable\n\t/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/pkg/schema/tracker.go:199\ngithub.com/pingcap/dm/syncer.(*RemoteCheckPoint).Rollback\n\t/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/checkpoint.go:559\ngithub.com/pingcap/dm/syncer.(*Syncer).Process\n\t/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/syncer.go:559"]
+```
+format this log:
+```
+errorVerbose=tikv aborts txn: leveldb: closed
+github.com/pingcap/tidb/store/tikv.extractKeyErr
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:442
+github.com/pingcap/tidb/store/tikv.extractLockFromKeyErr
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:423
+github.com/pingcap/tidb/store/tikv.(*tikvSnapshot).get
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:368
+github.com/pingcap/tidb/store/tikv.(*tikvSnapshot).Get
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/snapshot.go:298
+github.com/pingcap/tidb/kv.(*unionStore).Get
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/kv/union_store.go:113
+github.com/pingcap/tidb/store/tikv.(*tikvTxn).Get
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/store/tikv/txn.go:142
+github.com/pingcap/tidb/structure.(*TxStructure).HGet
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/structure/hash.go:59
+github.com/pingcap/tidb/meta.(*Meta).getHistoryDDLJob
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/meta/meta.go:743
+github.com/pingcap/tidb/meta.(*Meta).GetHistoryDDLJob
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/meta/meta.go:756
+github.com/pingcap/tidb/ddl.(*ddl).getHistoryDDLJob.func1
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_worker.go:263
+github.com/pingcap/tidb/kv.RunInNewTxn
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/kv/txn.go:47
+github.com/pingcap/tidb/ddl.(*ddl).getHistoryDDLJob
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_worker.go:260
+github.com/pingcap/tidb/ddl.(*ddl).doDDLJob
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl.go:521
+github.com/pingcap/tidb/ddl.(*ddl).DropTable
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_api.go:3689
+github.com/pingcap/dm/pkg/schema.(*Tracker).DropTable
+	/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/pkg/schema/tracker.go:199
+github.com/pingcap/dm/syncer.(*RemoteCheckPoint).Rollback
+	/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/checkpoint.go:559
+github.com/pingcap/dm/syncer.(*Syncer).Process
+	/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/syncer.go:559
+runtime.goexit
+	/usr/local/go/src/runtime/asm_amd64.s:1357
+    
+stack=
+github.com/pingcap/tidb/ddl.(*ddl).doDDLJob
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl.go:523
+github.com/pingcap/tidb/ddl.(*ddl).DropTable
+	/go/pkg/mod/github.com/pingcap/tidb@v1.1.0-beta.0.20200423094549-0ad7ce6cdae6/ddl/ddl_api.go:3689
+github.com/pingcap/dm/pkg/schema.(*Tracker).DropTable
+	/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/pkg/schema/tracker.go:199
+github.com/pingcap/dm/syncer.(*RemoteCheckPoint).Rollback
+	/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/checkpoint.go:559
+github.com/pingcap/dm/syncer.(*Syncer).Process
+	/home/jenkins/agent/workspace/dm_ghpr_test/go/src/github.com/pingcap/dm/syncer/syncer.go:559
+```
+
+
+### 4. Affected version (Required)
+
+<!-- v3.0.0, v4.0.0, etc -->
+current master
+
+### 5. Root Cause Analysis
+
+<!-- should be filled by the investigator before it's closed -->
+`(*ddl).doDDLJob` doesn't have an exit branch:
+
+https://github.com/pingcap/tidb/blob/168fcbb54f7825377736a5f2118ab3d79451f63f/ddl/ddl.go#L490-L499
+
+

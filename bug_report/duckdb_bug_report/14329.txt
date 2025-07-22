@@ -1,0 +1,53 @@
+ID: 14329
+Title: Partitioning-Aware Aggregation and Partitioning-Aware Infrastructure
+Description:
+
+This PR adds support for partitioning-aware aggregation. The `PhysicalPartitionedAggregate` class is added, that is used when we are grouping over columns that are partitioned. Internally, the class effectively runs an ungrouped aggregate for every partition, and then merges the aggregates for each partition together. This avoids the need for a hash table - which greatly speeds up aggregation. 
+
+Currently, partitition information is only emitted for hive-partitioned datasets, but this should be extended in the future.
+
+
+#### Partition-Aware Infrastructure
+
+This main contribution of this PR is the addition of partitioning-aware infrastructure - the aggregate is mostly a "proof-of-concept" that this works. The partitioning-aware infrastructure is mostly an extension of the batch index infrastructure. As such, most of the batch index methods are replaced with more generic partitioning methods (e.g. `get_batch_index` is turned into `get_partition_data`). The most interesting callbacks from a table function perspective are the following:
+
+```
+//! How a table is partitioned by a given set of columns
+enum class TablePartitionInfo : uint8_t {
+	NOT_PARTITIONED,         // the table is not partitioned by the given set of columns
+	SINGLE_VALUE_PARTITIONS, // each partition has exactly one unique value (e.g. bounds = [1,1][2,2][3,3])
+	OVERLAPPING_PARTITIONS,  // the partitions overlap **only** at the boundaries (e.g. bounds = [1,2][2,3][3,4]
+	DISJOINT_PARTITIONS      // the partitions are disjoint (e.g. bounds = [1,2][3,4][5,6])
+};
+
+struct OperatorPartitionData {
+	idx_t batch_index;
+	vector<ColumnPartitionData> partition_data;
+};
+
+typedef TablePartitionInfo (*table_function_get_partition_info_t)(ClientContext &context,
+                                                                  TableFunctionPartitionInput &input);
+typedef OperatorPartitionData (*table_function_get_partition_data_t)(ClientContext &context,
+                                                                     TableFunctionGetPartitionInput &input);
+```
+
+The `get_info` callback is used to determine if a dataset is partitioned over a set of columns, and how it is partitioned (either `NOT_PARTITIONED`, `SINGLE_VALUE_PARTITIONS`, `OVERLAPPING_PARTITIONS` or `DISJOINT_PARTITIONS`). The `get_partition_data` is used at runtime (similar to how `get_batch_index` was used previously) to obtain partition data for the current data chunk that we are processing.
+
+#### Benchmark
+
+Below is an example of the partitioned-aware aggregation, running TPC-H Q1 over `lineitem` partitioned over `l_returnflag` and `l_linestatus` on TPC-H SF10:
+
+```sql
+CALL dbgen(sf=10);
+COPY lineitem TO 'lineitemsf10_partitioned' (FORMAT parquet, PARTITION_BY (l_returnflag, l_linestatus));
+DROP TABLE lineitem;
+create view lineitem as from '../duckdb/lineitemsf10_part/**/*.parquet';
+PRAGMA tpch(1);
+```
+
+| Version | Total (s) | Aggregate (s) |
+|---------|-----------|---------------|
+| v1.1    | 0.27s     | 1.1s          |
+| New     | 0.22s     | 0.26s         |
+
+We can see that the total time is around ~20% faster. The aggregation itself is sped up significantly more (around 4X faster). The rest of the cost is dominated by reading the Parquet files. Note that the timing reported for the aggregate is the CPU runtime spent by all threads (i.e. 10 threads working for 0.22s have a total CPU run-time of 2.2s).

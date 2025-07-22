@@ -1,0 +1,154 @@
+ID: 15512
+Title: Timestamps rough around the edges
+Description:
+### What happens?
+
+The handling of large and infinite values in timestamps needs some love:
+
+**Bugs:**
+
+1. The difference of two `TIMESTAMPTZ` values  returns finite values even when one of the involved operands is infinite (essentially following integer arithmetic ignoring the infinity sentinel). For`TIMESTAMP` values, all such operations throw. In PostgreSQL for both types, the difference behaves like IEEE754 except an error is thrown where IEEE754 would return NaN.
+
+```sql
+SELECT
+    TIMESTAMPTZ 'Infinity' - TIMESTAMPTZ 'Infinity', -- 0 but should throw
+    TIMESTAMPTZ 'Infinity' - TIMESTAMPTZ '-Infinity', -- large value but should be infinity (or throw, because duckdb's INTERVAL can't be infinite currently)
+    TIMESTAMPTZ 'Infinity' - TIMESTAMPTZ '2020-01-01', -- large value but should be infinity (or throw, because duckdb's INTERVAL can't be infinite currently)
+```
+
+2. For `TIMESTAMP_NS`, the timestamp corresponding to `2**63 - 1` provides the `Infinity` sentinel; for `TIMESTAMP` and `TIMESTAMPTZ` it throws:
+
+```sql
+SELECT
+    TIMESTAMP_NS '2262-04-11 23:47:16.854775807', -- infinity
+    TIMESTAMP '294247-01-10 04:00:54.775807', -- "Conversion Error: timestamp field value out of range: "294247-01-10 04:00:54.775807", expected format is (YYYY-MM-DD HH:MM:SS[.US][±HH:MM| ZONE])"
+```
+
+3. For large but in-range literal values, the `TIMESTAMPTZ` constructor throws while the `TIMESTAMP` constructor works:
+
+```sql
+SELECT
+    TIMESTAMPTZ '294247-01-10 04:00:54.7758', -- Conversion Error: Unable to convert ICU date to timestamp
+    TIMESTAMP '294247-01-10 04:00:54.7758' -- works
+```
+
+4. `make_timestamp(microseconds)` and `make_timestamptz(microseconds)` provide the `Infinity` sentinel when fed  `2**63 - 1` (as integer literal), unlike the constructors, which throw on the corresponding timestamps:
+
+```sql
+SELECT
+    make_timestamp(9223372036854775807), -- Infinity
+    make_timestamptz(9223372036854775807), -- Infinity
+    TIMESTAMP '294247-01-10 04:00:54.775807', -- Error
+```
+
+5. For inputs where the correct output would be out-of-range for `INT64`, the  `epoch_ns(TIMESTAMP)` and `epoch_ns(TIMESTAMPTZ)` functions throw cryptic and scary errors. They should return `INT128` instead of `INT64`, so that they never overflow:
+ 
+```sql
+SELECT
+    epoch_ns(TIMESTAMP '294247-1-1 00:00:00'),-- "Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result. Error: Conversion Error: Could not convert Timestamp(US) to Timestamp(NS)"
+    epoch_ns(TIMESTAMPTZ '294247-1-1 00:00:00'),-- "Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result. Error: Conversion Error: Could not convert Timestamp(US) to Timestamp(NS)"
+```
+
+
+**Unhelpful and inconsistent error messages:**
+
+6. For out-of-range literal values, the `TIMESTAMP` / `TIMESTAMPTZ`  constructors throw out-of-range errors but then show the expected format (which the input adheres to anyway) instead of providing the more useful valid range of inputs:
+
+```sql
+    TIMESTAMP '294247-01-10 04:00:54.775808', -- "Conversion Error: timestamp field value out of range: "294247-01-10 04:00:54.775807", expected format is (YYYY-MM-DD HH:MM:SS[.US][±HH:MM| ZONE])"
+```
+
+7. For out-of-range literal values, the `TIMESTAMP_NS` constructor throws a cryptic error instead of an out-of-range error:
+
+```sql
+SELECT
+    TIMESTAMP_NS '2262-04-11 23:47:16.854775808', -- "Conversion Error: Could not convert string '2262-04-11 23:47:16.854775808' to INVALID"
+```
+
+8. Adding sufficiently large `INTERVAL`s to `TIMESTAMPTZ` values throws a cryptic error instead of an overflow error:
+
+```sql
+SELECT
+    TIMESTAMPTZ '294247-01-10 04:00:54.77' + INTERVAL 100 DAY, -- "Conversion Error: Unable to convert ICU date to timestamp"
+``` 
+
+9. For out-of-range inputs, `make_timestamp(year, month, day, ....)` throws overflow errors instead of the same out-of-range error as the `TIMESTAMP` constructor:
+```sql
+SELECT
+    make_timestamp(294247, 1, 10, 4, 0, 54.775807), -- "Conversion Error: Overflow exception in date/time -> timestamp conversion"
+```
+
+10. For out-of-range inputs, `make_timestamptz(year, month, day, ...)` throws the same non-useful error that the `TIMESTAMPTZ` constructor sometimes (but not always) throws:
+
+```sql
+SELECT
+    make_timestamptz(294248, 1, 10, 4, 0, 54.775807), -- "Conversion Error: Unable to convert ICU date to timestamp"
+```
+
+
+11. For out-of-range inputs, `to_timestamp` throws unclear error instead of same out-of-range error as the `TIMESTAMP` constructor:
+
+```sql
+SELECT
+    to_timestamp(99999999999999999), -- "Conversion Error: Could not convert epoch seconds to TIMESTAMP WITH TIME ZONE"
+```
+
+**Feature requests:**
+
+12. The difference of two `TIMESTAMP`/`TIMESTAMP_NS` values throws whenever one or both operands are infinite. In PostgreSQL, the behavior is the same as for PostgreSQL's `TIMESTAMPTZ`, i.e., IEEE754-like. Fixing this would require infinite `INTERVAL`s.
+
+```sql
+SELECT
+    TIMESTAMP 'Infinity' - TIMESTAMP 'Infinity', -- Correct "Invalid Input Error: Cannot subtract infinite timestamps"
+    TIMESTAMP 'Infinity' - TIMESTAMP '-Infinity', -- "Invalid Input Error: Cannot subtract infinite timestamps" but should be infinite (except DuckDB doesnt support infinite INTERVALs)
+    TIMESTAMP 'Infinity' - TIMESTAMP '2020-01-01', -- "Invalid Input Error: Cannot subtract infinite timestamps" but should be infinite (except DuckDB doesnt support infinite INTERVALs)
+```
+
+### To reproduce
+
+Just to avoid interference, set
+```sql
+SET TimeZone='UTC';
+```
+before executing the snippets above.
+
+
+### OS:
+
+Linux
+
+### DuckDB Version:
+
+'1.1.4-dev3162'
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+AMD64
+
+### Full Name:
+
+Soeren Wolfers
+
+### Affiliation:
+
+G-Research
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

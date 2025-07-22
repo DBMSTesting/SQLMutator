@@ -1,0 +1,50 @@
+ID: 15099
+Title: Dynamically push table filters from Top-N operator
+Description:
+When executing a Top-N query, we need to find the top or bottom `N` values for a given set of conditions. The Top-N operator builds the result through a heap in which we keep track of the top-N values seen so far. For any given heap of `N` values, we know that any row that has an ordering column value that is larger (or smaller, for `DESC` ordering) will not be in the result set at that moment.
+
+In the Top-N operator, we already keep track of this value - called the `boundary value` - and use it to prune out rows that we know are not going to be inserted into the heap early on in the `Sink` call. While this works in speeding up the Top-N operator itself, we still need to scan the rows from the base storage before finding out these rows will not make it into the final result.
+
+This PR extends the Top-N operator to push the boundary value into the scans as a table filter. This is similar to the dynamic table filters generated through joins (introduced in https://github.com/duckdb/duckdb/pull/12908), but "more dynamic". While the filters generated through joins are generated once (when the HT build is complete), the Top-N filters are updated whenever the boundary value is updated - which can happen for every `Sink` call.
+
+#### Implementation
+
+The implementation works through a new table filter - the `DynamicFilter`. This is a regular `TableFilter` that holds a shared pointer to a `DynamicFilterData ` - which contains a child table filter together with a lock:
+
+```cpp
+struct DynamicFilterData {
+	mutex lock;
+	unique_ptr<TableFilter> filter;
+	bool initialized = false;
+};
+```
+
+This filter is generated in the `TopN` optimizer. The `TopN` contains a shared pointer to the `DynamicFilterData` as well. The `TopN` operator then updates the underlying filter during the `Sink` phase whenever the global boundary value is updated to a new value.
+
+##### Performance
+
+Below is an illustration of the performance gain we can obtain here, running this query over TPC-H SF10:
+
+```sql
+SELECT * FROM lineitem ORDER BY l_orderkey LIMIT 5;
+```
+
+| main  |  New  |
+|-------|-------|
+| 0.19s | 0.02s |
+
+Note that this is not always beneficial, e.g. when looking in descending order in this scenario. Since the table is naturally ordered and we scan data in the table's natural order, we are never able to prune any row groups:
+
+```sql
+SELECT * FROM lineitem ORDER BY l_orderkey DESC LIMIT 5;
+```
+
+| main  |  New  |
+|-------|-------|
+| 0.23s | 0.23s |
+
+
+#### Limitations
+
+* When the `ORDER BY` clause has multiple order conditions, we can only generate the filter for the first order condition (since the value of the remaining ones is unknown).
+* We currently only support `NULLS LAST` ordering. It is possible to extend to `NULLS FIRST`, but this is more tricky as we need to take `NULL` values into account in the generated filters/boundary value.

@@ -1,0 +1,142 @@
+ID: 14487
+Title: Json profiling output incompatible with query_graph
+Description:
+### What happens?
+
+When I try to profile a script, and later build a query graph I get an error:
+
+```python
+in generate_timing_html
+    total_time = float(json_graph['operator_timing'])
+                       ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+KeyError: 'operator_timing'
+```
+This is caused by that the query_graph module expects the json_graph to have operator_timing (as well as operator_type and operator_cardinality) as keys in the json graph. However these are not keys for the json graph but rather elements under the key children. 
+
+This is handled in `get_child_timings(..)` and `generate_tree_recursive(..)` as they get `json['children'][0]` as input rather than the full json. However a query_timings object is created at the line above, so I use `query_timings.get_sum_of_all_timings()` rather than `json_graph['children'][0]` in case the json object is more nested than expected. 
+
+**Edit:**
+
+So I think both total_time and execution time was wrongly implemented, by going over how these numbers are used and trying to piece them together with the definitions in the documentation.
+
+Total_time seems to be meant to be the same the sum of operator_time, found with query_timings.get_sum_of_all_timings()
+Execution time seems to be the same as latency (The total elapsed query execution time.).
+
+In code:
+
+total_time = query_timings.get_sum_of_all_timings()
+execution_time = json_graph['latency']
+
+The reasoning for this is that using latency for total_time gives weird percentages (since it will be smaller than the individual parts in many cases), and using query_timings.get_sum_of_all_timings() for total_time makes execution_time and total_time equal.
+
+Using json_graph['children'][0]['operator_time'] gives a wrong number in case there is more operators than one at this level.
+
+I think the documentation and code (json output compilation) should reflect each other better so there are proper definitions of everything in the query_graph report. I.e that Execution time is renamed to latency or vice versa.
+
+I also see there are some missing logic in the query_graph, handling if any fields are not outputted by using custom profile settings. I can gladly rewrite the code to better reflect what we see in the documentation, for instance calling execution time Total elapsed query execution time or similar, and calling total time cumulative operator time or similar. Even adding a link directly to the duckdb documentation for profiling in the report could be considered.
+
+Made a PR to fix this: https://github.com/duckdb/duckdb/pull/14488
+
+### To Reproduce
+
+First make a query and output the profiling information:
+
+```sql
+PRAGMA enable_profiling = 'json';
+PRAGMA profiling_output = 'profile.json';
+SELECT * from range(10);
+```
+
+This produces the following file:
+```json
+{
+    "query_name": "SELECT * from range(10);",
+    "blocked_thread_time": 0.0,
+    "cpu_time": 0.0000122,
+    "extra_info": {},
+    "cumulative_cardinality": 10,
+    "cumulative_rows_scanned": 10,
+    "result_set_size": 80,
+    "latency": 0.0113113,
+    "rows_returned": 10,
+    "children": [
+        {
+            "cpu_time": 0.0000122,
+            "extra_info": {
+                "Function": "RANGE",
+                "Estimated Cardinality": "10"
+            },
+            "cumulative_cardinality": 10,
+            "operator_type": "TABLE_SCAN",
+            "operator_cardinality": 10,
+            "cumulative_rows_scanned": 10,
+            "operator_rows_scanned": 10,
+            "operator_timing": 0.0000122,
+            "result_set_size": 80,
+            "children": []
+        }
+    ]
+}
+```
+
+Then try to make a query graph:
+
+```python
+python -m duckdb.query_graph profile.json
+```
+```text
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\USERNAMME\FOLDER\.venv\Lib\site-packages\duckdb\query_graph\__main__.py", line 324, in <module>
+    main()
+  File "C:\Users\USERNAMME\FOLDER\.venv\Lib\site-packages\duckdb\query_graph\__main__.py", line 317, in main
+    translate_json_to_html(input, output)
+  File "C:\Users\USERNAMME\FOLDER\.venv\Lib\site-packages\duckdb\query_graph\__main__.py", line 256, in translate_json_to_html
+    timing_table = generate_timing_html(text, query_timings)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\USERNAMME\FOLDER\.venv\Lib\site-packages\duckdb\query_graph\__main__.py", line 170, in generate_timing_html
+    total_time = float(json_graph['operator_timing'])
+                       ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+KeyError: 'operator_timing'
+```
+
+### OS:
+
+x86_64
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+DuckDB CLI 
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Bjørnar Brende Smestad
+
+### Affiliation:
+
+NTNU
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

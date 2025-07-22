@@ -1,0 +1,63 @@
+ID: 38322
+Title: tidb panic while query out of memory query quota 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+drop table if exists t, t;
+create table t(a int, b int, index idx(a));
+create table t1(a int, c int, index idx(a));
+insert into t values(1, 1), (2,2), (3,3), (4,4), (5,5), (7, 7), (9,9);
+insert into t1 values(1, 1), (1, 10), (3, 10), (5, 5), (10, 11);
+split table t index idx between (1) and (10001) regions 10;
+split table t1 index idx between (1) and (10001) regions 10;
+set tidb_distsql_scan_concurrency=10;
+set tidb_mem_quota_query=10;
+select t.a, t1.a  from t use index(idx), t1 use index(idx)  where t.a=t1.a; -- ERROR 1105 (HY000): Out Of Memory Quota![conn_id=1363783645558473149]
+select t.a, t1.a  from t use index(idx), t1 use index(idx)  where t.a=t1.a; -- ERROR 2013 (HY000): Lost connection to MySQL server during query
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+tidb report out of memory quota but not lost connection
+### 3. What did you see instead (Required)
+Lost connection to MySQL server during query
+```sql
+mysql> select t.a, t1.a  from t use index(idx), t1 use index(idx)  where t.a=t1.a;
+ERROR 1105 (HY000): Out Of Memory Quota![conn_id=1363783645558473151]
+mysql> select t.a, t1.a  from t use index(idx), t1 use index(idx)  where t.a=t1.a;
+ERROR 2013 (HY000): Lost connection to MySQL server during query
+mysql>
+```
+
+tidb log
+```bash
+[2022/10/08 16:12:49.646 +08:00] [WARN] [expensivequery.go:189] [expensive_query] [cost_time=0.000369486s] [conn_id=1363783645558473151] [user=root] [database=test] [txn_start_ts=0] [mem_max="144 Bytes (144 Bytes)"] [sql="select t.a, t1.a  from t use index(idx), t1 use index(idx)  where t.a=t1.a"]
+[2022/10/08 16:12:49.647 +08:00] [ERROR] [conn.go:1039] ["connection running loop panic"] [conn=1363783645558473151] [lastSQL="select t.a, t1.a  from t use index(idx), t1 use index(idx)  where t.a=t1.a"] [err="Out Of Memory Quota![conn_id=1363783645558473151]"] [stack="github.com/pingcap/tidb/server.(*clientConn).Run.func1\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/conn.go:1042\nruntime.gopanic\n\t/usr/local/go1.19.1/src/runtime/panic.go:884\ngithub.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/util/memory/action.go:146\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/util/memory/tracker.go:404\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/util/memory/tracker.go:440\ngithub.com/pingcap/tidb/planner/core.(*indexJoinBuildHelper).buildTemplateRange.func1\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:1666\ngithub.com/pingcap/tidb/planner/core.(*indexJoinBuildHelper).buildTemplateRange\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:1741\ngithub.com/pingcap/tidb/planner/core.(*indexJoinBuildHelper).analyzeLookUpFilters\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:1519\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).getIndexJoinBuildHelper\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:756\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).buildIndexJoinInner2IndexScan\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:885\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).getIndexJoinByOuterIdx\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:746\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).tryToGetIndexJoin\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:1828\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).exhaustPhysicalPlans\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/exhaust_physical_plans.go:1963\ngithub.com/pingcap/tidb/planner/core.(*baseLogicalPlan).findBestTask\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/find_best_task.go:399\ngithub.com/pingcap/tidb/planner/core.(*baseLogicalPlan).enumeratePhysicalPlans4Task\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/find_best_task.go:223\ngithub.com/pingcap/tidb/planner/core.(*baseLogicalPlan).findBestTask\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/find_best_task.go:439\ngithub.com/pingcap/tidb/planner/core.physicalOptimize\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/optimizer.go:648\ngithub.com/pingcap/tidb/planner/core.DoOptimize\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/core/optimizer.go:294\ngithub.com/pingcap/tidb/planner.optimize\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/optimize.go:397\ngithub.com/pingcap/tidb/planner.Optimize\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/planner/optimize.go:245\ngithub.com/pingcap/tidb/executor.(*Compiler).Compile\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/executor/compiler.go:98\ngithub.com/pingcap/tidb/session.(*session).ExecuteStmt\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/session/session.go:2035\ngithub.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/driver_tidb.go:231\ngithub.com/pingcap/tidb/server.(*clientConn).handleStmt\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/conn.go:2049\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/conn.go:1904\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/conn.go:1359\ngithub.com/pingcap/tidb/server.(*clientConn).Run\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/conn.go:1104\ngithub.com/pingcap/tidb/server.(*Server).onConn\n\t/Users/pingcap/workspace/build-common@3/go/src/github.com/pingcap/tidb/server/server.go:563"]
+[2022/10/08 16:13:15.926 +08:00] [INFO] [gc_worker.go:1073] ["[gc worker] start resolve locks"] [uuid=60ed9ce90680001] [safePoint=0] [try-resolve-locks-ts=436526513105141771] [concurrency=1]
+[2022/10/08 16:13:15.927 +08:00] [INFO] [range_task.go:137] ["range task started"] [name=resolve-locks-runner] [startKey=] [endKey=] [concurrency=1]
+
+```
+### 4. What is your TiDB version? (Required)
+```sql
+mysql> select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                           |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v6.4.0-alpha
+Edition: Community
+Git Commit Hash: 556daf722ecb538b0b20aa800185f995e8543a4f
+Git Branch: heads/refs/tags/v6.4.0-alpha
+UTC Build Time: 2022-10-07 14:26:04
+GoVersion: go1.19.1
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv 
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

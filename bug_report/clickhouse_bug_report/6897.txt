@@ -1,0 +1,59 @@
+ID: 6897
+Title: unexpected behavior of input_format_allow_errors_num & input_format_allow_errors_ratio
+Description:
+**Version**: 2019/9/10 Master [1bd75b1](https://github.com/yandex/ClickHouse/commit/1bd75b1e74430be8e4f8e6a4aef2d00a305db3cf)
+
+**Input Format**: JSONEachRow
+
+**Setup SQL**:
+```
+create table default.test_input_ignore_error (a Int16, b Int16) Engine = Log()
+
+insert into default.test_input_ignore_error format JSONEachRow {}
+```
+
+### 1. input_format_allow_errors_num
+- Settings: `input_format_allow_errors_num= 1` and  `input_format_allow_errors_ratio= 0 `
+
+- **Behavior: insertion never throw exception, good records got abandoned after the first bad record**
+
+- **Expected Behavior: insertion throws exception if number of bad lines exceeds 
+`input_format_allow_errors_num` and if insertion succeeds, all good rows should be inserted.**
+
+- Reproduce SQL:
+    ```set input_format_allow_errors_num= 1```
+    ```set input_format_allow_errors_ratio= 0```
+  
+    + insertion never throw exception
+
+    ```insert into default.test_input_ignore_error format JSONEachRow {1} {2} {3}```
+
+    **Result:** Ok. 0 rows in set. Elapsed: 0.004 sec
+    **Expected Result:** throw exception when meet the second bad record
+
+    + good records got abandoned after the first bad record
+
+    ```insert into default.test_input_ignore_error format JSONEachRow {} {2} {} {} {}```
+
+    **Result:** Ok. 1 rows in set. Elapsed: 0.002 sec. 
+    **Expected Result:** insert 4 rows not 1
+
+### 2. input_format_ignore_errors_ratio 
+- Settings: `input_format_allow_errors_num= 0` and  `input_format_allow_errors_ratio= 0.5 `
+
+- **Behavior: the error ratio is not a error ratio in this BATCH but in the records we've SEEN. Also, good records ignored after the first bad record**
+
+  For example, `G` for good and `B` for bad records, set ignore ratio to 0.5: 
+
+  a input sequence `G B G B` is fine. But `G B B G` is not accepted, because CH will reject the second `B`  for a error ratio 0.75 in `G B B` seen records.
+
+- **Expected Behavior: error ratio should calculate on the whole batch ( as the name of this setting implies) and if insertion succeeds, all good rows should be inserted.**
+
+- Reproduce SQL:
+    ```set input_format_allow_errors_num = 0```
+    ```set input_format_allow_errors_ratio= 0.5```
+
+    ```insert into default.test_input_ignore_error format JSONEachRow {1} {} {} {} {}```
+
+    **Result:** Exception on client: Code: 26. DB::Exception: Cannot parse JSON string: expected opening quote: (Already have 1 errors out of 1 rows, which is 1 of all rows): (at row 1)
+    **Expected Result:** insert 4 rows

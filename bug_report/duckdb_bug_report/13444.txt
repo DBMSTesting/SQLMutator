@@ -1,0 +1,223 @@
+ID: 13444
+Title: `list_reduce` called on a list of structs produces made-up values
+Description:
+### What happens?
+
+When calling a `list_reduce` on a list of structs, it might happen that the result has nothing to do with original data.
+
+# Reducing an aptly typed `null` produces empty strings
+
+Consider the following data:
+
+```sql
+create table struct_data(
+    str struct(val text)[]
+)
+;
+
+insert into struct_data values
+    (null)
+;
+```
+
+Now, if we try to reduce the list (which is null) using any function, the following happens:
+
+```sql
+with foo as (
+    select
+        str.reduce((a, b) -> a) as str
+    from struct_data
+)
+select
+    str,
+    str.val,
+    str.val = '',
+    str.val is null,
+    str is null
+from foo
+;
+```
+
+```
+┌─────────────────────┬─────────┬────────────────┬───────────────────┬───────────────┐
+│         str         │   val   │ (str.val = '') │ (str.val IS NULL) │ (str IS NULL) │
+│ struct(val varchar) │ varchar │    boolean     │      boolean      │    boolean    │
+├─────────────────────┼─────────┼────────────────┼───────────────────┼───────────────┤
+│                     │         │ true           │ false             │ true          │
+└─────────────────────┴─────────┴────────────────┴───────────────────┴───────────────┘
+```
+
+Although the resulting struct is (correctly) null, when we access the `val` field we get an empty string instead of a null.
+
+The reduce is important there - if we try to access fields of a struct that is null, we get the expected results:
+
+```sql
+select
+    str[1],
+    str[1].val,
+    str[1].val = '',
+    str[1].val is null,
+    str[1] is null
+from struct_data
+;
+```
+```
+┌─────────────────────┬──────────────┬─────────────────────┬────────────────────────┬──────────────────┐
+│       str[1]        │ (str[1]).val │ ((str[1]).val = '') │ ((str[1]).val IS NULL) │ (str[1] IS NULL) │
+│ struct(val varchar) │   varchar    │       boolean       │        boolean         │     boolean      │
+├─────────────────────┼──────────────┼─────────────────────┼────────────────────────┼──────────────────┤
+│                     │              │                     │ true                   │ true             │
+└─────────────────────┴──────────────┴─────────────────────┴────────────────────────┴──────────────────┘
+```
+
+# Reducing actual values produces empty string
+
+Consider the task of detecting duplicates in a list of text values. One way to approach it is to reduce the list, while first creating a data structure to hold the state of the reduce. (My original usecase was more complex, so I couldn't simply use `list_distinct`).
+
+One way to formulate it is like this:
+
+```sql
+create table filter_data(
+    foo text[]
+)
+;
+
+insert into filter_data values
+    (['some value']),
+    (['some value', 'other value']),
+    (['some value', 'other value', 'some value']),
+    (['some value', 'other value', 'some value', 'other value']),
+    (['some value', 'other value', 'some value', 'other value', 'some value']),
+    (['some value', 'other value', 'some value', 'other value', 'some value', 'other value']),
+    (['some value', 'other value', 'some value', 'other value', 'some value', 'other value', 'some value'])
+;
+
+with
+    transformed as (
+        select
+            foo.list_transform(
+                x -> struct_pack(val := x, conflict := false)
+            ).reduce(
+                (res, x) -> case
+                    when res.conflict then res
+                    when res.val = x.val then res
+                    else struct_pack(val := null, conflict := true)
+                end
+            ) as result
+        from filter_data
+    )
+select
+    result,
+    result.val = ''
+from transformed
+;
+```
+
+One would expect the first row to result in `{val = 'some value', conflict = false}`, and all the other results to end up as `{val = null, conflict = true}`. However, we _actually_ get the following:
+
+```
+┌─────────────────────────────────────────┬───────────────────┐
+│                 result                  │ (result.val = '') │
+│ struct(val varchar, "conflict" boolean) │      boolean      │
+├─────────────────────────────────────────┼───────────────────┤
+│ {'val': some value, 'conflict': false}  │ false             │
+│ {'val': NULL, 'conflict': true}         │                   │
+│ {'val': , 'conflict': false}            │ true              │
+│ {'val': NULL, 'conflict': true}         │                   │
+│ {'val': , 'conflict': false}            │ true              │
+│ {'val': NULL, 'conflict': true}         │                   │
+│ {'val': , 'conflict': false}            │ true              │
+└─────────────────────────────────────────┴───────────────────┘
+```
+
+Every other row produces a row with an empty string inside val, and no conflict, which should not be possible to produce from the original data.
+
+### To Reproduce
+
+Both cases are easiest to reproduce using the following query:
+
+```sql
+with
+    data_(foo) as (values
+        (null::text[]),
+        (['a', 'b', 'c'])
+    ), transformed as (
+        select
+            foo.list_transform(
+                x -> struct_pack(val := x, conflict := false)
+            ).reduce(
+                (res, x) -> case
+                    when res.conflict then res
+                    when res.val = x.val then res
+                    else struct_pack(val := null, conflict := true)
+                end
+            ) as result
+        from data_
+    )
+select
+    result,
+    result.val = ''
+from transformed
+;
+```
+
+The result is
+
+```
+┌─────────────────────────────────────────┬───────────────────┐
+│                 result                  │ (result.val = '') │
+│ struct(val varchar, "conflict" boolean) │      boolean      │
+├─────────────────────────────────────────┼───────────────────┤
+│                                         │ true              │
+│ {'val': , 'conflict': false}            │ true              │
+└─────────────────────────────────────────┴───────────────────┘
+```
+
+but the expected result is
+
+
+```
+┌─────────────────────────────────────────┬───────────────────┐
+│                 result                  │ (result.val = '') │
+│ struct(val varchar, "conflict" boolean) │      boolean      │
+├─────────────────────────────────────────┼───────────────────┤
+│                                         │                   │
+│ {'val': NULL, 'conflict': true}         │                   │
+└─────────────────────────────────────────┴───────────────────┘
+```
+
+### OS:
+
+Ubuntu x64 in WSL on Windows 11
+
+### DuckDB Version:
+
+1.0.0 and nightly v0.0.1 ee3499a
+
+### DuckDB Client:
+
+CLI
+
+### Full Name:
+
+Míma Hlaváček
+
+### Affiliation:
+
+Arista Networks
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

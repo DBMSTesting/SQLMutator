@@ -1,0 +1,119 @@
+ID: 38670
+Title: Segfault during insert due to Materialized column/JSONExtractString
+Description:
+**Describe what's wrong**
+
+When copying data between two (non-replicated) mergetree tables for testing, I have been receiving Segfaults. This does _not_ reproduce consistently, only ~30% of the time.
+
+Looking at the stack traces, this seems to be related to my schema which is using materialized columns with JSONExtract.
+
+**Does it reproduce on recent release?**
+
+Tested on 22.6.1 revision 54455
+
+**How to reproduce**
+
+My schema:
+```sql
+CREATE TABLE default.sharded_events
+(
+    `uuid` UUID,
+    `event` String,
+    `properties` String,
+    `timestamp` DateTime64(6, 'UTC'),
+    `team_id` Int64,
+    `distinct_id` String,
+    `elements_chain` String,
+    `created_at` DateTime64(6, 'UTC'),
+    `person_id` UUID,
+    `person_created_at` DateTime64(3),
+    `person_properties` String,
+    `group0_properties` String,
+    `group1_properties` String,
+    `group2_properties` String,
+    `group3_properties` String,
+    `group4_properties` String,
+    `group0_created_at` DateTime64(3),
+    `group1_created_at` DateTime64(3),
+    `group2_created_at` DateTime64(3),
+    `group3_created_at` DateTime64(3),
+    `group4_created_at` DateTime64(3),
+    `$group_0` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$group_0'), '^"|"$', '') COMMENT 'column_materializer::$group_0',
+    `$group_1` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$group_1'), '^"|"$', '') COMMENT 'column_materializer::$group_1',
+    `$group_2` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$group_2'), '^"|"$', '') COMMENT 'column_materializer::$group_2',
+    `$group_3` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$group_3'), '^"|"$', '') COMMENT 'column_materializer::$group_3',
+    `$group_4` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$group_4'), '^"|"$', '') COMMENT 'column_materializer::$group_4',
+    `$window_id` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$window_id'), '^"|"$', '') COMMENT 'column_materializer::$window_id',
+    `$session_id` String MATERIALIZED replaceRegexpAll(JSONExtractRaw(properties, '$session_id'), '^"|"$', '') COMMENT 'column_materializer::$session_id',
+    `_timestamp` DateTime,
+    `_offset` UInt64
+)
+ENGINE = ReplacingMergeTree(_timestamp)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (team_id, toDate(timestamp), event, cityHash64(distinct_id), cityHash64(uuid))
+SAMPLE BY cityHash64(distinct_id)
+SETTINGS index_granularity = 8192;
+```
+
+The table has ~500M rows. `sharded_events2` table schema is identical.
+
+Copying query:
+```sql
+TRUNCATE TABLE sharded_events2;
+
+set max_block_size=100000, max_insert_block_size=100000, max_threads=20, max_insert_threads=20, optimize_on_insert=0, max_execution_time=0;
+
+INSERT INTO sharded_events2
+SELECT *
+FROM sharded_events
+WHERE person_id <> toUUIDOrZero('');
+```
+
+**Expected behavior**
+
+Copy completes successfully
+
+**Error message and/or stacktrace**
+
+```
+[ip-172-31-93-43] 2022.07.01 07:51:07.040108 [ 31524 ] <Fatal> BaseDaemon: ########################################
+[ip-172-31-93-43] 2022.07.01 07:51:07.047484 [ 31524 ] <Fatal> BaseDaemon: (version 22.6.1.1985 (official build), build id: A1A632F69545B4EC) (from thread 31353) (query_id: fda94723-9874-47f0-8cd6-f8ebc1fe957e) 
+(query: INSERT INTO sharded_events2 SELECT * FROM sharded_events WHERE person_id <> toUUIDOrZero('');) Received signal Segmentation fault (11)
+[ip-172-31-93-43] 2022.07.01 07:51:07.047530 [ 31524 ] <Fatal> BaseDaemon: Address: 0x7f3919d24000 Access: read. Attempted access has violated the permissions assigned to the memory area.
+[ip-172-31-93-43] 2022.07.01 07:51:07.047554 [ 31524 ] <Fatal> BaseDaemon: Stack trace: 0x19a0cc66 0xeed21e1 0xef0e3fb 0xef0ddc2 0x15374cd4 0x153756ba 0x15376b1c 0x15d51be5 0x1737567c 0x17373ff7 0x17373cd6 0x173
+7354a 0x171af9fa 0x171a491e 0x171a61e4 0xb94d0b7 0xb9504dd 0x7f397eab2b43 0x7f397eb44a00
+[ip-172-31-93-43] 2022.07.01 07:51:07.047612 [ 31524 ] <Fatal> BaseDaemon: 2. simdjson::icelake::dom_parser_implementation::stage2(simdjson::dom::document&) @ 0x19a0cc66 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047642 [ 31524 ] <Fatal> BaseDaemon: 3. simdjson::dom::parser::parse_into_document(simdjson::dom::document&, unsigned char const*, unsigned long, bool) & @ 0xeed21e1 in /usr
+/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047677 [ 31524 ] <Fatal> BaseDaemon: 4. DB::FunctionJSONHelpers::Executor<DB::NameJSONExtractRaw, DB::JSONExtractRawImpl, DB::SimdJSONParser>::run(std::__1::vector<DB::Colum
+nWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) @ 0xef0e3fb in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047710 [ 31524 ] <Fatal> BaseDaemon: 5. DB::ExecutableFunctionJSON<DB::NameJSONExtractRaw, DB::JSONExtractRawImpl>::executeImpl(std::__1::vector<DB::ColumnWithTypeAndName, s
+td::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0xef0ddc2 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047736 [ 31524 ] <Fatal> BaseDaemon: 6. DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::Colu
+mnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x15374cd4 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047764 [ 31524 ] <Fatal> BaseDaemon: 7. DB::IExecutableFunction::executeWithoutSparseColumns(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTy
+peAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x153756ba in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047788 [ 31524 ] <Fatal> BaseDaemon: 8. DB::IExecutableFunction::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&,
+ std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x15376b1c in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047825 [ 31524 ] <Fatal> BaseDaemon: 9. DB::ExpressionActions::execute(DB::Block&, unsigned long&, bool) const @ 0x15d51be5 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047848 [ 31524 ] <Fatal> BaseDaemon: 10. DB::ConvertingTransform::onConsume(DB::Chunk) @ 0x1737567c in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047866 [ 31524 ] <Fatal> BaseDaemon: 11. ? @ 0x17373ff7 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047886 [ 31524 ] <Fatal> BaseDaemon: 12. ? @ 0x17373cd6 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047947 [ 31524 ] <Fatal> BaseDaemon: 13. DB::ExceptionKeepingTransform::work() @ 0x1737354a in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047961 [ 31524 ] <Fatal> BaseDaemon: 14. DB::ExecutionThreadContext::executeTask() @ 0x171af9fa in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047980 [ 31524 ] <Fatal> BaseDaemon: 15. DB::PipelineExecutor::executeStepImpl(unsigned long, std::__1::atomic<bool>*) @ 0x171a491e in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.047997 [ 31524 ] <Fatal> BaseDaemon: 16. ? @ 0x171a61e4 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.048091 [ 31524 ] <Fatal> BaseDaemon: 17. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xb94d0b7 in /usr/bin/clickhouse
+[ip-172-31-93-43] 2022.07.01 07:51:07.048109 [ 31524 ] <Fatal> BaseDaemon: 18. ? @ 0xb9504dd in /usr/bin/clickhouse                                                                                               
+[ip-172-31-93-43] 2022.07.01 07:51:07.050846 [ 31524 ] <Fatal> BaseDaemon: 19. ? @ 0x7f397eab2b43 in ?
+[ip-172-31-93-43] 2022.07.01 07:51:07.050881 [ 31524 ] <Fatal> BaseDaemon: 20. ? @ 0x7f397eb44a00 in ?
+[ip-172-31-93-43] 2022.07.01 07:51:07.368926 [ 31524 ] <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: BC7D0D92B4030496529F48AA709DAAEE)
+↖ Progress: 224.45 million rows, 49.70 GB (10.82 million rows/s., 2.40 GB/s.) █████████████████████████████████████████████████████████▏                                               (18.1 CPU, 8.24 GB RAM) 44%E
+rror on processing query: Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000. (ATTEMPT_TO_READ_AFTER_EOF) (version 22.6.1.1985 (official build))
+```
+
+**Additional context**
+
+I am not able to share the dataset here - decided this is worth documenting regardless. However if there's other information/settings I can enable to provide more information let me know!
+
+Also note this does _not_ happen consistently, it's more of a 50/50 or a 30/70 odds. However I've seen this over 5 times over recent schema experimentation I've been doing.

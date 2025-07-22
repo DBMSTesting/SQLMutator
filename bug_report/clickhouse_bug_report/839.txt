@@ -1,0 +1,51 @@
+ID: 839
+Title: Bug: Some queries with LIMIT larger that the result size crash the server
+Description:
+I've found this problem with queries that involve grouping by a nullable column and having a LIMIT larger than the number of rows in the result.
+
+For example:
+
+```sql
+CREATE table chk (
+    category Nullable(UInt32),
+    value Float32,
+    date_index Date,
+    id UInt64
+)
+ENGINE = MergeTree(date_index, id, 8192);
+INSERT INTO chk VALUES (11, 10.0, '2017-05-05', 1);
+select category, sum(value) as value from chk group by category order by category limit 10;
+```
+
+Causes a segmentation fault crash; here's the server's log:
+
+```
+2017.06.01 10:11:19.824869 [ 4 ] <Debug> executeQuery: (from 127.0.0.1:52076) select category, sum(value) as value from chk group by category order by category limit 10
+2017.06.01 10:11:19.825448 [ 4 ] <Debug> test_db.chk (SelectExecutor): Key condition: unknown
+2017.06.01 10:11:19.825505 [ 4 ] <Debug> test_db.chk (SelectExecutor): Date condition: unknown
+2017.06.01 10:11:19.825604 [ 4 ] <Debug> test_db.chk (SelectExecutor): Selected 1 parts by date, 1 parts by key, 1 marks to read from 1 ranges
+2017.06.01 10:11:19.825722 [ 4 ] <Trace> test_db.chk (SelectExecutor): Reading approx. 8192 rows
+2017.06.01 10:11:19.825781 [ 4 ] <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2017.06.01 10:11:19.825958 [ 4 ] <Debug> executeQuery: Query pipeline:
+Limit
+ Expression
+  MergeSorting
+   PartialSorting
+    Expression
+     Aggregating
+      Concat
+       Expression
+        MergeTreeThread
+
+2017.06.01 10:11:19.826549 [ 5 ] <Trace> Aggregator: Aggregating
+2017.06.01 10:11:19.827696 [ 5 ] <Trace> Aggregator: Aggregation method: nullable_keys128
+2017.06.01 10:11:19.827883 [ 5 ] <Trace> Aggregator: Aggregated. 1 to 1 rows (from 0.000 MiB) in 0.001 sec. (782.903 rows/sec., 0.007 MiB/sec.)
+2017.06.01 10:11:19.827895 [ 5 ] <Trace> Aggregator: Merging aggregated data
+2017.06.01 10:11:19.828005 [ 6 ] <Error> BaseDaemon: ########################################
+2017.06.01 10:11:19.828032 [ 6 ] <Error> BaseDaemon: (from thread 5) Received signal Segmentation fault (11).
+2017.06.01 10:11:19.828038 [ 6 ] <Error> BaseDaemon: Address: NULL pointer.
+2017.06.01 10:11:19.830576 [ 6 ] <Error> BaseDaemon: 1. clickhouse-server(DB::ColumnNullable::getPermutation(bool, unsigned long, int, DB::PODArray<unsigned long, 4096ul, Allocator<false>, 15ul>&) const+0x1a1) [0x1e6d661]
+2017.06.01 10:11:19.830619 [ 6 ] <Error> BaseDaemon: 2. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0xa5) [0x341cf45]
+2017.06.01 10:11:19.830638 [ 6 ] <Error> BaseDaemon: 3. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76ba) [0x7f2c05e606ba]
+2017.06.01 10:11:19.830656 [ 6 ] <Error> BaseDaemon: 4. /lib/x86_64-linux-gnu/libc.so.6(clone+0x6d) [0x7f2c0548182d]
+```

@@ -1,0 +1,98 @@
+ID: 127
+Title: Problem with INSERT if having a VIEW with subqueries & AS keyword
+Description:
+That's a really strange one! 
+
+When you create a view (let's call it `test_stats`) that has a subquery with multiple tables (`test1` and `test2`) combined using `UNION ALL` clause, _and_ the first table in that clause has some custom-named columns (using `AS`); then if you try to insert some data to the first table (`test1`) the server will raise an exception that the renamed column wasn't found.
+
+Should the VIEW/UNION ALL query affect the original tables? It looks really weird to me.
+
+Here's an example:
+
+```
+>> CREATE TABLE test1 (id UInt64, date Date) ENGINE = MergeTree(date, (id, date), 8192);
+>> CREATE TABLE test2 (id UInt64, date Date) ENGINE = MergeTree(date, (id, date), 8192);
+
+>> CREATE VIEW test_stats AS SELECT _name, rows_total, rows_inserted, minus(rows_total, rows_inserted) AS _delta FROM 
+       (SELECT * FROM (
+           SELECT 'test1' AS _name, 1234 AS rows_total, count() AS rows_inserted FROM default.test1
+               UNION ALL
+           SELECT 'test2' AS _name, 4568 AS rows_total, count() AS rows_inserted FROM default.test2
+           )
+       );
+```
+
+```
+>> SELECT * FROM test_stats;
+
+Ok. 0 rows in set.
+```
+
+```
+>> INSERT INTO test1 VALUES (1, '2016-09-10');
+
+Received exception from server:
+Code: 10. DB::Exception: Received from localhost:9000, ::1. DB::Exception: Not found column: 'rows_total'.
+
+1 rows in set.
+```
+
+Even if I write explicitly that I want to insert just the `id` and `date`, it still raises the same exception:
+
+```
+>> INSERT INTO test1 (id, date) VALUES (1, '2016-09-10');
+
+Received exception from server:
+Code: 10. DB::Exception: Received from localhost:9000, ::1. DB::Exception: Not found column: 'rows_total'.
+
+1 rows in set.
+```
+
+Inserting into other tables works OK with either syntax:
+
+```
+>> INSERT INTO test2 (id, date) VALUES (1, '2016-09-10');
+
+Ok. 1 rows in set.
+
+>> INSERT INTO test2 VALUES (2, '2016-10-10');
+
+Ok. 1 rows in set.
+```
+
+```
+>> SELECT * FROM test_stats;
+
+┌─_name─┬─rows_total─┬─rows_inserted─┬─_delta─┐
+│ test2 │       4568 │             2 │   4566 │
+└───────┴────────────┴───────────────┴────────┘`
+
+>> DROP TABLE test_stats;
+
+Ok. 0 rows in set.
+```
+
+Let's make sure it was the view/subquery/union's fault:
+
+```
+>> INSERT INTO test1 (id, date) VALUES (1, '2016-09-10');
+
+Ok. 1 rows in set.
+
+>> CREATE VIEW test_stats AS SELECT cnt FROM 
+          (SELECT cnt FROM (
+              SELECT count() AS cnt FROM default.test1
+              UNION ALL
+              SELECT count() AS cnt FROM default.test2
+          )
+      );
+
+>> INSERT INTO test1 (id, date) VALUES (2, '2016-09-10');
+
+Received exception from server:
+Code: 10. DB::Exception: Received from localhost:9000, ::1. DB::Exception: Not found column cnt in block. There are only columns: id, date.
+
+1 rows in set.
+```
+
+I modified the server's output to make it less bloated; this bug appears on the v1.1.53981 (sorry, can't test it with the newer one right now).

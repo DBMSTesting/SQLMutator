@@ -1,0 +1,48 @@
+ID: 27952
+Title: mpp task may get the same ID and lead to query failed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+I run the TPC-DS query56.
+```
+mysql> source /Users/xxx/pc/tidb-bench/tpcds/queries/query_56.sql;
+ERROR 1105 (HY000): DB::Exception: The task [427626637160349697,9] has been registered
+```
+I added some logs to TiDB, and got.
+```
+[2021/09/10 17:29:23.280 +08:00] [WARN] [session.go:972] [AllocMPPTaskID] [id=2]
+[2021/09/10 17:29:23.280 +08:00] [WARN] [session.go:972] [AllocMPPTaskID] [id=3]
+[2021/09/10 17:29:23.280 +08:00] [WARN] [fragment.go:381] [constructMPPTasksForSinglePartitionTable] [id=3] [tableID=112]
+[2021/09/10 17:29:23.280 +08:00] [WARN] [fragment.go:381] [constructMPPTasksForSinglePartitionTable] [id=3] [tableID=112]
+...
+[2021/09/10 17:29:23.280 +08:00] [INFO] [mpp_gather.go:76] ["Dispatch mpp task"] [timestamp=427626637160349697] [ID=3] [address=192.168.197.180:3930] [plan="Table(date_dim)->Sel([eq(tpcds.date_dim.d_year, 2000) eq(tpcds.date_dim.d_moy, 1)])->Send(4, )"] [pf=474]
+...
+[2021/09/10 17:29:23.280 +08:00] [INFO] [mpp_gather.go:76] ["Dispatch mpp task"] [timestamp=427626637160349697] [ID=3] [address=192.168.197.180:3930] [plan="Table(date_dim)->Sel([eq(tpcds.date_dim.d_year, 2000) eq(tpcds.date_dim.d_moy, 1)])->Send(6, )"] [pf=278]
+...
+```
+
+After I added a mutex to protect taskID, the query successed.
+```
+func (s *SessionVars) AllocMPPTaskID(startTS uint64) int64 {
+	s.mppTaskIDAllocator.mu.Lock()
+	defer s.mppTaskIDAllocator.mu.Unlock()
+	if s.mppTaskIDAllocator.lastTS == startTS {
+		s.mppTaskIDAllocator.taskID++
+		log.Warn("AllocMPPTaskID", zap.Int64("id", s.mppTaskIDAllocator.taskID))
+		return s.mppTaskIDAllocator.taskID
+	}
+	s.mppTaskIDAllocator.lastTS = startTS
+	s.mppTaskIDAllocator.taskID = 1
+	return 1
+}
+```
+
+https://github.com/pingcap/tidb/pull/23747 Tried to fix it but I think it doesn't resolve the problem completely.
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

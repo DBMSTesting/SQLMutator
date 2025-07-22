@@ -1,0 +1,17 @@
+ID: 43540
+Title: Atomicity may be broken for a committed transaction whose primary is locked in fair-locking mode and a stale pessimistic lock request arrives after committing
+Description:
+## Bug Report
+
+Consider the following procedure:
+
+1. Transaction T1 begins and locks the first key `k1` in fair locking mode. `k1` become the transaction's primary.
+2. Transaction T1 writes some other keys, e.g. `k2`.
+3. T1 commits. Its primary (`k1`) is successfully committed, and it reports a successful state to the client. Its secondaries are prewritten but not committed yet.
+4. Maybe some other transactions writes `k1` (optional)
+5. TiKV receives a stale `PessimisticLock` request of step1. It successfully locks `k1` since it allows locking with conflict.
+6. Transaction T2 tries to access `k2`, and finds T1's secondary lock. So it tries to resolve the lock.
+7. T2 calls `CheckTxnStatus` on `k1` which is the primary of trasnaction T1.
+8. `CheckTxnStatus` finds the pessimistic lock of T1 on key `k1`. If the lock's TTL has expired (it'll happen eventually), then `CheckTxnStatus` will rollback the lock and return a *rolled back* state to the client (TiDB). Then T2 can rollback the lock on `k2`, which breaks T1's atomicity.
+
+This is somewhat similar to https://github.com/tikv/tikv/issues/14311 . The RPC request replaying after a long time (transaction does some retries and then successfully commit) should be very very unlikely to happen, but it's theoretically possible.

@@ -1,0 +1,201 @@
+ID: 15506
+Title: ASOF LEFT JOIN adds rows when joining a CTE
+Description:
+### What happens?
+
+ASOF LEFT JOIN with 2 rows on the LHS against a table with 3 rows returns 3 matches.
+
+This is a regression since 1.1.3.
+The behavior only occurs when the input is from a CTE. Materializing the inputs with `AS MATERIALIZED` or `CREATE TABLE` yields the original behavior.
+Looking at the plan from explain the join is flipped from LEFT to RIGHT. 
+Before dev2198/22 November 2023 this was failing with binder errors on the ASOF conditions.
+
+
+### To Reproduce
+
+```sql
+INSTALL json
+;
+
+LOAD json
+;
+
+SELECT
+  *
+FROM
+  pragma_version ()
+;
+
+WITH
+  id_with_timepoint AS (
+    SELECT
+      'ID1' AS user_id,
+      '2024-12-23'::TIMESTAMPTZ AS lastSeen
+  ),
+  id_and_payload_with_timepoint AS (
+    SELECT
+      'ID1' AS user_id,
+      '2024-02-11'::TIMESTAMPTZ AS timepoint,
+      '{ "amp": [ {"k": "fqn1"}, {"k": "fqn2"}]}'::VARCHAR AS payload
+  ),
+  --
+  -- First ASOF LEFT
+  -- 1 row:
+  --   ID1, 2024-12-23, { "amp": [ {"k": "fqn1"}, {"k": "fqn2"}]}
+  --
+  id_with_payload_intermediate AS (
+    SELECT
+      id_with_timepoint.user_id,
+      id_with_timepoint.lastSeen,
+      id_and_payload_with_timepoint.payload,
+    FROM
+      id_with_timepoint ASOF
+      LEFT JOIN id_and_payload_with_timepoint ON (
+        id_with_timepoint.user_id = id_and_payload_with_timepoint.user_id
+        AND id_and_payload_with_timepoint.timepoint < id_with_timepoint.lastSeen
+      )
+  ),
+  --
+  -- Lateral unnest
+  -- 2 rows
+  --  ID1, 2024-12-23, fqn1
+  --  ID1, 2024-12-23, fqn2
+  --
+  -- Materializing here with CTAS or AS MATERIALIZED changes behavior
+  -- id_with_fqn AS MATERIALIZED (
+  --
+  id_with_fqn AS (
+    SELECT
+      user_id,
+      lastSeen,
+      t.k_fqn
+    FROM
+      id_with_payload_intermediate
+      LEFT JOIN LATERAL UNNEST(payload ->> '$.amp[*].k') AS t (k_fqn) ON TRUE
+  ),
+  --
+  fqn_table AS (
+    SELECT
+      *
+    FROM
+      (
+        VALUES
+          ('fqn2', '2021-03-03'::TIMESTAMPTZ),
+          ('fqn2', '2021-02-02'::TIMESTAMPTZ),
+          ('fqn1', '2021-01-01'::TIMESTAMPTZ)
+      ) AS data (ap_fqn, timepoint)
+  )
+  -- LEFT ASOF
+  -- 
+  -- In 1.1.3 and in 1.1.4 dev3836 when id_with_fqn `AS MATERIALIZED (`
+  -- 2 rows:
+  --  fqn1, 2021-01-01
+  --  fqn2, 2021-03-03
+  --
+  -- In 1.1.4 dev3836 without MATERIALIZED cte
+  -- 3 rows:
+  --  fqn1, 2021-01-01
+  --  fqn2, 2021-02-02
+  --  fqn2, 2021-03-03
+  --
+SELECT
+  id_with_fqn.user_id,
+  id_with_fqn.k_fqn,
+  fqn_table.ap_fqn,
+  fqn_table.timepoint
+FROM
+  id_with_fqn ASOF
+  LEFT JOIN fqn_table ON (
+    id_with_fqn.k_fqn = fqn_table.ap_fqn
+    AND fqn_table.timepoint < id_with_fqn.lastSeen
+  )
+ORDER BY
+  k_fqn,
+  timepoint
+;
+```
+
+Output
+```
+┌─────────────────┬────────────┐
+│ library_version │ source_id  │
+│     varchar     │  varchar   │
+├─────────────────┼────────────┤
+│ v1.1.3          │ 19864453f7 │
+└─────────────────┴────────────┘
+┌─────────┬─────────┬─────────┬──────────────────────────┐
+│ user_id │  k_fqn  │ ap_fqn  │        timepoint         │
+│ varchar │ varchar │ varchar │ timestamp with time zone │
+├─────────┼─────────┼─────────┼──────────────────────────┤
+│ ID1     │ fqn1    │ fqn1    │ 2021-01-01 00:00:00+01   │
+│ ID1     │ fqn2    │ fqn2    │ 2021-03-03 00:00:00+01   │
+└─────────┴─────────┴─────────┴──────────────────────────┘
+┌─────────────────┬────────────┐
+│ library_version │ source_id  │
+│     varchar     │  varchar   │
+├─────────────────┼────────────┤
+│ v1.1.4-dev3741  │ ab8c909857 │
+└─────────────────┴────────────┘
+┌─────────┬─────────┬─────────┬──────────────────────────┐
+│ user_id │  k_fqn  │ ap_fqn  │        timepoint         │
+│ varchar │ varchar │ varchar │ timestamp with time zone │
+├─────────┼─────────┼─────────┼──────────────────────────┤
+│ ID1     │ fqn1    │ fqn1    │ 2021-01-01 00:00:00+00   │
+│ ID1     │ fqn2    │ fqn2    │ 2021-02-02 00:00:00+00   │
+│ ID1     │ fqn2    │ fqn2    │ 2021-03-03 00:00:00+00   │
+└─────────┴─────────┴─────────┴──────────────────────────┘
+┌─────────────────┬────────────┐
+│ library_version │ source_id  │
+│     varchar     │  varchar   │
+├─────────────────┼────────────┤
+│ v1.1.4-dev3836  │ ec7be6f00e │
+└─────────────────┴────────────┘
+┌─────────┬─────────┬─────────┬──────────────────────────┐
+│ user_id │  k_fqn  │ ap_fqn  │        timepoint         │
+│ varchar │ varchar │ varchar │ timestamp with time zone │
+├─────────┼─────────┼─────────┼──────────────────────────┤
+│ ID1     │ fqn1    │ fqn1    │ 2021-01-01 00:00:00+00   │
+│ ID1     │ fqn2    │ fqn2    │ 2021-02-02 00:00:00+00   │
+│ ID1     │ fqn2    │ fqn2    │ 2021-03-03 00:00:00+00   │
+└─────────┴─────────┴─────────┴──────────────────────────┘
+```
+
+### OS:
+
+maxOS 15.2
+
+### DuckDB Version:
+
+v1.1.4-dev3836 
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Rob Jackson
+
+### Affiliation:
+
+exaforce.com
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

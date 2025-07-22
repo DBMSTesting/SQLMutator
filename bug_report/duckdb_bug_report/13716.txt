@@ -1,0 +1,92 @@
+ID: 13716
+Title: Icu autoloading on overloads
+Description:
+Current autoloading logic works like:
+
+1. do a lookup for a function name
+2. if empty result set, lookup in EXTENSION_FUNCTIONS (or EXTENSION_COPY_FUNCTIONS, or EXTENSION_TYPES, or EXTENSION_COLLATIONS, depending on type)
+3. do another lookup
+
+This fails for functions where overloads are provided in extensions, since the first step would succeed, leading to no autoloading.
+
+The problem is inherently not super nice, since either we blindly perform autoloading (and might do so N times, paying potentially lag), or when we will eventually realize we might need overloads we will miss context (and we might also not be able to decide on the overload in the same way before and after load).
+
+Only proper solution is performing Autoloading in the same place it's done now also for some overloads.
+
+#### Solving ICU autoloading problems
+The most visible source of problems here, and the one meant to be solved by this PR, are ICU overloads.
+
+This is both since ICU is one of the few autoloadable extensions to provide a lots of autoloads, and since ICU is statically linked-in by default in most platforms, but NOT shipped by default in DuckDB-Wasm.
+
+Current solution to support same syntax locally and on the Web is, in most cases, just force a load of ICU on startup. While this works, it's unnecessary slow AND partially defeats the purpose of autoloading. 
+
+#### Solution
+A list of functions in the ICU extensions that provide overloads to already existing functions has been compiled by a logic like:
+```
+CREATE TABLE OLD as FROM SELECT count(*), function_name FROM duckdb_functions() GROUP BY function_name;
+INSTALL icu;
+LOAD icu;
+CREATE TABLE NEW as FROM SELECT count(*), function_name FROM duckdb_functions() GROUP BY function_name;
+FROM OLD,NEW WHERE OLD.function_name = NEW.function_name AND #1 != #3;
+```
+
+Then when such a function is found, TryAutoLoading is performed on ICU.
+Given no information is given back to the user on failures, this is only attempted once per instance. This is to mitigate performing one INSTALL request for every query with a `timezone` (say on a commit with no ICU available remotely).
+
+On failure to find an overloads, the error message will show that autoloading has been attempted (at some previous point), but given context on the actual error has been lost, a generic error message inviting to explicitly INSTALL and LOAD will be shown.
+
+#### Demo
+Current behaviour
+```
+D select now() at time zone 'PST';
+Binder Error: No function matches the given name and argument types 'timezone(STRING_LITERAL, TIMESTAMP WITH TIME ZONE)'. You might need to add explicit type casts.
+	Candidate functions:
+	timezone(DATE) -> BIGINT
+	timezone(TIMESTAMP) -> BIGINT
+	timezone(INTERVAL) -> BIGINT
+	timezone(INTERVAL, TIME WITH TIME ZONE) -> TIME WITH TIME ZONE
+
+LINE 1: select now() at time zone 'PST';
+                     ^
+```
+
+Current when autoloading works:
+```
+D select now() at time zone 'PST';
+┌─────────────────────────────┐
+│ main.timezone('PST', now()) │
+│          timestamp          │
+├─────────────────────────────┤
+│ 2024-09-03 05:21:24.425     │
+└─────────────────────────────┘
+```
+
+Current when autoloading fails:
+```
+D select now() at time zone 'PST';
+Binder Error: No function matches the given name and argument types 'timezone(STRING_LITERAL, TIMESTAMP WITH TIME ZONE)'. You might need to add explicit type casts.
+	Candidate functions:
+	timezone(DATE) -> BIGINT
+	timezone(TIMESTAMP) -> BIGINT
+	timezone(INTERVAL) -> BIGINT
+	timezone(INTERVAL, TIME WITH TIME ZONE) -> TIME WITH TIME ZONE
+
+Implicit installing and loading of 'icu' failed.
+Explcitly `INSTALL icu; LOAD icu;` might provide relevant overloads.
+
+LINE 1: select now() at time zone 'PST';
+                     ^
+```
+
+
+#### Limitiations
+The main limitation is that this currently works only for ICU. Generalizing this is viable, requires both compiling list of overloads (ideally to be done dynamically) and to provide a more general mechanism to register extension for which TryAutoLoading has been tried in ClientContext (removing tried_autoloading_icu and using a map from autoloadable extensions names)
+The same mechanism can also be used to improve other cases where TryAutoLoading is used, so that repeated failures are avoided. For example, I think the spatial+parquet interaction might incur in 1 request per parquet file if the requests are failing. This has not been raised yet, but eventually might need fixing. Similar cases might exist elsewhere, but haven't looked too hard.
+
+#### How to move forward
+Goal of this PR is offer a way forward for duckdb-wasm, so the target on ICU. This also means has basically no effect on distributed binaries that links in ICU, given in that case ICU will already be available in any case.
+
+I would like to use this in duckdb-wasm, one way would be to merge this in duckdb, unsure whether main or feature.
+I can also work with this merged into feature, and applying this as a patch on top of duckdb v1.1.0.
+
+Once this logic will be moved to duckdb-wasm (either as part of duckdb or as a patch), this solves https://github.com/duckdb/duckdb-wasm/issues/1770 and various similar issues raised over time.

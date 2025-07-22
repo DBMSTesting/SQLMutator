@@ -1,0 +1,94 @@
+ID: 6195
+Title: Query using JSONExtractRaw over a boolean value hangs with 100% CPU usage
+Description:
+**TL;DR**
+```
+SELECT JSONExtractRaw(json_string_field, 'key_with_boolean_value') FROM table;  -- hangs
+SELECT visitParamExtractRaw(json_string_field, 'key_with_boolean_value') FROM table;  -- OK
+SELECT JSONExtractRaw(json_string_field, 'key_with_boolean_value') FROM table WHERE certain_row_id = 1;  -- OK
+```
+
+**Describe the bug**
+
+Running such a query over a MergeTree table makes it hang and use 100% of the CPU core:
+```SELECT click_id, JSONExtractRaw(data, 'adBlock') FROM fingerprint WHERE date = today() ORDER BY created_at LIMIT 1;```
+It doesn't get either killed or completed (waited for a hour on a table with just ~500K rows). There's also nothing in the error log. Had to restart the server :(
+
+The funny thing is if I explicitly add more clauses in the WHERE, there's no hanging. Like this one:
+```SELECT click_id, JSONExtractRaw(data, 'adBlock') FROM fingerprint WHERE date = today() AND click_id = 'd60f013d-2f15-4c34-8a33-39de48e6b97b' ORDER BY created_at LIMIT 1;```
+(the `click_id` value is the same that would've returned by the first query)
+
+`JSONExtractRaw(data, 'otherKey')` over the keys having the string (and not a boolean) works fine. It seems to happen only with the booleans.
+
+Other functions like JSONExtractString or JSONExtractBool over those boolean elements work fine. 
+(well, I was also hoping that `JSONExtractString(json_string_field, 'some_boolean')` would return `'true'` or `'false'`, but whatever)
+
+`SELECT DISTINCT visitParamExtractRaw(data, 'adBlock') FROM fingerprint;` shows:
+```
+┌─adblock─┐
+│ false   │
+│ true    │
+│         │
+└─────────┘
+```
+The third, empty value is there because there are several rows with the `data` being the empty string (not even an empty object like `'{}'`).
+
+By the way, `visitParamExtractRaw` works fine:
+
+```
+SELECT click_id, visitParamExtractRaw(data, 'adBlock') FROM fingerprint WHERE date = today() ORDER BY created_at LIMIT 1;
+```
+
+`perf top -p $(pidof clickhouse-server)` while having multiple hanged queries:
+```
+Samples: 1M of event 'cycles:ppp', Event count (approx.): 370232537185
+Overhead  Shared Object       Symbol
+  45.86%  clickhouse          [.] _ZN2DB11WriteBuffer5writeEPKcm
+  36.31%  clickhouse          [.] memcpy
+  17.51%  clickhouse          [.] _ZN2DB11WriteBuffer4nextEv
+```
+
+The same command while everything's alright:
+```
+Samples: 3K of event 'cycles:ppp', Event count (approx.): 512427099
+Overhead  Shared Object       Symbol
+   4.52%  clickhouse          [.] memcpy
+   4.49%  clickhouse          [.] LZ4_compress_fast_extState
+   1.75%  clickhouse          [.] free
+   1.56%  clickhouse          [.] _ZN2DB12ColumnString10insertFromERKNS_7IColumnEm
+```
+
+* Server version: 19.11.3.11
+* Both binary (clickhouse-client) and HTTP
+
+**Additional context**  
+It's a MergeTree table that originally had such structure:
+```
+CREATE TABLE default.fingerprint (`created_at` DateTime DEFAULT now(), `date` Date DEFAULT toDate(created_at), `ip` String, `snip1` String, `snip2` String, `headers` String, `click_id` String, `snip3` String) ENGINE = MergeTree(date, (date, snip1), 8192);
+CREATE TABLE default.fingerprint_buffer AS default.fingerprint ENGINE = Buffer(default, fingerprint, 4, 5, 30, 25, 100, 1000000, 10000000);
+```
+
+Then I added a new column:
+```
+DROP TABLE fingerprint_buffer;
+ALTER TABLE fingerprint ADD COLUMN data String AFTER snip3;
+CREATE TABLE default.fingerprint_buffer AS default.fingerprint ENGINE = Buffer(default, fingerprint, 4, 5, 30, 25, 100, 1000000, 10000000);
+```
+
+The trace log of such a hanged query:
+```
+2019.07.28 09:52:06.350971 [ 46 ] {} <Trace> HTTPHandler: Request URI: /?session_id=553a681b-b4cc-4d8e-9bab-711fee42f641&database=default&stacktrace=0&query_id=aa5ef8cb-3156-4b23-bd0a-016d9a40420b
+2019.07.28 09:52:06.351748 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Debug> executeQuery: (from 127.0.0.1:64605) SELECT click_id, JSONExtractRaw(data, 'adBlock') adblock FROM default.fingerprint WHERE date = today() LIMIT 3 FORMAT PrettyCompactMonoBlock
+2019.07.28 09:52:06.355713 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Debug> default.fingerprint (SelectExecutor): Key condition: (column 0 in [18105, 18105])
+2019.07.28 09:52:06.355774 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Debug> default.fingerprint (SelectExecutor): MinMax index condition: (column 0 in [18105, 18105])
+2019.07.28 09:52:06.355811 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Debug> default.fingerprint (SelectExecutor): Selected 4 parts by date, 4 parts by key, 4 marks to read from 4 ranges
+2019.07.28 09:52:06.355972 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Trace> default.fingerprint (SelectExecutor): Reading approx. 32768 rows with 4 streams
+2019.07.28 09:52:06.356048 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.07.28 09:52:06.356758 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Debug> executeQuery: Query pipeline:
+2019.07.28 09:52:06.358298 [ 46 ] {aa5ef8cb-3156-4b23-bd0a-016d9a40420b} <Trace> UnionBlockInputStream: Waiting for threads to finish
+2019.07.28 09:52:59.769097 [ 49 ] {eb81beb7-88ec-4cff-87b3-8ab46ca892a9} <Debug> executeQuery: (from 127.0.0.1:46852) KILL QUERY WHERE query_id = 'aa5ef8cb-3156-4b23-bd0a-016d9a40420b' ASYNC
+2019.07.28 09:52:59.769163 [ 49 ] {eb81beb7-88ec-4cff-87b3-8ab46ca892a9} <Debug> executeQuery: (internal) SELECT query_id, user, query FROM system.processes WHERE query_id = 'aa5ef8cb-3156-4b23-bd0a-016d9a40420b'
+2019.07.28 09:54:55.967934 [ 49 ] {6eb26a38-ac4f-408e-81b1-c0a98a279a8b} <Debug> executeQuery: (from 127.0.0.1:46852) KILL QUERY WHERE query_id = 'aa5ef8cb-3156-4b23-bd0a-016d9a40420b' ASYNC
+```
+
+It's weird, but I couldn't reproduce it myself yet.

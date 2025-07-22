@@ -1,0 +1,51 @@
+ID: 58496
+Title: Tracking the memory leak problem
+Description:
+After I upgrade clickhouse from 21.8 to 22.8.21.38 lts,I encountered memory leak.The clickhouse process memory keep growing observably about 1GB per day,and release memory after restart server.
+I had checked all metrics about clickhouse follow this: [who-ate-my-memory](https://kb.altinity.com/altinity-kb-setup-and-maintenance/altinity-kb-who-ate-my-memory/)
+``` text
+caches
+primary keys in memory
+merge memory
+memory engines
+``` 
+All those matrics are have low memory useage.Then I found jemalloc memory was similar to clickhouse instance memory,those are three jemalloc metrics:
+``` text
+jemalloc.resident
+jemalloc.active
+jemalloc.allocated
+```
+So,I try to gather the clickhouse memory using jemalloc profiling tools in my test environment.
+Turn on jemalloc profile and start clickhouse like this:
+``` bash
+export MALLOC_CONF=background_thread:true,prof:true,prof_leak:true,lg_prof_sample:17,lg_prof_interval:32,prof_final:true,prof_prefix:/data/jemalloc/jeprof
+export CLICKHOUSE_WATCHDOG_ENABLE=0
+
+nohup /usr/bin/clickhouse-server --config=/etc/clickhouse-server/config.xml &
+```
+
+Then show memory with jeprof tool, the two heap files have 24 hours interval:
+``` bash
+/usr/local/jemalloc-521/bin/jeprof /usr/bin/clickhouse --base=/data/jemalloc/jeprof.36298.2172.i2172.heap /data/jemalloc/jeprof.36298.15994.i15994.heap
+```
+the top command output:
+``` text
+(jeprof) top
+Total: 272.1 MB
+    99.4  36.5%  36.5%    105.3  38.7% std::__1::__tree::__emplace_unique_key_args
+    98.0  36.0%  72.6%    198.2  72.8% Poco::Logger::unsafeGet
+    19.4   7.1%  79.7%     56.2  20.6% DB::SerializationArray::enumerateStreams
+    16.3   6.0%  85.7%    -19.5  -7.2% boost::multi_index::detail::ordered_index_impl::insert_
+    13.0   4.8%  90.4%     16.0   5.9% boost::multi_index::detail::hashed_index::insert_
+    11.3   4.1%  94.6%     19.2   7.0% std::__1::__hash_table::__emplace_unique_key_args
+     7.0   2.6%  97.1%     35.1  12.9% std::__1::__hash_table::__rehash
+     5.5   2.0%  99.2%      5.6   2.1% std::__1::vector::__emplace_back_slow_path
+     4.9   1.8% 101.0%      6.9   2.5% DB::DataTypeArray::doGetDefaultSerialization
+     3.0   1.1% 102.1%      3.0   1.1% boost::multi_index::detail::hashed_index::unchecked_rehash
+```
+According to the output, Is it possible to state that these two lines leak memory?
+``` text
+    99.4  36.5%  36.5%    105.3  38.7% std::__1::__tree::__emplace_unique_key_args
+    98.0  36.0%  72.6%    198.2  72.8% Poco::Logger::unsafeGet
+```
+And how to do it?

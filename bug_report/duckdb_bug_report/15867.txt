@@ -1,0 +1,129 @@
+ID: 15867
+Title: Profiler output always shows the `query_name` no matter the value of `custom_profiling_settings[QUERY_NAME]`
+Description:
+### What happens?
+
+_In my opinion, this is more like a small, annoying nit than an actual bug._
+
+The profiling output of Duckdb seemingly always shows the value of `query_name` (which is actually the [value of the query](https://github.com/duckdb/duckdb/blob/5d02d69e5ca85c9fb00cf3cd51e91ea7b875872c/src/main/query_profiler.cpp#L108)) no matter the value of `custom_profiling_settings[QUERY_NAME]`.
+
+This is fine in most cases, but if sensitive information could show up in the query, it would be great if showing the query name (aka the query) was truly optional. E.g.: in my use-case I was running queries that contain a `CREATE SECRET` statement, and I really want to avoid showing the secret in the profiliing output.
+
+Eyeballing the code the bug is present in current master, and fixing it is rather straightforward:
+
+- [Here](https://github.com/duckdb/duckdb/blob/5d02d69e5ca85c9fb00cf3cd51e91ea7b875872c/src/main/query_profiler.cpp#L223), adding `query_name` should be conditional, e.g.:
+```cpp
+if (info.Enabled(settings, MetricsType::QUERY_NAME)) {
+  info.metrics[MetricsType::QUERY_NAME] = query_info.query_name;
+}
+```
+- And probably [here](https://github.com/duckdb/duckdb/blob/5d02d69e5ca85c9fb00cf3cd51e91ea7b875872c/src/main/query_profiler.cpp#L600), should be a conditional print as well, e.g.:
+```cpp
+ss << (info.Enabled(settings, MetricsType::QUERY_NAME ? StringUtil::Replace(query_info.query_name, "\n", " ") : "") + "\n";
+```
+
+Please note that the above code considered as pseudo code, I did not actually build and run it. I'm trying to use it only to better explain my idea of the fix.
+
+### To Reproduce
+
+```
+$ duckdb
+v1.1.2
+Enter ".help" for usage hints.
+Connected to a transient in-memory database.
+Use ".open FILENAME" to reopen on a persistent database.
+```
+```sql
+CREATE TABLE repro_table (key INTEGER, value VARCHAR);
+INSERT INTO repro_table VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e');
+PRAGMA enable_profiling = 'query_tree';
+PRAGMA profiling_mode = 'standard';
+PRAGMA custom_profiling_settings = '{
+      "CPU_TIME": "false",
+      "CUMULATIVE_CARDINALITY": "false",
+      "CUMULATIVE_ROWS_SCANNED": "false",
+      "BLOCKED_THREAD_TIME": "false",
+      "EXTRA_INFO": "false",
+      "LATENCY": "false",
+      "OPERATOR_CARDINALITY": "false",
+      "OPERATOR_ROWS_SCANNED": "false",
+      "OPERATOR_TIMING": "false",
+      "OPERATOR_TYPE": "false",
+      "QUERY_NAME": "false",
+      "RESULT_SET_SIZE": "false",
+      "ROWS_RETURNED": "false"
+  }';
+SELECT * FROM repro_table;
+```
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+SELECT * FROM repro_table;
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 0.0002s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+└───────────────────────────┘
+```
+```
+┌───────┬─────────┐
+│  key  │  value  │
+│ int32 │ varchar │
+├───────┼─────────┤
+│     1 │ a       │
+│     2 │ b       │
+│     3 │ c       │
+│     4 │ d       │
+│     5 │ e       │
+└───────┴─────────┘
+```
+The problem is the presence of `SELECT * FROM repro_table;` in the output while `"QUERY_NAME": "false"`.
+
+### OS:
+
+Debian 6.1.123-1 (2025-01-02) x86_64 GNU/Linux
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+duckdb REPL
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Robert Ormandi
+
+### Affiliation:
+
+Roku
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

@@ -1,0 +1,213 @@
+ID: 16213
+Title: Specific query not finishing since v1.1.0 and filling up all temp disk space
+Description:
+### What happens?
+
+We have a specific query (involving a join and subqueries for counting), of which a minimal reproducible example has been derived below. It operates on two tables, one with over a million rows, the other 4-5% of that. The query works fine in DuckDB 1.0.0 and finishes very fast (at most a few seconds). However, in later releases it never seems to finish -- instead, a temporary directory gets created that keeps growing (and the progress bar remains stuck at 50%).
+
+A `git bisect` helped point out that the commit introducing the problem seems to be https://github.com/duckdb/duckdb/commit/91b0fb71d17090e9f68332e65673ab899d691bca .
+
+### To Reproduce
+
+Generate dummy data (two Parquet files) using the following Python script (with numpy, pandas, and duckdb):
+
+```python
+import numpy as np
+import pandas as pd
+import duckdb
+
+
+np.random.seed(12345)
+
+dates = np.random.randint(low=1514764800.0, high=1704067200.0, size=(1000000,))
+categories = np.random.randint(low=0, high=200, size=(1000000,))
+dates.sort()
+
+records = pd.DataFrame({
+    "creation_dt": dates,
+    "category": categories,
+}).reset_index().rename(columns={"index": "id"})
+records["creation_dt"] = records["creation_dt"].map(lambda x: pd.Timestamp(x * 1e9))
+records["category"] = records["category"].map('{:02X}'.format)
+
+labels = records.sample(frac=0.05, random_state=23456)
+label_delays = np.random.randint(low=1 * 60 * 60, high=125 * 24 * 60 * 60, size=(len(labels.index),))
+labels["label_dt"] = labels["creation_dt"] + pd.to_timedelta(label_delays, "s")
+labels["label"] = 1
+
+db = duckdb.connect()
+db.sql("""
+    copy (
+       select id, creation_dt::timestamp as creation_dt, creation_dt::date as creation_day, category from records
+    ) to 'records.parquet'
+""")
+db.sql("""
+    copy (
+       select id, label_dt::timestamp as label_dt, label from labels
+    ) to 'labels.parquet'
+""")
+```
+
+`records.parquet` has a million rows looking like this:
+
+```
+┌───────┬─────────────────────┬──────────────┬──────────┐
+│  id   │     creation_dt     │ creation_day │ category │
+│ int64 │      timestamp      │     date     │ varchar  │
+├───────┼─────────────────────┼──────────────┼──────────┤
+│     0 │ 2018-01-01 00:02:15 │ 2018-01-01   │ A5       │
+│     1 │ 2018-01-01 00:17:21 │ 2018-01-01   │ 62       │
+│     2 │ 2018-01-01 00:22:10 │ 2018-01-01   │ 07       │
+└───────┴─────────────────────┴──────────────┴──────────┘
+```
+
+5% of which has a corresponding row in `labels.parquet` looking like this:
+
+```
+┌────────┬─────────────────────┬───────┐
+│   id   │      label_dt       │ label │
+│ int64  │      timestamp      │ int64 │
+├────────┼─────────────────────┼───────┤
+│ 970100 │ 2024-02-13 10:14:11 │     1 │
+│ 524709 │ 2021-05-15 17:11:48 │     1 │
+│ 800619 │ 2022-11-28 23:57:17 │     1 │
+└────────┴─────────────────────┴───────┘
+```
+
+
+
+Then run the following SQL (on an in-memory database or on a file, same result). The query should result into a table that has a row for each combination of `creation_day` and `category` appearing in `records` with a third column `num_labeled_30d` that contains a count of how many records with that `category` have been labeled in the 30 days prior to `creation_day`.
+
+```sql
+create or replace table records as
+from 'records.parquet';
+
+
+create or replace table labels as
+from 'labels.parquet';
+
+with
+day_cat_rows as
+  (select category,
+          creation_day
+   from records
+   group by category,
+            creation_day),
+recs as
+  (select category,
+          records.creation_dt,
+          labels.label_dt,
+          labels.label
+   from records
+   left join labels on labels.id = records.id),
+counts as
+  (select day_cat_rows.creation_day,
+          category,
+
+     (select count(1)
+      from recs
+      where recs.creation_dt > day_cat_rows.creation_day - '30 days'::interval
+        and recs.creation_dt <= day_cat_rows.creation_day
+        and recs.category = day_cat_rows.category
+        and recs.label_dt <= day_cat_rows.creation_day
+        and recs.label = 1) as num_labeled_30d,
+   from day_cat_rows)
+select *
+from counts;
+```
+
+DuckDB 1.0.0 will give an output that looks like this:
+
+```
+┌──────────────┬──────────┬─────────────────┐
+│ creation_day │ category │ num_labeled_30d │
+│     date     │ varchar  │      int64      │
+├──────────────┼──────────┼─────────────────┤
+│ 2023-11-25   │ 05       │               2 │
+│ 2023-11-25   │ 3A       │               0 │
+│ 2023-11-25   │ 09       │               0 │
+│ 2023-11-25   │ 62       │               0 │
+│ 2023-11-25   │ 32       │               1 │
+│ 2023-11-25   │ 83       │               1 │
+│ 2023-11-25   │ 92       │               0 │
+│ 2023-11-25   │ 21       │               0 │
+│ 2023-11-25   │ BA       │               2 │
+│ 2023-11-25   │ 96       │               0 │
+│ 2023-11-25   │ 6F       │               1 │
+│ 2023-11-25   │ 64       │               0 │
+│ 2023-11-25   │ 24       │               1 │
+│ 2023-11-25   │ 14       │               0 │
+│ 2023-11-25   │ 5D       │               0 │
+│ 2023-11-25   │ 6A       │               0 │
+│ 2023-11-25   │ 4D       │               0 │
+│ 2023-11-25   │ B7       │               0 │
+│ 2023-11-25   │ 9E       │               1 │
+│ 2023-11-25   │ 1F       │               0 │
+│     ·        │ ·        │               · │
+│     ·        │ ·        │               · │
+│     ·        │ ·        │               · │
+│ 2021-09-07   │ 3F       │               1 │
+│ 2021-09-07   │ 74       │               0 │
+│ 2021-09-07   │ 06       │               0 │
+│ 2021-09-07   │ 52       │               0 │
+│ 2021-09-07   │ 2F       │               0 │
+│ 2021-09-07   │ 8B       │               0 │
+│ 2021-09-07   │ 17       │               0 │
+│ 2021-09-07   │ 89       │               1 │
+│ 2021-09-07   │ 39       │               1 │
+│ 2021-09-07   │ 5A       │               1 │
+│ 2021-09-07   │ 7E       │               0 │
+│ 2021-09-07   │ 82       │               0 │
+│ 2021-09-07   │ 7B       │               0 │
+│ 2021-09-07   │ 90       │               0 │
+│ 2021-09-08   │ 6D       │               1 │
+│ 2021-09-08   │ A0       │               1 │
+│ 2021-09-08   │ 67       │               2 │
+│ 2021-09-08   │ 94       │               0 │
+│ 2021-09-08   │ 61       │               0 │
+│ 2021-09-08   │ 60       │               1 │
+├──────────────┴──────────┴─────────────────┤
+│ 393154 rows (40 shown)          3 columns │
+└───────────────────────────────────────────┘
+```
+But in later releases, it does not finish.
+
+### OS:
+
+macOS 15.3, arm64
+
+### DuckDB Version:
+
+1.1.0 and later
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+M1 Pro chip, 32 GB RAM
+
+### Full Name:
+
+Thomas Daniels
+
+### Affiliation:
+
+DNS Belgium
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

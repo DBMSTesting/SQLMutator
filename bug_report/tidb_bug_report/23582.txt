@@ -1,0 +1,114 @@
+ID: 23582
+Title: INL_JOIN hint is not used correctly
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+``` sql
+CREATE TABLE `tbl_1` (
+  `col_5` decimal(47,21) NOT NULL DEFAULT '5308.88',
+  `col_6` enum('Alice','Bob','Charlie','David') DEFAULT NULL,
+  `col_7` float NOT NULL,
+  `col_8` bigint(20) NOT NULL DEFAULT '-688199144806783096',
+  `col_9` varchar(248) NOT NULL,
+  PRIMARY KEY (`col_5`,`col_7`,`col_9`,`col_8`) /*T![clustered_index] CLUSTERED */,
+  UNIQUE KEY `idx_3` (`col_9`(3),`col_8`),
+  UNIQUE KEY `idx_4` (`col_8`),
+  KEY `idx_5` (`col_7`),
+  KEY `idx_6` (`col_7`),
+  UNIQUE KEY `idx_7` (`col_5`,`col_7`,`col_8`),
+  UNIQUE KEY `idx_8` (`col_7`,`col_6`,`col_8`,`col_5`),
+  UNIQUE KEY `idx_9` (`col_9`,`col_8`),
+  KEY `idx_10` (`col_9`,`col_5`),
+  KEY `idx_11` (`col_5`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+PARTITION BY HASH( `col_8` )
+PARTITIONS 4;
+CREATE TABLE `tbl_2` (
+  `col_10` decimal(10,0) DEFAULT '142',
+  `col_11` enum('Alice','Bob','Charlie','David') NOT NULL,
+  `col_12` datetime NOT NULL DEFAULT '2017-11-14 00:00:00',
+  `col_13` double NOT NULL,
+  `col_14` mediumint(9) NOT NULL DEFAULT '-2341051',
+  PRIMARY KEY (`col_13`,`col_12`,`col_14`) /*T![clustered_index] CLUSTERED */,
+  KEY `idx_13` (`col_11`,`col_14`,`col_10`),
+  UNIQUE KEY `idx_14` (`col_14`,`col_11`,`col_12`),
+  KEY `idx_15` (`col_12`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+desc select /*+ INL_JOIN(tbl_1) */ tbl_1.col_8 from tbl_1  where col_7 in ( select col_13 from tbl_2 where tbl_2.col_12 < '2018-05-28' );
+desc select /*+ INL_JOIN(tbl_1) */ tbl_1.col_8 from tbl_1  where col_7 in ( select col_11 from tbl_2 where tbl_2.col_12 < '2018-05-28' );
+```
+
+
+### 2. What did you expect to see? (Required)
+```
+use the index hash join
+```
+### 3. What did you see instead (Required)
+``` sql
+mysql> desc select /*+ INL_JOIN(tbl_1) */ tbl_1.col_8 from tbl_1  where col_7 in ( select col_13 from tbl_2 where tbl_2.col_12 < '2018-05-28' );
++---------------------------------+----------+-----------+---------------------------+----------------------------------------------------------------------------------+
+| id                              | estRows  | task      | access object             | operator info                                                                    |
++---------------------------------+----------+-----------+---------------------------+----------------------------------------------------------------------------------+
+| HashJoin_16                     | 2.50     | root      |                           | inner join, equal:[eq(test.tbl_1.col_7, test.tbl_2.col_13)]                      |
+| ├─StreamAgg_103(Build)          | 2.00     | root      |                           | group by:test.tbl_2.col_13, funcs:firstrow(test.tbl_2.col_13)->test.tbl_2.col_13 |
+| │ └─TableReader_115             | 2.00     | root      |                           | data:Selection_114                                                               |
+| │   └─Selection_114             | 2.00     | cop[tikv] |                           | lt(test.tbl_2.col_12, 2018-05-28 00:00:00.000000)                                |
+| │     └─TableFullScan_113       | 2.00     | cop[tikv] | table:tbl_2               | keep order:true                                                                  |
+| └─PartitionUnion_18(Probe)      | 40000.00 | root      |                           |                                                                                  |
+|   ├─TableReader_20              | 10000.00 | root      |                           | data:TableFullScan_19                                                            |
+|   │ └─TableFullScan_19          | 10000.00 | cop[tikv] | table:tbl_1, partition:p0 | keep order:false, stats:pseudo                                                   |
+|   ├─TableReader_40              | 10000.00 | root      |                           | data:TableFullScan_39                                                            |
+|   │ └─TableFullScan_39          | 10000.00 | cop[tikv] | table:tbl_1, partition:p1 | keep order:false, stats:pseudo                                                   |
+|   ├─TableReader_60              | 10000.00 | root      |                           | data:TableFullScan_59                                                            |
+|   │ └─TableFullScan_59          | 10000.00 | cop[tikv] | table:tbl_1, partition:p2 | keep order:false, stats:pseudo                                                   |
+|   └─TableReader_80              | 10000.00 | root      |                           | data:TableFullScan_79                                                            |
+|     └─TableFullScan_79          | 10000.00 | cop[tikv] | table:tbl_1, partition:p3 | keep order:false, stats:pseudo                                                   |
++---------------------------------+----------+-----------+---------------------------+----------------------------------------------------------------------------------+
+14 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+----------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                          |
++---------+------+----------------------------------------------------------------------------------+
+| Warning | 1815 | Optimizer Hint /*+ INL_JOIN(tbl_1) */ or /*+ TIDB_INLJ(tbl_1) */ is inapplicable |
++---------+------+----------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> desc select /*+ INL_JOIN(tbl_1) */ tbl_1.col_8 from tbl_1  where col_7 in ( select col_11 from tbl_2 where tbl_2.col_12 < '2018-05-28' );
++--------------------------------+----------+-----------+---------------------------+----------------------------------------------------+
+| id                             | estRows  | task      | access object             | operator info                                      |
++--------------------------------+----------+-----------+---------------------------+----------------------------------------------------+
+| HashJoin_16                    | 32000.00 | root      |                           | semi join, equal:[eq(test.tbl_1.col_7, Column#11)] |
+| ├─Projection_98(Build)         | 2.00     | root      |                           | cast(test.tbl_2.col_11, double BINARY)->Column#11  |
+| │ └─TableReader_101            | 2.00     | root      |                           | data:Selection_100                                 |
+| │   └─Selection_100            | 2.00     | cop[tikv] |                           | lt(test.tbl_2.col_12, 2018-05-28 00:00:00.000000)  |
+| │     └─TableFullScan_99       | 2.00     | cop[tikv] | table:tbl_2               | keep order:false                                   |
+| └─PartitionUnion_17(Probe)     | 40000.00 | root      |                           |                                                    |
+|   ├─TableReader_19             | 10000.00 | root      |                           | data:TableFullScan_18                              |
+|   │ └─TableFullScan_18         | 10000.00 | cop[tikv] | table:tbl_1, partition:p0 | keep order:false, stats:pseudo                     |
+|   ├─TableReader_39             | 10000.00 | root      |                           | data:TableFullScan_38                              |
+|   │ └─TableFullScan_38         | 10000.00 | cop[tikv] | table:tbl_1, partition:p1 | keep order:false, stats:pseudo                     |
+|   ├─TableReader_59             | 10000.00 | root      |                           | data:TableFullScan_58                              |
+|   │ └─TableFullScan_58         | 10000.00 | cop[tikv] | table:tbl_1, partition:p2 | keep order:false, stats:pseudo                     |
+|   └─TableReader_79             | 10000.00 | root      |                           | data:TableFullScan_78                              |
+|     └─TableFullScan_78         | 10000.00 | cop[tikv] | table:tbl_1, partition:p3 | keep order:false, stats:pseudo                     |
++--------------------------------+----------+-----------+---------------------------+----------------------------------------------------+
+14 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                                                                   |
++---------+------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Warning | 1815 | There are no matching table names for (tbl_1) in optimizer hint /*+ INL_JOIN(tbl_1) */ or /*+ TIDB_INLJ(tbl_1) */. Maybe you can use the table alias name |
++---------+------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master

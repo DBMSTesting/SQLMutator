@@ -1,0 +1,116 @@
+ID: 52914
+Title: data inconsistency during adding index with replace into statement
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Put this test to real tikv test
+``` 
+SQLfunc TestAddUniqueDuplicateIndexes(t *testing.T) {
+	store, dom := realtikvtest.CreateMockStoreAndDomainAndSetup(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int DEFAULT '-13202', b varchar(221) NOT NULL DEFAULT 'duplicatevalue', " +
+		"c int NOT NULL DEFAULT '0', PRIMARY KEY (c, b, a));")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	d := dom.DDL()
+	originalCallback := d.GetHook()
+	defer d.SetHook(originalCallback)
+	callback := &callback.TestDDLCallback{}
+
+	tk1.Exec("INSERT INTO t VALUES (-18585,'duplicatevalue',0);")
+
+	onJobUpdatedExportedFunc := func(job *model.Job) {
+		switch job.SchemaState {
+		case model.StateDeleteOnly:
+			_, err := tk1.Exec("delete from t where c = 0;")
+			assert.NoError(t, err)
+			_, err = tk1.Exec("insert INTO t VALUES (-18585,'duplicatevalue',1);")
+			assert.NoError(t, err)
+		}
+	}
+	callback.OnJobUpdatedExported.Store(&onJobUpdatedExportedFunc)
+	d.SetHook(callback)
+
+	tk3 := testkit.NewTestKit(t, store)
+	tk3.MustExec("use test")
+	ingest.MockDMLExecutionStateBeforeImport = func() {
+		tk3.MustExec("replace INTO t VALUES (-18585,'duplicatevalue',4);")
+		tk3.MustQuery("select * from t;").Check(testkit.Rows("-18585 duplicatevalue 1", "-18585 duplicatevalue 4"))
+	}
+	ddl.MockDMLExecutionStateBeforeMerge = func() {
+		tk3.MustQuery("select * from t;").Check(testkit.Rows("-18585 duplicatevalue 1", "-18585 duplicatevalue 4"))
+		tk3.MustExec("replace into t values (-18585,'duplicatevalue',0);")
+	}
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/ingest/mockDMLExecutionStateBeforeImport", "1*return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockDMLExecutionStateBeforeMerge", "return(true)"))
+	tk.MustExec("alter table t add unique index idx(b);")
+	tk.MustExec("admin check table t;")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/ingest/mockDMLExecutionStateBeforeImport"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockDMLExecutionStateBeforeMerge"))
+}
+
+```
+
+And
+
+```
+@@ -41,6 +41,8 @@ import (
+        "go.uber.org/zap"
+ )
+
++var MockDMLExecutionStateBeforeImport func()
++
+ // BackendCtx is the backend context for add index reorg task.
+ type BackendCtx interface {
+        Register(jobID, indexID int64, schemaName, tableName string) (Engine, error)
+@@ -226,6 +228,11 @@ func (bc *litBackendCtx) Flush(indexID int64, mode FlushMode) (flushed, imported
+                        }
+                }()
+        }
++       failpoint.Inject("mockDMLExecutionStateBeforeImport", func(_ failpoint.Value) {
++               if MockDMLExecutionStateBeforeImport != nil {
++                       MockDMLExecutionStateBeforeImport()
++               }
++       })
+        err = bc.unsafeImportAndReset(ei)
+        if err != nil {
+                return true, false, err
+
+@@ -1920,6 +1920,8 @@ var MockDMLExecutionStateMerging func()
+ // MockDMLExecutionStateBeforeImport is only used for test.
+ var MockDMLExecutionStateBeforeImport func()
+
++var MockDMLExecutionStateBeforeMerge func()
++
+ func (w *worker) addPhysicalTableIndex(t table.PhysicalTable, reorgInfo *reorgInfo) error {
+
+
+@@ -876,6 +876,11 @@ func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Jo
+                ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+                return false, ver, errors.Trace(err)
+        case model.BackfillStateReadyToMerge:
++               failpoint.Inject("mockDMLExecutionStateBeforeMerge", func(_ failpoint.Value) {
++                       if MockDMLExecutionStateBeforeMerge != nil {
++                               MockDMLExecutionStateBeforeMerge()
++                       }
++               })
+                logutil.BgLogger().Info("index backfill state ready to merge", zap.String("category", "ddl"), zap.Int64("job ID", job.ID),
+```
+### 2. What did you expect to see? (Required)
+test pass
+### 3. What did you see instead (Required)
+test failed
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

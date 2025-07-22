@@ -1,0 +1,83 @@
+ID: 5479
+Title: bitmapHasAny in scalar subquery causes segment fault
+Description:
+```
+Bitmap aggregation functions work, however bitmapHasAny in scalar subquery causes segment fault.
+
+gpu03 :) SELECT groupBitmap(id) FROM trips WHERE pickup_datetime>'2017-06-24 00:00:00'; 
+┌─groupBitmap(id)─┐
+│         9895896 │
+└─────────────────┘
+1 rows in set. Elapsed: 0.117 sec. Processed 9.90 million rows, 118.85 MB (84.71 million rows/s., 1.02 GB/s.) 
+
+gpu03 :) SELECT count(*) FROM trips WHERE bitmapHasAny((SELECT groupBitmapState(id) FROM trips WHERE pickup_datetime>'2017-06-24 00:00:00'), bitmapBuild([id]));
+[gpu03] 2019.05.30 08:03:55.936969 {e0dd4a0c-ebdb-4368-b4dc-4c1d342168c6} [ 41 ] <Debug> default.trips (SelectExecutor): Selected 249 parts by date, 249 parts by key, 87923 marks to read fro
+m 249 ranges
+[gpu03] 2019.05.30 08:03:55.943311 {e0dd4a0c-ebdb-4368-b4dc-4c1d342168c6} [ 41 ] <Debug> executeQuery: Query pipeline:
+Expression
+ Expression
+  ParallelAggregating
+   Expression × 24
+    Filter
+     MergeTreeThread
+
+↘ Progress: 1.51 million rows, 12.06 MB (131.76 thousand rows/s., 1.05 MB/s.) ▏                                                                                                            0%
+Exception on client:
+Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000, ::1
+
+Connecting to localhost:9000 as user default.
+Code: 210. DB::NetException: Connection refused (localhost:9000, ::1)
+```
+
+The following is a piece of /var/log/clickhouse-server/clickhouse-server.err.log.
+```
+2019.05.30 16:03:55.983304 [ 68 ] {} <Error> BaseDaemon: ########################################
+2019.05.30 16:03:55.983467 [ 68 ] {} <Error> BaseDaemon: (version 19.9.1.1) (from thread 50) Received signal Segmentation fault (11).
+2019.05.30 16:03:55.983494 [ 68 ] {} <Error> BaseDaemon: Address: 0x2316e1
+2019.05.30 16:03:55.983506 [ 68 ] {} <Error> BaseDaemon: Access: read.
+2019.05.30 16:03:55.983520 [ 68 ] {} <Error> BaseDaemon: Address not mapped to object.
+2019.05.30 16:03:56.044183 [ 68 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(DB::FunctionBitmapCardinality<DB::BitmapHasAnyImpl, DB::NameBitmapHasAny, unsigned char>::executeImpl(DB::Block&, std::vector<unsigned long, std::allocator<unsigned long> > const&, unsigned long, unsigned long)+0x22e) [0x33c6c8e]
+2019.05.30 16:03:56.044298 [ 68 ] {} <Error> BaseDaemon: 1. /usr/bin/clickhouse-server(DB::PreparedFunctionImpl::execute(DB::Block&, std::vector<unsigned long, std::allocator<unsigned long> > const&, unsigned long, unsigned long, bool)+0x3fa) [0x632b26a]
+2019.05.30 16:03:56.044326 [ 68 ] {} <Error> BaseDaemon: 2. /usr/bin/clickhouse-server(DB::ExpressionAction::execute(DB::Block&, bool) const+0x2f6) [0x64f65f6]
+2019.05.30 16:03:56.044345 [ 68 ] {} <Error> BaseDaemon: 3. /usr/bin/clickhouse-server(DB::ExpressionActions::execute(DB::Block&, bool) const+0x4e) [0x64f859e]
+2019.05.30 16:03:56.044365 [ 68 ] {} <Error> BaseDaemon: 4. /usr/bin/clickhouse-server(DB::FilterBlockInputStream::readImpl()+0x427) [0x639a827]
+2019.05.30 16:03:56.044381 [ 68 ] {} <Error> BaseDaemon: 5. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x28a) [0x5d70a8a]
+2019.05.30 16:03:56.044398 [ 68 ] {} <Error> BaseDaemon: 6. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x63992dd]
+2019.05.30 16:03:56.044415 [ 68 ] {} <Error> BaseDaemon: 7. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x28a) [0x5d70a8a]
+2019.05.30 16:03:56.044438 [ 68 ] {} <Error> BaseDaemon: 8. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::loop(unsigned long)+0xfc) [0x63d231c]
+2019.05.30 16:03:56.044460 [ 68 ] {} <Error> BaseDaemon: 9. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x206) [0x63d2896]
+2019.05.30 16:03:56.044514 [ 68 ] {} <Error> BaseDaemon: 10. /usr/bin/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::process()::{lambda()#1}>(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::process()::{lambda()#1}&&)::{lambda()#1}::operator()() const+0x6c) [0x63d2cfc]
+2019.05.30 16:03:56.044551 [ 68 ] {} <Error> BaseDaemon: 11. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1e6) [0x6a98366]
+2019.05.30 16:03:56.044581 [ 68 ] {} <Error> BaseDaemon: 12. /usr/bin/clickhouse-server() [0x7712f9f]
+2019.05.30 16:03:56.044601 [ 68 ] {} <Error> BaseDaemon: 13. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7fc897a796db]
+2019.05.30 16:03:56.044625 [ 68 ] {} <Error> BaseDaemon: ########################################
+2019.05.30 16:03:56.044645 [ 68 ] {} <Error> BaseDaemon: (version 19.9.1.1) (from thread 43) Received signal Segmentation fault (11).
+2019.05.30 16:03:56.044658 [ 68 ] {} <Error> BaseDaemon: Address: 0x2316e1
+2019.05.30 16:03:56.044673 [ 68 ] {} <Error> BaseDaemon: Access: read.
+2019.05.30 16:03:56.044687 [ 68 ] {} <Error> BaseDaemon: Address not mapped to object.
+2019.05.30 16:03:56.083816 [ 68 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(DB::FunctionBitmapCardinality<DB::BitmapHasAnyImpl, DB::NameBitmapHasAny, unsigned char>::executeImpl(DB::Block&, std::vector<unsigned long, std::allocator<unsigned long> > const&, unsigned long, unsigned long)+0x22e) [0x33c6c8e]
+2019.05.30 16:03:56.083868 [ 68 ] {} <Error> BaseDaemon: 1. /usr/bin/clickhouse-server(DB::PreparedFunctionImpl::execute(DB::Block&, std::vector<unsigned long, std::allocator<unsigned long> > const&, unsigned long, unsigned long, bool)+0x3fa) [0x632b26a]
+2019.05.30 16:03:56.083887 [ 68 ] {} <Error> BaseDaemon: 2. /usr/bin/clickhouse-server(DB::ExpressionAction::execute(DB::Block&, bool) const+0x2f6) [0x64f65f6]
+2019.05.30 16:03:56.083903 [ 68 ] {} <Error> BaseDaemon: 3. /usr/bin/clickhouse-server(DB::ExpressionActions::execute(DB::Block&, bool) const+0x4e) [0x64f859e]
+2019.05.30 16:03:56.083921 [ 68 ] {} <Error> BaseDaemon: 4. /usr/bin/clickhouse-server(DB::FilterBlockInputStream::readImpl()+0x427) [0x639a827]
+2019.05.30 16:03:56.083936 [ 68 ] {} <Error> BaseDaemon: 5. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x28a) [0x5d70a8a]
+2019.05.30 16:03:56.083949 [ 68 ] {} <Error> BaseDaemon: 6. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x63992dd]
+2019.05.30 16:03:56.083980 [ 68 ] {} <Error> BaseDaemon: 7. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x28a) [0x5d70a8a]
+2019.05.30 16:03:56.083993 [ 68 ] {} <Error> BaseDaemon: 8. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::loop(unsigned long)+0xfc) [0x63d231c]
+2019.05.30 16:03:56.084003 [ 68 ] {} <Error> BaseDaemon: 9. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x206) [0x63d2896]
+2019.05.30 16:03:56.084022 [ 68 ] {} <Error> BaseDaemon: 10. /usr/bin/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::process()::{lambda()#1}>(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::process()::{lambda()#1}&&)::{lambda()#1}::operator()() const+0x6c) [0x63d2cfc]
+2019.05.30 16:03:56.084034 [ 68 ] {} <Error> BaseDaemon: 11. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1e6) [0x6a98366]
+2019.05.30 16:03:56.084043 [ 68 ] {} <Error> BaseDaemon: 12. /usr/bin/clickhouse-server() [0x7712f9f]
+2019.05.30 16:03:56.084055 [ 68 ] {} <Error> BaseDaemon: 13. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7fc897a796db]
+
+```
+
+**How to reproduce**
+* ClickHouse server info: 
+Build from master tip c269dd2c on Mint 19.
+```
+[root@gpu03 ~]# sudo docker run -d --name clickhouse-server-master --network=host --ulimit nofile=262144:262144 --volume=/bigdata/ckdata:/var/lib/clickhouse --volume=/var/log:/var/log --volume=/usr/share/zoneinfo/Asia/Shanghai:/etc/localtime yandex/clickhouse-server
+```
+* Machine info:
+48 vCPU, 200GB RAM
+

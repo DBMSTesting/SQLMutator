@@ -1,0 +1,137 @@
+ID: 42447
+Title: CTRL-C reorganize partition report error canceling DDL job
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. use mycli connet to the tidb
+2. create table and reorganize partition
+```sql
+CREATE TABLE `t1` (
+    `id` bigint(20) NOT NULL AUTO_INCREMENT,
+    `k` int(11) NOT NULL DEFAULT '0',
+    `c` char(120) NOT NULL DEFAULT '',
+    `pad` char(60) NOT NULL DEFAULT '',
+    PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+    KEY `k_1` (`k`)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+  PARTITION BY RANGE (`id`)
+  (PARTITION `p0` VALUES LESS THAN (2000000),
+   PARTITION `p1` VALUES LESS THAN (4000000),
+   PARTITION `p2` VALUES LESS THAN (6000000),
+   PARTITION `p3` VALUES LESS THAN (8000000),
+   PARTITION `p4` VALUES LESS THAN (10000000),
+   PARTITION `p5` VALUES LESS THAN (MAXVALUE));
+insert into t1(k, c, pad) values (1, 'a', 'beijing'), (2, 'b', 'chengdu');
+insert into t1(k, c, pad) select k, c, pad from t1 limit 2000000; -- some times
+alter table t1 reorganize partition p0, p1, p2, p3, p4 into( partition pnew values less than (10000000));
+```
+3. ctrl-c the query
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+As the reorg partition is a ddl and should not be cancelled.
+
+### 3. What did you see instead (Required)
+1. the ddl was cancelled
+```sql
++--------+-------------------------------+------------+----------------------------------+----------------------+-----------+----------+-----------+---------------------+---------------------+---------------------+---------------+
+| JOB_ID | DB_NAME                       | TABLE_NAME | JOB_TYPE                         | SCHEMA_STATE         | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE         |
++--------+-------------------------------+------------+----------------------------------+----------------------+-----------+----------+-----------+---------------------+---------------------+---------------------+---------------+
+| 4390   | test | t1    | alter table reorganize partition | write reorganization | 324       | 3897     | 1851281   | 2023-03-21 10:43:53 | 2023-03-21 10:43:53 | 2023-03-21 10:44:39 | cancelled     |
+```
+3. handle ddl job failed
+```log
+[2023/03/21 18:44:34.646 +08:00] [INFO] [reorg.go:267] ["[ddl] run reorg job wait timeout"] ["wait time"=5s] ["total added row count"=1851281]
+[2023/03/21 18:44:34.650 +08:00] [INFO] [ddl_worker.go:1157] ["[ddl] schema version doesn't change"]
+[2023/03/21 18:44:34.657 +08:00] [INFO] [ddl_worker.go:960] ["[ddl] run DDL job"] [worker="worker 4, tp general"] [job="ID:4390, Type:alter table reorganize partition, State:running, SchemaState:write reorganization, SchemaID:324, TableID:3897, RowCount:1851281, ArgLen:0,
+ start time: 2023-03-21 18:43:53.92 +0800 CST, Err:<nil>, ErrCount:0, SnapshotVersion:440243436721274886, UniqueWarnings:0"]
+[2023/03/21 18:44:35.047 +08:00] [INFO] [backfilling.go:350] ["[ddl] backfill worker back fill index"] [worker="backfill-worker 0, tp reorganize partition"] [addedCount=360448] [scanCount=360448] ["next key"=748000000000000f3a5f7280000000001c639100] [speed(rows/s)=20730.6
+22020986328]
+[2023/03/21 18:44:38.772 +08:00] [INFO] [server.go:798] [kill] [conn=120565848032150253] [query=false]
+[2023/03/21 18:44:38.986 +08:00] [WARN] [ddl.go:1118] ["error canceling DDL job"] []
+[2023/03/21 18:44:39.741 +08:00] [INFO] [reorg.go:267] ["[ddl] run reorg job wait timeout"] ["wait time"=5s] ["total added row count"=1948561]
+[2023/03/21 18:44:39.747 +08:00] [WARN] [session.go:953] ["can not retry txn"] [label=internal] [error="[kv:9007]Write conflict, txnStartTS=440243447298785293, conflictStartTS=440243448439111683, conflictCommitTS=440243448439111685, key={tableID=281474976710654, tableName
+=mysql.tidb_ddl_job, handle=4390}, originalKey=748000fffffffffffe5f728000000000001126, primary={tableID=281474976710654, tableName=mysql.tidb_ddl_job, handle=4390}, originalPrimaryKey=748000fffffffffffe5f728000000000001126, reason=Optimistic [try again later]"] [IsBatchIn
+sert=false] [IsPessimistic=false] [InRestrictedSQL=true] [tidb_retry_limit=10] [tidb_disable_txn_auto_retry=true]
+[2023/03/21 18:44:39.747 +08:00] [WARN] [session.go:969] ["commit failed"] ["finished txn"="Txn{state=invalid}"] [error="[kv:9007]Write conflict, txnStartTS=440243447298785293, conflictStartTS=440243448439111683, conflictCommitTS=440243448439111685, key={tableID=281474976
+710654, tableName=mysql.tidb_ddl_job, handle=4390}, originalKey=748000fffffffffffe5f728000000000001126, primary={tableID=281474976710654, tableName=mysql.tidb_ddl_job, handle=4390}, originalPrimaryKey=748000fffffffffffe5f728000000000001126, reason=Optimistic [try again la
+ter]"]
+[2023/03/21 18:44:39.747 +08:00] [INFO] [job_table.go:288] ["[ddl] handle ddl job failed"] [error="[kv:9007]Write conflict, txnStartTS=440243447298785293, conflictStartTS=440243448439111683, conflictCommitTS=440243448439111685, key={tableID=281474976710654, tableName=mysq
+l.tidb_ddl_job, handle=4390}, originalKey=748000fffffffffffe5f728000000000001126, primary={tableID=281474976710654, tableName=mysql.tidb_ddl_job, handle=4390}, originalPrimaryKey=748000fffffffffffe5f728000000000001126, reason=Optimistic [try again later]"] [job="ID:4390,
+Type:alter table reorganize partition, State:running, SchemaState:write reorganization, SchemaID:324, TableID:3897, RowCount:1948561, ArgLen:2, start time: 2023-03-21 18:43:53.92 +0800 CST, Err:<nil>, ErrCount:0, SnapshotVersion:440243436721274886, UniqueWarnings:0"]
+[2023/03/21 18:44:39.754 +08:00] [INFO] [ddl_worker.go:960] ["[ddl] run DDL job"] [worker="worker 4, tp general"] [job="ID:4390, Type:alter table reorganize partition, State:cancelling, SchemaState:write reorganization, SchemaID:324, TableID:3897, RowCount:1851281, ArgLen
+:0, start time: 2023-03-21 18:43:53.92 +0800 CST, Err:<nil>, ErrCount:0, SnapshotVersion:440243436721274886, UniqueWarnings:0"]
+[2023/03/21 18:44:39.754 +08:00] [INFO] [rollingback.go:433] ["[ddl] the DDL job is cancelled normally"] [worker="worker 4, tp general"] [job="ID:4390, Type:alter table reorganize partition, State:cancelled, SchemaState:write reorganization, SchemaID:324, TableID:3897, Ro
+wCount:1851281, ArgLen:0, start time: 2023-03-21 18:43:53.92 +0800 CST, Err:[ddl:8214]Cancelled DDL job, ErrCount:1, SnapshotVersion:440243436721274886, UniqueWarnings:0"] [error="[ddl:8214]Cancelled DDL job"]
+[2023/03/21 18:44:39.755 +08:00] [INFO] [ddl_worker.go:579] ["[ddl] finish DDL job"] [worker="worker 4, tp general"] [job="ID:4390, Type:alter table reorganize partition, State:cancelled, SchemaState:write reorganization, SchemaID:324, TableID:3897, RowCount:1851281, ArgL
+en:0, start time: 2023-03-21 18:43:53.92 +0800 CST, Err:[ddl:8214]Cancelled DDL job, ErrCount:1, SnapshotVersion:440243436721274886, UniqueWarnings:0"]
+[2023/03/21 18:44:39.773 +08:00] [INFO] [ddl.go:1171] ["[ddl] DDL job is failed"] [jobID=4390]
+[2023/03/21 18:44:39.773 +08:00] [INFO] [tidb.go:285] ["rollbackTxn called due to ddl/autocommit failure"]
+[2023/03/21 18:44:39.774 +08:00] [WARN] [session.go:2202] ["run statement failed"] [conn=120565848032150253] [schemaVersion=291] [error="[ddl:8214]Cancelled DDL job"] [session="{\n  \"currDBName\": \"partitioninsert_1647963896275\",\n  \"id\": 120565848032150253,\n  \"sta
+tus\": 2,\n  \"strictMode\": true,\n  \"user\": {\n    \"Username\": \"root\",\n    \"Hostname\": \"127.0.0.1\",\n    \"CurrentUser\": false,\n    \"AuthUsername\": \"root\",\n    \"AuthHostname\": \"%\",\n    \"AuthPlugin\": \"mysql_native_password\"\n  }\n}"]
+[2023/03/21 18:44:39.775 +08:00] [INFO] [conn.go:1151] ["command dispatched failed"] [conn=120565848032150253] [connInfo="id:120565848032150253, addr:127.0.0.1:39770 status:10, collation:utf8_general_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql="a
+lter table sbtest3 reorganize partition p0, p1, p2, p3, p4 into( partition pnew values less than (10000000))"] [txn_mode=PESSIMISTIC] [timestamp=440243436629524482] [err="[ddl:8214]Cancelled DDL job\ngithub.com/pingcap/errors.AddStack\n\t/go/pkg/mod/github.com/pingcap/err
+ors@v0.11.5-0.20221009092201-b66cddb77c32/errors.go:174\ngithub.com/pingcap/errors.Trace\n\t/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/juju_adaptor.go:15\ngithub.com/pingcap/tidb/ddl.(*ddl).DoDDLJob\n\t/home/jenkins/agent/workspace/build-c
+ommon/go/src/github.com/pingcap/tidb/ddl/ddl.go:1172\ngithub.com/pingcap/tidb/ddl.(*ddl).ReorganizePartitions\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/ddl/ddl_api.go:4050\ngithub.com/pingcap/tidb/ddl.(*ddl).AlterTable\n\t/home/jenkins/a
+gent/workspace/build-common/go/src/github.com/pingcap/tidb/ddl/ddl_api.go:3358\ngithub.com/pingcap/tidb/executor.(*DDLExec).executeAlterTable\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/ddl.go:384\ngithub.com/pingcap/tidb/executor
+.(*DDLExec).Next\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/ddl.go:148\ngithub.com/pingcap/tidb/executor.Next\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/executor.go:326\ngithub.com/pingc
+ap/tidb/executor.(*ExecStmt).next\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:1212\ngithub.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/ping
+cap/tidb/executor/adapter.go:957\ngithub.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:782\ngithub.com/pingcap/tidb/executor.(*ExecStmt).Exec\n\t/home/jenkins/agent/work
+space/build-common/go/src/github.com/pingcap/tidb/executor/adapter.go:577\ngithub.com/pingcap/tidb/session.runStmt\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:2333\ngithub.com/pingcap/tidb/session.(*session).ExecuteStmt\
+n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/session/session.go:2190\ngithub.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/driver_tidb.go:259\ngithub.c
+om/pingcap/tidb/server.(*clientConn).handleStmt\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:2001\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingc
+ap/tidb/server/conn.go:1851\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/conn.go:1337\ngithub.com/pingcap/tidb/server.(*clientConn).Run\n\t/home/jenkins/agent/workspace/build-com
+mon/go/src/github.com/pingcap/tidb/server/conn.go:1120\ngithub.com/pingcap/tidb/server.(*Server).onConn\n\t/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/server/server.go:675\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1598"]
+[2023/03/21 18:44:39.822 +08:00] [INFO] [backfilling.go:350] ["[ddl] backfill worker back fill index"] [worker="backfill-worker 0, tp reorganize partition"] [addedCount=450560] [scanCount=450560] ["next key"=748000000000000f3a5f7280000000001dc39100] [speed(rows/s)=18872.1
+8800474528]
+[2023/03/21 18:44:42.395 +08:00] [INFO] [backfilling.go:376] ["[ddl] backfill worker finish task"] [worker="backfill-worker 0, tp reorganize partition"] [task="taskID: 4, physicalTableID: 3898, range: [748000000000000f3a5f72800000000016e392, 748000000000000f3a5f7280000000
+001e847f], jobID: 4390"] ["added count"=499950] ["scan count"=499950] ["next key"=748000000000000f3a5f7280000000001e847f00] ["take time"=26.965048651s]
+[2023/03/21 18:44:42.405 +08:00] [INFO] [backfilling.go:617] ["[ddl] backfill workers successfully processed batch"] [element=ID:1,TypeKey:_col_] ["total added count"=1999999] ["start key"=748000000000000f3a5f728000000000000001] ["next key"=748000000000000f3a5f72800000000
+01e847f00] ["batch added count"=1999999] ["take time"=48.051959973s] []
+```
+4. a large unexpected log, unexpected no source type context
+```log
+[2023/03/21 18:44:42.453 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.453 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.453 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.453 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.472 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.474 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.478 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.481 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.488 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.490 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.492 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.496 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.506 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.509 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.513 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.516 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+[2023/03/21 18:44:42.526 +08:00] [WARN] [txn.go:213] ["unexpected no source type context, if you see this warning, the `RequestSourceTypeKey` is missing in the context"]
+```
+```bash
+/tidb-4000/log # grep "unexpected no source type conte"  tidb.log |wc                                                                                                                                                                         root@bogon
+  51446 1131812 8745820
+```
+### 4. What is your TiDB version? (Required)
+```sql
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v7.0.0                                   |
+| Edition: Community                                        |
+| Git Commit Hash: fc166ffae8576ac3efb2f5abac848d5edbaf2657 |
+| Git Branch: heads/refs/tags/v7.0.0                        |
+| UTC Build Time: 2023-03-20 07:08:59                       |
+| GoVersion: go1.20.2                                       |
+| Race Enabled: false                                       |
+| TiKV Min Version: 6.2.0-alpha                             |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,105 @@
+ID: 14531
+Title: global system variable can't take effect right away for new connection
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+set global variable -> return success -> check the value in new connect but get the old value 
+
+I have also tried another variable `tidb_disable_txn_auto_retry` It also can't take effect right away. 
+mainly test code :
+```go
+ func setGloableVar(dsn string, increment int, offset int) error {
+      var err error
+      /*
+          err = checkRetry(dsn, "on")
+          if err != nil {
+              return errors.Trace(err)
+          }
+          err = checkRetry(dsn, "off")
+          if err != nil {
+              return errors.Trace(err)
+          }
+
+          db, err := sql.Open("mysql", dsn)
+          if err != nil {
+              return errors.Trace(err)
+          }
+      */
+      db, err := sql.Open("mysql", dsn)
+      if err != nil {
+          return errors.Trace(err)
+      }
+      defer db.Close()
+
+      _, err = db.Exec(fmt.Sprintf("SET @@GLOBAL.auto_increment_increment = %d;", increment))
+      if err != nil {
+          return errors.Trace(err)
+      }
+
+      _, err = db.Exec(fmt.Sprintf("SET @@GLOBAL.auto_increment_offset = %d;", offset))
+      if err != nil {
+          return errors.Trace(err)
+      }
+
+      // time.Sleep(time.Second * 3)
+      // check value for new connection
+      db.Close()
+      db2, err := sql.Open("mysql", dsn)
+      if err != nil {
+          return errors.Trace(err)
+      }
+
+      var v int
+      row := db2.QueryRow("SELECT @@auto_increment_increment;")
+      err = row.Scan(&v)
+      if err != nil {
+          return errors.Trace(err)
+      }
+
+      if v != increment {
+          return errors.Errorf("increment get: %d after set as: %d", v, increment)
+      }
+
+      row = db2.QueryRow("SELECT @@auto_increment_offset;")
+      err = row.Scan(&v)
+      if err != nil {
+          return errors.Trace(err)
+      }
+
+      if v != offset {
+          return errors.Errorf("offset get: %d after set as: %d", v, offset)
+      }
+
+      return nil
+  }
+```
+when offset = 1
+run the func to set as 2, it will failed:
+from tidb log we can see:
+```
+[2020/01/19 14:22:09.991 +08:00] [INFO] [session.go:1903] [GENERAL_LOG] [conn=210] [user=root@127.0.0.1] [schemaVersion=22] [txnStartTS=0] [current_db=] [sql="use `test`"]
+[2020/01/19 14:22:09.991 +08:00] [INFO] [server.go:415] ["new connection"] [conn=210] [remoteAddr=127.0.0.1:51485]
+[2020/01/19 14:22:09.991 +08:00] [INFO] [session.go:1903] [GENERAL_LOG] [conn=210] [user=root@127.0.0.1] [schemaVersion=22] [txnStartTS=0] [current_db=test] [sql="SET @@GLOBAL.auto_increment_increment = 2;"]
+[2020/01/19 14:22:09.992 +08:00] [INFO] [session.go:1903] [GENERAL_LOG] [conn=210] [user=root@127.0.0.1] [schemaVersion=22] [txnStartTS=0] [current_db=test] [sql="SET @@GLOBAL.auto_increment_offset = 2;"]
+[2020/01/19 14:22:09.994 +08:00] [INFO] [server.go:418] ["connection closed"] [conn=210]
+[2020/01/19 14:22:09.994 +08:00] [INFO] [session.go:1903] [GENERAL_LOG] [conn=211] [user=root@127.0.0.1] [schemaVersion=22] [txnStartTS=0] [current_db=] [sql="use `test`"]
+[2020/01/19 14:22:09.994 +08:00] [INFO] [server.go:415] ["new connection"] [conn=211] [remoteAddr=127.0.0.1:51486]
+[2020/01/19 14:22:09.995 +08:00] [INFO] [session.go:1903] [GENERAL_LOG] [conn=211] [user=root@127.0.0.1] [schemaVersion=22] [txnStartTS=0] [current_db=test] [sql="SELECT @@auto_increment_increment"]
+[2020/01/19 14:22:09.995 +08:00] [INFO] [session.go:1903] [GENERAL_LOG] [conn=211] [user=root@127.0.0.1] [schemaVersion=22] [txnStartTS=0] [current_db=test] [sql="SELECT @@auto_increment_offset"]
+[2020/01/19 14:22:09.995 +08:00] [INFO] [server.go:418] ["connection closed"] [conn=211]
+```
+
+2. What did you expect to see?
+global system variable can't take effect right away for the new connection
+
+
+3. What did you see instead?
+It needs a few seconds to take effect
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+v3.0.9

@@ -1,0 +1,128 @@
+ID: 17123
+Title: TiDB new collation does not work on min/max function when agg is pushdown to tikv
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. What did you do?
+
+<!-- If possible, provide a recipe for reproducing the error. -->
+```
+mysql> show create table t1;
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                                                              |
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t1    | CREATE TABLE `t1` (
+  `id` varchar(10) COLLATE utf8mb4_general_ci DEFAULT NULL,
+  `value` varchar(10) COLLATE utf8mb4_general_ci DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin |
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> select * from t1;
++------+-------+
+| id   | value |
++------+-------+
+| a    | b     |
+| A    | b     |
+| a    | B     |
+| A    | B     |
+| b    | a     |
++------+-------+
+5 rows in set (0.00 sec)
+
+mysql> explain select min(id),min(value) from t1;
++----------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| id                         | estRows | task      | access object | operator info                                                       |
++----------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| StreamAgg_16               | 1.00    | root      |               | funcs:min(Column#8)->Column#4, funcs:min(Column#9)->Column#5        |
+| └─TableReader_17           | 1.00    | root      |               | data:StreamAgg_8                                                    |
+|   └─StreamAgg_8            | 1.00    | cop[tikv] |               | funcs:min(test.t1.id)->Column#8, funcs:min(test.t1.value)->Column#9 |
+|     └─TableFullScan_15     | 5.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                      |
++----------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+
+mysql>  select min(id),min(value) from t1;
++---------+------------+
+| min(id) | min(value) |
++---------+------------+
+| A       | B          |
++---------+------------+
+1 row in set (0.00 sec)
+
+mysql> set tidb_opt_copcpu_factor=100000;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> explain select min(id),min(value) from t1;
++--------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| id                       | estRows | task      | access object | operator info                                                       |
++--------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| StreamAgg_9              | 1.00    | root      |               | funcs:min(test.t1.id)->Column#4, funcs:min(test.t1.value)->Column#5 |
+| └─TableReader_19         | 5.00    | root      |               | data:TableFullScan_18                                               |
+|   └─TableFullScan_18     | 5.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                      |
++--------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql>  select min(id),min(value) from t1;
++---------+------------+
+| min(id) | min(value) |
++---------+------------+
+| a       | a          |
++---------+------------+
+1 row in set (0.00 sec)
+```
+### 2. What did you expect to see?
+```
+mysql>  select min(id),min(value) from t1;
++---------+------------+
+| min(id) | min(value) |
++---------+------------+
+| a       | a          |
++---------+------------+
+1 row in set (0.00 sec)
+```
+### 3. What did you see instead?
+```
+mysql> explain select min(id),min(value) from t1;
++----------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| id                         | estRows | task      | access object | operator info                                                       |
++----------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| StreamAgg_16               | 1.00    | root      |               | funcs:min(Column#8)->Column#4, funcs:min(Column#9)->Column#5        |
+| └─TableReader_17           | 1.00    | root      |               | data:StreamAgg_8                                                    |
+|   └─StreamAgg_8            | 1.00    | cop[tikv] |               | funcs:min(test.t1.id)->Column#8, funcs:min(test.t1.value)->Column#9 |
+|     └─TableFullScan_15     | 5.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                      |
++----------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+
+mysql>  select min(id),min(value) from t1;
++---------+------------+
+| min(id) | min(value) |
++---------+------------+
+| A       | B          |
++---------+------------+
+1 row in set (0.00 sec)
+
+mysql> set tidb_opt_copcpu_factor=100000;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> explain select min(id),min(value) from t1;
++--------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| id                       | estRows | task      | access object | operator info                                                       |
++--------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+| StreamAgg_9              | 1.00    | root      |               | funcs:min(test.t1.id)->Column#4, funcs:min(test.t1.value)->Column#5 |
+| └─TableReader_19         | 5.00    | root      |               | data:TableFullScan_18                                               |
+|   └─TableFullScan_18     | 5.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                      |
++--------------------------+---------+-----------+---------------+---------------------------------------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql>  select min(id),min(value) from t1;
++---------+------------+
+| min(id) | min(value) |
++---------+------------+
+| a       | a          |
++---------+------------+
+1 row in set (0.00 sec)
+```
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+master

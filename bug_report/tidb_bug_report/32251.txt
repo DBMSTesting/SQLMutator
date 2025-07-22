@@ -1,0 +1,166 @@
+ID: 32251
+Title: unix_timestamp return in-consitent result for ambiguous timestamp value under different timezone
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+### 0. Background
+In TiDB/MySQL, a timestamp column is timezone sensitive, and for some timezone, it has `Daylight Saving Time`. According to https://www.timeanddate.com/time/change/china/shanghai?year=1990 and https://www.timeanddate.com/time/change/chile/santiago?year=2022
+for `Asia/Shanghai` timezone
+> When local daylight time was about to reach
+> Sunday, 16 September 1990, 02:00:00 clocks were turned backward 1 hour to
+> Sunday, 16 September 1990, 01:00:00 local standard time instead.
+
+for `America/Santiago` timezone
+> When local daylight time is about to reach
+> Sunday, 3 April 2022, 00:00:00 clocks are turned backward 1 hour to
+> Saturday, 2 April 2022, 23:00:00 local standard time instead.
+
+So `1990-09-15 16:00:00 UTC` and `1990-09-15 17:00:00 UTC` are ambiguous when in `Asia/Shanghai` timezone because both of them are `1990-09-16 01:00:00`. `2022-04-03 02:00:00 UTC` or `2022-04-03 03:00:00 UTC` are ambiguous when in `America/Santiago` because both of them are `2022-04-02 23:00:00`.
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+mysql> desc timestamp_table;
++-------+-----------+------+------+---------+-------+
+| Field | Type      | Null | Key  | Default | Extra |
++-------+-----------+------+------+---------+-------+
+| id    | int(11)   | YES  |      | NULL    |       |
+| value | timestamp | YES  |      | NULL    |       |
++-------+-----------+------+------+---------+-------+
+2 rows in set (0.00 sec)
+
+mysql> set time_zone='UTC';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into timestamp_table values(1,'1990-09-15 15:59:59'),(2, '1990-09-15 16:00:00'),(3,'1990-09-15 17:00:00');
+Query OK, 3 rows affected (0.01 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+
+mysql> select unix_timestamp(value), value from timestamp_table;
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|             653414399 | 1990-09-15 15:59:59 |
+|             653414400 | 1990-09-15 16:00:00 |
+|             653418000 | 1990-09-15 17:00:00 |
++-----------------------+---------------------+
+3 rows in set (0.01 sec)
+
+mysql> set time_zone='Asia/Shanghai';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> select unix_timestamp(value), value from timestamp_table;
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|             653414399 | 1990-09-16 00:59:59 |
+|             653418000 | 1990-09-16 01:00:00 |
+|             653418000 | 1990-09-16 01:00:00 |
++-----------------------+---------------------+
+3 rows in set (0.01 sec)
+mysql> delete from timestamp_table;
+Query OK, 3 rows affected (0.00 sec)
+
+mysql> set time_zone='UTC';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into timestamp_table values(1,'2022-04-03 01:59:59'),(2,'2022-04-03 02:00:00'),(3,'2022-04-03 03:00:00');
+Query OK, 3 rows affected (0.00 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+
+mysql> select unix_timestamp(value), value from timestamp_table;
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|            1648951199 | 2022-04-03 01:59:59 |
+|            1648951200 | 2022-04-03 02:00:00 |
+|            1648954800 | 2022-04-03 03:00:00 |
++-----------------------+---------------------+
+3 rows in set (0.01 sec)
+
+mysql> set time_zone='America/Santiago';
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> select unix_timestamp(value), value from timestamp_table;
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|            1648951199 | 2022-04-02 22:59:59 |
+|            1648951200 | 2022-04-02 23:00:00 |
+|            1648951200 | 2022-04-02 23:00:00 |
++-----------------------+---------------------+
+3 rows in set (0.01 sec)
+```
+### 2. What did you expect to see? (Required)
+I think a reasonable behavior should be one of either
+- unix_timestamp return the same result for the same value under different timezone(This is the MySQL's behavior)
+or at least
+- the `rounding direct` for an ambiguous value should be the same, that is always return the greater or smaller result for all the ambiguous values
+### 3. What did you see instead (Required)
+for `1990-09-15 16:00:00 UTC` and `1990-09-15 17:00:00 UTC`
+Under `UTC` timezone, 
+```
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|             653414399 | 1990-09-15 15:59:59 |
+|             653414400 | 1990-09-15 16:00:00 |
+|             653418000 | 1990-09-15 17:00:00 |
++-----------------------+---------------------+
+```
+Under `Asia/Shanghai` timezone,
+```
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|             653414399 | 1990-09-16 00:59:59 |
+|             653418000 | 1990-09-16 01:00:00 |
+|             653418000 | 1990-09-16 01:00:00 |
++-----------------------+---------------------+
+```
+As we can see, `1990-09-15 16:00:00 UTC` and `1990-09-15 17:00:00 UTC` are ambiguous under `Asia/Shanghai` timezone, and TiDB return **greater** result for both of them under `Asia/Shanghai` timezone.
+
+For `2022-04-03 02:00:00 UTC` or `2022-04-03 03:00:00 UTC`
+Under `UTC` timezone
+```
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|            1648951199 | 2022-04-03 01:59:59 |
+|            1648951200 | 2022-04-03 02:00:00 |
+|            1648954800 | 2022-04-03 03:00:00 |
++-----------------------+---------------------+
+```
+Under 'America/Santiago' timezone
+```
++-----------------------+---------------------+
+| unix_timestamp(value) | value               |
++-----------------------+---------------------+
+|            1648951199 | 2022-04-02 22:59:59 |
+|            1648951200 | 2022-04-02 23:00:00 |
+|            1648951200 | 2022-04-02 23:00:00 |
++-----------------------+---------------------+
+```
+As we can see, `2022-04-03 02:00:00 UTC` or `2022-04-03 03:00:00 UTC` are ambiguous under `America/Santiago` timezone, and TiDB return **smaller** result for both of them under `America/Santiago` timezone.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                            |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v5.5.0-alpha-202-g077eb80f1
+Edition: Community
+Git Commit Hash: 077eb80f1317a54b1a73894d9f58cd6dfff19260
+Git Branch: master
+UTC Build Time: 2022-02-08 04:27:22
+GoVersion: go1.17.1
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

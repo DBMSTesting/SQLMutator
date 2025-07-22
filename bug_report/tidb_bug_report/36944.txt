@@ -1,0 +1,139 @@
+ID: 36944
+Title: wrong results when the query contains setting user var
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+create table t(a int, b int, index idx_a(a));
+insert into t values (1,2), (3,4);
+-- repeat the following insert for 16 times
+insert into t select a + 1, b + 1 from t;
+insert into t select a + 1, b + 1 from t;
+...
+insert into t select a + 1, b + 1 from t;
+
+SELECT i, a AS aa FROM
+(
+    SELECT
+        (@i := @i + 1) AS i,
+        t1.a
+    FROM
+        (SELECT a FROM t ORDER BY a) t1,
+        (SELECT @i := 0) AS x
+    ORDER BY
+        a
+) tmp limit 10;
+```
+
+### 2. What did you expect to see? (Required)
+MySQL's results:
+```
+mysql> SELECT i, a AS aa FROM
+    -> (
+    ->     SELECT
+    ->         (@i := @i + 1) AS i,
+    ->         t1.a
+    ->     FROM
+    ->         (SELECT a FROM t ORDER BY a) t1,
+    ->         (SELECT @i := 0) AS x
+    ->     ORDER BY
+    ->         a
+    -> ) tmp limit 10;
++------+------+
+| i    | aa   |
++------+------+
+|    1 |    1 |
+|    2 |    2 |
+|    3 |    2 |
+|    4 |    2 |
+|    5 |    2 |
+|    6 |    2 |
+|    7 |    2 |
+|    8 |    2 |
+|    9 |    2 |
+|   10 |    2 |
++------+------+
+10 rows in set, 2 warnings (0.11 sec)
+```
+
+### 3. What did you see instead (Required)
+TiDB's results:
+```
+mysql> SELECT i, a AS aa FROM
+    -> (
+    ->     SELECT
+    ->         (@i := @i + 1) AS i,
+    ->         t1.a
+    ->     FROM
+    ->         (SELECT a FROM t ORDER BY a) t1,
+    ->         (SELECT @i := 0) AS x
+    ->     ORDER BY
+    ->         a
+    -> ) tmp limit 10;
++------+------+
+| i    | aa   |
++------+------+
+| 1025 |    1 |
+| 1034 |    2 |
+| 1030 |    2 |
+| 1033 |    2 |
+| 1027 |    2 |
+| 1029 |    2 |
+| 1031 |    2 |
+| 1032 |    2 |
+| 1026 |    2 |
+| 1028 |    2 |
++------+------+
+10 rows in set (0.55 sec)
+```
+Looking into the execution plan, No order is guaranteed when pulling data from `HashJoin_25`, which doesn't match the meaning of the query.
+```
+mysql> explain SELECT i, a AS aa FROM
+    -> (
+    ->     SELECT
+    ->         (@i := @i + 1) AS i,
+    ->         t1.a
+    ->     FROM
+    ->         (SELECT a FROM t ORDER BY a) t1,
+    ->         (SELECT @i := 0) AS x
+    ->     ORDER BY
+    ->         a
+    -> ) tmp limit 10;
++---------------------------------+-----------+-----------+-------------------------+---------------------------------------------------+
+| id                              | estRows   | task      | access object           | operator info                                     |
++---------------------------------+-----------+-----------+-------------------------+---------------------------------------------------+
+| TopN_17                         | 10.00     | root      |                         | test.t.a, offset:0, count:10                      |
+| └─Projection_22                 | 131072.00 | root      |                         | setvar(i, plus(getvar(i), 1))->Column#5, test.t.a |
+|   └─HashJoin_25                 | 131072.00 | root      |                         | CARTESIAN inner join                              |
+|     ├─Projection_26(Build)      | 1.00      | root      |                         | setvar(i, 0)->Column#4                            |
+|     │ └─TableDual_27            | 1.00      | root      |                         | rows:1                                            |
+|     └─IndexReader_35(Probe)     | 131072.00 | root      |                         | index:IndexFullScan_34                            |
+|       └─IndexFullScan_34        | 131072.00 | cop[tikv] | table:t, index:idx_a(a) | keep order:true                                   |
++---------------------------------+-----------+-----------+-------------------------+---------------------------------------------------+
+7 rows in set (0.00 sec)
+```
+
+
+### 4. What is your TiDB version? (Required)
+```
+mysql> SELECT tidb_version();
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                   |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v5.4.0-1263-gc7b5ca0f7
+Edition: Community
+Git Commit Hash: c7b5ca0f716f373a2d79760817e1069c196b290c
+Git Branch: master
+UTC Build Time: 2022-08-06 05:32:04
+GoVersion: go1.18.1
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: unistore |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

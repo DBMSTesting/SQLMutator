@@ -1,0 +1,75 @@
+ID: 50972
+Title: some partition/constraints expressions will cause DDL hangs forever
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+> CREATE TABLE t (id int) PARTITION BY HASH( t.id ) PARTITIONS 4;
+> show create table t;
+> alter table t rename tx;
+```
+
+### 2. What did you expect to see? (Required)
+
+success, in MySQL:
+
+```
+mysql> show create table t;
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                    |
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t     | CREATE TABLE `t` (
+  `id` int DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50100 PARTITION BY HASH (`id`)
+PARTITIONS 4 */ |
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.01 sec)
+
+mysql> alter table t rename tx;
+Query OK, 0 rows affected (0.08 sec)
+```
+
+### 3. What did you see instead (Required)
+
+The rename DDL hangs:
+
+```
+mysql> CREATE TABLE t (id int) PARTITION BY HASH( t.id ) PARTITIONS 4;
+Query OK, 0 rows affected (0.03 sec)
+
+mysql> show create table t;
++-------+------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                         |
++-------+------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t     | CREATE TABLE `t` (
+  `id` int(11) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+PARTITION BY HASH (`t`.`id`) PARTITIONS 4 |
++-------+------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> alter table t rename tx; --- this DDL hangs
+```
+
+We can see that the hash expression is `t.id` not `id` and when we rename this table, it schema load will fail:
+
+```
+[2024/02/05 10:33:28.159 +08:00] [ERROR] [partition.go:1197] ["wrong table partition expression"] [expression=`t`.`id`] [error="[planner:1054]Unknown column 't.id' in 'expression'"]
+[2024/02/05 10:33:28.159 +08:00] [ERROR] [domain.go:286] ["failed to load schema diff"] [error="[planner:1054]Unknown column 't.id' in 'expression'"]
+[2024/02/05 10:33:28.172 +08:00] [ERROR] [partition.go:1197] ["wrong table partition expression"] [expression=`t`.`id`] [error="[planner:1054]Unknown column 't.id' in 'expression'"]
+[2024/02/05 10:33:28.172 +08:00] [ERROR] [domain.go:905] ["reload schema in loop failed"] [error="Build table `test`.`tx` schema failed: [planner:1054]Unknown column 't.id' in 'expression'"]
+```
+
+If we restart tidb server after that, the server will hang on loading schema and cannot be connected.
+
+This also affects constraints like `CREATE TABLE t1 (a int, check(t1.a > 1));`
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

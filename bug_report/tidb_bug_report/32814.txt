@@ -1,0 +1,39 @@
+ID: 32814
+Title: TiDB may dispatch duplicated tasks to different TiFlash node and produce wrong result. 
+Description:
+## Bug Report
+
+completely same as https://github.com/pingcap/tics/issues/4163
+
+```sql
+use test;
+create table t(a int not null);
+create table s(a int not null);
+alter table t set tiflash replica 1;
+alter table s set tiflash replica 1;
+
+insert into t values (1);
+insert into s values (1);
+
+explain analyze SELECT count(distinct a) as x from t having exists(select a from s where x=s.a);
++--------------------------------------+---------+---------+-------------------+---------------+----------------------------------------------------------------------------------------------------------+-------------------------------------------+--------+------+
+| id                                   | estRows | actRows | task              | access object | execution info                                                                                           | operator info                             | memory | disk |
++--------------------------------------+---------+---------+-------------------+---------------+----------------------------------------------------------------------------------------------------------+-------------------------------------------+--------+------+
+| TableReader_23                       | 0.80    | 2       | root              |               | time:72.4ms, loops:2, cop_task: {num: 4, max: 0s, min: 0s, avg: 0s, p95: 0s, copr_cache_hit_ratio: 0.00} | data:ExchangeSender_22                    | N/A    | N/A  |
+| └─ExchangeSender_22                  | 0.80    | 2       | batchCop[tiflash] |               | tiflash_task:{proc max:7.03ms, min:6.36ms, p80:7.03ms, p95:7.03ms, iters:2, tasks:2, threads:48}         | ExchangeType: PassThrough                 | N/A    | N/A  |
+|   └─HashJoin_10                      | 0.80    | 2       | batchCop[tiflash] |               | tiflash_task:{proc max:7.03ms, min:6.36ms, p80:7.03ms, p95:7.03ms, iters:2, tasks:2, threads:48}         | semi join, equal:[eq(Column#5, test.s.a)] | N/A    | N/A  |
+|     ├─ExchangeReceiver_21(Build)     | 1.00    | 2       | batchCop[tiflash] |               | tiflash_task:{proc max:7.03ms, min:6.36ms, p80:7.03ms, p95:7.03ms, iters:2, tasks:2, threads:48}         |                                           | N/A    | N/A  |
+|     │ └─ExchangeSender_20            | 1.00    | 1       | batchCop[tiflash] |               | tiflash_task:{proc max:1.8ms, min:0s, p80:1.8ms, p95:1.8ms, iters:1, tasks:2, threads:1}                 | ExchangeType: Broadcast                   | N/A    | N/A  |
+|     │   └─TableFullScan_19           | 1.00    | 1       | batchCop[tiflash] | table:s       | tiflash_task:{proc max:1.8ms, min:0s, p80:1.8ms, p95:1.8ms, iters:1, tasks:2, threads:1}                 | keep order:false, stats:pseudo            | N/A    | N/A  |
+|     └─Projection_15(Probe)           | 1.00    | 2       | batchCop[tiflash] |               | tiflash_task:{proc max:6.36ms, min:6.03ms, p80:6.36ms, p95:6.36ms, iters:2, tasks:2, threads:48}         | Column#5                                  | N/A    | N/A  |
+|       └─HashAgg_16                   | 1.00    | 2       | batchCop[tiflash] |               | tiflash_task:{proc max:6.36ms, min:6.03ms, p80:6.36ms, p95:6.36ms, iters:2, tasks:2, threads:2}          | funcs:count(distinct test.t.a)->Column#5  | N/A    | N/A  |
+|         └─ExchangeReceiver_18        | 1.00    | 2       | batchCop[tiflash] |               | tiflash_task:{proc max:6.36ms, min:6.03ms, p80:6.36ms, p95:6.36ms, iters:2, tasks:2, threads:48}         |                                           | N/A    | N/A  |
+|           └─ExchangeSender_17        | 1.00    | 1       | batchCop[tiflash] |               | tiflash_task:{proc max:2.32ms, min:0s, p80:2.32ms, p95:2.32ms, iters:1, tasks:2, threads:1}              | ExchangeType: PassThrough                 | N/A    | N/A  |
+|             └─HashAgg_13             | 1.00    | 1       | batchCop[tiflash] |               | tiflash_task:{proc max:2.32ms, min:0s, p80:2.32ms, p95:2.32ms, iters:1, tasks:2, threads:1}              | group by:test.t.a,                        | N/A    | N/A  |
+|               └─TableFullScan_14     | 1.00    | 1       | batchCop[tiflash] | table:t       | tiflash_task:{proc max:2.32ms, min:0s, p80:2.32ms, p95:2.32ms, iters:1, tasks:2, threads:1}              | keep order:false, stats:pseudo            | N/A    | N/A  |
++--------------------------------------+---------+---------+-------------------+---------------+----------------------------------------------------------------------------------------------------------+-------------------------------------------+--------+------+
+12 rows in set (0.18 sec)
+```
+
+<!-- Paste the output of SELECT tidb_version() -->
+

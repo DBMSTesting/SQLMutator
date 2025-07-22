@@ -1,0 +1,59 @@
+ID: 27187
+Title: tidb OOM during analyze table phase of lightning import 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. Use lightning to import 70GB of test data
+2. Waiting the lightning import finished, and check tidb status.
+
+### 2. What did you expect to see? (Required)
+Lightning import should succeed, including analyze table phase at the end of the lightning import.
+
+### 3. What did you see instead (Required)
+At the end of lightning import, there is a analyze table task, it fails due to TiDB OOM.
+
+lightning log:
+[2021/08/12 16:15:02.902 +08:00] [WARN] [util.go:143] ["analyze table failed but going to try again"] [table=`aa`.`bb`] [query="ANALYZE TABLE `aa`.`bb`"] [args=null] [retryCnt=0] [error="invalid connection"]
+[2021/08/12 16:15:02.902 +08:00] [WARN] [util.go:131] ["analyze table retry start"] [table=`aa`.`bb`] [query="ANALYZE TABLE `aa`.`bb`"] [args=null] [retryCnt=1]
+[2021/08/12 16:15:05.904 +08:00] [WARN] [util.go:146] ["analyze table failed with no retry"] [table=`aa`.`bb`] [query="ANALYZE TABLE `aa`.`bb`"] [args=null] [retryCnt=1] [error="dial tcp 172.16.6.151:4000: connect: connection refused"]
+[2021/08/12 16:15:05.904 +08:00] [ERROR] [table_restore.go:892] ["analyze failed"] [table=`aa`.`bb`] [takeTime=4m1.76799318s] [error="analyze table failed: dial tcp 172.16.6.151:4000: connect: connection refused"]
+[2021/08/12 16:15:05.904 +08:00] [WARN] [table_restore.go:762] ["analyze table failed, will skip this error and go on"] [table=`aa`.`bb`] [error="analyze table failed: dial tcp 172.16.6.151:4000: connect: connection refused"]
+[2021/08/12 16:15:05.904 +08:00] [INFO] [restore.go:1458] ["restore all tables data completed"] [takeTime=44m35.187444468s] []
+[2021/08/12 16:15:05.904 +08:00] [INFO] [restore.go:1078] ["everything imported, stopping periodic actions"]
+
+tidb OOMs
+[root@centos76_vm log]# dmesg -Tw | grep -i out
+...
+[Thu Aug 12 16:15:01 2021]  [<ffffffff9d7c2cc6>] out_of_memory+0x4b6/0x4f0
+[Thu Aug 12 16:15:01 2021] Out of memory: Kill process 14986 (tidb-server) score 972 or sacrifice child
+[Thu Aug 12 16:15:01 2021]  [<ffffffff9d7c2cc6>] out_of_memory+0x4b6/0x4f0
+[Thu Aug 12 16:15:01 2021] Out of memory: Kill process 14992 (tidb-server) score 972 or sacrifice child
+
+Notes: I retested this scenario, and this time tidb had OOM warn, restarted (even though it didn't OOM)
+Tidb log:
+[2021/08/12 19:59:00.129 +08:00] [WARN] [grpclogger.go:81] ["grpc: Server.Serve failed to create ServerTransport: connection error: desc = \"transport: http2Server.HandleStreams failed to receive the preface from client: EOF\""] [system=grpc] [grpc_log=true]
+[2021/08/12 19:59:15.654 +08:00] [WARN] [memory_usage_alarm.go:139] ["tidb-server has the risk of OOM. Running SQLs and heap profile will be recorded in record path"] ["is server-memory-quota set"=false] ["system memory total"=16655896576] ["system memory usage"=14556434432] ["tidb-server memory usage"=11517374872] [memory-usage-alarm-ratio=0.8] ["record path"="/tmp/1001_tidb/MC4wLjAuMDo0MDAwLzAuMC4wLjA6MTAwODA=/tmp-storage/record"]
+
+/var/log/messages of tidb node:
+Aug 12 19:59:47 centos76_vm systemd: tidb-4000.service: main process exited, code=exited, status=2/INVALIDARGUMENT
+Aug 12 19:59:47 centos76_vm systemd: Unit tidb-4000.service entered failed state.
+Aug 12 19:59:47 centos76_vm systemd: tidb-4000.service failed.
+[2021/08/12 19:59:00.129 +08:00] [WARN] [grpclogger.go:81] ["grpc: Server.Serve failed to create ServerTransport: connection error: desc = \"transport: http2Server.HandleStreams failed to receive the preface from client: EOF\""] [system=grpc] [grpc_log=true]
+[2021/08/12 19:59:15.654 +08:00] [WARN] [memory_usage_alarm.go:139] ["tidb-server has the risk of OOM. Running SQLs and heap profile will be recorded in record path"] ["is server-memory-quota set"=false] ["system memory total"=16655896576] ["system memory usage"=14556434432] ["tidb-server memory usage"=11517374872] [memory-usage-alarm-ratio=0.8] ["record path"="/tmp/1001_tidb/MC4wLjAuMDo0MDAwLzAuMC4wLjA6MTAwODA=/tmp-storage/record"]
+/var/log/messages of tidb node:
+Aug 12 19:59:47 centos76_vm systemd: tidb-4000.service: main process exited, code=exited, status=2/INVALIDARGUMENT
+Aug 12 19:59:47 centos76_vm systemd: Unit tidb-4000.service entered failed state.
+Aug 12 19:59:47 centos76_vm systemd: tidb-4000.service failed.
+
+Full lightning & TiDB logs, can be found at:
+http://minio.pingcap.net:9000/minio/nfs/logs/tidb_oom/
+
+### 4. What is your TiDB version? (Required)
+TiDB versioni: v5.0.0-nightly-20210809
+Cluster topo: each node is 8C 16G.
+<img width="1074" alt="tidb_topo" src="https://user-images.githubusercontent.com/7403864/129302590-c3d5c39e-e201-4bb4-a899-c3bcbedbd222.PNG">
+
+

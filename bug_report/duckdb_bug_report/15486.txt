@@ -1,0 +1,91 @@
+ID: 15486
+Title: Columns with large strings cannot convert to polars/arrow.
+Description:
+### What happens?
+
+When trying to convert columns with large strings to polars or pyarrow, I'm getting 
+
+
+> duckdb.duckdb.InvalidInputException: Invalid Input Error: Arrow Appender: The maximum total string size for regular string buffers is 2147483647 but the offset of ...
+
+This is likely because internally you use the string and not the large_string data types. A backward-compatible solution would be to have some control over it in `result.pl()` or `result.arrow()` like `result.pl(use_large_string=True)` or similar (but there are many possible solutions here including ones that are transparent to the user).
+
+Note that this can happen with large arrays as well when the individual strings are small, but the underlying string size is large. This means that this will happen, for example, when querying many parquet files and converting the result to `polars`.
+
+### To Reproduce
+
+```python
+
+import polars as pl
+
+# Create three large DataFrames with string columns containing strings that exceed 2GB
+xyz = [pl.DataFrame(dict(
+    id=[i],  # Unique ID for each row
+    name=[s * 2000000000]  # A string that is 2 billion characters long
+)) for (i, s) in enumerate('xyz')]
+
+# Write each DataFrame to a separate Parquet file
+# Polars allows handling and saving large strings to Parquet without errors
+for name, df in zip('xyz', xyz):
+    df.write_parquet(f'{name}.parquet')
+
+# Concatenate the large DataFrames into one
+# Polars handles this concatenation without issues
+df = pl.concat(xyz)  # No problem here
+
+# Convert the concatenated Polars DataFrame to an Arrow Table
+# PyArrow's LargeString type supports large strings, so no problem arises here
+tbl = df.to_arrow()  # No problem here
+
+import duckdb
+
+# Attempt to load the concatenated Parquet files into DuckDB
+# This operation fails because DuckDB's Arrow Appender cannot handle strings 
+# that exceed the maximum buffer size for regular string types (2GB).
+result = duckdb.sql("SELECT * FROM '[xyz].parquet'")
+result.pl()  # This triggers the error
+```
+```console
+duckdb.duckdb.InvalidInputException: Invalid Input Error: Arrow Appender: The maximum total string size for regular string buffers is 2147483647 but the offset of 4000000000 exceeds this.
+```
+
+
+### OS:
+
+Ubuntu 20.04.6 LTS
+
+### DuckDB Version:
+
+1.1.13
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+Intel® Core™ i9-10940X CPU @ 3.30GHz × 28 , 188.4 GiB Memory
+
+### Full Name:
+
+Erez Zinman
+
+### Affiliation:
+
+Razor-Labs
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,74 @@
+ID: 34441
+Title: 0 is handled improperly as a column constant value
+Description:
+We upgraded from v. 21.2.2.8 to v. 21.12.4.1 a few days ago and started to experience a weird issue.
+Some queries having 0 as a column constant value started to return the following error:
+
+> Received exception from server (version 21.12.4):
+> Code: 44. DB::Exception: DB::Exception: Cannot convert column `enabled` because it is non constant in source stream but must be constant in result. (ILLEGAL_COLUMN)
+
+
+I wasn't able to define exact criteria but it seems that a JOIN and a UNION ALL, as in the example below, are a must.
+
+The query is:
+
+```
+SELECT *
+FROM
+(
+    SELECT
+        ef.frequency AS frequency,
+        0 AS enabled,
+        NULL as name
+    FROM e_frequencies AS ef
+    UNION ALL
+    SELECT
+        tf.frequency AS frequency,
+        0 AS enabled,
+        t.name AS name
+    FROM t_frequencies AS tf
+    INNER JOIN tags AS t ON toUInt64(tf.tag_id) = t.id
+)
+WHERE frequency > 0
+LIMIT 0, 50
+```
+
+Things start working properly if I replace 0 with, say, `1-1` or `toUInt8('0')` in both `0 AS enabled` lines or in `frequency > 0` condition. It also works perfectly fine if there's any numeric literal other than 0 in any of those two places (`0 AS enabled` or `frequency > 0`)
+
+Tables schemas are as follows:
+
+`e_frequencies`:
+```
+CREATE TABLE e_frequencies
+(
+    `id` UInt32,
+    `frequency` UInt64
+)
+ENGINE = Distributed('default_cluster', 'default', 'e_frequencies_data', rand())
+```
+
+`t_frequencies`:
+```
+CREATE TABLE t_frequencies
+(
+    `tag_id` UInt32,
+    `frequency` UInt64
+)
+ENGINE = Distributed('default_cluster', 'default', 't_frequencies_data', rand())
+```
+`tags`:
+```
+CREATE DICTIONARY tags
+(
+    `id` UInt64,
+    `name` String
+)
+PRIMARY KEY id
+SOURCE(MYSQL(...))
+LIFETIME(MIN 300 MAX 360)
+LAYOUT(HASHED()) 
+```
+
+I tried to reproduce the issue using non-distributed table engines but with no success, so that makes me think that the problem might be related to the previously solved issue #8165
+
+Please let me know if any other information is needed and thank you in advance

@@ -1,0 +1,138 @@
+ID: 38333
+Title: Index analysis doesn't work with toHour and Timezone condition
+Description:
+**Describe what's wrong**
+Filter condition doesn't work correctly when functions like toHour are involved, I have another examples involved toDayOfWeek function as well where produced results are incorrect but I'll report in separate ticket about it.
+
+**Does it reproduce on recent release?**
+Yes, verified as part of v22.3-lts
+
+**How to reproduce**
+
+* Which ClickHouse server version to use 21.12.4.1
+* Which interface to use, if matters: clickhouse-client
+* Queries to run that lead to unexpected result and 
+
+##### Table definition
+```
+clickhouse-db-02.server.internal :) show create db.articles_ext_data;
+
+SHOW CREATE TABLE db.articles_ext_data
+
+Query id: 383c56fa-21e0-4dae-bc78-9eb9adfd03b2
+
+[clickhouse-db-02.server.internal] 2022.06.23 08:19:47.831837 [ 65324 ] {383c56fa-21e0-4dae-bc78-9eb9adfd03b2} <Debug> executeQuery: (from 127.0.0.1:43080) show create db.articles_ext_data;
+[clickhouse-db-02.server.internal] 2022.06.23 08:19:47.831935 [ 65324 ] {383c56fa-21e0-4dae-bc78-9eb9adfd03b2} <Trace> ContextAccess (default): Access granted: SHOW COLUMNS ON db.articles_ext_data
+┌─statement──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE db.articles_ext_data
+(
+    `internal_id` String,
+    `timestamp` Nullable(DateTime('UTC')),
+    `url` Nullable(String),
+    `data_provider` String,
+    `document_length` UInt32,
+    `domain_name` String,
+    `is_near_duplicate` UInt8,
+    `publish_date` DateTime('UTC'),
+    `lang` Nullable(String),
+    `frames.label` Array(String),
+    `frames.score` Array(Float64),
+    `frames.version` Array(UInt32),
+    `frames.role` Array(Array(String)),
+    `frames.value` Array(Array(String)),
+    `frames.entity_id` Array(Array(UInt32)),
+    `frames.salience_score` Array(Array(Float64)),
+    `tags.id` Array(UInt32),
+    `frames.num_mentions` Array(UInt32),
+    `tags.name` Array(String),
+    `tags.score` Array(Float64),
+    `tags.tagger` Array(String),
+    `tags.checksum` Array(String),
+    `tags.type` Array(String),
+    `kpis.entity_id` Array(UInt32),
+    `kpis.salience_score` Array(Float64),
+    `kpis.num_mentions` Array(UInt32)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/replicated/db/articles_ext_data', 'clickhouse-db-02.server.internal')
+PARTITION BY toYYYYMMDD(publish_date)
+PRIMARY KEY cityHash64(internal_id)
+ORDER BY cityHash64(internal_id)
+SAMPLE BY cityHash64(internal_id)
+SETTINGS index_granularity = 8192 │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[clickhouse-db-02.server.internal] 2022.06.23 08:19:47.833999 [ 65324 ] {383c56fa-21e0-4dae-bc78-9eb9adfd03b2} <Information> executeQuery: Read 1 rows, 1.22 KiB in 0.002124662 sec., 470 rows/sec., 575.46 KiB/sec.
+[clickhouse-db-02.server.internal] 2022.06.23 08:19:47.834029 [ 65324 ] {383c56fa-21e0-4dae-bc78-9eb9adfd03b2} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+
+1 rows in set. Elapsed: 0.003 sec.
+```
+```
+# Working Use Case
+SELECT
+    toHour(toTimeZone(publish_date, 'UTC')) AS toHour_UTC,
+    toHour(toTimeZone(publish_date, 'Asia/Jerusalem')) AS toHour_Israel
+FROM db.articles_ext_data
+WHERE (publish_date >= toTimeZone(toDateTime('2021-07-01 00:00:00'), 'Asia/Jerusalem')) AND (publish_date < toTimeZone(toDateTime('2021-09-30 23:59:59'), 'Asia/Jerusalem'))
+HAVING toHour_UTC = 5
+ORDER BY toHour_UTC DESC
+LIMIT 10
+
+Query id: 9032228d-a5ae-465b-985d-6cb5d8369ec8
+
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.827400 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> executeQuery: (from 127.0.0.1:43080) SELECT toHour(toTimeZone(publish_date, 'UTC')) AS toHour_UTC, toHour(toTimeZone(publish_date, 'Asia/Jerusalem')) AS toHour_Israel FROM db.articles_ext_data WHERE (publish_date >= toTimeZone(toDateTime('2021-07-01 00:00:00'), 'Asia/Jerusalem')) AND (publish_date < toTimeZone(toDateTime('2021-09-30 23:59:59'), 'Asia/Jerusalem')) HAVING toHour_UTC = 5 ORDER BY toHour_UTC DESC LIMIT 10;
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.828408 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Trace> ContextAccess (default): Access granted: SELECT(publish_date) ON db.articles_ext_data
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.829203 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.829851 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): Key condition: unknown, unknown, and, unknown, and
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.841597 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): MinMax index condition: (column 0 in [1625097600, +Inf)), (column 0 in (-Inf, 1633046398]), and, (toHour(toTimezone(column 0)) in [5, 5]), and
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.843542 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): Selected 117/3088 parts by partition key, 117 parts by primary key, 5858/5858 marks by primary key, 5858 marks to read from 117 ranges
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.845501 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): Reading approx. 6585652 rows with 32 streams
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.853734 [ 53567 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> MergingSortedTransform: Merge sorted 1 blocks, 10 rows in 0.007999958 sec., 1250.0065625344535 rows/sec., 15.63 KiB/sec
+┌─toHour_UTC─┬─toHour_Israel─┐
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+│          5 │             8 │
+└────────────┴───────────────┘
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.854394 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Information> executeQuery: Read 6585652 rows, 25.12 MiB in 0.026937251 sec., 244481220 rows/sec., 932.62 MiB/sec.
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:11.854421 [ 65324 ] {9032228d-a5ae-465b-985d-6cb5d8369ec8} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+
+10 rows in set. Elapsed: 0.028 sec. Processed 6.59 million rows, 26.34 MB (235.49 million rows/s., 941.98 MB/s.)
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# Not Working Use Case
+SELECT
+    toHour(toTimeZone(publish_date, 'UTC')) AS toHour_UTC,
+    toHour(toTimeZone(publish_date, 'Asia/Jerusalem')) AS toHour_Israel
+FROM db.articles_ext_data
+WHERE (publish_date >= toTimeZone(toDateTime('2021-07-01 00:00:00'), 'Asia/Jerusalem')) AND (publish_date < toTimeZone(toDateTime('2021-09-30 23:59:59'), 'Asia/Jerusalem'))
+HAVING toHour_Israel = 8
+ORDER BY toHour_Israel DESC
+LIMIT 10
+
+Query id: c1c83e59-af83-40cc-b93e-d2a774186fa1
+
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.523436 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Debug> executeQuery: (from 127.0.0.1:43080) SELECT toHour(toTimeZone(publish_date, 'UTC')) AS toHour_UTC, toHour(toTimeZone(publish_date, 'Asia/Jerusalem')) AS toHour_Israel FROM db.articles_ext_data WHERE (publish_date >= toTimeZone(toDateTime('2021-07-01 00:00:00'), 'Asia/Jerusalem')) AND (publish_date < toTimeZone(toDateTime('2021-09-30 23:59:59'), 'Asia/Jerusalem')) HAVING toHour_Israel = 8 ORDER BY toHour_Israel DESC LIMIT 10
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.524450 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Trace> ContextAccess (default): Access granted: SELECT(publish_date) ON db.articles_ext_data
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.525283 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.526006 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): Key condition: unknown, unknown, and, unknown, and
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.537831 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): MinMax index condition: (column 0 in [1625097600, +Inf)), (column 0 in (-Inf, 1633046398]), and, (toHour(toTimezone(column 0)) in [8, 8]), and
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.537893 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Debug> db.articles_ext_data (bf32f1f5-ce1c-44e3-bf32-f1f5ce1c24e3) (SelectExecutor): Selected 0/3088 parts by partition key, 0 parts by primary key, 0/0 marks by primary key, 0 marks to read from 0 ranges
+[clickhouse-db-02.server.internal] 2022.06.23 08:18:34.538562 [ 65324 ] {c1c83e59-af83-40cc-b93e-d2a774186fa1} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+Ok.
+
+0 rows in set. Elapsed: 0.016 sec.
+```
+
+**Expected behavior**
+The expected results should be identical to the first query response regardless of condition **toHour_UTC = 5 or toHour_Israel = 8** applies
+
+**Additional context**
+On small tables with syntenic data, I was unable to reproduce the issue, I also tried to copy data from one table to another with the same structure and after data migration completion the issue reproduces consistently.
+Might be related to https://github.com/ClickHouse/ClickHouse/issues/10977
+

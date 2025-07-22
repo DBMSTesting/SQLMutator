@@ -1,0 +1,72 @@
+ID: 18197
+Title: Enum Column in LEFT JOIN leads to Exception
+Description:
+When doing a left join on a table, which contains an Enum column, selecting this column will lead to an error when setting 'join_use_nulls' is disabled. Clickhouse tries to use default value for enum which does not exist.
+
+**How to reproduce**
+Tested with clh: 20.12.3.3
+
+```
+CREATE TABLE join_test_main (
+    keycol UInt16,
+    value_main String
+) engine=MergeTree() order by (keycol) partition by tuple();
+
+CREATE TABLE join_test_join (
+    keycol UInt16,
+    value_join_enum Enum8('First' = 1,'Second' = 2),
+    value_join_string String
+) engine=MergeTree() order by (keycol) partition by tuple();
+
+INSERT INTO join_test_main
+VALUES
+(1, 'First'),(2,'Second'), (3, 'Third');
+
+INSERT INTO join_test_join
+VALUES
+(2,'Second', 'Second');
+
+
+```
+
+Testquery and exception:
+
+```
+SELECT join_test_main.keycol, join_test_join.value_join_enum
+FROM join_test_main
+LEFT JOIN join_test_join USING(keycol);
+
+Error on processing query: SELECT join_test_main.keycol, join_test_join.value_join_enum
+FROM join_test_main
+LEFT JOIN join_test_join USING(keycol);
+Code: 36, e.displayText() = DB::Exception: Unexpected value 0 for type Enum8('First' = 1, 'Second' = 2), Stack trace (when copying this message, always include the lines below):
+
+0. DB::DataTypeEnum<signed char>::findByValue(signed char const&) const @ 0x94abcd5 in /usr/bin/clickhouse
+1. DB::DataTypeEnum<signed char>::serializeText(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const @ 0xd75d470 in /usr/bin/clickhouse
+2. DB::PrettyBlockOutputFormat::calculateWidths(DB::Block const&, DB::Chunk const&, std::__1::vector<DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 0ul, 0ul>, std::__1::allocator<DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 0ul, 0ul> > >&, DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 0ul, 0ul>&, DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 0ul, 0ul>&) @ 0xe6de3f6 in /usr/bin/clickhouse
+3. DB::PrettyCompactBlockOutputFormat::writeChunk(DB::Chunk const&, DB::IOutputFormat::PortKind) @ 0xe6e2b19 in /usr/bin/clickhouse
+4. DB::IOutputFormat::write(DB::Block const&) @ 0xe64de63 in /usr/bin/clickhouse
+5. DB::MaterializingBlockOutputStream::write(DB::Block const&) @ 0xe5d4de2 in /usr/bin/clickhouse
+6. DB::Client::onData(DB::Block&) @ 0x7da4cb2 in /usr/bin/clickhouse
+7. DB::Client::receiveAndProcessPacket(bool) @ 0x7da4896 in /usr/bin/clickhouse
+8. DB::Client::receiveResult() @ 0x7da6d4c in /usr/bin/clickhouse
+9. DB::Client::processOrdinaryQuery() @ 0x7d9aef1 in /usr/bin/clickhouse
+10. DB::Client::processParsedSingleQuery() @ 0x7d99822 in /usr/bin/clickhouse
+11. DB::Client::processMultiQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x7d97e2c in /usr/bin/clickhouse
+12. DB::Client::processQueryText(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x7d8d2df in /usr/bin/clickhouse
+13. DB::Client::mainImpl() @ 0x7d8907d in /usr/bin/clickhouse
+14. DB::Client::main(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x7d84c62 in /usr/bin/clickhouse
+15. Poco::Util::Application::run() @ 0x10d8ad33 in /usr/bin/clickhouse
+16. mainEntryClickHouseClient(int, char**) @ 0x7d7adbd in /usr/bin/clickhouse
+17. main @ 0x7ce0cbd in /usr/bin/clickhouse
+18. __libc_start_main @ 0x270b3 in /lib/x86_64-linux-gnu/libc-2.31.so
+19. _start @ 0x7c9102e in /usr/bin/clickhouse
+
+```
+**Expected behavior**
+To be discussed:
+ - Always null even without explicit setting
+ - Always an Enum which has empty String as element 0
+ - Syntax Error before execution, to not allow Enum fields without 0
+ - Always the first element of an enum (would not recommend)
+

@@ -1,0 +1,206 @@
+ID: 41462
+Title: Min/Max function applied on partition key causes more than 5000x performance degradation
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+Schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS test_table ( a INT NOT NULL, b INT NOT NULL, c INT NOT NULL, PRIMARY KEY (a,b,c)) PARTITION BY HASH(a) PARTITIONS 5;
+```
+
+Data. For any tuple, column a and b have same value, generated from [1-10], and column c is increasing by 1.
+
+A script generated 100k tuples is provided:
+
+```shell
+#!/bin/bash
+
+TABLENAME="test_table"
+num=100000
+
+echo "insert into ${TABLENAME} values (1,1,1)" >> insert_sql.sql
+for(( i=2;i<=${num};i++ ))
+    do
+        insert_a=$[RANDOM%10+1]
+        echo ",(${insert_a},${insert_a},${i})" >> insert_sql.sql
+    done
+echo ";" >> insert_sql.sql
+```
+
+Query:
+
+```sql
+select min(a) from test_table;
+select max(a) from test_table;
+select distinct(a) from test_table order by a limit 1;
+select min(b) from test_table;
+```
+
+### 2. What did you expect to see? (Required)
+
+Four queries should take a similar amount of time.
+
+### 3. What did you see instead (Required)
+
+First two queries took a very long time to execute(1 min 54.51 sec, 2 min 3.46 sec). While the last two act quickly(21.3ms, 14.4ms). There is a 5000x performance degradation between them.
+
+
+
+We also test some other queries with function on a.
+
+```sql
+select count(a) from test_table;
+select distinct(a) from test_table;
+```
+
+ But they can also act quickly (in 0.01 sec). 
+
+
+
+We analyzed the execution plans of the four queries mentioned in section1.
+
+```
+explain analyze select min(a) from test_table;
++------------------------------+-----------+---------+-----------+---------------+---------------------------------------------+
+| id                 | estRows   | actRows | task | access object | execution info | operator info   | memory    | disk |
++------------------------------+-----------+---------+-----------+---------------+---------------------------------------------+
+| StreamAgg_9 | 1.00   | 1 | root  |    | time:1m54.5s, loops:2 | funcs:min(lxrtest.test_table.a)->Column#4 | 404 Bytes | N/A  |
+
+| └─TopN_10| 1.00| 1 | root  |     | time:1m54.5s, loops:2 | lxrtest.test_table.a, offset:0, count:1   | 144 Bytes | N/A  |
+
+|   └─TableReader_17   | 1.00|100000|root|partition:all|time:1m54.5s, loops:100, cop_task: {num: 100005, max: 9.83ms, min: 143.2µs, avg: 1.13ms, p95: 2.28ms, max_proc_keys: 1, p95_proc_keys: 1, tot_proc: 49.3s, tot_wait: 4ms, rpc_num: 100005, rpc_time: 1m52.5s, copr_cache_hit_ratio: 0.00, distsql_concurrency: 1} | data:Limit_16    | 415 Bytes | N/A  |
+
+|     └─Limit_16|1.00|100000|cop[tikv] |     |tikv_task:{proc max:10ms, min:0s, avg: 885.1µs, p80:2ms, p95:2ms, iters:100005, tasks:100005}, scan_detail: {total_process_keys: 100000, total_process_keys_size: 4500000, total_keys: 200005, get_snapshot_time: 861.2ms, rocksdb: {delete_skipped_count: 801083507, key_skipped_count: 801183507, block: {cache_hit_count: 300015}}}  | offset:0, count:1 | N/A  | N/A  |
+
+|       └─TableFullScan_15|100000.00 | 100000  | cop[tikv] | table:test_table   | tikv_task:{proc max:10ms, min:0s, avg: 884.4µs, p80:2ms, p95:2ms, iters:100005, tasks:100005} | keep order:false  | N/A   | N/A  |
++------------------------------------------------------------------------------------------------------------------------------+
+5 rows in set (1 min 54.51 sec)
+```
+
+```
+ explain analyze select max(a) from test_table;
++------------------------------+-----------+---------+-----------+---------------+----------------------------------------------
+| id  | estRows   | actRows | task      | access object | execution info     | operator info          | memory    | disk |
++------------------------------+-----------+---------+-----------+---------------+----------------------------------------------
+| StreamAgg_9| 1.00 | 1  | root  |   | time:2m3.4s, loops:2   | funcs:max(lxrtest.test_table.a)->Column#4   | 404 Bytes | N/A  |
+
+| └─TopN_10  | 1.00 | 1  | root |   | time:2m3.4s, loops:2   | lxrtest.test_table.a:desc, offset:0, count:1 | 144 Bytes | N/A  |
+
+|   └─TableReader_17| 1.00| 100000| root | partition:all | time:2m3.4s, loops:100, cop_task: {num: 100005, max: 12.8ms, min: 146.4µs, avg: 1.22ms, p95: 3.16ms, max_proc_keys: 1, p95_proc_keys: 1, tot_proc: 1m6.8s, tot_wait: 6ms, rpc_num: 100005, rpc_time: 2m1.4s, copr_cache_hit_ratio: 0.00, distsql_concurrency: 1} | data:Limit_16 | 729 Bytes | N/A  |
+
+|     └─Limit_16| 1.00| 100000| cop[tikv] |  | tikv_task:{proc max:12ms, min:0s, avg: 974.7µs, p80:2ms, p95:3ms, iters:100005, tasks:100005}, scan_detail: {total_process_keys: 100000, total_process_keys_size: 4500000, total_keys: 200005, get_snapshot_time: 853.8ms, rocksdb: {delete_skipped_count: 600673297, key_skipped_count: 1201546589, block: {cache_hit_count: 479959, read_count: 1, read_byte: 7.50 KB, read_time: 27.4µs}}}   | offset:0, count:1 | N/A   | N/A  |
+
+|       └─TableFullScan_15     | 100000.00 | 100000  | cop[tikv] | table:test_table   | tikv_task:{proc max:12ms, min:0s, avg: 974µs, p80:2ms, p95:3ms, iters:100005, tasks:100005}    | keep order:false, desc     | N/A  | N/A  |
++------------------------------+-----------+---------+-----------+---------------+----------------------------------------------
+5 rows in set (2 min 3.46 sec)
+```
+
+```
+explain analyze select distinct(a) from test_table order by a limit 1;
++--------------------------------+-----------+---------+-----------+---------------+--------------------------------------------
+| id                  | estRows   | actRows | task      | access object | execution info | operator info   | memory    | disk |
++--------------------------------+-----------+---------+-----------+---------------+--------------------------------------------
+| Projection_8 | 1.00 | 1  | root  |      | time:21.3ms, loops:2, Concurrency:OFF    | lxrtest.test_table.a | 760 Bytes | N/A  |
+
+| └─TopN_11  | 1.00  | 1  | root  |     | time:21.3ms, loops:2  | lxrtest.test_table.a, offset:0, count:1   | 768 Bytes | N/A  |
+
+|   └─HashAgg_22| 10.00 | 10  | root |    | time:21.3ms, loops:6, partial_worker:{wall_time:21.202766ms, concurrency:5, task_num:1, tot_wait:105.664641ms, tot_exec:36.595µs, tot_time:105.713751ms, max:21.178408ms, p95:21.178408ms}, final_worker:{wall_time:21.280731ms, concurrency:5, task_num:5, tot_wait:105.783828ms, tot_exec:231.081µs, tot_time:106.018965ms, max:21.255377ms, p95:21.255377ms}   | group by:lxrtest.test_table.a, funcs:firstrow(lxrtest.test_table.a)->lxrtest.test_table.a, funcs:firstrow(lxrtest.test_table.a)->lxrtest.test_table.a | 10.8 KB   | N/A  |
+
+|     └─TableReader_23  | 10.00 | 10  | root | partition:all | time:21.1ms, loops:2, cop_task: {num: 5, max: 21.1ms, min: 10.7ms, avg: 16.1ms, p95: 21.1ms, max_proc_keys: 20071, p95_proc_keys: 20071, tot_proc: 75ms, rpc_num: 5, rpc_time: 80.4ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}  | data:HashAgg_16   | 367 Bytes | N/A  |
+
+|       └─HashAgg_16| 10.00  | 10 | cop[tikv] |     | tikv_task:{proc max:20ms, min:10ms, avg: 15.2ms, p80:20ms, p95:20ms, iters:100, tasks:5}, scan_detail: {total_process_keys: 100000, total_process_keys_size: 4500000, total_keys: 100005, get_snapshot_time: 834.1µs, rocksdb: {key_skipped_count: 100000, block: {cache_hit_count: 87}}} | group by:lxrtest.test_table.a,    | N/A   | N/A  |
+
+|         └─TableFullScan_21| 100000.00 | 100000  | cop[tikv] | table:test_table   | tikv_task:{proc max:19ms, min:10ms, avg: 14.4ms, p80:19ms, p95:19ms, iters:100, tasks:5}    | keep order:false    | N/A       | N/A  |
++--------------------------------+-----------+---------+-----------+---------------+--------------------------------------------
+6 rows in set (0.02 sec)
+```
+
+```
+ explain analyze select min(b) from test_table;
++------------------------------+-----------+---------+-----------+---------------+----------------------------------------------
+| id  | estRows   | actRows | task      | access object | execution info   | operator info    | memory    | disk |
++------------------------------+-----------+---------+-----------+---------------+----------------------------------------------
+| StreamAgg_9|1.00| 1    | root    |          |time:14.4ms, loops:2|funcs:min(lxrtest.test_table.b)->Column#4 | 404 Bytes |N/A|
+
+| └─TopN_10 | 1.00 | 1    | root    |         | time:14.4ms, loops:2|lxrtest.test_table.b, offset:0, count:1| 144 Bytes | N/A |
+
+| └─TableReader_17 | 1.00 | 5    | root | partition:all | time:14.4ms, loops:3, cop_task: {num: 5, max: 14.3ms, min: 9.35ms, avg: 11.7ms, p95: 14.3ms, max_proc_keys: 20071, p95_proc_keys: 20071, tot_proc: 51ms, rpc_num: 5, rpc_time: 58.2ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15} | data:TopN_16 | 355 Bytes | N/A  |
+
+|     └─TopN_16                | 1.00      | 5       | cop[tikv] |               | tikv_task:{proc max:14ms, min:9ms, avg: 11.2ms, p80:14ms, p95:14ms, iters:100, tasks:5}, scan_detail: {total_process_keys: 100000, total_process_keys_size: 4500000, total_keys: 100005, get_snapshot_time: 1.55ms, rocksdb: {delete_skipped_count: 60032, key_skipped_count: 160032, block: {cache_hit_count: 15}}} | lxrtest.test_table.b, offset:0, count:1   | N/A     | N/A  |
+
+|       └─TableFullScan_15     | 100000.00 | 100000  | cop[tikv] | table:test_table   | tikv_task:{proc max:12ms, min:7ms, avg: 9.2ms, p80:12ms, p95:12ms, iters:100, tasks:5}   | keep order:false    | N/A   | N/A  |
++------------------------------+-----------+---------+-----------+---------------+----------------------------------------------
+```
+
+And we found that the first two queries used Limit but no TopN on tikv, which may lead to a large data transfer from tikv to root. This may make query slow(even on the same machine).
+
+Then we try to rewrite the query, but found that Hints, DISTINCT, and subquery cannot change the query plan.
+
+```
+show index from test_table;
++-------+------------+----------+--------------+-------------+-----------+-------------+----------+--------+------+------------
+| Table | Non_unique | Key_name | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression | Clustered |
++-------+------------+----------+--------------+-------------+-----------+-------------+----------+--------+------+------------
+| test_table |          0 | PRIMARY  |            1 | a           | A         |           0 |     NULL | NULL   |      | BTREE      |         |               | YES     | NULL       | YES       |
+| test_table |          0 | PRIMARY  |            2 | b           | A         |           0 |     NULL | NULL   |      | BTREE      |         |               | YES     | NULL       | YES       |
+| test_table |          0 | PRIMARY  |            3 | c           | A         |           0 |     NULL | NULL   |      | BTREE      |         |               | YES     | NULL       | YES       |
++-------+------------+----------+--------------+-------------+-----------+-------------+----------+--------+------+------------
+3 rows in set (0.00 sec)
+
+explain SELECT /*+ FORCE_INDEX(test_table, PRIMARY) */ max(a) FROM test_table;
++------------------------------+-----------+-----------+---------------+-----------------------------------------+
+| id                           | estRows   | task      | access object | operator info                           |
++------------------------------+-----------+-----------+---------------+-----------------------------------------+
+| StreamAgg_9                  | 1.00      | root      |               | funcs:max(lxrtest.test_table.a)->Column#4    |
+| └─TopN_10                    | 1.00      | root      |               | lxrtest.test_table.a:desc, offset:0, count:1 |
+|   └─TableReader_17           | 1.00      | root      | partition:all | data:Limit_16                           |
+|     └─Limit_16               | 1.00      | cop[tikv] |               | offset:0, count:1                       |
+|       └─TableFullScan_15     | 100000.00 | cop[tikv] | table:test_table   | keep order:false, desc                  |
++------------------------------+-----------+-----------+---------------+-----------------------------------------+
+5 rows in set (0.00 sec)
+```
+
+```
+explain SELECT max(distinct(a)) FROM test_table;
++------------------------------+-----------+-----------+---------------+-----------------------------------------------+
+| id                           | estRows   | task      | access object | operator info                                 |
++------------------------------+-----------+-----------+---------------+-----------------------------------------------+
+| StreamAgg_9                  | 1.00      | root      |               | funcs:max(distinct lxrtest.test_table.a)->Column#4 |
+| └─TopN_10                    | 1.00      | root      |               | lxrtest.test_table.a:desc, offset:0, count:1       |
+|   └─TableReader_17           | 1.00      | root      | partition:all | data:Limit_16                                 |
+|     └─Limit_16               | 1.00      | cop[tikv] |               | offset:0, count:1                             |
+|       └─TableFullScan_15     | 100000.00 | cop[tikv] | table:test_table   | keep order:false, desc                        |
++------------------------------+-----------+-----------+---------------+-----------------------------------------------+
+5 rows in set (0.00 sec)
+```
+
+```
+explain select max(t.a) from (select a from test_table order by a) as t;
++------------------------------+-----------+-----------+---------------+-----------------------------------------+
+| id                           | estRows   | task      | access object | operator info                           |
++------------------------------+-----------+-----------+---------------+-----------------------------------------+
+| StreamAgg_11                 | 1.00      | root      |               | funcs:max(lxrtest.test_table.a)->Column#4    |
+| └─TopN_12                    | 1.00      | root      |               | lxrtest.test_table.a:desc, offset:0, count:1 |
+|   └─TableReader_19           | 1.00      | root      | partition:all | data:Limit_18                           |
+|     └─Limit_18               | 1.00      | cop[tikv] |               | offset:0, count:1                       |
+|       └─TableFullScan_17     | 100000.00 | cop[tikv] | table:test_table   | keep order:false, desc                  |
++------------------------------+-----------+-----------+---------------+-----------------------------------------+
+5 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+Release Version: v6.5.0
+Edition: Community
+Git Commit Hash: 706c3fa3c526cdba5b3e9f066b1a568fb96c56e3
+Git Branch: heads/refs/tags/v6.5.0
+UTC Build Time: 2022-12-27 03:50:44
+GoVersion: go1.19.3
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv 

@@ -1,0 +1,128 @@
+ID: 54039
+Title: Wrong user in error message when running SET PASSWORD FOR USER without sufficient privileges
+Description:
+## Bug Report
+
+Imagine having two users:
+1. `u1` with `SUPER` privilege
+2. `u2` without `SUPER` privilege
+
+When `u2` tries to run `SET PASSWORD FOR u1`, it should return an error saying that `u2` does not have enough privilege. But the current error will say `u1` does not have enough privilege, which doesn't seem correct.
+
+Tested with MySQL 8.3.0 and verified that the behavior is different:
+```
+➜  ~ mysql -u root
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 10
+Server version: 8.3.0 Homebrew
+
+Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> create user u1;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> grant super on *.* to u1;
+Query OK, 0 rows affected, 1 warning (0.01 sec)
+
+mysql> create user u2;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> grant create user on *.* to u2;
+Query OK, 0 rows affected (0.01 sec)
+➜  ~ mysql -u u2;
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 11
+Server version: 8.3.0 Homebrew
+
+Copyright (c) 2000, 2024, Oracle and/or its affiliates.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> set password for 'u1'='pwd';
+ERROR 1044 (42000): Access denied for user 'u2'@'%' to database 'mysql'
+```
+
+### 1. Minimal reproduce step (Required)
+
+Add a unit test:
+```go
+func TestSetPwd(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	// Create user u1 with super privilege.
+	tk.MustExec("create user 'u1'")
+	tk.MustExec("grant super on *.* to u1")
+	// Create user u2 with create user privilege.
+	tk.MustExec("create user 'u2'")
+	tk.MustExec("grant create user on *.* to u2")
+
+	tk2 := testkit.NewTestKit(t, store)
+	require.NoError(t, tk2.Session().Auth(&auth.UserIdentity{Username: "u2", Hostname: "localhost"}, nil, nil, nil))
+	tk2.MustExec("set password for 'u1'='randompassword'")
+}
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+Should see this error: `[executor:1044]Access denied for user 'u2'@'%' to database 'mysql'` since `u2` lacks the privileges.
+
+### 3. What did you see instead (Required)
+Error: `[executor:1044]Access denied for user 'u1'@'%' to database 'mysql'`
+
+Full trace:
+```
+Test:           TestSetPwd
+                Messages:       sql:set password for 'u1'='randompassword', [], error stack [executor:1044]Access denied for user 'u1'@'%' to database 'mysql'
+                                github.com/pingcap/errors.AddStack
+                                        /Users/yzhan/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20240318064555-6bd07397691f/errors.go:178
+                                github.com/pingcap/errors.(*Error).GenWithStackByArgs
+                                        /Users/yzhan/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20240318064555-6bd07397691f/normalize.go:175
+                                github.com/pingcap/tidb/pkg/executor.(*SimpleExec).executeSetPwd
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/simple.go:2470
+                                github.com/pingcap/tidb/pkg/executor.(*SimpleExec).Next
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/simple.go:178
+                                github.com/pingcap/tidb/pkg/executor/internal/exec.Next
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/internal/exec/executor.go:410
+                                github.com/pingcap/tidb/pkg/executor.(*ExecStmt).next
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/adapter.go:1238
+                                github.com/pingcap/tidb/pkg/executor.(*ExecStmt).handleNoDelayExecutor
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/adapter.go:987
+                                github.com/pingcap/tidb/pkg/executor.(*ExecStmt).handleNoDelay
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/adapter.go:821
+                                github.com/pingcap/tidb/pkg/executor.(*ExecStmt).Exec
+                                        /Users/yzhan/workspace2/tidb/pkg/executor/adapter.go:585
+                                github.com/pingcap/tidb/pkg/session.runStmt
+                                        /Users/yzhan/workspace2/tidb/pkg/session/session.go:2285
+                                github.com/pingcap/tidb/pkg/session.(*session).ExecuteStmt
+                                        /Users/yzhan/workspace2/tidb/pkg/session/session.go:2146
+                                github.com/pingcap/tidb/pkg/testkit.(*TestKit).ExecWithContext
+                                        /Users/yzhan/workspace2/tidb/pkg/testkit/testkit.go:383
+                                github.com/pingcap/tidb/pkg/testkit.(*TestKit).MustExecWithContext
+                                        /Users/yzhan/workspace2/tidb/pkg/testkit/testkit.go:155
+                                github.com/pingcap/tidb/pkg/testkit.(*TestKit).MustExec
+                                        /Users/yzhan/workspace2/tidb/pkg/testkit/testkit.go:150
+                                github.com/pingcap/tidb/pkg/extension_test.TestSetPwd
+                                        /Users/yzhan/workspace2/tidb/pkg/extension/auth_test.go:683
+                                testing.tRunner
+                                        /usr/local/go/src/testing/testing.go:1595
+                                runtime.goexit
+                                        /usr/local/go/src/runtime/asm_arm64.s:1197
+
+```
+
+### 4. What is your TiDB version? (Required)
+Latest commit or v8.1.0.
+<!-- Paste the output of SELECT tidb_version() -->
+

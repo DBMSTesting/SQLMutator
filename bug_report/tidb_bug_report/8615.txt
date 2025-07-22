@@ -1,0 +1,60 @@
+ID: 8615
+Title: unexpected behavior about prepare cache
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+It's found in `TestPrepareCacheDeferredFunction`.
+In this test, we use `time.Sleep(time.Second*1)` to test the `now()` in prepare cache works well.
+
+But since the column is `TIMESTAMP(3)`. We don't need to sleep so long.
+
+2. What did you expect to see?
+
+The test works well if we sleep less than 1s.
+
+3. What did you see instead?
+
+The result is always `x.000s`, the information of millisecond is lost.
+It happened in the following code block:
+```
+// Eval implements Expression interface.
+func (c *Constant) Eval(_ chunk.Row) (types.Datum, error) {
+	if c.DeferredExpr != nil {
+		if sf, sfOK := c.DeferredExpr.(*ScalarFunction); sfOK {
+			dt, err := sf.Eval(chunk.Row{})
+			if err != nil {
+				return c.Value, err
+			}
+			if dt.IsNull() {
+				c.Value.SetNull()
+				return c.Value, nil
+			}
+			retType := types.NewFieldType(c.RetType.Tp)
+			if retType.Tp == mysql.TypeUnspecified {
+				retType.Tp = mysql.TypeVarString
+			}
+			val, err := dt.ConvertTo(sf.GetCtx().GetSessionVars().StmtCtx, retType)
+			if err != nil {
+				return dt, err
+			}
+			c.Value.SetValue(val.GetValue())
+		}
+	}
+	return c.Value, nil
+}
+```
+
+After the `Eval` of sf, `dt` holds the millisecond part. But when we do
+```
+val, err := dt.ConvertTo(sf.GetCtx().GetSessionVars().StmtCtx, retType)
+```
+Millisecond is lost.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+master with f72769cee45d42c31149031f121da7d05d19af90

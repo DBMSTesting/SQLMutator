@@ -1,0 +1,61 @@
+ID: 21101
+Title: clickhouse 20.12.5  restart error: external dictionary not found
+Description:
+(you don't have to strictly follow this form)
+
+**Describe the bug**
+Reproduce of [12454](https://github.com/ClickHouse/ClickHouse/issues/12454).
+
+When creating a dictionary and a materilized column, after restart we get  `external dictionary not found`
+
+
+**Does it reproduce on recent release?**
+`20.12.5 `
+
+**How to reproduce**
+Create source table for dictionary
+```
+CREATE TABLE tests.ip_prefix (
+  `prefix` String,
+  `as_number` UInt32,
+  `as_name` String
+) ENGINE = MergeTree()
+ORDER BY
+  prefix SETTINGS storage_policy = 'ebs_gp2_jbod',
+  index_granularity = 8192
+```
+
+Create dict
+```
+CREATE DICTIONARY ip_prefix_dict(
+  prefix String DEFAULT '',
+  as_number UInt32 DEFAULT 0,
+  as_name String DEFAULT ''
+)
+PRIMARY KEY prefix
+SOURCE(CLICKHOUSE(HOST 'localhost' PORT 9000 USER 'default' TABLE 'ip_prefix' PASSWORD '' DB 'tests'))
+LIFETIME(MIN 1 MAX 10)
+LAYOUT(ip_trie)
+```
+
+Create table with Materilized Column 
+
+```
+CREATE TABLE ip_test
+(
+    `timestamp`                         DateTime Codec (DoubleDelta, LZ4),
+    `ip`                                String CODEC (LZ4),
+    `is_ipv6`                           UINT8 MATERIALIZED isIPv6String(ip),
+    `as_name`                           LowCardinality(String) MATERIALIZED dictGet('tests.ip_prefix_dict', 'as_name',
+        tuple(if(is_ipv6, toIPv6(ip), toIPv4(ip))))
+) ENGINE = MergeTree() PARTITION BY toYYYYMM(timestamp)
+ORDER BY timestamp
+SETTINGS
+        index_granularity = 8192
+```
+
+Insert to `ip_test`  works.
+
+Now restart server and get error on unknown `ip_prefix_dict`
+
+ 

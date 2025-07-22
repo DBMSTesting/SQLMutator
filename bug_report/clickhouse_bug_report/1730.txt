@@ -1,0 +1,211 @@
+ID: 1730
+Title: Segfaults on replace_query / KILL QUERY and HTTP session
+Description:
+Server version 1.1.54304.
+
+I get the following segfault today:
+
+```
+2018.01.05 14:30:04.215634 [ 796977 ] <Error> BaseDaemon: ########################################
+2018.01.05 14:30:04.215698 [ 796977 ] <Error> BaseDaemon: (from thread 791598) Received signal Segmentation fault (11).
+2018.01.05 14:30:04.215712 [ 796977 ] <Error> BaseDaemon: Address: 0x31008
+2018.01.05 14:30:04.230438 [ 796977 ] <Error> BaseDaemon: 0. clickhouse-server(DB::ASTTableExpression::~ASTTableExpression()+0x98) [0x342ad38]
+2018.01.05 14:30:04.230467 [ 796977 ] <Error> BaseDaemon: 1. clickhouse-server(DB::ASTTablesInSelectQueryElement::~ASTTablesInSelectQueryElement()+0xe5) [0x342aa75]
+2018.01.05 14:30:04.230484 [ 796977 ] <Error> BaseDaemon: 2. clickhouse-server(DB::ASTTablesInSelectQuery::~ASTTablesInSelectQuery()+0x75) [0x3429695]
+2018.01.05 14:30:04.230500 [ 796977 ] <Error> BaseDaemon: 3. clickhouse-server(DB::ASTSelectQuery::~ASTSelectQuery()+0x195) [0x2b59a65]
+2018.01.05 14:30:04.230532 [ 796977 ] <Error> BaseDaemon: 4. clickhouse-server(std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release()+0x66) [0x1425c36]
+2018.01.05 14:30:04.230565 [ 796977 ] <Error> BaseDaemon: 5. clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_
+string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x62d) [0x31413ed]
+2018.01.05 14:30:04.230585 [ 796977 ] <Error> BaseDaemon: 6. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTP
+Handler::Output&)+0x1f04) [0x143c6b4]
+2018.01.05 14:30:04.230604 [ 796977 ] <Error> BaseDaemon: 7. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+2018.01.05 14:30:04.230619 [ 796977 ] <Error> BaseDaemon: 8. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+2018.01.05 14:30:04.230633 [ 796977 ] <Error> BaseDaemon: 9. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+2018.01.05 14:30:04.230648 [ 796977 ] <Error> BaseDaemon: 10. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+2018.01.05 14:30:04.230663 [ 796977 ] <Error> BaseDaemon: 11. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+2018.01.05 14:30:04.230677 [ 796977 ] <Error> BaseDaemon: 12. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+2018.01.05 14:30:04.230690 [ 796977 ] <Error> BaseDaemon: 13. /lib64/libpthread.so.0(+0x7e25) [0x7f29b38afe25]
+```
+
+I've succeeded to reproduce that few times, but only manually on my data. Looks like it's connected to KILL QUERY / replace_query and HTTP requests (may be with sessions?).
+
+Scenario is something like that:
+1) Run the following select in HTTP session 
+```sql
+SELECT 
+    timestampField, 
+    field1, 
+    ...
+    field6
+FROM smallTableWithLogEngine 
+ANY LEFT JOIN 
+(
+    SELECT 
+        timestampField, 
+        date, 
+        visitParamExtractString(json_field, 'field1') AS field1, 
+        ...,
+        visitParamExtractString(json_field, 'field6') AS field6
+    FROM HugeMergeTreeTable
+    WHERE ((date > '2017-11-20') AND (date < '2017-12-10')) AND (fieldX = 1234)
+    ORDER BY timestampField ASC
+) USING (field1)
+WHERE date != '2017-11-26'
+-- smallTableWithLogEngine has about 7K rows
+-- stats: 712 rows in set. Elapsed: 16.057 sec. Processed 18.64 million rows, 4.01 GB (1.16 million rows/s., 249.92 MB/s.) 
+```
+2) The request is killed from another connection (by replace query) - looks like the moment of killing makes difference, and ~~I was not able to reproduce that with KILL QUERY~~ With KILL QUERY it also works.
+3) Later in original http session another request get fired, server responses with Session is locked by a concurrent client. (Not sure, but probably that step is not mandatory)
+4) Sometimes server dies after that combination.
+
+Segfault reproduces with different errors and stack traces:
+
+```
+2018.01.05 15:09:29.914850 [ 1054 ] <Error> BaseDaemon: (from thread 22) Received signal Segmentation fault (11).
+2018.01.05 15:09:29.914869 [ 1054 ] <Error> BaseDaemon: Address: NULL pointer.
+2018.01.05 15:09:29.924366 [ 1053 ] <Error> HTTPHandler: Code: 373, e.displayText() = DB::Exception: Session is locked by a concurrent client., e.what() = DB::Exception, Stack trace:
+  
+0. clickhouse-server(StackTrace::StackTrace()+0x16) [0x31f0766]
+1. clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x1f) [0x14246cf]
+2. clickhouse-server(DB::Context::acquireSession(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::chrono::duration<long, std::ratio<1l, 1000000000l
+> >, bool) const+0x54c) [0x318f2bc]
+3. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x846) [0x143aff6]
+4. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+5. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+6. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+7. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+8. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+9. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+10. /lib64/libpthread.so.0(+0x7e25) [0x7f6b45877e25]
+11. /lib64/libc.so.6(clone+0x6d) [0x7f6b4335334d]
+  
+2018.01.05 15:09:29.953264 [ 1054 ] <Error> BaseDaemon: 0. clickhouse-server(MemoryTracker::alloc(long)+0x125) [0x31f7aa5]
+2018.01.05 15:09:29.953286 [ 1054 ] <Error> BaseDaemon: 1. clickhouse-server(MemoryTracker::alloc(long)+0x7c) [0x31f79fc]
+2018.01.05 15:09:29.953315 [ 1054 ] <Error> BaseDaemon: 2. clickhouse-server(Allocator<false>::realloc(void*, unsigned long, unsigned long, unsigned long)+0x15d) [0x31f6a8d]
+2018.01.05 15:09:29.953346 [ 1054 ] <Error> BaseDaemon: 3. clickhouse-server(DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long)+0x244) [0x328be84]
+2018.01.05 15:09:29.953391 [ 1054 ] <Error> BaseDaemon: 4. clickhouse-server(DB::Block DB::MergeSortingBlocksBlockInputStream::mergeImpl<DB::SortCursor>(std::priority_queue<DB::SortCursor, st
+d::vector<DB::SortCursor, std::allocator<DB::SortCursor> >, std::less<std::vector<DB::SortCursor, std::allocator<DB::SortCursor> >::value_type> >&)+0x110) [0x363a1c0]
+2018.01.05 15:09:29.953412 [ 1054 ] <Error> BaseDaemon: 5. clickhouse-server(DB::MergeSortingBlocksBlockInputStream::readImpl()+0x94) [0x3632cd4]
+2018.01.05 15:09:29.953439 [ 1054 ] <Error> BaseDaemon: 6. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 15:09:29.953456 [ 1054 ] <Error> BaseDaemon: 7. clickhouse-server(DB::MergeSortingBlockInputStream::readImpl()+0x4b) [0x36348bb]
+2018.01.05 15:09:29.953470 [ 1054 ] <Error> BaseDaemon: 8. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 15:09:29.953483 [ 1054 ] <Error> BaseDaemon: 9. clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x1a) [0x345fcaa]
+2018.01.05 15:09:29.953508 [ 1054 ] <Error> BaseDaemon: 10. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 15:09:29.953535 [ 1054 ] <Error> BaseDaemon: 11. clickhouse-server(DB::LazyBlockInputStream::readImpl()+0x2b) [0x32fc74b]
+2018.01.05 15:09:29.953549 [ 1054 ] <Error> BaseDaemon: 12. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 15:09:29.953565 [ 1054 ] <Error> BaseDaemon: 13. clickhouse-server(DB::CreatingSetsBlockInputStream::createOne(DB::SubqueryForSet&)+0xce7) [0x34adc67]
+2018.01.05 15:09:29.953579 [ 1054 ] <Error> BaseDaemon: 14. clickhouse-server(DB::CreatingSetsBlockInputStream::readPrefixImpl()+0x50) [0x34b0e60]
+2018.01.05 15:09:29.953598 [ 1054 ] <Error> BaseDaemon: 15. clickhouse-server(DB::IProfilingBlockInputStream::readPrefix()+0x52) [0x2b886c2]
+2018.01.05 15:09:29.953626 [ 1054 ] <Error> BaseDaemon: 16. clickhouse-server(DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*)+0x2b) [0x346b17b]
+2018.01.05 15:09:29.953651 [ 1054 ] <Error> BaseDaemon: 17. clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x595) [0x3141355]
+2018.01.05 15:09:29.953672 [ 1054 ] <Error> BaseDaemon: 18. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x1f04) [0x143c6b4]
+2018.01.05 15:09:29.953689 [ 1054 ] <Error> BaseDaemon: 19. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+2018.01.05 15:09:29.953703 [ 1054 ] <Error> BaseDaemon: 20. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+2018.01.05 15:09:29.953718 [ 1054 ] <Error> BaseDaemon: 21. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+2018.01.05 15:09:29.953731 [ 1054 ] <Error> BaseDaemon: 22. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+2018.01.05 15:09:29.953758 [ 1054 ] <Error> BaseDaemon: 23. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+2018.01.05 15:09:29.953773 [ 1054 ] <Error> BaseDaemon: 24. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+2018.01.05 15:09:29.953787 [ 1054 ] <Error> BaseDaemon: 25. /lib64/libpthread.so.0(+0x7e25) [0x7f6b45877e25]
+
+
+2018.01.05 15:11:57.107744 [ 76 ] <Error> BaseDaemon: ########################################
+2018.01.05 15:11:57.107804 [ 76 ] <Error> BaseDaemon: (from thread 20) Received signal Segmentation fault (11).
+2018.01.05 15:11:57.107816 [ 76 ] <Error> BaseDaemon: Address: NULL pointer.
+2018.01.05 15:11:57.129882 [ 76 ] <Error> BaseDaemon: 0. clickhouse-server(CurrentMemoryTracker::free(long)+0x2a) [0x31f6cba]
+2018.01.05 15:11:57.129909 [ 76 ] <Error> BaseDaemon: 1. clickhouse-server(Allocator<false>::free(void*, unsigned long)+0x45) [0x31f6625]
+2018.01.05 15:11:57.129927 [ 76 ] <Error> BaseDaemon: 2. clickhouse-server(DB::MergeSortingBlockInputStream::~MergeSortingBlockInputStream()+0x5d9) [0x363bc39]
+2018.01.05 15:11:57.129942 [ 76 ] <Error> BaseDaemon: 3. clickhouse-server(DB::ExpressionBlockInputStream::~ExpressionBlockInputStream()+0xed) [0x334897d]
+2018.01.05 15:11:57.129973 [ 76 ] <Error> BaseDaemon: 4. clickhouse-server(std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release()+0x66) [0x1425c36]
+2018.01.05 15:11:57.129988 [ 76 ] <Error> BaseDaemon: 5. clickhouse-server(DB::IProfilingBlockInputStream::~IProfilingBlockInputStream()+0xbe) [0x1433c5e]
+2018.01.05 15:11:57.130003 [ 76 ] <Error> BaseDaemon: 6. clickhouse-server(DB::CreatingSetsBlockInputStream::~CreatingSetsBlockInputStream()+0x28d) [0x34b114d]
+2018.01.05 15:11:57.130017 [ 76 ] <Error> BaseDaemon: 7. clickhouse-server(DB::ProcessListEntry::~ProcessListEntry()+0x7d2) [0x3181382]
+2018.01.05 15:11:57.130032 [ 76 ] <Error> BaseDaemon: 8. clickhouse-server(DB::BlockIO::~BlockIO()+0x489) [0x2b874a9]
+2018.01.05 15:11:57.130060 [ 76 ] <Error> BaseDaemon: 9. clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x61c) [0x31413dc]
+2018.01.05 15:11:57.130080 [ 76 ] <Error> BaseDaemon: 10. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x1f04) [0x143c6b4]
+2018.01.05 15:11:57.130097 [ 76 ] <Error> BaseDaemon: 11. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+2018.01.05 15:11:57.130127 [ 76 ] <Error> BaseDaemon: 12. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+2018.01.05 15:11:57.130141 [ 76 ] <Error> BaseDaemon: 13. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+2018.01.05 15:11:57.130155 [ 76 ] <Error> BaseDaemon: 14. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+2018.01.05 15:11:57.130169 [ 76 ] <Error> BaseDaemon: 15. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+2018.01.05 15:11:57.130191 [ 76 ] <Error> BaseDaemon: 16. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+2018.01.05 15:11:57.130205 [ 76 ] <Error> BaseDaemon: 17. /lib64/libpthread.so.0(+0x7e25) [0x7fef88e67e25]
+
+
+
+
+2018.01.05 16:06:11.232660 [ 1573 ] <Error> BaseDaemon: (from thread 1518) Received signal Segmentation fault (11).
+2018.01.05 16:06:11.232674 [ 1573 ] <Error> BaseDaemon: Address: NULL pointer.
+2018.01.05 16:06:11.235428 [ 38 ] <Error> HTTPHandler: Code: 373, e.displayText() = DB::Exception: Session is locked by a concurrent client., e.what() = DB::Exception, Stack trace:
+  
+0. clickhouse-server(StackTrace::StackTrace()+0x16) [0x31f0766]
+1. clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x1f) [0x14246cf]
+2. clickhouse-server(DB::Context::acquireSession(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::chrono::duration<long, std::ratio<1l, 1000000000l
+> >, bool) const+0x54c) [0x318f2bc]
+3. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x846) [0x143aff6]
+4. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+5. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+6. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+7. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+8. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+9. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+10. /lib64/libpthread.so.0(+0x7e25) [0x7fc9abd88e25]
+11. /lib64/libc.so.6(clone+0x6d) [0x7fc9a986434d]
+  
+2018.01.05 16:06:11.264292 [ 1573 ] <Error> BaseDaemon: 0. clickhouse-server(MemoryTracker::alloc(long)+0x125) [0x31f7aa5]
+2018.01.05 16:06:11.264313 [ 1573 ] <Error> BaseDaemon: 1. clickhouse-server(MemoryTracker::alloc(long)+0x7c) [0x31f79fc]
+2018.01.05 16:06:11.264334 [ 1573 ] <Error> BaseDaemon: 2. clickhouse-server(Allocator<false>::realloc(void*, unsigned long, unsigned long, unsigned long)+0x15d) [0x31f6a8d]
+2018.01.05 16:06:11.264354 [ 1573 ] <Error> BaseDaemon: 3. clickhouse-server(DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long)+0x244) [0x328be84]
+2018.01.05 16:06:11.264406 [ 1573 ] <Error> BaseDaemon: 4. clickhouse-server(DB::Block DB::MergeSortingBlocksBlockInputStream::mergeImpl<DB::SortCursor>(std::priority_queue<DB::SortCursor, st
+d::vector<DB::SortCursor, std::allocator<DB::SortCursor> >, std::less<std::vector<DB::SortCursor, std::allocator<DB::SortCursor> >::value_type> >&)+0x110) [0x363a1c0]
+2018.01.05 16:06:11.264440 [ 1573 ] <Error> BaseDaemon: 5. clickhouse-server(DB::MergeSortingBlocksBlockInputStream::readImpl()+0x94) [0x3632cd4]
+2018.01.05 16:06:11.264456 [ 1573 ] <Error> BaseDaemon: 6. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 16:06:11.264472 [ 1573 ] <Error> BaseDaemon: 7. clickhouse-server(DB::MergeSortingBlockInputStream::readImpl()+0x4b) [0x36348bb]
+2018.01.05 16:06:11.264486 [ 1573 ] <Error> BaseDaemon: 8. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 16:06:11.264500 [ 1573 ] <Error> BaseDaemon: 9. clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x1a) [0x345fcaa]
+2018.01.05 16:06:11.264528 [ 1573 ] <Error> BaseDaemon: 10. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 16:06:11.264552 [ 1573 ] <Error> BaseDaemon: 11. clickhouse-server(DB::LazyBlockInputStream::readImpl()+0x2b) [0x32fc74b]
+2018.01.05 16:06:11.264566 [ 1573 ] <Error> BaseDaemon: 12. clickhouse-server(DB::IProfilingBlockInputStream::read()+0x1e6) [0x2b909d6]
+2018.01.05 16:06:11.264581 [ 1573 ] <Error> BaseDaemon: 13. clickhouse-server(DB::CreatingSetsBlockInputStream::createOne(DB::SubqueryForSet&)+0xce7) [0x34adc67]
+2018.01.05 16:06:11.264595 [ 1573 ] <Error> BaseDaemon: 14. clickhouse-server(DB::CreatingSetsBlockInputStream::readPrefixImpl()+0x50) [0x34b0e60]
+2018.01.05 16:06:11.264610 [ 1573 ] <Error> BaseDaemon: 15. clickhouse-server(DB::IProfilingBlockInputStream::readPrefix()+0x52) [0x2b886c2]
+2018.01.05 16:06:11.264627 [ 1573 ] <Error> BaseDaemon: 16. clickhouse-server(DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*)+0x2b) [0x346b17b]
+2018.01.05 16:06:11.264652 [ 1573 ] <Error> BaseDaemon: 17. clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_s
+tring<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x595) [0x3141355]
+2018.01.05 16:06:11.264671 [ 1573 ] <Error> BaseDaemon: 18. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPH
+andler::Output&)+0x1f04) [0x143c6b4]
+2018.01.05 16:06:11.264687 [ 1573 ] <Error> BaseDaemon: 19. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+2018.01.05 16:06:11.264701 [ 1573 ] <Error> BaseDaemon: 20. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+2018.01.05 16:06:11.264715 [ 1573 ] <Error> BaseDaemon: 21. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+2018.01.05 16:06:11.264728 [ 1573 ] <Error> BaseDaemon: 22. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+2018.01.05 16:06:11.264742 [ 1573 ] <Error> BaseDaemon: 23. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+2018.01.05 16:06:11.264756 [ 1573 ] <Error> BaseDaemon: 24. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+2018.01.05 16:06:11.264780 [ 1573 ] <Error> BaseDaemon: 25. /lib64/libpthread.so.0(+0x7e25) [0x7fc9abd88e25]
+```
+
+With KILL QUERY it also reproduces:
+```
+2018.01.08 13:52:14.869930 [ 124719 ] <Error> BaseDaemon: ########################################
+2018.01.08 13:52:14.870017 [ 124719 ] <Error> BaseDaemon: (from thread 124718) Received signal Segmentation fault (11).
+2018.01.08 13:52:14.870032 [ 124719 ] <Error> BaseDaemon: Address: 0x90008
+2018.01.08 13:52:14.890971 [ 124719 ] <Error> BaseDaemon: 0. clickhouse-server(DB::ASTTableExpression::~ASTTableExpression()+0x98) [0x342ad38]
+2018.01.08 13:52:14.890994 [ 124719 ] <Error> BaseDaemon: 1. clickhouse-server(DB::ASTTablesInSelectQueryElement::~ASTTablesInSelectQueryElement()+0xe5) [0x342aa75]
+2018.01.08 13:52:14.891010 [ 124719 ] <Error> BaseDaemon: 2. clickhouse-server(DB::ASTTablesInSelectQuery::~ASTTablesInSelectQuery()+0x75) [0x3429695]
+2018.01.08 13:52:14.891025 [ 124719 ] <Error> BaseDaemon: 3. clickhouse-server(DB::ASTSelectQuery::~ASTSelectQuery()+0x195) [0x2b59a65]
+2018.01.08 13:52:14.891041 [ 124719 ] <Error> BaseDaemon: 4. clickhouse-server(DB::ASTSubquery::~ASTSubquery()+0x95) [0x360d0c5]
+2018.01.08 13:52:14.891056 [ 124719 ] <Error> BaseDaemon: 5. clickhouse-server(DB::ASTTableExpression::~ASTTableExpression()+0x135) [0x342add5]
+2018.01.08 13:52:14.891084 [ 124719 ] <Error> BaseDaemon: 6. clickhouse-server(DB::ASTTablesInSelectQueryElement::~ASTTablesInSelectQueryElement()+0xe5) [0x342aa75]
+2018.01.08 13:52:14.891098 [ 124719 ] <Error> BaseDaemon: 7. clickhouse-server(DB::ASTTablesInSelectQuery::~ASTTablesInSelectQuery()+0x75) [0x3429695]
+2018.01.08 13:52:14.891111 [ 124719 ] <Error> BaseDaemon: 8. clickhouse-server(DB::ASTSelectQuery::~ASTSelectQuery()+0x195) [0x2b59a65]
+2018.01.08 13:52:14.891126 [ 124719 ] <Error> BaseDaemon: 9. clickhouse-server(DB::ASTSelectQuery::~ASTSelectQuery()+0x195) [0x2b59a65]
+2018.01.08 13:52:14.891146 [ 124719 ] <Error> BaseDaemon: 10. clickhouse-server(std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release()+0x66) [0x1425c36]
+2018.01.08 13:52:14.891180 [ 124719 ] <Error> BaseDaemon: 11. clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0x62d) [0x31413ed]
+2018.01.08 13:52:14.891200 [ 124719 ] <Error> BaseDaemon: 12. clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x1f04) [0x143c6b4]
+2018.01.08 13:52:14.891217 [ 124719 ] <Error> BaseDaemon: 13. clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x1e9) [0x143e829]
+2018.01.08 13:52:14.891230 [ 124719 ] <Error> BaseDaemon: 14. clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x2dd) [0x3b5f9bd]
+2018.01.08 13:52:14.891244 [ 124719 ] <Error> BaseDaemon: 15. clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x3b5944f]
+2018.01.08 13:52:14.891258 [ 124719 ] <Error> BaseDaemon: 16. clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x11b) [0x3b688cb]
+2018.01.08 13:52:14.891272 [ 124719 ] <Error> BaseDaemon: 17. clickhouse-server(Poco::PooledThread::run()+0xa7) [0x3c6cd67]
+2018.01.08 13:52:14.891286 [ 124719 ] <Error> BaseDaemon: 18. clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x96) [0x3bf13c6]
+2018.01.08 13:52:14.891298 [ 124719 ] <Error> BaseDaemon: 19. /lib64/libpthread.so.0(+0x7e25) [0x7f9db3776e25]
+```
+  

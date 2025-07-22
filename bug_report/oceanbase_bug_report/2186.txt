@@ -1,0 +1,117 @@
+ID: 2186
+Title: [Bug]: Regarding the `ROUND` function and other predicates using `USE_COLUMN_TABLE`, the results do not match expectations.
+Description:
+**Describe the bug**
+
+**Environment**
+
+- OS Version and CPU Arch(`uname -a`):
+
+```bash
+Linux 3.10.0-1160.102.1.el7.x86_64 #1 SMP Tue Oct 17 15:42:21 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux
+```
+
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+
+```bash
+select version();
+-- 5.7.25-OceanBase_CE-v4.3.4.0
+```
+
+**Fast Reproduce Steps(Required)**
+
+Steps to reproduce the behavior:
+
+```sql
+DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t1;
+
+CREATE TABLE IF NOT EXISTS t0 (
+    c0 FLOAT PRIMARY KEY NOT NULL,
+    c1 INT,
+    c2 VARCHAR(500)
+) WITH COLUMN GROUP (all columns, each column);
+
+CREATE TABLE IF NOT EXISTS t1 LIKE t0;
+
+INSERT INTO t0 (c2, c1, c0) VALUES ("eVt%", 1, -1.088348796E9);
+INSERT INTO t0 (c2, c1, c0) VALUES ("abc", 2, -2.088348796E9);
+INSERT INTO t0 (c2, c1, c0) VALUES ("xyz", 3, -3.088348796E9);
+INSERT INTO t0 (c2, c1, c0) VALUES ("eVt%", 4, -41.088348796E9);
+
+INSERT INTO t1 (c0, c1, c2) VALUES (0.390985317943897, 1, '_w');
+INSERT INTO t1 (c0, c1, c2) VALUES (0.490123456789012, 1, '_x');
+INSERT INTO t1 (c0, c1, c2) VALUES (0.590123456789012, 2, '_y');
+INSERT INTO t1 (c0, c1, c2) VALUES (0.190985317943891, 3, '_z');
+INSERT INTO t1 (c0, c1, c2) VALUES (0.20985317943892, 2, '_w11');
+```
+
+**Expected behavior**
+
+The query should return the value as follows (result from MySQL 8.4.1) 
+
+```sql
+MySQL [test]> SELECT /*+ USE_COLUMN_TABLE(t0) */
+    ->     t0.c0, t0.c1, t0.c2
+    -> FROM
+    ->     t0
+    -> WHERE
+    ->     EXISTS (
+    ->         SELECT 1 /*+ USE_COLUMN_TABLE(t1) */
+    ->         FROM t1
+    ->         WHERE
+    ->             t0.c1 = t1.c1
+    ->             AND (ROUND(t1.c2 - 0.5, 0)) = (((t0.c0 || '') AND t0.c2))
+    ->     )
+    -> GROUP BY t0.c0, t0.c1, t0.c2
+    -> HAVING t0.c1 > 0
+    -> ORDER BY t0.c1 DESC LIMIT 10;
++-------------+------+------+
+| c0          | c1   | c2   |
++-------------+------+------+
+| -3088350000 |    3 | xyz  |
+| -2088350000 |    2 | abc  |
+| -1088350000 |    1 | eVt% |
++-------------+------+------+
+3 rows in set, 7 warnings (0.00 sec)
+```
+
+**Actual Behavior**
+
+```sql
+MySQL [test]> SELECT /*+ USE_COLUMN_TABLE(t0) */
+    ->     t0.c0, t0.c1, t0.c2
+    -> FROM
+    ->     t0
+    -> WHERE
+    ->     EXISTS (
+    ->         SELECT /*+ USE_COLUMN_TABLE(t1) */ 1
+    ->         FROM t1
+    ->         WHERE
+    ->             t0.c1 = t1.c1
+    ->             AND (ROUND(t1.c2 - 0.5, 0)) = (((t0.c0 || '') AND t0.c2))
+    ->     )
+    -> GROUP BY t0.c0, t0.c1, t0.c2
+    -> HAVING t0.c1 > 0
+    -> ORDER BY t0.c1 DESC LIMIT 10;
+Empty set, 9 warnings (0.00 sec)
+
+
+MySQL [test]> explain SELECT /*+ USE_COLUMN_TABLE(t0) */     t0.c0, t0.c1, t0.c2 FROM      t0 WHERE      EXISTS (         SELECT /*+ USE_COLUMN_TABLE(t1) */ 1          FROM t1         WHERE              t0.c1 = t1.c1             AND (ROUND(t1.c2 - 0.5, 0)) = (((t0.c0 || '') AND t0.c2))     ) GROUP BY t0.c0, t0.c1, t0.c2 HAVING t0.c1 > 0 ORDER BY t0.c1 DESC LIMIT 10;
++-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Query Plan                                                                                                                                                |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| =============================================================                                                                                             |
+| |ID|OPERATOR                    |NAME |EST.ROWS|EST.TIME(us)|                                                                                             |
+| -------------------------------------------------------------                                                                                             |
+| |0 |TOP-N SORT                  |     |1       |12          |                                                                                             |
+| |1 |└─HASH RIGHT SEMI JOIN      |     |1       |12          |                                                                                             |
+| |2 |  ├─SUBPLAN SCAN            |VIEW1|1       |5           |                                                                                             |
+| |3 |  │ └─COLUMN TABLE FULL SCAN|t1   |1       |5           |                                                                                             |
+| |4 |  └─COLUMN TABLE FULL SCAN  |t0   |4       |7           |                                                                                             |
+| =============================================================
+```
+
+**Additional context**
+
+This query can be executed normally on TiDB 8.4 and MySQL 8.4.1.

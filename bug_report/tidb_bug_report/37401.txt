@@ -1,0 +1,100 @@
+ID: 37401
+Title: Explain Format = "dot" does not show CTE
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. import bookshop
+    https://docs.pingcap.com/tidb/stable/dev-guide-bookshop-schema-design#import-table-structures-and-data
+2. create temp table top_50_eldest_authors
+```
+CREATE TEMPORARY TABLE top_50_eldest_authors (
+    id BIGINT,
+    name VARCHAR(255),
+    age INT,
+    PRIMARY KEY(id)
+);
+```
+3. execute 
+```
+explain format = "dot"
+WITH top_50_eldest_authors_cte AS (
+    SELECT a.id, a.name, (IFNULL(a.death_year, YEAR(NOW())) - a.birth_year) AS age
+    FROM authors a
+    ORDER BY age DESC
+    LIMIT 50
+)
+SELECT
+    ANY_VALUE(ta.id) AS author_id,
+    ANY_VALUE(ta.age) AS author_age,
+    ANY_VALUE(ta.name) AS author_name,
+    COUNT(*) AS books
+FROM top_50_eldest_authors_cte ta
+LEFT JOIN book_authors ba ON ta.id = ba.author_id
+GROUP BY ta.id;
+```
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+show  CTE 
+
+```
+-----------------------------------------------------------------------------------------------------------------------------+
+| id                                   | estRows  | task      | access object | operator info                                                                                                                                                                                                       |
++--------------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_23                        | 40.00    | root      |               | any_value(bookshop.authors.id)->Column#13, any_value(Column#9)->Column#14, any_value(bookshop.authors.name)->Column#15, Column#12                                                                                   |
+| └─HashAgg_24                         | 40.00    | root      |               | group by:bookshop.authors.id, funcs:count(1)->Column#12, funcs:firstrow(bookshop.authors.id)->bookshop.authors.id, funcs:firstrow(bookshop.authors.name)->bookshop.authors.name, funcs:firstrow(Column#9)->Column#9 |
+|   └─HashJoin_26                      | 61.95    | root      |               | left outer join, equal:[eq(bookshop.authors.id, bookshop.book_authors.author_id)]                                                                                                                                   |
+|     ├─CTEFullScan_30(Build)          | 40.00    | root      | CTE:ta        | data:CTE_0                                                                                                                                                                                                          |
+|     └─TableReader_29(Probe)          | 20000.00 | root      |               | data:TableFullScan_28                                                                                                                                                                                               |
+|       └─TableFullScan_28             | 20000.00 | cop[tikv] | table:ba      | keep order:false                                                                                                                                                                                                    |
+| CTE_0                                | 40.00    | root      |               | Non-Recursive CTE                                                                                                                                                                                                   |
+| └─Selection_12(Seed Part)            | 40.00    | root      |               | 1                                                                                                                                                                                                                   |
+|   └─Projection_13                    | 50.00    | root      |               | bookshop.authors.id, bookshop.authors.name, minus(ifnull(bookshop.authors.death_year, 2022), bookshop.authors.birth_year)->Column#6                                                                                 |
+|     └─Projection_20                  | 50.00    | root      |               | bookshop.authors.id, bookshop.authors.name, bookshop.authors.birth_year, bookshop.authors.death_year                                                                                                                |
+|       └─TopN_14                      | 50.00    | root      |               | Column#19:desc, offset:0, count:50                                                                                                                                                                                  |
+|         └─Projection_21              | 50.00    | root      |               | bookshop.authors.id, bookshop.authors.name, bookshop.authors.birth_year, bookshop.authors.death_year, minus(ifnull(bookshop.authors.death_year, 2022), bookshop.authors.birth_year)->Column#19                      |
+|           └─TableReader_19           | 50.00    | root      |               | data:TopN_18                                                                                                                                                                                                        |
+|             └─TopN_18                | 50.00    | cop[tikv] |               | minus(ifnull(bookshop.authors.death_year, 2022), bookshop.authors.birth_year):desc, offset:0, count:50                                                                                                              |
+|               └─TableFullScan_17     | 20000.00 | cop[tikv] | table:a       | keep order:false                                                                                                                                                                                                    |
++--------------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+### 3. What did you see instead (Required)
+
+not include CTE 
+
+```
+| 
+digraph Projection_23 {
+subgraph cluster23{
+node [style=filled, color=lightgrey]
+color=black
+label = "root"
+"Projection_23" -> "HashAgg_24"
+"HashAgg_24" -> "HashJoin_26"
+"HashJoin_26" -> "CTEFullScan_30"
+"HashJoin_26" -> "TableReader_29"
+}
+subgraph cluster28{
+node [style=filled, color=lightgrey]
+color=black
+label = "cop"
+"TableFullScan_28"
+}
+"TableReader_29" -> "TableFullScan_28"
+}
+```
+ |
+
+### 4. What is your TiDB version? (Required)
+
+6.1.0
+
+<!-- Paste the output of SELECT tidb_version() -->
+

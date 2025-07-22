@@ -1,0 +1,54 @@
+ID: 19687
+Title: ClickHouse doesn't work correctly with sql aliases.
+Description:
+Latest actual ClickHouse version:
+We are getting a column mismatch error when using sql alias in JOIN query. But if you add the database prefix 'default', then the same query will work. And this is really weird! After all, the error was not talking about this at all and we were already in 'default'.
+You can reproduce the bug using docker-compose here:
+https://github.com/demidko/ch_prefixes
+
+```
+CREATE MATERIALIZED VIEW competitors_one_day_test
+(
+             `lemma` String,
+             `city` UInt32,
+             `date` DateTime,
+             `packets` Array(UInt32)
+)
+ENGINE = MergeTree()
+ORDER BY (date, city)
+POPULATE
+AS SELECT
+    any(lemma),
+    city,
+    date,
+    arrayReduce('groupUniqArray', groupArray(packet))
+FROM
+    (SELECT lemma, city, date, packet
+
+         /*
+         We are already in 'default' and sql is correctly, but:
+         
+         Code: 47. DB::Exception:
+         Received from clickhouse:9000.
+         DB::Exception:
+         Missing columns: 'l.docs'
+         while processing query: 'SELECT lemma, city, date, packet FROM default.log ARRAY JOIN docs GLOBAL ALL INNER JOIN default.docs_to_packets_week ON doc = l.docs WHERE (toDate(date) > subtractDays(today(), 1)) AND (city != 0)',
+         required columns: 'lemma' 'doc' 'date' 'l.docs' 'packet' 'city',
+         maybe you meant:  '['lemma']' '['docs']' '['date']' '['docs']' '['city']',
+         joined columns: 'doc' 'packet',
+         arrayJoin columns: 'docs'
+         */
+
+     FROM log AS l
+         /*
+         with 'log.defult': OK
+         */
+
+     ARRAY JOIN docs
+     GLOBAL INNER JOIN docs_to_packets_week ON doc = l.docs
+     WHERE (toDate(date) > subtractDays(today(), 1)) AND (city != 0))
+GROUP BY
+    cityHash64(lemma),
+    city,
+    date;
+```

@@ -1,0 +1,104 @@
+ID: 29585
+Title: unexpected  timestamp value for timestamp type at the write-only DDL state  
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+**Background** : I am testing the behavior of the online DDL of tidb, so I add some delay to ddl state change to observe  and test the state change process. Detail Is follows:
+
+https://github.com/pingcap/tidb/blob/master/ddl/ddl_worker.go#L904
+From：
+``` 
+
+// OwnerCheckAllVersions returns only when context is timeout(2 * lease) or all TiDB schemas are synced.
+err = d.schemaSyncer.OwnerCheckAllVersions(ctx, latestSchemaVersion)
+```
+To
+```
+time.Sleep(1500 * time.Millisecond)
+// OwnerCheckAllVersions returns only when context is timeout(2 * lease) or all TiDB schemas are synced.
+err = d.schemaSyncer.OwnerCheckAllVersions(ctx, latestSchemaVersion)
+```
+
+Or you can use another way to simulate state delay when doing a ddl change( remove the etcd update may be help).
+
+Then:
+
+1. Start a tidb cluster
+ 3 db, 3 kv, 1 pd, db is the one we modify upper.
+2. Create table
+create table test.t1(id int primary key, c1 timestamp default '2020-09-12 12:03:04')
+3. Alter column type
+ alter table test.t1 modify column c1 bigint default 333333333; 
+4. Insert Data
+At the mean time, we insert data with an incremental id value and default c1 value:   insert into test.t1(id) values($i)
+
+By the 3,4 step above, we can observe the behavior of ddl at different state:  
+**absent-> delete-only->write-only->write-reorg->public** 
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+- Before 'public' state, data will be something like:
+```
+| 125 | 20200912120304 |
+| 126 | 20200912120304 |
+| 127 | 20200912120304 |
+| 128 | 20200912120304 |
+```
+- After 'public' state,  data will be something like:
+```
+| 207 |      333333333 |
+| 208 |      333333333 |
+| 209 |      333333333 |
+```
+
+### 3. What did you see instead (Required)
+A strange value appear at the table, detail:
+```
+mysql> select * from t1 limit 120;
++-----+----------------+
+| id  | c1             |
++-----+----------------+
+| 100 | 20200912040304 |
+...
+| 121 | 20200912040304 |
+| 122 | 20200912040304 |
+| 123 | 20200912040304 |
+| 124 | 20200912040304 |
+| 125 | 20200912120304 |
+| 126 | 20200912120304 |
+| 127 | 20200912120304 |
+| 128 | 20200912120304 |
+| 129 | 20200912120304 |
+| 130 | 20200912120304 |
+| 131 | 20200912120304 |
+| 132 | 20200912120304 |
+| 133 | 20200912120304 |
+...
+| 207 |      333333333 |
+| 208 |      333333333 |
+| 209 |      333333333 |
+| 210 |      333333333 |
+```
+
+id is [100, 124],  value for c1 is 20200912040304   ----> unexpected, why??
+id is [125, 206],  value for c1 is 20200912120304   ----> expected, insert at write-only ~ public
+id is [207, ~],  value for c1 is 333333333                  ----> expected, insert at public 
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+Release Version: v5.3.0-alpha-1304-ga96deab-dirty
+Edition: Community
+Git Commit Hash: a96deabe7e46385722cf96f7fc254de86fd5bd1a
+Git Branch: master
+UTC Build Time: 2021-11-04 10:02:29
+GoVersion: go1.16.7
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |

@@ -1,0 +1,115 @@
+ID: 15296
+Title: Macro produces different results in where clause vs column list
+Description:
+### What happens?
+
+Macro expressions produce different results when used as a where clause predicate vs column list.
+
+I suspect this happens when the macro references the same tables as the query it is being used in. #14305 looks similar, but I'm reporting a separate issue because my reproducer is simpler.
+
+### To Reproduce
+
+```sql
+create table items (
+    id bigint,
+    val text
+);
+insert into items values (1, 'a'), (2, 'b'), (3, 'c');
+
+-- lookup_val is a macro that returns the value of the item with the given id.
+-- The underscore prefixed aliases are an attempt to avoid column name confusion
+-- when the macro is used in a query that also references the items table. But
+-- this doesn't seem to work : /.
+create macro lookup_val(_id) as (
+    select _items.val
+    from items as _items
+    where _items.id = _id
+    limit 1
+);
+
+select lookup_val(id) as lv from items where lookup_val(id) = 'b';
+select lookup_val(id) as lv from items where lv = 'b';
+select lookup_val(item_id) as lv from (values (1), (2), (3)) item_ids(item_id) where lookup_val(item_id) = 'b';
+select lookup_val(id) as lv from items where lookup_val(items.id) = 'b';
+```
+
+All four queries should produce the same results, but the first query produces the wrong result as shown below:
+
+```
+┌─────────┐
+│   lv    │
+│ varchar │
+├─────────┤
+│ 0 rows  │
+└─────────┘
+┌─────────┐
+│   lv    │
+│ varchar │
+├─────────┤
+│ b       │
+└─────────┘
+┌─────────┐
+│   lv    │
+│ varchar │
+├─────────┤
+│ b       │
+└─────────┘
+┌─────────┐
+│   lv    │
+│ varchar │
+├─────────┤
+│ b       │
+└─────────┘
+```
+
+The following workaround of renaming the selected column in the macro works, but it would be nice if it wasn't needed:
+
+```sql
+create macro lookup_val(id) as (
+    select _val
+    from items as _(_id, _val)
+    where _id = id
+);
+```
+
+So it seems that the root of the problem is that the expression `id` refers to the main queries `items` table when used in the select list, but to the macros `_items` table in the where clause after the macro expansion. This difference in precedence seems like a bug to me, but maybe I'm not understanding how this is supposed to work.
+
+### OS:
+
+macOS
+
+### DuckDB Version:
+
+v1.1.3 19864453f7
+
+### DuckDB Client:
+
+cli
+
+### Hardware:
+
+arm
+
+### Full Name:
+
+Felix Geisendörfer
+
+### Affiliation:
+
+Datadog
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

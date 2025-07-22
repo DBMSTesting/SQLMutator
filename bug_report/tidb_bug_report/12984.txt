@@ -1,0 +1,54 @@
+ID: 12984
+Title: planner: don't regenerate the same group by columns when decorrelate
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+```
+drop table if exists t;
+create table t(a int, b int, c int);
+mysql> explain select a from t t1 where t1.a = (select max(t2.a) from t t2 where t1.b=t2.b and t1.c=t2.b);
++------------------------------+----------+-----------+--------------------------------------------------------------------------------------------------------------+
+| id                           | count    | task      | operator info                                                                                                |
++------------------------------+----------+-----------+--------------------------------------------------------------------------------------------------------------+
+| Projection_11                | 7992.00  | root      | Column#1                                                                                                     |
+| └─HashLeftJoin_12            | 7992.00  | root      | inner join, inner:Selection_17, equal:[eq(Column#2, Column#6) eq(Column#3, Column#6) eq(Column#1, Column#9)] |
+|   ├─TableReader_16           | 9970.03  | root      | data:Selection_15                                                                                            |
+|   │ └─Selection_15           | 9970.03  | cop[tikv] | not(isnull(Column#1)), not(isnull(Column#2)), not(isnull(Column#3))                                          |
+|   │   └─TableScan_14         | 10000.00 | cop[tikv] | table:t1, range:[-inf,+inf], keep order:false, stats:pseudo                                                  |
+|   └─Selection_17             | 6393.60  | root      | not(isnull(Column#9))                                                                                        |
+|     └─HashAgg_20             | 7992.00  | root      | group by:Column#6, Column#6, funcs:max(Column#5), firstrow(Column#6)                                         |
+|       └─TableReader_27       | 9990.00  | root      | data:Selection_26                                                                                            |
+|         └─Selection_26       | 9990.00  | cop[tikv] | not(isnull(Column#6))                                                                                        |
+|           └─TableScan_25     | 10000.00 | cop[tikv] | table:t2, range:[-inf,+inf], keep order:false, stats:pseudo                                                  |
++------------------------------+----------+-----------+--------------------------------------------------------------------------------------------------------------+
+```
+
+2. What did you expect to see?
+
+Only need group by one `Column#6` and the Agg can be pushed down.
+
+3. What did you see instead?
+
+There are two `Column#6` in `HashAgg_20`'s group by items.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+```
+mysql> select tidb_version();
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                            |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v4.0.0-alpha-617-g72c5d26
+Git Commit Hash: 72c5d26966687c38a157dd25b9386d8811ba47b5
+Git Branch: master
+UTC Build Time: 2019-10-25 06:55:52
+GoVersion: go version go1.13 linux/amd64
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

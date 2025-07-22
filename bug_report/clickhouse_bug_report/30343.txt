@@ -1,0 +1,74 @@
+ID: 30343
+Title: Adding a data skipping index breaks live queries.
+Description:
+**Describe what's wrong**
+
+Adding a data skipping index breaks live queries.
+
+**Does it reproduce on recent release?**
+
+Reproducible in (at least):
+* 21.9.2.17
+* 21.10.2.15
+
+**How to reproduce**
+
+```
+# 1. Create a table and insert 10M rows distributed across 100 partitions
+
+CREATE TABLE test2
+(
+    `p` UInt32,
+    `val` String
+)
+ENGINE = MergeTree
+PARTITION BY p
+ORDER BY tuple()
+
+INSERT INTO test2 SELECT
+    number % 100 AS p,
+    toString(rand() % 100) AS val
+FROM numbers(10000000)
+
+# 2. Simple select works and scans all 100 partitions and 10M rows as expected
+
+SELECT count()
+FROM test2
+WHERE val = 'qwe'
+
+┌─count()─┐
+│       0 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.072 sec. Processed 10.00 million rows, 109.00 MB (138.06 million rows/s., 1.50 GB/s.)
+
+# 3. Add bloom filter
+
+ALTER TABLE test2
+    ADD INDEX idx_bloom val TYPE bloom_filter GRANULARITY 1
+
+# 4. Repeat the query
+
+SELECT count()
+FROM test2
+WHERE val = 'qwe'
+
+Query id: 4f5dbf5f-5c0d-441f-b6c9-1a9d3261658e
+
+
+0 rows in set. Elapsed: 0.005 sec. 
+
+Received exception from server (version 21.10.2):
+Code: 1001. DB::Exception: Received from clickhouse-server:9000. DB::Exception: std::__1::__fs::filesystem::filesystem_error: filesystem error: in file_size:
+No such file or directory [/var/lib/clickhouse/store/303/303e3f5f-9f67-4ac6-b03e-3f5f9f674ac6/0_1_576_1/skp_idx_idx_bloom.mrk3]. (STD_EXCEPTION)
+
+# 5. If index is materialized with "ALTER TABLE test2 MATERIALIZE INDEX idx_bloom" eveything is back to normal
+```
+
+**Expected behavior**
+
+There should be no downtime and no queries should be affected when adding a data skipping index. The index should not be used when processing the parts it's not been materialized in yet.
+
+**Additional context**
+
+Can be as well reproduced in clickhouse docker, e.g. yandex/clickhouse-server:21.10.2.15 (can try that if not reproducible on someone's machine)

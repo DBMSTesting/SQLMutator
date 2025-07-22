@@ -1,0 +1,65 @@
+ID: 24676
+Title: columns that match group by expr should not trigger only-full-group-by-error
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+DROP TABLE IF EXISTS t1;
+CREATE TABLE `t1` (
+  `id` int(11) NOT NULL PRIMARY KEY,
+  `c1` int(11) NOT NULL DEFAULT '0'
+);
+
+SELECT c1 FROM t1 GROUP BY c1 ORDER BY c1 ASC; -- legal (obviously)
+SELECT ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) AS `c1` FROM `t1` GROUP BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ORDER BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ASC; -- legal
+SELECT ((floor(((`c1` - 10) / 300)) * 50000) + 0.0) AS `c1` FROM `t1` GROUP BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ORDER BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ASC; -- illegal
+```
+
+### 2. What did you expect to see? (Required)
+
+If a column in the FROM list matches the GROUP BY expression exactly, and all functions specified are deterministic, then there is no violation of only-full-group-by. Here is the result from MySQL 8.0.24:
+
+```sql
+mysql [localhost:8024] {msandbox} (test) > SELECT c1 FROM t1 GROUP BY c1 ORDER BY c1 ASC; -- legal (obviously)
+Empty set (0.00 sec)
+
+mysql [localhost:8024] {msandbox} (test) > SELECT ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) AS `c1` FROM `t1` GROUP BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ORDER BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ASC; -- legal
+Empty set (0.00 sec)
+
+mysql [localhost:8024] {msandbox} (test) > SELECT ((floor(((`c1` - 10) / 300)) * 50000) + 0.0) AS `c1` FROM `t1` GROUP BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ORDER BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ASC; -- illegal
+ERROR 1055 (42000): Expression #1 of SELECT list is not in GROUP BY clause and contains nonaggregated column 'test.t1.c1' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by
+
+```
+
+### 3. What did you see instead (Required)
+
+```sql
+Empty set (0.00 sec)
+
+mysql> SELECT ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) AS `c1` FROM `t1` GROUP BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ORDER BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ASC; -- legal
+ERROR 1055 (42000): Expression #1 of ORDER BY is not in GROUP BY clause and contains nonaggregated column '' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by
+mysql> SELECT ((floor(((`c1` - 10) / 300)) * 50000) + 0.0) AS `c1` FROM `t1` GROUP BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ORDER BY ((floor(((`c1` - 0.0) / 50000)) * 50000) + 0.0) ASC; -- illegal
+ERROR 1055 (42000): Expression #1 of ORDER BY is not in GROUP BY clause and contains nonaggregated column '' which is not functionally dependent on columns in GROUP BY clause; this is incompatible with sql_mode=only_full_group_by
+```
+
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql> SELECT tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-beta.2-2893-gb7c22aa31-dirty
+Edition: Community
+Git Commit Hash: b7c22aa31d062b77a96493519a6b50ca9b627971
+Git Branch: show-privileges
+UTC Build Time: 2021-05-13 20:47:08
+GoVersion: go1.13.15
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

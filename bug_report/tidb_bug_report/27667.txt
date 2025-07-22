@@ -1,0 +1,114 @@
+ID: 27667
+Title: planner: hints cannot work for apply
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+create table t1 (a int, key(a));
+create table t2 (a int, key(a));
+
+mysql> explain select /*+ SRTEAM_AGG(@q2) */ (select/*+ QB_NAME(q2) */ sum(t2.a) from t2 where t2.a=t1.a) as s, t1.a from t1;
++----------------------------------+----------+-----------+----------------------+------------------------------------------------------------------------------------------+
+| id                               | estRows  | task      | access object        | operator info                                                                            |
++----------------------------------+----------+-----------+----------------------+------------------------------------------------------------------------------------------+
+| Projection_10                    | 10000.00 | root      |                      | Column#7, test.t1.a                                                                      |
+| └─HashJoin_12                    | 10000.00 | root      |                      | left outer join, equal:[eq(test.t1.a, test.t2.a)]                                        |
+|   ├─HashAgg_29(Build)            | 7992.00  | root      |                      | group by:Column#16, funcs:sum(Column#14)->Column#7, funcs:firstrow(Column#15)->test.t2.a |
+|   │ └─Projection_39              | 9990.00  | root      |                      | cast(test.t2.a, decimal(32,0) BINARY)->Column#14, test.t2.a, test.t2.a                   |
+|   │   └─IndexReader_36           | 9990.00  | root      |                      | index:IndexFullScan_35                                                                   |
+|   │     └─IndexFullScan_35       | 9990.00  | cop[tikv] | table:t2, index:a(a) | keep order:false, stats:pseudo                                                           |
+|   └─TableReader_24(Probe)        | 10000.00 | root      |                      | data:TableFullScan_23                                                                    |
+|     └─TableFullScan_23           | 10000.00 | cop[tikv] | table:t1             | keep order:false, stats:pseudo                                                           |
++----------------------------------+----------+-----------+----------------------+------------------------------------------------------------------------------------------+
+8 rows in set, 1 warning (0.00 sec)
+
+mysql> 
+mysql> show warnings;
++---------+------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                                                                                                                          |
++---------+------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Warning | 1064 | You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:8064]Optimizer hint syntax error at line 1 column 29 near "SRTEAM_AGG(@q2) */"  |
++---------+------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> explain select /*+ INL_JOIN(t2@q2) */ (select /*+ QB_NAME(q2) */ sum(t2.a) from t2 where t2.a=t1.a) as s, t1.a from t1;
++----------------------------------+----------+-----------+----------------------+------------------------------------------------------------------------------------------+
+| id                               | estRows  | task      | access object        | operator info                                                                            |
++----------------------------------+----------+-----------+----------------------+------------------------------------------------------------------------------------------+
+| Projection_10                    | 10000.00 | root      |                      | Column#7, test.t1.a                                                                      |
+| └─HashJoin_12                    | 10000.00 | root      |                      | left outer join, equal:[eq(test.t1.a, test.t2.a)]                                        |
+|   ├─HashAgg_29(Build)            | 7992.00  | root      |                      | group by:Column#16, funcs:sum(Column#14)->Column#7, funcs:firstrow(Column#15)->test.t2.a |
+|   │ └─Projection_39              | 9990.00  | root      |                      | cast(test.t2.a, decimal(32,0) BINARY)->Column#14, test.t2.a, test.t2.a                   |
+|   │   └─IndexReader_36           | 9990.00  | root      |                      | index:IndexFullScan_35                                                                   |
+|   │     └─IndexFullScan_35       | 9990.00  | cop[tikv] | table:t2, index:a(a) | keep order:false, stats:pseudo                                                           |
+|   └─TableReader_24(Probe)        | 10000.00 | root      |                      | data:TableFullScan_23                                                                    |
+|     └─TableFullScan_23           | 10000.00 | cop[tikv] | table:t1             | keep order:false, stats:pseudo                                                           |
++----------------------------------+----------+-----------+----------------------+------------------------------------------------------------------------------------------+
+8 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                                                          |
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------+
+| Warning | 1815 | There are no matching table names for (t2) in optimizer hint /*+ INL_JOIN(t2) */ or /*+ TIDB_INLJ(t2) */. Maybe you can use the table alias name |
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+If the subquery is not in select field, both can work:
+```
+mysql> explain select /*+ STREAM_AGG(@q2) */ * from t1 where (select /*+ QB_NAME(q2) */ count(*) from t2 where t2.a=t1.a)>1;
++----------------------------------+---------+-----------+----------------------+-------------------------------------------------------------------------------------------+
+| id                               | estRows | task      | access object        | operator info                                                                             |
++----------------------------------+---------+-----------+----------------------+-------------------------------------------------------------------------------------------+
+| MergeJoin_14                     | 7992.00 | root      |                      | inner join, left key:test.t1.a, right key:test.t2.a                                       |
+| ├─Selection_30(Build)            | 6393.60 | root      |                      | gt(ifnull(Column#5, 0), 1)                                                                |
+| │ └─StreamAgg_37                 | 7992.00 | root      |                      | group by:test.t2.a, funcs:count(Column#6)->Column#5, funcs:firstrow(test.t2.a)->test.t2.a |
+| │   └─IndexReader_38             | 7992.00 | root      |                      | index:StreamAgg_31                                                                        |
+| │     └─StreamAgg_31             | 7992.00 | cop[tikv] |                      | group by:test.t2.a, funcs:count(1)->Column#6                                              |
+| │       └─IndexFullScan_36       | 9990.00 | cop[tikv] | table:t2, index:a(a) | keep order:true, stats:pseudo                                                             |
+| └─IndexReader_29(Probe)          | 9990.00 | root      |                      | index:IndexFullScan_28                                                                    |
+|   └─IndexFullScan_28             | 9990.00 | cop[tikv] | table:t1, index:a(a) | keep order:true, stats:pseudo                                                             |
++----------------------------------+---------+-----------+----------------------+-------------------------------------------------------------------------------------------+
+8 rows in set (0.00 sec)
+
+mysql> explain select /*+ INL_JOIN(t2@q2) */ * from t1 where exists (select /*+ QB_NAME(q2) */ 1 from t2 where t2.a=t1.a);
++-----------------------------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------+
+| id                          | estRows | task      | access object        | operator info                                                                                                  |
++-----------------------------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------+
+| IndexJoin_13                | 7992.00 | root      |                      | semi join, inner:IndexReader_12, outer key:test.t1.a, inner key:test.t2.a, equal cond:eq(test.t1.a, test.t2.a) |
+| ├─IndexReader_22(Build)     | 9990.00 | root      |                      | index:IndexFullScan_21                                                                                         |
+| │ └─IndexFullScan_21        | 9990.00 | cop[tikv] | table:t1, index:a(a) | keep order:false, stats:pseudo                                                                                 |
+| └─IndexReader_12(Probe)     | 1.25    | root      |                      | index:Selection_11                                                                                             |
+|   └─Selection_11            | 1.25    | cop[tikv] |                      | not(isnull(test.t2.a))                                                                                         |
+|     └─IndexRangeScan_10     | 1.25    | cop[tikv] | table:t2, index:a(a) | range: decided by [eq(test.t2.a, test.t1.a)], keep order:false, stats:pseudo                                   |
++-----------------------------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v5.2.0-alpha-763-g04e144aeb-dirty
+Edition: Community
+Git Commit Hash: 04e144aeb58a33c0338c6a391f794b2f4c349edd
+Git Branch: master
+UTC Build Time: 2021-08-30 04:32:37
+GoVersion: go1.16.3
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+

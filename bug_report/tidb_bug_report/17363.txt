@@ -1,0 +1,103 @@
+ID: 17363
+Title: tidb_decode_plan record is wrong when running with multi-query
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+set a slow SlowThreshold value and run this go snippet:
+
+```
+package main
+
+import (
+	"database/sql"
+	"fmt"
+)
+import _ "github.com/go-sql-driver/mysql"
+
+func main() {
+
+
+	db, err := sql.Open("mysql", "root:@(0.0.0.0:4000)/test")
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("select * from tt")
+	if err != nil {
+		panic(err)
+	}
+	for rows.Next() {}
+	rows.Close()
+
+	db.Exec("update tt set v = v + 1 where id = 1; update tt set v = v + 1 where id = 10")
+
+	fmt.Println("ok?")
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+slow log record right update plan
+
+```
++-------------------+---------+------+---------------+---------------+
+| id                | estRows | task | access object | operator info |
++-------------------+---------+------+---------------+---------------+
+| Update_2          | N/A     | root |               | N/A           |
+| └─Point_Get_1     | 1.00    | root | table:tt      | handle:10     |
++-------------------+---------+------+---------------+---------------+
+2 rows in set (0.001 sec)
+
+```
+
+### 3. What did you see instead (Required)
+
+```
+# Time: 2020-05-22T17:15:30.111414443+08:00
+# Txn_start_ts: 416845379695017984
+# User: root@127.0.0.1
+# Conn_ID: 1
+# Query_time: 0.000317284
+# Parse_time: 0.000053465
+# Compile_time: 0.000035593
+# Prewrite_time: 0.000050836 Commit_time: 0.000047784 Get_commit_ts_time: 0.000001183 Write_keys: 1 Write_size: 27 Prewrite_region: 1
+# DB: test
+# Is_internal: false
+# Digest: 01b023217bb11e3cdf6b42edde799f8162d7716077456485a909aad6037d7c0e
+# Num_cop_tasks: 0
+# Mem_max: 363
+# Prepared: false
+# Plan_from_cache: false
+# Has_more_results: false
+# Succ: true
+# Plan: tidb_decode_plan('H3gwCTM2XzEJMAkxCXRhYmxlOnR0LCBoYW5kbGU6MTAK')
+# Plan_digest: c7cc66159a5defa347a2b42630d6d8e7a218e4adf330b296ec2e3ba5f8ba5f57
+ update tt set v = v + 1 where id = 10;
+```
+
+```
+MySQL [test]> select tidb_decode_plan('H3gwCTM2XzEJMAkxCXRhYmxlOnR0LCBoYW5kbGU6MTAK');
++------------------------------------------------------------------+
+| tidb_decode_plan('H3gwCTM2XzEJMAkxCXRhYmxlOnR0LCBoYW5kbGU6MTAK') |
++------------------------------------------------------------------+
+| 	Point_Get_1	root	1	table:tt, handle:10                          |
++------------------------------------------------------------------+
+1 row in set (0.003 sec)
+```
+
+### 4. Affected version (Required)
+
+<!-- v3.0.0, v4.0.0, etc -->
+
+4.0.0 and master
+
+### 5. Root Cause Analysis
+
+<!-- should be filled by the investigator before it's closed -->

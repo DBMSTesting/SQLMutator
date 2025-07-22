@@ -1,0 +1,234 @@
+ID: 14953
+Title: WHERE clause ignores Decimal comparison when using Polars DataFrame
+Description:
+### What happens?
+
+When filtering a Polars DataFrame containing Decimal values using `WHERE column > value`, DuckDB includes rows that fail the comparison, but this only happens with Polars DataFrames - not with Parquet files or DuckDB tables containing identical data.
+
+### To Reproduce
+
+```python
+import duckdb
+import polars as pl
+import numpy as np
+from pathlib import Path
+import tempfile
+
+np.random.seed(10)
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    path = Path(tmp_dir) / "test.parquet"
+    pl.DataFrame({'x': pl.Series(np.random.uniform(-10, 10, 1000)).cast(pl.Decimal(18, 4))}).write_parquet(path, use_pyarrow=True)
+    
+    conn = duckdb.connect()
+    conn.sql(f"CREATE TABLE x_table AS SELECT * FROM '{path}'")
+
+    df_pl = pl.read_parquet(path)
+
+    query = """
+    SELECT x, x > 0.05 AS is_x_good, x::FLOAT > 0.05 AS is_float_x_good
+    FROM {}
+    WHERE is_x_good
+    ORDER BY x ASC
+    """
+    print("DuckDB table:\n", conn.sql(query.format('x_table')), sep='')
+    print("Parquet from DuckDB:\n", conn.sql(query.format(f"read_parquet('{path}')")), sep='')
+    print("Polars df from DuckDB:\n", conn.sql(query.format("df_pl")), sep='')
+
+    query_cte = """
+    WITH base AS(
+        SELECT x, x > 0.05 AS is_x_good, x::FLOAT > 0.05 AS is_float_x_good
+        FROM df_pl
+    )
+    SELECT *
+    FROM base
+    WHERE is_x_good
+    ORDER BY x ASC
+    """
+    print("Polars df from DuckDB cte:\n", conn.sql(query_cte), sep='')
+```
+
+#### Expected behavior
+Querying the Polars DataFrame should return the same results as querying the Parquet file or DuckDB table directly - rows where `x > 0.05` evaluates to `true`.
+
+#### Actual behavior
+
+Full output showing the discrepancy:
+
+```
+DuckDB table:
+┌───────────────┬───────────┬─────────────────┐
+│       x       │ is_x_good │ is_float_x_good │
+│ decimal(18,4) │  boolean  │     boolean     │
+├───────────────┼───────────┼─────────────────┤
+│        0.0533 │ true      │ true            │
+│        0.0714 │ true      │ true            │
+│        0.0901 │ true      │ true            │
+│        0.0968 │ true      │ true            │
+│        0.1011 │ true      │ true            │
+│        0.1395 │ true      │ true            │
+│        0.1520 │ true      │ true            │
+│        0.1867 │ true      │ true            │
+│        0.2066 │ true      │ true            │
+│        0.2126 │ true      │ true            │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│        9.7783 │ true      │ true            │
+│        9.8024 │ true      │ true            │
+│        9.8033 │ true      │ true            │
+│        9.8187 │ true      │ true            │
+│        9.8965 │ true      │ true            │
+│        9.9051 │ true      │ true            │
+│        9.9246 │ true      │ true            │
+│        9.9409 │ true      │ true            │
+│        9.9615 │ true      │ true            │
+│        9.9727 │ true      │ true            │
+├───────────────┴───────────┴─────────────────┤
+│ 495 rows (20 shown)               3 columns │
+└─────────────────────────────────────────────┘
+
+Parquet from DuckDB:
+┌───────────────┬───────────┬─────────────────┐
+│       x       │ is_x_good │ is_float_x_good │
+│ decimal(18,4) │  boolean  │     boolean     │
+├───────────────┼───────────┼─────────────────┤
+│        0.0533 │ true      │ true            │
+│        0.0714 │ true      │ true            │
+│        0.0901 │ true      │ true            │
+│        0.0968 │ true      │ true            │
+│        0.1011 │ true      │ true            │
+│        0.1395 │ true      │ true            │
+│        0.1520 │ true      │ true            │
+│        0.1867 │ true      │ true            │
+│        0.2066 │ true      │ true            │
+│        0.2126 │ true      │ true            │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│        9.7783 │ true      │ true            │
+│        9.8024 │ true      │ true            │
+│        9.8033 │ true      │ true            │
+│        9.8187 │ true      │ true            │
+│        9.8965 │ true      │ true            │
+│        9.9051 │ true      │ true            │
+│        9.9246 │ true      │ true            │
+│        9.9409 │ true      │ true            │
+│        9.9615 │ true      │ true            │
+│        9.9727 │ true      │ true            │
+├───────────────┴───────────┴─────────────────┤
+│ 495 rows (20 shown)               3 columns │
+└─────────────────────────────────────────────┘
+
+Polars df from DuckDB:
+┌───────────────┬───────────┬─────────────────┐
+│       x       │ is_x_good │ is_float_x_good │
+│ decimal(18,4) │  boolean  │     boolean     │
+├───────────────┼───────────┼─────────────────┤
+│        0.0349 │ false     │ false           │  <- Should not appear
+│        0.0404 │ false     │ false           │  <- Should not appear
+│        0.0533 │ true      │ true            │
+│        0.0714 │ true      │ true            │
+│        0.0901 │ true      │ true            │
+│        0.0968 │ true      │ true            │
+│        0.1011 │ true      │ true            │
+│        0.1395 │ true      │ true            │
+│        0.1520 │ true      │ true            │
+│        0.1867 │ true      │ true            │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│        9.7783 │ true      │ true            │
+│        9.8024 │ true      │ true            │
+│        9.8033 │ true      │ true            │
+│        9.8187 │ true      │ true            │
+│        9.8965 │ true      │ true            │
+│        9.9051 │ true      │ true            │
+│        9.9246 │ true      │ true            │
+│        9.9409 │ true      │ true            │
+│        9.9615 │ true      │ true            │
+│        9.9727 │ true      │ true            │
+├───────────────┴───────────┴─────────────────┤
+│ 497 rows (20 shown)               3 columns │
+└─────────────────────────────────────────────┘
+
+Polars df from DuckDB cte:
+┌───────────────┬───────────┬─────────────────┐
+│       x       │ is_x_good │ is_float_x_good │
+│ decimal(18,4) │  boolean  │     boolean     │
+├───────────────┼───────────┼─────────────────┤
+│        0.0349 │ false     │ false           │  <- Should not appear
+│        0.0404 │ false     │ false           │  <- Should not appear
+│        0.0533 │ true      │ true            │
+│        0.0714 │ true      │ true            │
+│        0.0901 │ true      │ true            │
+│        0.0968 │ true      │ true            │
+│        0.1011 │ true      │ true            │
+│        0.1395 │ true      │ true            │
+│        0.1520 │ true      │ true            │
+│        0.1867 │ true      │ true            │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│           ·   │  ·        │  ·              │
+│        9.7783 │ true      │ true            │
+│        9.8024 │ true      │ true            │
+│        9.8033 │ true      │ true            │
+│        9.8187 │ true      │ true            │
+│        9.8965 │ true      │ true            │
+│        9.9051 │ true      │ true            │
+│        9.9246 │ true      │ true            │
+│        9.9409 │ true      │ true            │
+│        9.9615 │ true      │ true            │
+│        9.9727 │ true      │ true            │
+├───────────────┴───────────┴─────────────────┤
+│ 497 rows (20 shown)               3 columns │
+└─────────────────────────────────────────────┘
+```
+
+When querying the Polars DataFrame, rows where both `is_x_good` and `is_float_x_good` are `false` appear in the results, despite the `WHERE is_x_good` clause. This doesn't happen when querying the Parquet file or DuckDB table directly.
+
+Interestingly, filtering on `WHERE is_float_x_good` (casting to FLOAT first) produces the expected results.
+
+DuckDB 1.1.1
+Polars 1.7.1
+
+
+### OS:
+
+Linux
+
+### DuckDB Version:
+
+1.1.1
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Pavel Khokhlov
+
+### Affiliation:
+
+personal
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,74 @@
+ID: 11940
+Title: Address: NULL pointer. Access: read. Unknown si_code.
+Description:
+Clickhouse server is crashing randomly (once every dozen times) when running a query that groups by LowCardinality column against a buffer table through a distributed table.
+
+Version:
+```19.14.10.16 (official build)```
+
+Query:
+```
+select max(start) 
+  from test.logs
+group by client_id
+```
+Tables:
+```
+CREATE TABLE test.logs_buffer (
+`ingest_time` DateTime DEFAULT now(), 
+`start` DateTime, 
+`client_id` LowCardinality(String), 
+`metric_value` UInt64) ENGINE = Buffer(test, logs_local, 16, 3, 20, 2000000, 20000000, 100000000, 300000000)
+
+CREATE TABLE test.logs_local (
+`ingest_time` DateTime DEFAULT now(), 
+`start` DateTime, 
+`client_id` LowCardinality(String), 
+`metric_value` UInt64) ENGINE = MergeTree PARTITION BY formatDateTime(start, '%Y%m%d%H') ORDER BY (start) TTL start + toIntervalHour(1) SETTINGS index_granularity = 8192
+
+
+CREATE TABLE test.logs (
+`ingest_time` DateTime, 
+`start` DateTime, `service` 
+`client_id` LowCardinality(String), 
+`metric_value` UInt64) ENGINE = Distributed(shards, 'test', logs_buffer, rand())
+```
+
+`client_id` characteristic:
+451 unique alphanumeric strings with max length of 10
+
+Insertion rate:
+36k / sec (6k / sec per node)
+
+Stacktrace:
+```
+ (version 19.14.10.16 (official build))
+2020.06.25 07:04:52.562859 [ 101 ] {} <Fatal> BaseDaemon: ########################################
+2020.06.25 07:04:52.563004 [ 101 ] {} <Fatal> BaseDaemon: (version 19.14.10.16 (official build)) (from thread 91) Received signal Segmentation fault (11).
+2020.06.25 07:04:52.563038 [ 101 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+2020.06.25 07:04:52.563069 [ 101 ] {} <Fatal> BaseDaemon: Stack trace: 0x5604c0afd8a5 0x5604c0affd09 0x5604c0b00dc4 0x5604c0d74c7c 0x5604c13b9029 0x5604c13b9aa0 0x5604c1200be1 0x5604c120af83 0x5604c120b1b1 0x5604c0ab4dc7 0x5604c0bdcb45 0x5604c0a98217 0x5604c0ab472b 0x5604c0d2904f 0x5604bd9de38e 0x5604bd9e0409 0x5604c17b6489 0x5604c17b1260 0x5604c17b197d 0x5604c2e94c91 0x5604c2e92a3c 0x5604c36082a0 0x7f48502736ba 0x7f484fb9d41d
+2020.06.25 07:04:52.563444 [ 101 ] {} <Fatal> BaseDaemon: 3. 0x5604c0afd8a5 DB::ReverseIndex<unsigned long, DB::ColumnString>::insert(StringRef const&) /usr/bin/clickhouse
+2020.06.25 07:04:52.563522 [ 101 ] {} <Fatal> BaseDaemon: 4. 0x5604c0affd09 COW<DB::IColumn>::mutable_ptr<DB::IColumn> DB::ColumnUnique<DB::ColumnString>::uniqueInsertRangeImpl<unsigned char>(DB::IColumn const&, unsigned long, unsigned long, unsigned long, DB::ColumnVector<unsigned char>::MutablePtr&&, DB::ReverseIndex<unsigned long, DB::ColumnString>*, unsigned long) /usr/bin/clickhouse
+2020.06.25 07:04:52.563550 [ 101 ] {} <Fatal> BaseDaemon: 5. 0x5604c0b00dc4 DB::ColumnUnique<DB::ColumnString>::uniqueInsertRangeFrom(DB::IColumn const&, unsigned long, unsigned long) /usr/bin/clickhouse
+2020.06.25 07:04:52.563626 [ 101 ] {} <Fatal> BaseDaemon: 6. 0x5604c0d74c7c DB::ColumnLowCardinality::insertRangeFrom(DB::IColumn const&, unsigned long, unsigned long) /usr/bin/clickhouse
+2020.06.25 07:04:52.563720 [ 101 ] {} <Fatal> BaseDaemon: 7. 0x5604c13b9029 DB::BufferBlockOutputStream::insertIntoBuffer(DB::Block const&, DB::StorageBuffer::Buffer&) /usr/bin/clickhouse
+2020.06.25 07:04:52.563744 [ 101 ] {} <Fatal> BaseDaemon: 8. 0x5604c13b9aa0 DB::BufferBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+2020.06.25 07:04:52.563812 [ 101 ] {} <Fatal> BaseDaemon: 9. 0x5604c1200be1 DB::PushingToViewsBlockOutputStream::write(DB::Block const&) /usr/bin/clickhouse
+2020.06.25 07:04:52.563847 [ 101 ] {} <Fatal> BaseDaemon: 10. 0x5604c120af83 DB::SquashingBlockOutputStream::finalize() /usr/bin/clickhouse
+2020.06.25 07:04:52.563867 [ 101 ] {} <Fatal> BaseDaemon: 11. 0x5604c120b1b1 DB::SquashingBlockOutputStream::writeSuffix() /usr/bin/clickhouse
+2020.06.25 07:04:52.563912 [ 101 ] {} <Fatal> BaseDaemon: 12. 0x5604c0ab4dc7 DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*) /usr/bin/clickhouse
+2020.06.25 07:04:52.563977 [ 101 ] {} <Fatal> BaseDaemon: 13. 0x5604c0bdcb45 DB::NullAndDoCopyBlockInputStream::readImpl() /usr/bin/clickhouse
+2020.06.25 07:04:52.564023 [ 101 ] {} <Fatal> BaseDaemon: 14. 0x5604c0a98217 DB::IBlockInputStream::read() /usr/bin/clickhouse
+2020.06.25 07:04:52.564045 [ 101 ] {} <Fatal> BaseDaemon: 15. 0x5604c0ab472b DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*) /usr/bin/clickhouse
+2020.06.25 07:04:52.564097 [ 101 ] {} <Fatal> BaseDaemon: 16. 0x5604c0d2904f DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>) /usr/bin/clickhouse
+2020.06.25 07:04:52.564175 [ 101 ] {} <Fatal> BaseDaemon: 17. 0x5604bd9de38e DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&) /usr/bin/clickhouse
+2020.06.25 07:04:52.564203 [ 101 ] {} <Fatal> BaseDaemon: 18. 0x5604bd9e0409 DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&) /usr/bin/clickhouse
+2020.06.25 07:04:52.564262 [ 101 ] {} <Fatal> BaseDaemon: 19. 0x5604c17b6489 Poco::Net::HTTPServerConnection::run() /usr/bin/clickhouse
+2020.06.25 07:04:52.564293 [ 101 ] {} <Fatal> BaseDaemon: 20. 0x5604c17b1260 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+2020.06.25 07:04:52.564322 [ 101 ] {} <Fatal> BaseDaemon: 21. 0x5604c17b197d Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+2020.06.25 07:04:52.564390 [ 101 ] {} <Fatal> BaseDaemon: 22. 0x5604c2e94c91 Poco::PooledThread::run() /usr/bin/clickhouse
+2020.06.25 07:04:52.564413 [ 101 ] {} <Fatal> BaseDaemon: 23. 0x5604c2e92a3c Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+2020.06.25 07:04:52.564460 [ 101 ] {} <Fatal> BaseDaemon: 24. 0x5604c36082a0 ? /usr/bin/clickhouse
+2020.06.25 07:04:52.564573 [ 101 ] {} <Fatal> BaseDaemon: 25. 0x7f48502736ba start_thread /lib/x86_64-linux-gnu/libpthread-2.23.so
+2020.06.25 07:04:52.564653 [ 101 ] {} <Fatal> BaseDaemon: 26. 0x7f484fb9d41d __clone /lib/x86_64-linux-gnu/libc-2.23.so
+```

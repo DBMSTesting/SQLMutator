@@ -1,0 +1,98 @@
+ID: 18943
+Title: force_drop_table does not work with MATERIALIZED VIEW
+Description:
+master (21.2.1.1)
+
+#### Repro:
+
+1. Set in `config.xml`
+```xml
+    <max_table_size_to_drop>1</max_table_size_to_drop>
+    <max_partition_size_to_drop>1</max_partition_size_to_drop>
+```
+
+2. Create table and MV:
+```sql
+create table t (x UInt64) engine = Null;
+CREATE MATERIALIZED VIEW t_mv engine = SummingMergeTree order by y as select bitAnd(x, 15) as y, sum(x) as s from t group by y;
+insert into t select number from numbers(100);
+```
+
+Drop table should fail (it's ok):
+```sql
+:) drop table t_mv
+
+DROP TABLE t_mv
+
+Query id: 2a6ade12-9813-458e-8436-02e3d93714f6
+
+
+Received exception from server (version 21.2.1):
+Code: 359. DB::Exception: Received from localhost:9000. DB::Exception: Table or Partition in default.`.inner.t_mv` was not dropped.
+Reason:
+1. Size (288.00 B) is greater than max_[table/partition]_size_to_drop (1.00 B)
+2. File '/home/nik-kochetov/test/clickhouse/flags/force_drop_table' intended to force DROP doesn't exist
+How to fix this:
+1. Either increase (or set to zero) max_[table/partition]_size_to_drop in server config
+2. Either create forcing file /home/nik-kochetov/test/clickhouse/flags/force_drop_table and make sure that ClickHouse has write permission for it.
+Example:
+sudo touch '/home/nik-kochetov/test/clickhouse/flags/force_drop_table' && sudo chmod 666 '/home/nik-kochetov/test/clickhouse/flags/force_drop_table'. 
+
+0 rows in set. Elapsed: 0.012 sec. 
+```
+
+3. Create `force_drop_table`
+```sh
+$ sudo touch '/home/nik-kochetov/test/clickhouse/flags/force_drop_table' && sudo chmod 666 '/home/nik-kochetov/test/clickhouse/flags/force_drop_table'
+$ ls -lah /home/nik-kochetov/test/clickhouse/flags/force_drop_table
+-rw-rw-rw- 1 root root 0 Jan 11 17:20 /home/nik-kochetov/test/clickhouse/flags/force_drop_table
+```
+
+4. Drop for MV:
+```sql
+:) drop table t_mv
+
+DROP TABLE t_mv
+
+Query id: a9e01d6e-d0fc-46bc-b80c-170d809d3869
+
+
+Received exception from server (version 21.2.1):
+Code: 359. DB::Exception: Received from localhost:9000. DB::Exception: Table or Partition in default.`.inner.t_mv` was not dropped.
+Reason:
+1. Size (288.00 B) is greater than max_[table/partition]_size_to_drop (1.00 B)
+2. File '/home/nik-kochetov/test/clickhouse/flags/force_drop_table' intended to force DROP doesn't exist
+How to fix this:
+1. Either increase (or set to zero) max_[table/partition]_size_to_drop in server config
+2. Either create forcing file /home/nik-kochetov/test/clickhouse/flags/force_drop_table and make sure that ClickHouse has write permission for it.
+Example:
+sudo touch '/home/nik-kochetov/test/clickhouse/flags/force_drop_table' && sudo chmod 666 '/home/nik-kochetov/test/clickhouse/flags/force_drop_table'. 
+
+0 rows in set. Elapsed: 0.015 sec. 
+```
+
+Result: `force_drop_table` file is removed, MV is not.
+
+#### Workaround
+
+1. Create `force_drop_table` again
+2. Drop inner table
+```sql
+:) drop table `.inner.t_mv`
+
+DROP TABLE `.inner.t_mv`
+
+Query id: 59fba49d-a71e-41b0-87a5-8db03618372f
+
+Ok.
+```
+3. Drop MV
+```sql
+:) drop table t_mv
+
+DROP TABLE t_mv
+
+Query id: eaff07df-20bf-4031-bcac-088ab403474a
+
+Ok.
+```

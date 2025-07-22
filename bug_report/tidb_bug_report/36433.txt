@@ -1,0 +1,111 @@
+ID: 36433
+Title: string literals in partition definition doesn't respect charset settings
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+my:root@127.0.0.1:4000=> use test;
+USE
+my:root@127.0.0.1:4000=> set character_set_connection=gbk;
+SET
+my:root@127.0.0.1:4000=> create table `test`.`a` (id bigint, name varbinary(16) unique key) partition by range columns(name) (
+my:root@127.0.0.1:4000(> partition p0 values less than ('你好'),
+my:root@127.0.0.1:4000(> partition p1 values less than ('我好'),
+my:root@127.0.0.1:4000(> partition p2 values less than MAXVALUE);
+CREATE TABLE
+my:root@127.0.0.1:4000=> insert into a values(1, '你好');
+INSERT 1
+my:root@127.0.0.1:4000=> select * from a;
+ id |       name
+----+------------------
+  1 | \xc4\xe3\xba\xc3
+(1 row)
+
+my:root@127.0.0.1:4000=> select * from a partition(p0);
+ id |       name
+----+------------------
+  1 | \xc4\xe3\xba\xc3
+(1 row)
+my:root@127.0.0.1:4000=> set character_set_connection=utf8mb4;
+SET
+my:root@127.0.0.1:4000=> insert into a values(1, '你好');
+INSERT 1
+my:root@127.0.0.1:4000=> select * from a partition(p0);
+ id |       name
+----+------------------
+  1 | \xc4\xe3\xba\xc3
+(1 row)
+
+my:root@127.0.0.1:4000=> select * from a partition(p1);
+ id | name
+----+------
+  1 | 你好
+(1 row)
+```
+Seems TiDB always uses utf8mb4 to store string literals in partition DDL. So when I use gbk charset to insert '你好', it falls into partition p0.
+
+### 2. What did you expect to see? (Required)
+
+In MySQL 8, the same procedure:
+
+```
+mysql> set character_set_connection=gbk;
+Query OK, 0 rows affected (0.00 sec)
+mysql> create table `test`.`a` (id bigint, name varbinary(16) unique key) partition by range columns(name) (
+    -> partition p0 values less than ('你好'),
+    -> partition p1 values less than ('我好'),
+    -> partition p2 values less than MAXVALUE);
+Query OK, 0 rows affected (0.06 sec)
+mysql> insert into a values(1, '你好');
+Query OK, 1 row affected (0.00 sec)
+
+mysql> select * from a;
++------+------------+
+| id   | name       |
++------+------------+
+|    1 | 0xC4E3BAC3 |
++------+------------+
+1 row in set (0.00 sec)
+mysql> select * from a partition(p0);
+Empty set (0.00 sec)
+mysql> select * from a partition(p1);
++------+------------+
+| id   | name       |
++------+------------+
+|    1 | 0xC4E3BAC3 |
++------+------------+
+1 row in set (0.00 sec)
+mysql> set character_set_connection=utf8mb4;
+Query OK, 0 rows affected (0.00 sec)
+mysql> insert into a values(1, '你好');
+Query OK, 1 row affected (0.01 sec)
+mysql> select * from a partition(p0);
+Empty set (0.01 sec)
+mysql> select * from a partition(p1);
++------+------------+
+| id   | name       |
++------+------------+
+|    1 | 0xC4E3BAC3 |
++------+------------+
+1 row in set (0.00 sec)
+mysql> select * from a partition(p2);
++------+----------------+
+| id   | name           |
++------+----------------+
+|    1 | 0xE4BDA0E5A5BD |
++------+----------------+
+1 row in set (0.00 sec)
+```
+
+Seems MySQL respects the charset settings when executing partition DDL.
+
+### 4. What is your TiDB version? (Required)
+
+nightly
+
+<!-- Paste the output of SELECT tidb_version() -->
+

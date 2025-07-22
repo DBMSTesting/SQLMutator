@@ -1,0 +1,33 @@
+ID: 12957
+Title: Move checkpointing parallelism into `TaskExecutor` class, use that class for parallel `union_by_name`
+Description:
+https://github.com/duckdb/duckdb/pull/9999 introduced parallel checkpointing by adding a separate mechanism for managing tasks during the checkpointing process. This was necessary because the checkpointing code cannot easily use the normal parallelism loops during execution - as the checkpointing can run outside of regular query execution (e.g. when shutting down a database, or during a commit). 
+
+This PR extracts the logic that was added in that PR into a separate class - the `TaskExecutor`. This class can be used to easily add parallelism in places where we cannot use the regular parallelism model. The `TaskExecutor` schedules tasks using the `TaskScheduler`, which are then executed in parallel using the regular worker threads. It merely provides a number of helper functions for keeping track of how many tasks have completed, and for error handling across different threads.
+
+In this PR we use the `TaskExecutor` to provide a parallel implementation of the `union_by_name` file scanning. Since we perform auto-detection on all files, this is trivial to parallelize, and can provide substantial speedups when running `read_csv` or `read_parquet` with `union_by_name` enabled over many small files. The `union_by_name` is also a good showcase for how easy the parallelism is to add using the `TaskExecutor`, e.g.:
+
+```cpp
+TaskExecutor executor(context);
+// schedule tasks for all files
+for (auto &file : files) {
+	auto task = make_uniq<UnionByReaderTask>(....);
+	executor.ScheduleTask(std::move(task));
+}
+// complete all tasks
+executor.WorkOnTasks();
+```
+
+### Benchmarks
+
+Below are some timings of reading 1000 small CSV files. Source:
+
+```sql
+CREATE TABLE t1 AS select i,i,i,i,i,i,i,i,i,i from range(0,2048) tbl(i);
+COPY t1 TO 'small_csv.csv' (FORMAT CSV, HEADER 0);
+SELECT * from read_csv(repeat(['small_csv.csv'], 1000),delim= ',',  header = 0, union_by_name=true);
+```
+
+| v1.0 | main | new  |
+|------|------|------|
+| 3.9s | 3.2s | 0.6s |

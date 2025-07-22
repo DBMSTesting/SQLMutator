@@ -1,0 +1,158 @@
+ID: 2138
+Title: [Bug]: OceanBase Tenant Memory Insufficiency on OBD Restart
+Description:
+**Describe the bug**
+When a tenant in OceanBase is configured with a small memory space (1GB), restarting the OB cluster causes it to hang, with no additional error messages. However, stopping and starting the cluster allows it to boot, and one can enter the system tenant, but cannot enter the tenant with insufficient memory, displaying "ERROR 8001 (08004): Server is initializing" error.
+
+**Environment**
+- OS Version and CPU Arch(`uname -a`):
+```
+Linux node-49-52-27-34 3.10.0-1160.80.1.el7.x86_64 #1 SMP Tue Nov 8 15:48:59 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux
+```
+
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+```
+select version() \G
+*************************** 1. row ***************************
+version(): 5.7.25-OceanBase_CE-v4.3.2.1
+```
+
+**Fast Reproduce Steps(Required)**
+1. Configure a tenant in OceanBase with a memory space of 1GB.
+```sql
+MySQL [(none)]> SELECT a.TENANT_NAME, b.UNIT_CONFIG_ID  FROM oceanbase.DBA_OB_TENANTS a,oceanbase.DBA_OB_RESOURCE_POOLS b WHERE b.TENANT_ID=a.TENANT_ID;
++-------------+----------------+
+| TENANT_NAME | UNIT_CONFIG_ID |
++-------------+----------------+
+| sys         |              1 |
+| mq_t1       |           1001 |
++-------------+----------------+
+2 rows in set (0.08 sec)
+
+MySQL [(none)]> SELECT * FROM oceanbase.DBA_OB_UNIT_CONFIGS WHERE UNIT_CONFIG_ID='1001';
++----------------+-------+----------------------------+----------------------------+---------+---------+-------------+---------------+---------------------+---------------------+-------------+
+| UNIT_CONFIG_ID | NAME  | CREATE_TIME                | MODIFY_TIME                | MAX_CPU | MIN_CPU | MEMORY_SIZE | LOG_DISK_SIZE | MAX_IOPS            | MIN_IOPS            | IOPS_WEIGHT |
++----------------+-------+----------------------------+----------------------------+---------+---------+-------------+---------------+---------------------+---------------------+-------------+
+|           1001 | unit1 | 2024-09-23 12:51:00.676089 | 2024-09-27 22:14:21.362579 |       3 |       3 | 17179869184 |    8589934592 | 9223372036854775807 | 9223372036854775807 |           3 |
++----------------+-------+----------------------------+----------------------------+---------+---------+-------------+---------------+---------------------+---------------------+-------------+
+1 row in set (0.02 sec)
+
+MySQL [(none)]> ALTER RESOURCE UNIT unit1 MEMORY_SIZE '1G';
+Query OK, 0 rows affected (0.04 sec)
+```
+
+3. Attempt to restart the OB cluster.
+```shell
+obd cluster restart obdhp
+Get local repositories and plugins ok
+Load cluster param plugin ok
+Open ssh connection ok
+Cluster status check ok
+Check before restart observer ok
+Connect to observer ok
+Server check ok
+Observer restart /  -- # blocking here
+```
+The end of the obd trace shows these:
+```log
+....
+[2024-09-28 10:43:39.149] [DEBUG] ---- execute sql: select * from oceanbase.__all_server where status != 'active' or stop_time > 0 or start_service_time = 0. args: None
+[2024-09-28 10:43:39.150] [DEBUG] -- {'gmt_create': datetime.datetime(2024, 9, 23, 11, 50, 39, 966266), 'gmt_modified': datetime.datetime(2024, 9, 28, 10, 43, 1, 599733), 'svr_ip': '127.0.0.1', 'svr_port': 2982, 'id': 1, 'zone': 'zone1', 'inner_port': 2981, 'with_rootserver': 1, 'status': 'ACTIVE', 'block_migrate_in_time': 0, 'build_version': '4.3.2.1_1-be54a1e99a143d88b0863a786a30ca9d64195df0(Sep 25 2024 13:50:35)', 'stop_time': 0, 'start_service_time': 0, 'first_sessid': 0, 'with_partition': 1, 'last_offline_time': 0}
+[2024-09-28 10:43:42.153] [DEBUG] ---- execute sql: select * from oceanbase.__all_server where status != 'active' or stop_time > 0 or start_service_time = 0. args: None
+[2024-09-28 10:43:42.155] [DEBUG] -- {'gmt_create': datetime.datetime(2024, 9, 23, 11, 50, 39, 966266), 'gmt_modified': datetime.datetime(2024, 9, 28, 10, 43, 1, 599733), 'svr_ip': '127.0.0.1', 'svr_port': 2982, 'id': 1, 'zone': 'zone1', 'inner_port': 2981, 'with_rootserver': 1, 'status': 'ACTIVE', 'block_migrate_in_time': 0, 'build_version': '4.3.2.1_1-be54a1e99a143d88b0863a786a30ca9d64195df0(Sep 25 2024 13:50:35)', 'stop_time': 0, 'start_service_time': 0, 'first_sessid': 0, 'with_partition': 1, 'last_offline_time': 0}
+[2024-09-28 10:43:45.157] [DEBUG] ---- execute sql: select * from oceanbase.__all_server where status != 'active' or stop_time > 0 or start_service_time = 0. args: None
+[2024-09-28 10:43:45.159] [DEBUG] -- {'gmt_create': datetime.datetime(2024, 9, 23, 11, 50, 39, 966266), 'gmt_modified': datetime.datetime(2024, 9, 28, 10, 43, 1, 599733), 'svr_ip': '127.0.0.1', 'svr_port': 2982, 'id': 1, 'zone': 'zone1', 'inner_port': 2981, 'with_rootserver': 1, 'status': 'ACTIVE', 'block_migrate_in_time': 0, 'build_version': '4.3.2.1_1-be54a1e99a143d88b0863a786a30ca9d64195df0(Sep 25 2024 13:50:35)', 'stop_time': 0, 'start_service_time': 0, 'first_sessid': 0, 'with_partition': 1, 'last_offline_time': 0}
+[2024-09-28 10:43:48.159] [DEBUG] ---- execute sql: select * from oceanbase.__all_server where status != 'active' or stop_time > 0 or start_service_time = 0. args: None
+[2024-09-28 10:43:48.160] [DEBUG] -- {'gmt_create': datetime.datetime(2024, 9, 23, 11, 50, 39, 966266), 'gmt_modified': datetime.datetime(2024, 9, 28, 10, 43, 1, 599733), 'svr_ip': '127.0.0.1', 'svr_port': 2982, 'id': 1, 'zone': 'zone1', 'inner_port': 2981, 'with_rootserver': 1, 'status': 'ACTIVE', 'block_migrate_in_time': 0, 'build_version': '4.3.2.1_1-be54a1e99a143d88b0863a786a30ca9d64195df0(Sep 25 2024 13:50:35)', 'stop_time': 0, 'start_service_time': 0, 'first_sessid': 0, 'with_partition': 1, 'last_offline_time': 0}
+[2024-09-28 10:43:51.163] [DEBUG] ---- execute sql: select * from oceanbase.__all_server where status != 'active' or stop_time > 0 or start_service_time = 0. args: None
+[2024-09-28 10:43:51.165] [DEBUG] -- {'gmt_create': datetime.datetime(2024, 9, 23, 11, 50, 39, 966266), 'gmt_modified': datetime.datetime(2024, 9, 28, 10, 43, 1, 599733), 'svr_ip': '127.0.0.1', 'svr_port': 2982, 'id': 1, 'zone': 'zone1', 'inner_port': 2981, 'with_rootserver': 1, 'status': 'ACTIVE', 'block_migrate_in_time': 0, 'build_version': '4.3.2.1_1-be54a1e99a143d88b0863a786a30ca9d64195df0(Sep 25 2024 13:50:35)', 'stop_time': 0, 'start_service_time': 0, 'first_sessid': 0, 'with_partition': 1, 'last_offline_time': 0}
+[2024-09-28 10:43:51.912] [ERROR] Keyboard Interrupt
+[2024-09-28 10:43:51.912] [ERROR] Traceback (most recent call last):
+[2024-09-28 10:43:51.912] [ERROR]   File "/home/dase209/.obd/plugins/oceanbase-ce/4.2.2.0/restart.py", line 290, in restart
+[2024-09-28 10:43:51.912] [ERROR]     ret = self.un_rolling()
+....
+```
+Observe that the cluster hangs and no error messages are output.
+6. Use stop and start commands to try to boot the cluster.
+```shell
+$ obd cluster stop obdhp
+Get local repositories ok
+Search plugins ok
+Open ssh connection ok
+Stop observer ok
+Stop obshell ok
+Stop obproxy ok
+Stop grafana ok
+Stop obagent ok
+Stop prometheus ok
+obdhp stopped
+Trace ID: bc2621fe-7d43-11ef-b754-b4055dcd2b4f
+If you want to view detailed obd logs, please run: obd display-trace bc2621fe-7d43-11ef-b754-b4055dcd2b4f
+$ obd cluster start obdhp
+Get local repositories ok
+Search plugins ok
+Load cluster param plugin ok
+Open ssh connection ok
+Check before start observer ok
+[WARN] OBD-1007: (127.0.0.1) The recommended number of stack size is unlimited (Current value: 10240)
+
+Check before start obproxy ok
+Check before start obagent ok
+Check before start prometheus ok
+Check before start grafana ok
+cluster scenario: htap
+Start observer ok
+observer program health check ok
+obshell program health check ok
+Connect to observer 127.0.0.1:2981 ok
+Start obproxy ok
+obproxy program health check ok
+Connect to obproxy ok
+Initialize obproxy-ce ok
+Start obagent ok
+obagent program health check ok
+Connect to Obagent ok
+Start promethues ok
+prometheus program health check ok
+Connect to Prometheus ok
+Initialize prometheus ok
+Start grafana ok
+grafana program health check ok
+Connect to grafana ok
+Initialize grafana ok
+Wait for observer init ok
+```
+Then we try to connect sys tenant and user tenant.
+```shell
+$ obclient -h127.0.0.1 -P2981 -uroot -p'sinDBw4TCVmVRzfXLTOC'
+Welcome to the OceanBase.  Commands end with ; or \g. -- # success connect
+Your OceanBase connection id is 3221487689
+Server version: OceanBase_CE 4.3.2.1 (r1-be54a1e99a143d88b0863a786a30ca9d64195df0) (Built Sep 25 2024 13:50:35)
+
+$ obclient -h127.0.0.1 -P2981 -uroot@mq_t1 -p
+ERROR 8001 (08004): Server is initializing
+```
+Observe that the sys tenant is set up but user tenant is still hung.
+8. Attempt to enter the tenant with sufficient memory.
+```sql
+obclient [oceanbase]> ALTER RESOURCE UNIT unit1 memory_size '16G';
+Query OK, 0 rows affected (0.021 sec)
+```
+Then try to connect user tenant directly and success.
+```shell
+obclient -h127.0.0.1 -P2981 -uroot@mq_t1 -- success
+Welcome to the OceanBase.  Commands end with ; or \g.
+```
+
+**Expected behavior**
+The expected behavior is that the OB cluster should successfully restart regardless of the memory settings, and all tenants should be accessible normally, since there is no warning or error message when altering the memory limit.
+
+Otherwise, OBD RESTART should behave as [STOP + START], i.e., restart the cluster without the hang tenant, so that we can alter the conf to solve the problem.
+
+**Actual Behavior**
+The actual result is that when the tenant memory is set to 1GB, restarting the cluster causes it to hang. After using the stop and start commands, although it is possible to enter the system tenant, it is not possible to enter the tenant with insufficient memory, displaying "ERROR 8001 (08004): Server is initializing" error.
+
+**Additional context**
+- The issue may be related to memory management or resource allocation.
+- The tenant was functioning normally before attempting to restart the cluster.
+- After the restart failure, there are no error messages other than the "ERROR 8001 (08004): Server is initializing" error, which makes diagnosing the problem difficult. And the error message is not totally correct: server is up for sys tenant, it is hung only for the user tenant.

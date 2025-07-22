@@ -1,0 +1,143 @@
+ID: 37045
+Title: `SHOW COLUMNS FROM view_xx` does not work in v6.x, but it works well in v5.4.0
+Description:
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+1. Use `CREATE VIEW AS SELECT` to create a view
+```
+        create view
+            test_normalization.temp_view
+        as (
+            
+with
+
+input_data as (
+    select *
+    from _airbyte_test_normalization.`nested_stream_with_co_1g_into_long_names_stg`
+    -- nested_stream_with_co__lting_into_long_names from test_normalization._airbyte_raw_nested_s__lting_into_long_names
+),
+
+scd_data as (
+    -- SQL model to build a Type 2 Slowly Changing Dimension (SCD) table for each record identified by their primary key
+    select
+      md5(cast(concat(coalesce(cast(id as char(1000)), '')) as char(1000))) as _airbyte_unique_key,
+      id,
+      `date`,
+      `partition`,
+      `date` as _airbyte_start_at,
+      lag(`date`) over (
+        partition by id
+        order by
+            `date` is null asc,
+            `date` desc,
+            _airbyte_emitted_at desc
+      ) as _airbyte_end_at,
+      case when row_number() over (
+        partition by id
+        order by
+            `date` is null asc,
+            `date` desc,
+            _airbyte_emitted_at desc
+      ) = 1 then 1 else 0 end as _airbyte_active_row,
+      _airbyte_ab_id,
+      _airbyte_emitted_at,
+      _airbyte_nested_strea__nto_long_names_hashid
+    from input_data
+),
+dedup_data as (
+    select
+        -- we need to ensure de-duplicated rows for merge/update queries
+        -- additionally, we generate a unique key for the scd table
+        row_number() over (
+            partition by
+                _airbyte_unique_key,
+                _airbyte_start_at,
+                _airbyte_emitted_at
+            order by _airbyte_active_row desc, _airbyte_ab_id
+        ) as _airbyte_row_num,
+        md5(cast(concat(coalesce(cast(_airbyte_unique_key as char(1000)), ''), '-', coalesce(cast(_airbyte_start_at as char(1000)), ''), '-', coalesce(cast(_airbyte_emitted_at as char(1000)), '')) as char(1000))) as _airbyte_unique_key_scd,
+        scd_data.*
+    from scd_data
+)
+select
+    _airbyte_unique_key,
+    _airbyte_unique_key_scd,
+    id,
+    `date`,
+    `partition`,
+    _airbyte_start_at,
+    _airbyte_end_at,
+    _airbyte_active_row,
+    _airbyte_ab_id,
+    _airbyte_emitted_at,
+    current_timestamp() as _airbyte_normalized_at,
+    _airbyte_nested_strea__nto_long_names_hashid
+from dedup_data where _airbyte_row_num = 1
+        )
+```
+2. Check columns of view
+```
+show columns from test_normalization.temp_view
+```
+
+### 2. What did you expect to see? (Required)
+Query success with column information about this view.
+
+### 3. What did you see instead (Required)
+```
+mysql> show columns from temp_view;
+ERROR 1105 (HY000): line 1 column 1176 near "(PARTITION BY `id` ORDER BY `date` IS NULL,`date` DESC,`_airbyte_emitted_at` DESC) AS `_airbyte_end_at`,CASE WHEN ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `date` IS NULL,`date` DESC,`_airbyte_emitted_at` DESC)=1 THEN 1 ELSE 0 END AS `_airbyte_active_row`,`_airbyte_ab_id` AS `_airbyte_ab_id`,`_airbyte_emitted_at` AS `_airbyte_emitted_at`,`_airbyte_nested_strea__nto_long_names_hashid` AS `_airbyte_nested_strea__nto_long_names_hashid` FROM `input_data`), `dedup_data` AS (SELECT R
+```
+What's more, `DESC` failed too.
+```
+mysql> desc temp_view;
+ERROR 1105 (HY000): line 1 column 1176 near "(PARTITION BY `id` ORDER BY `date` IS NULL,`date` DESC,`_airbyte_emitted_at` DESC) AS `_airbyte_end_at`,CASE WHEN ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `date` IS NULL,`date` DESC,`_airbyte_emitted_at` DESC)=1 THEN 1 ELSE 0 END AS `_airbyte_active_row`,`_airbyte_ab_id` AS `_airbyte_ab_id`,`_airbyte_emitted_at` AS `_airbyte_emitted_at`,`_airbyte_nested_strea__nto_long_names_hashid` AS `_airbyte_nested_strea__nto_long_names_hashid` FROM `input_data`), `dedup_data` AS (SELECT R
+```
+But I can `SELECT` from this view
+```
+mysql> select * from temp_view;
++----------------------------------+----------------------------------+-------------+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------+-----------------+---------------------+--------------------------------------+----------------------------+------------------------+----------------------------------------------+
+| _airbyte_unique_key              | _airbyte_unique_key_scd          | id          | date                 | partition                                                                                                                                                                                 | _airbyte_start_at    | _airbyte_end_at | _airbyte_active_row | _airbyte_ab_id                       | _airbyte_emitted_at        | _airbyte_normalized_at | _airbyte_nested_strea__nto_long_names_hashid |
++----------------------------------+----------------------------------+-------------+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------+-----------------+---------------------+--------------------------------------+----------------------------+------------------------+----------------------------------------------+
+| 6630ee2276d145cd18704ad2176833df | 0be2e7da10a49a0b6362b234b58dbd92 | test record | 2020-08-31T00:00:00Z | {"DATA": [{"currency": "EUR"}], "column___with__quotes": [{"currency": "EUR"}], "column`_'with\"_quotes": [{"currency": "EUR"}], "double_array_data": [[{"id": "USD"}], [{"id": "GBP"}]]} | 2020-08-31T00:00:00Z | NULL            |                   1 | 5cef752e-2f93-4951-9a66-a36b63104633 | 2020-10-14 01:23:19.100000 | 2022-08-11 06:41:53    | 7ee9a20cbfc86b3575296470a1811f02             |
+| 8653d5c7898950016e5d019df6815626 | 2c858220df9718a337ff91bf885bdd38 | 4.2         | 2020-08-29T00:00:00Z | {"DATA": [{"currency": "EUR"}], "column___with__quotes": [{"currency": "EUR"}], "column`_'with\"_quotes": [{"currency": "EUR"}], "double_array_data": [[{"id": "EUR"}]]}                  | 2020-08-29T00:00:00Z | NULL            |                   1 | 60d902f5-8857-481a-82ed-a8563ea515be | 2020-10-14 01:23:19.000000 | 2022-08-11 06:41:53    | 0c88fb21d7a81e409b79c689adb5c67f             |
++----------------------------------+----------------------------------+-------------+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------+-----------------+---------------------+--------------------------------------+----------------------------+------------------------+----------------------------------------------+
+2 rows in set (0.05 sec)
+```
+### 4. What is your TiDB version? (Required)
+Those failed in v6.x.
+While success in v5.4.0.
+
+### More information
+1. All data comes from `nested_stream_with_co_1g_into_long_names_stg` table.
+```
+mysql> select * from _airbyte_test_normalization.`nested_stream_with_co_1g_into_long_names_stg`;
++----------------------------------------------+-------------+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------+----------------------------+------------------------+
+| _airbyte_nested_strea__nto_long_names_hashid | id          | date                 | partition                                                                                                                                                                                 | _airbyte_ab_id                       | _airbyte_emitted_at        | _airbyte_normalized_at |
++----------------------------------------------+-------------+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------+----------------------------+------------------------+
+| 0c88fb21d7a81e409b79c689adb5c67f             | 4.2         | 2020-08-29T00:00:00Z | {"DATA": [{"currency": "EUR"}], "column___with__quotes": [{"currency": "EUR"}], "column`_'with\"_quotes": [{"currency": "EUR"}], "double_array_data": [[{"id": "EUR"}]]}                  | 1a37defd-57fc-47fd-9edd-8e548519023d | 2020-10-14 01:23:19.000000 | 2022-08-12 04:33:52    |
+| 7ee9a20cbfc86b3575296470a1811f02             | test record | 2020-08-31T00:00:00Z | {"DATA": [{"currency": "EUR"}], "column___with__quotes": [{"currency": "EUR"}], "column`_'with\"_quotes": [{"currency": "EUR"}], "double_array_data": [[{"id": "USD"}], [{"id": "GBP"}]]} | c81f6d3b-6433-4ca4-86a4-36a78f90033f | 2020-10-14 01:23:19.100000 | 2022-08-12 04:33:52    |
++----------------------------------------------+-------------+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------+----------------------------+------------------------+
+2 rows in set (0.05 sec)
+```
+2. DDL about the table
+```
+mysql> desc _airbyte_test_normalization.`nested_stream_with_co_1g_into_long_names_stg`;
++----------------------------------------------+---------------+------+------+---------+-------+
+| Field                                        | Type          | Null | Key  | Default | Extra |
++----------------------------------------------+---------------+------+------+---------+-------+
+| _airbyte_nested_strea__nto_long_names_hashid | varchar(32)   | YES  |      | NULL    |       |
+| id                                           | varchar(1000) | YES  |      | NULL    |       |
+| date                                         | varchar(1000) | YES  |      | NULL    |       |
+| partition                                    | json          | YES  |      | NULL    |       |
+| _airbyte_ab_id                               | varchar(256)  | YES  | PRI  | NULL    |       |
+| _airbyte_emitted_at                          | timestamp(6)  | YES  |      | NULL    |       |
+| _airbyte_normalized_at                       | datetime      | YES  |      | NULL    |       |
++----------------------------------------------+---------------+------+------+---------+-------+
+7 rows in set (0.05 sec)
+```
+

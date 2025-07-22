@@ -1,0 +1,49 @@
+ID: 13167
+Title: planner: sort merge join is missed when two tables are in desc order
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+```
+create table t1 (c1 int primary key, c2 int);
+insert into t1 values (1,1),(2,3);
+create table t2 (c1 int primary key, c2 int);
+insert into t2 values (1,1),(2,3),(3,2);
+```
+2. What did you expect to see?
+```
+mysql> explain select /*+ TIDB_SMJ(t3,t4) */ * from (select * from t1 order by c1) as t3 join (select * from t2 order by c1)as t4 on t3.c1=t4.c1;
++------------------------+----------+-----------+------------------------------------------------------------+
+| id                     | count    | task      | operator info                                              |
++------------------------+----------+-----------+------------------------------------------------------------+
+| MergeJoin_11           | 2.50     | root      | inner join, left key:Column#1, right key:Column#5          |
+| ├─TableReader_19       | 2.00     | root      | data:TableScan_18                                          |
+| │ └─TableScan_18       | 2.00     | cop[tikv] | table:t1, range:[-inf,+inf], keep order:true, stats:pseudo |
+| └─TableReader_25       | 10000.00 | root      | data:TableScan_24                                          |
+|   └─TableScan_24       | 10000.00 | cop[tikv] | table:t2, range:[-inf,+inf], keep order:true, stats:pseudo |
++------------------------+----------+-----------+------------------------------------------------------------+
+5 rows in set, 1 warning (0.00 sec)
+
+mysql> explain select /*+ TIDB_SMJ(t3,t4) */ * from (select * from t1 order by c1 desc) as t3 join (select * from t2 order by c1 desc)as t4 on t3.c1=t4.c1;
+This result should keek the same as the above.
+```
+3. What did you see instead?
+```
+mysql> explain select /*+ TIDB_SMJ(t3,t4) */ * from (select * from t1 order by c1 desc) as t3 join (select * from t2 order by c1 desc)as t4 on t3.c1=t4.c1;
++------------------------+----------+-----------+------------------------------------------------------------------+
+| id                     | count    | task      | operator info                                                    |
++------------------------+----------+-----------+------------------------------------------------------------------+
+| HashRightJoin_13       | 2.50     | root      | inner join, inner:TableReader_19, equal:[eq(Column#1, Column#5)] |
+| ├─TableReader_19       | 2.00     | root      | data:TableScan_18                                                |
+| │ └─TableScan_18       | 2.00     | cop[tikv] | table:t1, range:[-inf,+inf], keep order:true, desc, stats:pseudo |
+| └─TableReader_25       | 10000.00 | root      | data:TableScan_24                                                |
+|   └─TableScan_24       | 10000.00 | cop[tikv] | table:t2, range:[-inf,+inf], keep order:true, desc, stats:pseudo |
++------------------------+----------+-----------+------------------------------------------------------------------+
+5 rows in set, 1 warning (0.00 sec)
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+Release Version: v4.0.0-alpha-672-g87acbcddf

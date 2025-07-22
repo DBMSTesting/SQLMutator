@@ -1,0 +1,65 @@
+ID: 571
+Title: don't retry for condition not match error 
+Description:
+```
+package main
+
+import (
+    "database/sql"
+    "os"
+    "runtime"
+    "sync"
+
+    _ "github.com/pingcap/tidb"
+)
+
+func perr(err error) {
+    if err != nil {
+        println(err.Error())
+        os.Exit(1)
+    }
+}
+
+func run(db *sql.DB, query string, args ...interface{}) (bool, error) {
+    rows, err := db.Query(query, args...)
+    if err != nil {
+        return false, err
+    }
+    defer rows.Close()
+
+    if rows.Next() {
+        return true, nil
+    }
+    return false, nil
+}
+
+func main() {
+    runtime.GOMAXPROCS(runtime.NumCPU())
+    db, err := sql.Open("tidb", "memory://test/test")
+    perr(err)
+
+    _, err = db.Exec("create table if not exists t (c int, index(c))")
+    perr(err)
+
+    _, err = db.Exec("insert into t values (?)", 1)
+    perr(err)
+
+    var wg sync.WaitGroup
+    wg.Add(2)
+    f := func() {
+        defer wg.Done()
+
+        for i := 0; i < 100; i++ {
+            _, err = db.Exec("update t set c = ?", i)
+            perr(err)
+        }
+    }
+
+    go f()
+    go f()
+
+    wg.Wait()
+
+    db.Close()
+}
+```

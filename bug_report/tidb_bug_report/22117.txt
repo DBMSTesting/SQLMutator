@@ -1,0 +1,118 @@
+ID: 22117
+Title: DDL hangs, DML reports PD server timeout and many regions miss peers
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+1. use tiup deploy a nightly version tidb cluster with 1tidb/1pd/1tikv
+2. Kill PD/TiKV/TiDB multiple times.
+
+pd.toml
+```
+[schedule]
+leader-schedule-limit = 4
+region-schedule-limit = 2048
+replica-schedule-limit = 64
+```
+tidb.toml
+```
+[binlog]
+enable = false
+ignore-error = false
+
+[log]
+slow-threshold = 300
+```
+tikv.toml
+```
+[readpool]
+[readpool.coprocessor]
+use-unified-pool = true
+[readpool.storage]
+use-unified-pool = false
+```
+3. recover all chaos
+4. use netcat to check ports(pd:2379 tikv:20160 tidb:4000), they all work well
+
+### 2. What did you expect to see? (Required)
+
+The cluster works well after the chaos recover.
+
+### 3. What did you see instead (Required)
+
+The cluster does not work anymore.
+
+1. DDL hangs
+```
+[2020/12/31 00:33:07.299 +00:00] [WARN] [backoff.go:342] ["pdRPC backoffer.maxSleep 40000ms is exceeded, errors:\nregion not found for key \"t\\x80\\x00\\x00\\x00\\x00\\x00\\n\\x8e_r\" at 2020-12-31T00:33:02.638778103Z\nregion not found for key \"t\\x80\\x00\\x00\\x00\\x00\\x00\\n\\x8e_r\" at 2020-12-31T00:33:04.754918433Z\nregion not found for key \"t\\x80\\x00\\x00\\x00\\x00\\x00\\n\\x8e_r\" at 2020-12-31T00:33:07.299888834Z"]
+[2020/12/31 00:33:07.300 +00:00] [ERROR] [ddl_worker.go:720] ["[ddl] run DDL job error"] [worker="worker 2, tp add index"] [error="[tikv:9001]PD server timeout"]
+[2020/12/31 00:33:07.306 +00:00] [INFO] [ddl_worker.go:499] ["[ddl] run DDL job failed, sleeps a while then retries it."] [worker="worker 2, tp add index"] [waitTime=1s] [error="[tikv:9001]PD server timeout"]
+[2020/12/31 00:33:07.744 +00:00] [INFO] [ddl_worker.go:569] ["[ddl] DDL job need to wait dependent job, sleeps a while, then retries it."] [worker="worker 1, tp general"] [jobID=2875] [dependentJobID=2801] [waitTime=200ms]
+[2020/12/31 00:33:08.306 +00:00] [INFO] [ddl_worker.go:774] ["[ddl] schema version doesn't change"] [worker="worker 2, tp add index"]
+[2020/12/31 00:33:08.308 +00:00] [INFO] [ddl_worker.go:599] ["[ddl] run DDL job"] [worker="worker 2, tp add index"] [job="ID:2801, Type:add index, State:running, SchemaState:write reorganization, SchemaID:1, TableID:2702, RowCount:0, ArgLen:0, start time: 2020-12-30 21:52:02.806 +0000 UTC, Err:[tikv:9001]PD server timeout, ErrCount:229, SnapshotVersion:0"]
+[2020/12/31 00:33:10.783 +00:00] [INFO] [ddl_worker.go:569] ["[ddl] DDL job need to wait dependent job, sleeps a while, then retries it."] [worker="worker 1, tp general"] [jobID=2875] [dependentJobID=2801] [waitTime=200ms]
+[2020/12/31 00:33:13.820 +00:00] [INFO] [ddl_worker.go:569] ["[ddl] DDL job need to wait dependent job, sleeps a while, then retries it."] [worker="worker 1, tp general"] [jobID=2875] [dependentJobID=2801] [waitTime=200ms]
+^C
+```
+
+2. dml reports PD server timeout
+```
+mysql> begin;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> select * from v limit 1;
+ERROR 9001 (HY000): PD server timeout
+```
+
+3. pd region check miss peer
+```
+root@ce61d5126d28:/disk1/deploy# ~/.tiup/components/ctl/v4.0.9/pd-ctl region check miss-peer | jq .count
+512
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+pd
+```
+root@ce61d5126d28:/disk1/deploy# /disk1/deploy/pd-2379/bin/pd-server -V
+Release Version: v4.0.0-rc.2-411-gb6d036bf
+Edition: Community
+Git Commit Hash: b6d036bfda6ff000d8072163284bc198175477cc
+Git Branch: master
+UTC Build Time:  2020-12-28 05:55:51
+```
+
+tidb
+```
+root@ce61d5126d28:/disk1/deploy# /disk1/deploy/tidb-4000/bin/tidb-server -V
+Release Version: v4.0.0-beta.2-1921-g5e67a597c
+Edition: Community
+Git Commit Hash: 5e67a597ccdd8220f40d69bc601f1b664949f885
+Git Branch: master
+UTC Build Time: 2020-12-28 07:22:38
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+
+tikv
+```
+root@ce61d5126d28:/disk1/deploy# /disk1/deploy/tikv-20160/bin/tikv-server -V
+TiKV
+Release Version:   4.1.0-alpha
+Edition:           Community
+Git Commit Hash:   bd5a30bb0356edde71972e0f33316be4ac1973de
+Git Commit Branch: master
+UTC Build Time:    2020-12-28 13:21:51
+Rust Version:      rustc 1.49.0-nightly (b1496c6e6 2020-10-18)
+Enable Features:   jemalloc mem-profiling portable sse protobuf-codec test-engines-rocksdb
+Profile:           dist_release
+```

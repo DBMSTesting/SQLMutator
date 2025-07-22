@@ -1,0 +1,106 @@
+ID: 33592
+Title: Wrong result for query with minimal timestamp 1970-01-01 00:00:00
+Description:
+During evaluation if `v21.12.3.32` is compatible with our current used release `v20.12.8.2` we observed that some queries does not return the expected rows anymore.
+
+
+**Version**
+```
+SELECT version()
+┌─version()──┐
+│ 21.12.3.32 │
+└────────────┘
+```
+
+
+**How to reproduce**
+
+
+```
+CREATE TABLE Test.A
+(
+    `timestamp` DateTime('UTC'),
+    `a` Int
+)
+ENGINE = MergeTree
+PARTITION BY toStartOfWeek(toDateTime(timestamp, 'UTC'))
+ORDER BY timestamp
+```
+
+```
+CREATE TABLE Test.B
+(
+    `timestamp` DateTime('UTC'),
+    `a` Int
+)
+ENGINE = MergeTree
+PARTITION BY toStartOfWeek(toDateTime(timestamp, 'UTC'))
+ORDER BY timestamp
+```
+
+```
+INSERT INTO Test.A VALUES (toDateTime(1559952000,'UTC'), 1)
+```
+
+**Expect** one returned row, but none is returned:
+```
+SELECT toUInt32(timestamp) AS ts
+FROM
+(
+    SELECT DISTINCT timestamp
+    FROM Test.A
+)
+ALL LEFT JOIN
+(
+    SELECT DISTINCT
+        timestamp,
+        1 AS exists
+    FROM Test.B
+) USING (timestamp)
+WHERE (exists = 0) AND (timestamp >= '1970-01-01 00:00:00')
+
+Query id: bbea4bca-fbf6-4b00-816a-54f85e3a63bc
+
+Ok.
+
+0 rows in set. Elapsed: 0.018 sec. 
+```
+
+**Unexpected workaround**:  Use '1970-01-**04** 00:00:00' instead of '1970-01-01 00:00:00' 
+```
+SELECT toUInt32(timestamp) AS ts
+FROM
+(
+    SELECT DISTINCT timestamp
+    FROM Test.A
+)
+ALL LEFT JOIN
+(
+    SELECT DISTINCT
+        timestamp,
+        1 AS exists
+    FROM Test.B
+) USING (timestamp)
+WHERE (exists = 0) AND (timestamp >= '1970-01-04 00:00:00')
+
+Query id: f0338a9c-64db-4b3d-9c70-93314393233d
+
+┌─────────ts─┐
+│ 1559952000 │
+└────────────┘
+
+1 rows in set. Elapsed: 0.034 sec. 
+```
+
+**Expected behavior**
+
+Should work in the same way as in clickhouse release v20 with minimal timestamp 0 ('1970-01-01 00:00:00')
+since we determine the minimum timestamp by the following query:
+```
+SELECT min(timestamp)
+FROM Test.B
+
+┌──────min(timestamp)─┐
+│ 1970-01-01 00:00:00 │
+└─────────────────────┘
+```

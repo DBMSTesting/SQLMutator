@@ -1,0 +1,54 @@
+ID: 6104
+Title: currentDatabase() + create table ON CLUSTER DDL
+Description:
+```
+create database test_database on cluster replicated;
+use test_database;
+
+CREATE TABLE test_local on cluster replicated (number UInt64) Engine=MergeTree ORDER BY number; 
+
+CREATE TABLE test_dist ON CLUSTER replicated
+ENGINE = Distributed(replicated, currentDatabase(), test_local, random()) AS
+SELECT *
+FROM test_local
+
+┌─host────────────────────┬─port─┬─status─┬─error───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬─num_hosts_remaining─┬─num_hosts_active─┐
+│ chi-test-replicated-1-0 │ 9000 │     60 │ Code: 60, e.displayText() = DB::Exception: Table default.test_local doesn't exist. (version 19.11.2.7 (official build)) │                   3 │                0 │
+│ chi-test-replicated-0-0 │ 9000 │     60 │ Code: 60, e.displayText() = DB::Exception: Table default.test_local doesn't exist. (version 19.11.2.7 (official build)) │                   2 │                0 │
+│ chi-test-replicated-1-1 │ 9000 │     60 │ Code: 60, e.displayText() = DB::Exception: Table default.test_local doesn't exist. (version 19.11.2.7 (official build)) │                   1 │                0 │
+│ chi-test-replicated-0-1 │ 9000 │     60 │ Code: 60, e.displayText() = DB::Exception: Table default.test_local doesn't exist. (version 19.11.2.7 (official build)) │                   0 │                0 │
+└─────────────────────────┴──────┴────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────┴──────────────────┘
+
+SELECT *
+FROM system.zookeeper
+WHERE (path = '/clickhouse/test/task_queue/ddl') AND (name = 'query-0000000004')
+
+Row 1:
+──────
+name:           query-0000000004
+value:          version: 1
+query: CREATE TABLE test_database.test_dist ON CLUSTER replicated ENGINE = Distributed(replicated, currentDatabase(), test_local, random()) AS SELECT * FROM test_local
+hosts: ['chi%2Dtest%2Dreplicated%2D0%2D0:9000','chi%2Dtest%2Dreplicated%2D0%2D1:9000','chi%2Dtest%2Dreplicated%2D1%2D0:9000','chi%2Dtest%2Dreplicated%2D1%2D1:9000']
+initiator: chi%2Dtest%2Dreplicated%2D0%2D0%2D0%2Echi%2Dtest%2Dreplicated%2D0%2D0%2Edefault%2Esvc%2Ecluster%2Elocal:9000
+
+czxid:          85
+mzxid:          85
+ctime:          2019-07-22 14:13:46
+mtime:          2019-07-22 14:13:46
+version:        0
+cversion:       2
+aversion:       0
+ephemeralOwner: 0
+dataLength:     464
+numChildren:    2
+pzxid:          86
+path:           /clickhouse/test/task_queue/ddl
+
+1 rows in set. Elapsed: 0.004 sec. 
+
+```
+
+`currentDatabase` should be expanded on initiator server, and query stored in zookeeper should have proper database.
+
+
+The case with circular replication is not (that can be hit by that change) is important, as ON CLUSTER queries anyway don't work in that case.

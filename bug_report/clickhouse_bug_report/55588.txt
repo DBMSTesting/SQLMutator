@@ -1,0 +1,76 @@
+ID: 55588
+Title: CTE in a materialized view condition wrongly parsed
+Description:
+**Describe what's wrong**
+
+When creating a materialized view using a CTE as a condition, it gets parsed as a regular table.
+
+In:
+
+```
+CREATE MATERIALIZED VIEW mv_cte_bug.mv TO mv_cte_bug.ds
+(
+    `timestamp` DateTime,
+    `payload` String
+) AS
+WITH [''] AS problematic_cte
+SELECT
+    timestamp,
+    payload
+FROM mv_cte_bug.landing
+WHERE payload IN problematic_cte
+```
+
+The `WHERE payload IN problematic_cte` gets transformed into `WHERE payload IN (default.problematic_cte)` causing all inserts to fail.
+
+**Does it reproduce on recent release?**
+
+Failing in 23.8 and 22.8
+
+**How to reproduce**
+
+```sql
+DROP DATABASE IF EXISTS mv_cte_bug ON CLUSTER tinybird SYNC;
+CREATE DATABASE mv_cte_bug ON CLUSTER tinybird;
+
+CREATE TABLE mv_cte_bug.landing ON CLUSTER tinybird (
+    `timestamp` DateTime,
+    `payload` String
+)
+Engine=ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/mv_cte_bug.landing', '{replica}')
+ORDER BY timestamp;
+
+CREATE TABLE mv_cte_bug.ds ON CLUSTER tinybird (
+    `timestamp` DateTime,
+    `payload` String
+)
+Engine=ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/mv_cte_bug.ds', '{replica}')
+ORDER BY timestamp;
+
+CREATE MATERIALIZED VIEW mv_cte_bug.mv ON CLUSTER tinybird TO mv_cte_bug.ds AS
+WITH [''] AS problematic_cte
+SELECT timestamp, payload
+FROM mv_cte_bug.landing
+WHERE payload IN problematic_cte
+;
+
+SHOW CREATE TABLE mv_cte_bug.mv;
+```
+
+```
+CREATE MATERIALIZED VIEW mv_cte_bug.mv TO mv_cte_bug.ds
+(
+    `timestamp` DateTime,
+    `payload` String
+) AS
+WITH [''] AS problematic_cte
+SELECT
+    timestamp,
+    payload
+FROM mv_cte_bug.landing
+WHERE payload IN (default.problematic_cte)
+```
+
+**Expected behavior**
+
+The MV gets created correctly.

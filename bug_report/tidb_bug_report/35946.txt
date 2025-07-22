@@ -1,0 +1,164 @@
+ID: 35946
+Title: Tidb as the backend of proxysql. The query result is incorrect 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+- 现象
+
+不同where条件加上括号后的sql 查询结果一样。
+- 产生条件
+
+1.同一个链接；
+2.代码里sql预处理语句
+3.判断条件key是主键
+4.where判断条件是括号括起来的  WHERE  (id = ?)
+
+- 复现代码
+```
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/jmoiron/sqlx"
+	"github.com/pkg/errors"
+)
+
+/*
+CREATE TABLE `tidb_demo` (
+   `id` INT UNSIGNED AUTO_INCREMENT COMMENT '主键id',
+   `num` INT NOT NULL DEFAULT '0' COMMENT '数量',
+   `img` VARCHAR(256) NOT NULL DEFAULT '图片链接',
+   PRIMARY KEY (`id`),
+   UNIQUE INDEX de(`num`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT 'demo表';
+
+INSERT INTO tidb_demo(`id`,`num`,`img`) VALUES(1,1,'http://demo.com/demo1.png'),(2,2,'http://demo.com/demo2.png');
+*/
+
+// TidbDemo  demo表
+type TidbDemo struct {
+	Id  int64  `db:"id" json:"id"`   //  主键id
+	Num int64  `db:"num" json:"num"` //  数量
+	Img string `db:"img" json:"img"` // 图片链接
+}
+
+type Config struct {
+	DbName      string
+	Host        string
+	Port        string
+	User        string
+	Password    string
+	Charset     string
+	MaxIdleCons int
+	MaxOpenCons int
+}
+
+func main() {
+	// 创建数据库链接
+	// TODO: 填充数据库链接信息
+	dbCfg := &Config{}
+	dbCfg.DbName = "test"
+	dbCfg.Host = "" //541
+	//dbCfg.Host = "" // 4014
+	dbCfg.Port = ""
+	dbCfg.User = ""
+	//dbCfg.User = "root"
+	dbCfg.Password = ""
+	//dbCfg.Password = ""
+	dbCfg.Charset = "utf8mb4"
+	db := newSqlInstance(dbCfg)
+
+	// 第一次执行sql
+	const querySql = "SELECT * FROM tidb_demo WHERE  (id = ?)"
+	res1 := &TidbDemo{}
+	if err := db.Get(res1, querySql, 1); err != nil {
+		fmt.Println(errors.WithStack(err))
+		return
+	}
+	fmt.Println("1 time:", unsafeJsonToStr(res1))
+	// 第二次执行sql
+	res2 := &TidbDemo{}
+	if err := db.Get(res2, querySql, 2); err != nil {
+		fmt.Println(errors.WithStack(err))
+		return
+	}
+	fmt.Println("2 time:", unsafeJsonToStr(res2))
+
+	fmt.Println()
+
+	// 非主键字段
+	const querySql2 = "SELECT * FROM tidb_demo WHERE  (num = ?)"
+	res3 := &TidbDemo{}
+	if err := db.Get(res3, querySql2, 1); err != nil {
+		fmt.Println(errors.WithStack(err))
+		return
+	}
+	fmt.Println("非主键字段 1 time", unsafeJsonToStr(res3))
+	// 第二次执行sql
+	res4 := &TidbDemo{}
+	if err := db.Get(res4, querySql2, 2); err != nil {
+		fmt.Println(errors.WithStack(err))
+		return
+	}
+	fmt.Println("非主键字段 2 time", unsafeJsonToStr(res4))
+}
+
+func newSqlInstance(conf *Config) *sqlx.DB {
+	charset := conf.Charset
+	if charset == "" {
+		charset = "utf8,utf8mb4"
+	}
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=%s", conf.User, conf.Password, conf.Host, conf.Port, conf.DbName, conf.Charset)
+	fmt.Println("dsn", dsn)
+	db := sqlx.MustConnect("mysql", dsn)
+	if conf.MaxIdleCons != 0 {
+		db.SetMaxIdleConns(conf.MaxIdleCons)
+	}
+	if conf.MaxOpenCons != 0 {
+		db.SetMaxOpenConns(conf.MaxOpenCons)
+	}
+	return db.Unsafe()
+}
+
+func unsafeJsonToStr(data interface{}) string {
+	raw, _ := json.Marshal(data)
+	return string(raw)
+}
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+- 希望看到这个结果
+![image](https://user-images.githubusercontent.com/69559746/177259736-4c1f5247-d87f-4f5d-a3da-71775d1b2384.png)
+
+
+### 3. What did you see instead (Required)
+- 结果是这样的
+![image](https://user-images.githubusercontent.com/69559746/177259816-dec158ef-8a6b-49e1-9e9e-847c8815198b.png)
+第一组返回 是判断条件为id（主键）值不同加括号返回的结果是相同的
+第二组返回 是判断条件为num（非主键）值不同返回的结果是不同的
+
+
+### 4. What is your TiDB version? (Required)
+tidb v5.4.1 , proxysql v2.4.1
+<!-- Paste the output of SELECT tidb_version() -->
+
+### 5. 排查过程
+看起来是tidb的bug
+![image](https://user-images.githubusercontent.com/69559746/177260567-560afbb6-256f-4aab-a1bb-26bfaa2915b1.png)
+- 1.  proxysql发送req prepare statement
+- 2. tidb返回statement
+- 3. proxysql发送了arg，值为 1
+![image](https://user-images.githubusercontent.com/69559746/177260404-75a00549-4fa9-4950-9b8e-c6db20161371.png)
+- 4. tidb返回结果
+![image](https://user-images.githubusercontent.com/69559746/177260441-1d16782f-1252-47c5-a1bf-e1cf1a0559eb.png)
+- 5. proxysql发送了arg，值为2
+![image](https://user-images.githubusercontent.com/69559746/177260488-d7b8217e-e908-4eab-b45c-98c3ca237adc.png)
+- 6. tidb返回了与arg 1相同的结果
+![image](https://user-images.githubusercontent.com/69559746/177260528-e342d8fc-b670-4ec8-9f33-b50247ca8bf7.png)

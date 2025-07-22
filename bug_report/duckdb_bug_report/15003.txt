@@ -1,0 +1,147 @@
+ID: 15003
+Title: Rework Auto-Complete To Work Based On PEG grammar
+Description:
+This PR reworks the `sql_auto_complete` function to work based off-of a PEG grammar. We include a set of PEG grammar files that can parse ~almost the entirety of DuckDB's SQL dialect (based on [@hannes peg-parser experiments](https://github.com/hannes/peg-parser-experiments/blob/main/sql.gram) but greatly extended). Here's a short snippet:
+
+```gram
+SelectStatement <- SelectOrParens (SetopClause SelectStatement)* ResultModifiers
+
+SetopClause <- ('UNION'i / 'EXCEPT'i / 'INTERSECT'i) DistinctOrAll? ByName?
+ByName <- 'BY'i 'NAME'i
+SelectOrParens <- BaseSelect / Parens(SelectStatement)
+
+BaseSelect <- WithClause? (SimpleSelect / ValuesClause / DescribeStatement / TableStatement / PivotStatement / UnpivotStatement) ResultModifiers
+ResultModifiers <- OrderByClause? LimitClause? OffsetClause?
+TableStatement <- 'TABLE' BaseTableName
+
+SimpleSelect <- SelectFrom WhereClause? GroupByClause? HavingClause? WindowClause? QualifyClause? SampleClause?
+
+SelectFrom <- (SelectClause FromClause?) / (FromClause SelectClause?)
+WithStatement <- Identifier InsertColumnList? 'AS'i Materialized? SubqueryReference
+Materialized <- 'NOT'i? 'MATERIALIZED'i
+WithClause <- 'WITH'i Recursive? List(WithStatement)
+Recursive <- 'RECURSIVE'i
+SelectClause <- 'SELECT'i DistinctClause? TargetList
+TargetList <- List(AliasedExpression)
+ColumnAliases <- Parens(List(Identifier))
+```
+
+The grammar files are split up by statement type - but are inlined into a C++ header file (`extension/autocomplete/include/inlined_grammar.hpp`) through the following script:
+
+```
+extension/autocomplete/inline_grammar.py
+
+```
+
+#### Auto-Complete
+
+The auto-complete now works as follows:
+
+##### PEG Grammar Tokenization
+
+First the PEG parser is parsed into a set of tokens by the `PEGParser::ParseRules` function and stored on a per-rule basis, e.g.:
+
+```
+Materialized <- 'NOT'? 'MATERIALIZED'
+
+->
+
+rules["Materialized"] = { LITERAL("NOT") OPERATOR("?") LITERAL("MATERIALIZED") }
+```
+
+
+##### Token -> Matcher Conversion
+The tokens are then converted into `Matcher` objects through the `MatcherFactory::CreateMatcher` function. This parses the tokens one-by-one and constructs the specified matchers.
+
+##### Tokenize SQL
+
+The `BaseTokenizer` tokenizes the SQL string into `MatcherToken`. These tokens are only strings, there are no special tokens or anything. The tokenization follows ~roughly the same rules as the current scanner but is a reimplementation so minor differences will likely be present.
+
+##### Parse SQL and provide suggestions
+
+The matchers are then used to parse the input string **except** for the last word (i.e. the word containing the cursor). Any matchers that can accept more input at the time of parsing then provide suggestions.
+
+For example, if we have the following query:
+
+```sql
+SELECT * FROM linei
+```  
+
+The matcher parsers the subset:
+
+```sql
+SELECT * FROM
+```
+
+The `BaseTableRef` parser then provides various suggestions for follow-ups:
+
+* Catalog Name
+* Schema Name
+* Table Name
+
+##### Filter Suggestions
+
+Finally, the suggestions are filtered using the last word - i.e. `linei` in the above example. This filter will lead us to suggest the table name `lineitem` (given that we are operating on a TPC-H database).
+
+
+### Matcher Infrastructure
+
+The matchers are the (recursive) unit that define the parser. At its core, there are two methods that are implemented by various matchers:
+
+```cpp
+enum class MatchResultType { SUCCESS, FAIL };
+enum class SuggestionType { OPTIONAL, MANDATORY };
+
+MatchResultType Match(MatchState &state) const = 0;
+SuggestionType AddSuggestion(MatchState &state) const = 0;
+```
+
+* **Match** is used to match against the current token - if `SUCCESS` is returned the tokens are consumed, if `FAIL` is returned the tokens are not consumed
+* **AddSuggestion** is called when all matches are exhausted, and adds suggestions to the state
+
+The following matchers are available, that are automatically constructed in order to parse the PEG grammar:
+
+#### Leaf Matchers
+* **KeywordMatcher**: Parses a single literal keyword (e.g. `SELECT`)
+* **IdentifierMatcher**: Parses a single identifier (e.g. `lineitem` or `"Column"`)
+* **StringLiteralMatcher**: Parses a string literal (e.g. `'text'`)
+* **NumberLiteralMatcher**: Parses a numeric literal (e.g. 123)
+* **OperatorMatcher**: Parses an operator (e.g. `>=`)
+
+#### Recursive Matchers
+
+The following recursive matchers are available:
+
+* **ListMatcher**: Contains `n` child matchers, succeeds in parsing only if all child matchers (in-order) succeed
+* **OptionalMatcher**: Contains a single child matcher - always succeeds, optionally consuming the child token
+* **ChoiceMatcher**: Contains `n` child matchers, succeeds if one child matcher succeeds
+* **RepeatMatcher**: Contains a single child matcher, repeatedly parses that child matcher. Succeeds if the child matcher parses at least once.
+
+These matchers correspond to the PEG rules, i.e. `ChoiceMatcher` is the OR rule (`/`). `RepeatMatcher` corresponds to the `*` rule. `OptionalMatcher` corresponds to the `?` rule. `ListMatcher` corresponds to the brackets (and every top-level rule is implicitly a list matcher).
+
+For example:
+
+```
+Materialized <- 'NOT'? 'MATERIALIZED'
+
+ListMatcher(OptionalMatcher(Keyword("NOT")), Keyword("Materialized"))
+```
+
+Note that matchers can be recursive, i.e. a matcher can refer **back** to itself. This is rather common (e.g. `Expression` refers back to `Expression` eventually). Matchers can only not be left-recursive, but this is a restriction that is also present in the PEG grammar itself.
+
+
+### Testing & Supported Grammar
+
+This PR also introduces a new function: `check_peg_parser`. This function checks whether or not a given SQL statement is **entirely** consumed/parsed by the PEG parser using the matcher infrastructure. This has been tested against  all SQL statements from our test infrastructure using the `scripts/test_peg_parser.py` script, example usage:
+
+```
+python3 scripts/test_peg_parser.py --shell build/reldebug/duckdb --all-tests
+```
+
+There are roughly ~100 tests (out of 3.2K) that contain SQL that is not successfully parsed (yet) - this is mostly due to differences in handling of keywords (to be looked at in the future). 
+
+#### Limitations
+
+Almost all SQL features are supported, but there are a few known limitations still:
+
+* Dollar-quoted strings are not supported in the tokenizer

@@ -1,0 +1,121 @@
+ID: 65989
+Title: allow_experimental_analyzer=1 breaks JOINs for tables with engine MySQL
+Description:
+ClickHouse version 24.3.3.102.
+
+Looks like JOINs with engine MySQL are working in totally unexpected way with new analyzer or something odd is happening with WHERE conditions (it's sent to all tables?). Or it's messed up
+I have two tables in MySQL used in ClickHouse:
+
+```
+CREATE TABLE mysql._Users
+(
+    `id` Int32,
+    `Name` String,
+    `Created` Nullable(DateTime)
+)
+ENGINE = MySQL('host', 'database', '_Users', 'user', '[HIDDEN]') 
+
+CREATE TABLE mysql._Tickets
+(
+    `id` Int32,
+    `Subject` Nullable(String),
+    `Created` Nullable(DateTime),
+    `Creator` Int32
+)
+ENGINE = MySQL('host', 'database', '_Tickets', 'user', '[HIDDEN]') 
+```
+
+With following example data:
+
+```
+SELECT id, Name, Created
+FROM mysql._Users
+WHERE id = 469722
+FORMAT Pretty
+
+┌─────id─┬─Name─────────────┬─────────────Created─┐
+│ 469722 │ user@example.com │ 2019-08-30 07:55:01 │
+└────────┴──────────────────┴─────────────────────┘
+
+SELECT id, Creator, Subject, Created
+FROM mysql._Tickets
+WHERE id = 281607
+
+┌─────id─┬─Creator─┬─Subject──────────────────────┬─────────────Created─┐
+│ 281607 │  469722 │ Feedback                     │ 2024-06-25 12:09:41 │
+└────────┴─────────┴──────────────────────────────┴─────────────────────┘
+
+```
+
+When JOINing these two tables Name is missing:
+
+```
+SELECT _Tickets.id, Subject, _Tickets.Created, Name
+FROM mysql._Tickets
+LEFT JOIN mysql._Users ON _Tickets.Creator = _Users.id
+WHERE _Tickets.Created = '2024-06-25 12:09:41'
+
+┌─────id─┬─Subject──────────────────────┬─────────────Created─┬─Name─┐
+│ 281607 │ Feedback                     │ 2024-06-25 12:09:41 │      │
+└────────┴──────────────────────────────┴─────────────────────┴──────┘
+```
+But with setting **allow_experimental_analyzer = 0**:
+```
+SELECT _Tickets.id, Subject, _Tickets.Created, Name
+FROM mysql._Tickets
+LEFT JOIN mysql._Users ON _Tickets.Creator = _Users.id
+WHERE _Tickets.Created = '2024-06-25 12:09:41'
+SETTINGS allow_experimental_analyzer = 0
+
+┌─────id─┬─Subject──────────────────────┬─────────────Created─┬─Name──────────────────┐
+│ 281607 │ Feedback                     │ 2024-06-25 12:09:41 │ user@example.com      │
+└────────┴──────────────────────────────┴─────────────────────┴───────────────────────┘
+```
+
+Looks like WHERE condition is sent to both tables with new analyzer, despite that we explicitly used full table names with columns. This is werid:
+```
+SELECT _Tickets.id, Subject, _Tickets.Created, Name
+FROM mysql._Tickets
+LEFT JOIN mysql._Users ON _Tickets.Creator = _Users.id
+WHERE _Tickets.Created = '2024-06-25 12:09:41' OR _Tickets.Created = '2019-08-30 07:55:01'
+
+┌─────id─┬─Subject──┬─────────────Created─┬─Name─────────────┐
+│ 281607 │ Feedback │ 2024-06-25 12:09:41 │ user@example.com │
+└────────┴──────────┴─────────────────────┴──────────────────┘
+```
+
+EXPLAINs are different:
+```
+EXPLAIN
+SELECT  _Tickets.id, Subject,  _Tickets.Created, Name
+FROM mysql._Tickets
+LEFT JOIN mysql._Users ON _Tickets.Creator = _Users.id
+WHERE _Tickets.Created = '2024-06-25 12:09:41'
+SETTINGS allow_experimental_analyzer = 1
+
+┌─explain──────────────────────────────────────────────────────────────────────┐
+│ Expression ((Project names + (Projection + )))                               │
+│   Join (JOIN FillRightFirst)                                                 │
+│     Filter (( + (JOIN actions + Change column names to column identifiers))) │
+│       ReadFromStorage (MySQL)                                                │
+│     Expression ((JOIN actions + Change column names to column identifiers))  │
+│       ReadFromStorage (MySQL)                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+```
+EXPLAIN
+SELECT _Tickets.id, Subject,  _Tickets.Created, Name
+FROM mysql._Tickets
+LEFT JOIN mysql._Users ON _Tickets.Creator = _Users.id
+WHERE _Tickets.Created = '2024-06-25 12:09:41'
+SETTINGS allow_experimental_analyzer = 0
+
+┌─explain──────────────────────────────────────────────────────────────────────────────────────┐
+│ Expression ((Projection + (Before ORDER BY + )))                                             │
+│   Join (JOIN FillRightFirst)                                                                 │
+│     Filter (( + Before JOIN))                                                                │
+│       ReadFromStorage (MySQL)                                                                │
+│     Expression ((Joined actions + (Rename joined columns + (Projection + Before ORDER BY)))) │
+│       ReadFromStorage (MySQL)                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+```

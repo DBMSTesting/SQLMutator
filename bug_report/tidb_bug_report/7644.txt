@@ -1,0 +1,114 @@
+ID: 7644
+Title: Weird Same Value Update Between Two or More Transactions
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+```sql
+CREATE TABLE `t` (
+  `a` int(11) NOT NULL AUTO_INCREMENT,
+  `b` int(11) DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8;
+insert into t values(1, 0);
+```
+
+```scala
+  #scala
+  val c1 = buildConnectionClient
+  val c2 = buildConnectionClient
+  val c3 = buildConnectionClient
+  println("Initial Value")
+  fetchAndPrint("select b from t where a = 1", c3)
+  println("-" * 10)
+  (0 to 10).foreach(i => {
+    c1.setAutoCommit(false)
+    update("update t set b=2 where a=1", c2)
+    fetchAndPrint("select b from t where a = 1", c1)
+    update("update t set b=0 where a=1", c1)
+    c1.commit()
+  })
+  c1.close()
+  c2.close()
+  c3.close()
+```
+ 
+
+2. What did you expect to see?
+
+Maybe like :)
+
+```
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+```
+
+or 
+
+```
+0
+0
+0
+0
+0
+0
+...
+```
+
+3. What did you see instead?
+
+```
+Initial Value
+0
+----------
+2
+0
+2
+0
+2
+0
+2
+0
+2
+0
+2
+```
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+**master branch**
+
+---
+
+Hello, I have seen this interesting issue :) [Same transaction returns different results when i ran multiply times](https://stackoverflow.com/questions/52097939/same-transaction-returns-different-results-when-i-ran-multiply-times) and try to investigate it, finally find this is caused by **TiDB** will ignore the **same value** update by:
+
+```go
+		cmp, err := newData[i].CompareDatum(sc, &oldData[i])
+		if err != nil {
+			return false, handleChanged, newHandle, errors.Trace(err)
+		}
+		if cmp != 0 {
+                 ...
+```
+
+https://github.com/pingcap/tidb/blob/master/executor/write.go#L74
+
+
+but this will cause the **strange behavior** like **PO** asked, for the **same value** will not be updated, but for **different value** will be updated and committed in the multi **Transactions**, 
+Since the other **transaction** maybe modified the **value**, _but it's not seen by the same value transaction_. I have created a flow in the answer, maybe it's clearer to explain it.
+
+I am trying to think about whether can just removed **cmp** check rule, this can be ensured  **same value** and **different value** always can be updated and committed.
+
+Thanks

@@ -1,0 +1,197 @@
+ID: 9439
+Title: insert into distributed table with materialized column
+Description:
+When inserting into the Distributed table view, fails with 
+SQL Error [44]: ClickHouse exception, code: 44, host: 172.28.102.44, port: 8123; Code: 44, e.displayText() = DB::Exception: Cannot insert column IDhash, because it is MATERIALIZED column. (version 20.1.4.14 (official build))
+
+Using Macros with 3 node cluster, executed on each server.
+
+create database netpm_ran;
+--  Server1
+CREATE TABLE IF NOT EXISTS netpm_ran.RawCounters_shard
+(
+    `vendor` LowCardinality(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(5)),
+    `node` String CODEC(LZ4HC(9)),
+    `nodeType` Nullable(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(9)),
+    `dt` DateTime CODEC(DoubleDelta, LZ4),
+    `granPeriod` Nullable(Int32) ,
+    `ID` String CODEC(LZ4HC(9)),
+    `IDhash` UInt64 MATERIALIZED sipHash64(ID),
+    `counterGroup` String CODEC(LZ4HC(9)),
+    `counterID` String CODEC(LZ4HC(9)),
+    `counterValue` Nullable(Float64),
+    `assumed` Int8 DEFAULT 0,
+    `lastModified` Int64 DEFAULT now()
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/{cluster}/tables/netpm_ran.rawcounters/{shard}', '{replica}',lastModified)
+PARTITION BY toStartOfHour(dt)
+PRIMARY KEY (counterID,  node, ID, dt, counterGroup, vendor)
+ORDER BY (counterID, node, ID, dt, counterGroup, vendor)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS netpm_ran.RawCounters 
+(
+    `vendor` LowCardinality(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(5)),
+    `node` String CODEC(LZ4HC(9)),
+    `nodeType` Nullable(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(9)),
+    `dt` DateTime CODEC(DoubleDelta, LZ4),
+    `granPeriod` Nullable(Int32) ,
+    `ID` String CODEC(LZ4HC(9)),
+    `IDhash` UInt64,
+    `counterGroup` String CODEC(LZ4HC(9)),
+    `counterID` String CODEC(LZ4HC(9)),
+    `counterValue` Nullable(Float64),
+    `assumed` Int8 DEFAULT 0,
+    `lastModified` Int64 DEFAULT now()
+)
+ENGINE = Distributed(
+   'netpm_cluster',
+   'netpm_ran',
+   RawCounters_shard,
+    intHash32(IDhash));
+   
+
+ 
+ CREATE TABLE IF NOT EXISTS netpm_ran.Counters_shard
+(
+    `vendor` LowCardinality(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(5)),
+    `node` String CODEC(LZ4HC(9)),
+    `nodeType` Nullable(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(9)),
+    `dt` DateTime CODEC(DoubleDelta, LZ4),
+    `granPeriod` Nullable(Int32) ,
+    `ID` String CODEC(LZ4HC(9)),
+    `IDhash` UInt64 MATERIALIZED sipHash64(ID),
+    `counterGroup` String CODEC(LZ4HC(9)),
+    `counterID` String CODEC(LZ4HC(9)),
+    `counterValue` Nullable(Float64),
+    `assumed` Int8 DEFAULT 0,
+    `lastModified` Int64 DEFAULT now()
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/{cluster}/tables/netpm_ran.counters/{shard}', '{replica}',lastModified)
+PARTITION BY toStartOfHour(dt)
+PRIMARY KEY (counterID,  node, ID, dt, counterGroup, vendor)
+ORDER BY (counterID, node, ID, dt, counterGroup, vendor)
+SETTINGS index_granularity = 8192;
+
+ 
+  CREATE TABLE IF NOT EXISTS netpm_ran.Counters
+(
+    `vendor` LowCardinality(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(5)),
+    `node` String CODEC(LZ4HC(9)),
+    `nodeType` Nullable(String) DEFAULT 'UNKNOWN' CODEC(LZ4HC(9)),
+    `dt` DateTime CODEC(DoubleDelta, LZ4),
+    `granPeriod` Nullable(Int32) ,
+    `ID` String CODEC(LZ4HC(9)),
+    `IDhash` UInt64,
+    `counterGroup` String CODEC(LZ4HC(9)),
+    `counterID` String CODEC(LZ4HC(9)),
+    `counterValue` Nullable(Float64),
+    `assumed` Int8 DEFAULT 0,
+    `lastModified` Int64 DEFAULT now()
+)
+ENGINE = Distributed(
+   'netpm_cluster',
+   'netpm_ran',
+   Counters_shard,
+    intHash32(IDhash));
+  
+  drop table netpm_ran.mv_raw_to_counters;
+
+ 
+
+ ATTACH MATERIALIZED VIEW netpm_ran.mv_raw_to_counters TO netpm_ran.Counters
+(
+	`vendor` String ,
+    `node` String,
+    `nodeType` Nullable(String),
+    `dt` DateTime,
+    `granPeriod` Nullable(Int16),
+    `ID` String ,
+    `IDhash` UInt64,
+    `counterGroup` String,
+    `counterID` String,
+    `counterValue` Nullable(Float64),
+    `assumed` Int8 DEFAULT 0,
+    `lastModified` Int64  DEFAULT now()
+) AS
+SELECT vendor,node,nodeType,dt,granPeriod,ID,IDhash ,counterGroup,counterID,counterValue,assumed,lastModified  FROM netpm_ran.RawCounters_shard
+WHERE lower(dictGet('counterdef', 'keep', (vendor, counterID))) IN ('true', '1');
+
+
+Inserts directly into the local shard table functions correctly. 
+The functional concept that the data inserted data into the RawCounters table is copied to the Counters table (both sharded) if the dictionary function returns a true value. 
+The sipHash64 Value is the Materialized view used in a dictionary lookup in a later process.
+
+If the system is not clustered, the process works correctly
+
+
+insert into netpm_ran.RawCounters (vendor,node,nodeType, dt,granPeriod ,ID,IDhash,counterGroup, counterID ,counterValue ,lastModified)
+values ('v1','node1','test',now(),900,'ID1','cg1','cID1',100,0,0)
+
+
+Trace Dump
+
+org.jkiss.dbeaver.model.sql.DBSQLException: SQL Error [44]: ClickHouse exception, code: 44, host: 172.28.102.44, port: 8123; Code: 44, e.displayText() = DB::Exception: Cannot insert column IDhash, because it is MATERIALIZED column. (version 20.1.4.14 (official build))
+
+
+	at org.jkiss.dbeaver.model.impl.jdbc.exec.JDBCStatementImpl.executeStatement(JDBCStatementImpl.java:134)
+
+	at org.jkiss.dbeaver.ui.editors.sql.execute.SQLQueryJob.executeStatement(SQLQueryJob.java:487)
+
+	at org.jkiss.dbeaver.ui.editors.sql.execute.SQLQueryJob.lambda$0(SQLQueryJob.java:424)
+
+	at org.jkiss.dbeaver.model.exec.DBExecUtils.tryExecuteRecover(DBExecUtils.java:164)
+
+	at org.jkiss.dbeaver.ui.editors.sql.execute.SQLQueryJob.executeSingleQuery(SQLQueryJob.java:416)
+
+	at org.jkiss.dbeaver.ui.editors.sql.execute.SQLQueryJob.extractData(SQLQueryJob.java:774)
+
+	at org.jkiss.dbeaver.ui.editors.sql.SQLEditor$QueryResultsContainer.readData(SQLEditor.java:2914)
+
+	at org.jkiss.dbeaver.ui.controls.resultset.ResultSetJobDataRead.lambda$0(ResultSetJobDataRead.java:110)
+
+	at org.jkiss.dbeaver.model.exec.DBExecUtils.tryExecuteRecover(DBExecUtils.java:164)
+
+	at org.jkiss.dbeaver.ui.controls.resultset.ResultSetJobDataRead.run(ResultSetJobDataRead.java:108)
+
+	at org.jkiss.dbeaver.ui.controls.resultset.ResultSetViewer$17.run(ResultSetViewer.java:3421)
+
+	at org.jkiss.dbeaver.model.runtime.AbstractJob.run(AbstractJob.java:103)
+
+	at org.eclipse.core.internal.jobs.Worker.run(Worker.java:63)
+
+Caused by: ru.yandex.clickhouse.except.ClickHouseException: ClickHouse exception, code: 44, host: 172.28.102.44, port: 8123; Code: 44, e.displayText() = DB::Exception: Cannot insert column IDhash, because it is MATERIALIZED column. (version 20.1.4.14 (official build))
+
+
+	at ru.yandex.clickhouse.except.ClickHouseExceptionSpecifier.specify(ClickHouseExceptionSpecifier.java:58)
+
+	at ru.yandex.clickhouse.except.ClickHouseExceptionSpecifier.specify(ClickHouseExceptionSpecifier.java:28)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.checkForErrorAndThrow(ClickHouseStatementImpl.java:875)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.getInputStream(ClickHouseStatementImpl.java:616)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:117)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:100)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:95)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.executeQuery(ClickHouseStatementImpl.java:90)
+
+	at ru.yandex.clickhouse.ClickHouseStatementImpl.execute(ClickHouseStatementImpl.java:226)
+
+	at org.jkiss.dbeaver.model.impl.jdbc.exec.JDBCStatementImpl.execute(JDBCStatementImpl.java:338)
+
+	at org.jkiss.dbeaver.model.impl.jdbc.exec.JDBCStatementImpl.executeStatement(JDBCStatementImpl.java:131)
+
+	... 12 more
+
+Caused by: java.lang.Throwable: Code: 44, e.displayText() = DB::Exception: Cannot insert column IDhash, because it is MATERIALIZED column. (version 20.1.4.14 (official build))
+
+
+	at ru.yandex.clickhouse.except.ClickHouseExceptionSpecifier.specify(ClickHouseExceptionSpecifier.java:53)
+
+	... 22 more
+
+

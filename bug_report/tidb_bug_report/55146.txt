@@ -1,0 +1,110 @@
+ID: 55146
+Title: Scalar subquery do not take advantage of the index's order
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+drop table if exists t1;
+drop table if exists t2;
+create table t1(id bigint primary key,col1 varchar(10),col2 varchar(10),col3 varchar(10));
+create table t2(id bigint primary key,col1 varchar(10),col2 varchar(10),col3 varchar(10));
+
+set session cte_max_recursion_depth=100000;
+
+insert into t1
+with RECURSIVE cte as (
+select 1 as level,FLOOR(1 + (RAND() * 1000000)) id,substr(md5(rand()),1,10) col1,substr(md5(rand()),1,10) col2,substr(md5(rand()),1,10) col3
+union all
+select level+1 level,FLOOR(1 + (RAND() * 1000000)) id,substr(md5(rand()),1,10) col1,substr(md5(rand()),1,10) col2,substr(md5(rand()),1,10) col3 
+from cte 
+where level<10000
+)
+select level,col1,col2,col3 from cte;
+
+insert into t2
+with RECURSIVE cte as (
+select 1 as level,FLOOR(1 + (RAND() * 1000000)) id,substr(md5(rand()),1,10) col1,substr(md5(rand()),1,10) col2,substr(md5(rand()),1,10) col3
+union all
+select level+1 level,FLOOR(1 + (RAND() * 1000000)) id,substr(md5(rand()),1,10) col1,substr(md5(rand()),1,10) col2,substr(md5(rand()),1,10) col3 
+from cte 
+where level<10000
+)
+select level,col1,col2,col3 from cte;
+
+create index t1_col1 on t1(col1,col2);
+create index t2_col1 on t2(col1,col2);
+
+analyze table t1,t2;
+
+explain analyze
+select t1.*,(select col3 from t2 where t1.col1=t2.col1 order by col2 limit 1) from t1 limit 10;
+
+explain analyze
+select t1.*,(select /*+ ORDER_INDEX(t2,t2_col1)*/ col3 from t2 where t1.col1=t2.col1 order by col2 limit 1) from t1 limit 10;
+```
+
+### 2. What did you expect to see? (Required)
+`IndexRangeScan` operator with `keep order:false` on index t2_col1. Example:
+```
+MySQL [test]> explain analyze select /*+ ORDER_INDEX(t2,t2_col1)*/ col3 from t2 where 'AAA'=t2.col1 order by col2 limit 1;
++------------------------------------+---------+---------+-----------+-------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------+-----------+------+
+| id                                 | estRows | actRows | task      | access object                       | execution info                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | operator info                            | memory    | disk |
++------------------------------------+---------+---------+-----------+-------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------+-----------+------+
+| Projection_8                       | 1.00    | 0       | root      |                                     | time:1.86ms, loops:1, RU:0.524451, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                                                                                                             | test.t2.col3                             | 1.86 KB   | N/A  |
+| └─Projection_18                    | 1.00    | 0       | root      |                                     | time:1.86ms, loops:1, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                                                                                                                          | test.t2.col1, test.t2.col2, test.t2.col3 | 2.23 KB   | N/A  |
+|   └─IndexLookUp_17                 | 1.00    | 0       | root      |                                     | time:1.86ms, loops:1                                                                                                                                                                                                                                                                                                                                                                                                                                                           | limit embedded(offset:0, count:1)        | 246 Bytes | N/A  |
+|     ├─Limit_16(Build)              | 1.00    | 0       | cop[tikv] |                                     | time:1.72ms, loops:1, cop_task: {num: 1, max: 1.65ms, proc_keys: 0, tot_proc: 148.4µs, tot_wait: 58.3µs, copr_cache_hit_ratio: 0.00, build_task_duration: 27.8µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:1, total_time:1.62ms}}, tikv_task:{time:0s, loops:1}, scan_detail: {total_keys: 1, get_snapshot_time: 28µs, rocksdb: {block: {cache_hit_count: 2}}}, time_detail: {total_process_time: 148.4µs, total_wait_time: 58.3µs, tikv_wall_time: 403.1µs}        | offset:0, count:1                        | N/A       | N/A  |
+|     │ └─IndexRangeScan_14          | 1.00    | 0       | cop[tikv] | table:t2, index:t2_col1(col1, col2) | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                                                                                                                                                                                                                                                                   | range:["AAA","AAA"], keep order:true     | N/A       | N/A  |
+|     └─TableRowIDScan_15(Probe)     | 1.00    | 0       | cop[tikv] | table:t2                            |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | keep order:false                         | N/A       | N/A  |
++------------------------------------+---------+---------+-----------+-------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------+-----------+------+
+6 rows in set (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+MySQL [test]> 
+MySQL [test]> explain analyze
+    -> select t1.*,(select col3 from t2 where t1.col1=t2.col1 order by col2 limit 1) from t1 limit 10;
++--------------------------------------+---------+---------+-----------+-------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------+-----------+------+
+| id                                   | estRows | actRows | task      | access object                       | execution info                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | operator info                                                        | memory    | disk |
++--------------------------------------+---------+---------+-----------+-------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------+-----------+------+
+| Limit_21                             | 10.00   | 10      | root      |                                     | time:11.8ms, loops:2, RU:5.906909                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | offset:0, count:10                                                   | N/A       | N/A  |
+| └─Apply_23                           | 10.00   | 10      | root      |                                     | time:11.8ms, loops:1, Concurrency:OFF, cache:OFF                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | CARTESIAN left outer join                                            | 0 Bytes   | N/A  |
+|   ├─Limit_24(Build)                  | 10.00   | 10      | root      |                                     | time:2.31ms, loops:2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | offset:0, count:10                                                   | N/A       | N/A  |
+|   │ └─TableReader_28                 | 10.00   | 10      | root      |                                     | time:2.3ms, loops:1, cop_task: {num: 1, max: 2.26ms, proc_keys: 10, tot_proc: 1.24ms, tot_wait: 106.2µs, copr_cache_hit_ratio: 0.00, build_task_duration: 4.38µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:1, total_time:2.25ms}}                                                                                                                                                                                                                                                                                                                                                                                                                | data:Limit_27                                                        | 961 Bytes | N/A  |
+|   │   └─Limit_27                     | 10.00   | 10      | cop[tikv] |                                     | tikv_task:{time:1ms, loops:1}, scan_detail: {total_process_keys: 10, total_process_keys_size: 720, total_keys: 21, get_snapshot_time: 53µs, rocksdb: {delete_skipped_count: 10000, key_skipped_count: 20, block: {cache_hit_count: 2, read_count: 13, read_byte: 207.5 KB, read_time: 243.1µs}}}, time_detail: {total_process_time: 1.24ms, total_suspend_time: 24.2µs, total_wait_time: 106.2µs, total_kv_read_wall_time: 1ms, tikv_wall_time: 1.9ms}                                                                                                                                                                                                      | offset:0, count:10                                                   | N/A       | N/A  |
+|   │     └─TableFullScan_26           | 10.00   | 10      | cop[tikv] | table:t1                            | tikv_task:{time:1ms, loops:1}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | keep order:false                                                     | N/A       | N/A  |
+|   └─TopN_30(Probe)                   | 10.00   | 0       | root      |                                     | time:9.11ms, loops:10                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | test.t2.col2, offset:0, count:1                                      | 0 Bytes   | N/A  |
+|     └─IndexLookUp_41                 | 10.00   | 0       | root      |                                     | time:9.05ms, loops:20                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |                                                                      | 264 Bytes | N/A  |
+|       ├─TopN_40(Build)               | 10.00   | 0       | cop[tikv] |                                     | time:8.54ms, loops:10, cop_task: {num: 10, max: 2.5ms, min: 309.3µs, avg: 811.4µs, p95: 2.5ms, tot_proc: 771µs, tot_wait: 800.3µs, copr_cache_hit_ratio: 0.00, build_task_duration: 98.5µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:10, total_time:8.02ms}}, tikv_task:{proc max:1ms, min:0s, avg: 200µs, p80:1ms, p95:1ms, iters:10, tasks:10}, scan_detail: {total_keys: 10, get_snapshot_time: 105.2µs, rocksdb: {block: {cache_hit_count: 22, read_count: 8, read_byte: 127.6 KB, read_time: 164.4µs}}}, time_detail: {total_process_time: 771µs, total_wait_time: 800.3µs, total_kv_read_wall_time: 2ms, tikv_wall_time: 3.67ms}           | test.t2.col2, offset:0, count:1                                      | N/A       | N/A  |
+|       │ └─IndexRangeScan_38          | 10.00   | 0       | cop[tikv] | table:t2, index:t2_col1(col1, col2) | tikv_task:{proc max:1ms, min:0s, avg: 200µs, p80:1ms, p95:1ms, iters:10, tasks:10}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | range: decided by [eq(test.t1.col1, test.t2.col1)], keep order:false | N/A       | N/A  |
+|       └─TableRowIDScan_39(Probe)     | 10.00   | 0       | cop[tikv] | table:t2                            |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | keep order:false                                                     | N/A       | N/A  |
++--------------------------------------+---------+---------+-----------+-------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------+-----------+------+
+11 rows in set (0.05 sec)
+
+MySQL [test]> 
+MySQL [test]> explain analyze
+    -> select t1.*,(select /*+ ORDER_INDEX(t2,t2_col1)*/ col3 from t2 where t1.col1=t2.col1 order by col2 limit 1) from t1 limit 10;
+ERROR 1815 (HY000): Internal : Can't find a proper physical plan for this query
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+MySQL [test]> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v8.1.0
+Edition: Community
+Git Commit Hash: 945d07c5d5c7a1ae212f6013adfb187f2de24b23
+Git Branch: HEAD
+UTC Build Time: 2024-05-21 03:51:57
+GoVersion: go1.21.10
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+1 row in set (0.00 sec)
+```

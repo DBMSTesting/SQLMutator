@@ -1,0 +1,76 @@
+ID: 32416
+Title: v5.4.0 list partition can't work after restarting tidb
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+New v5.4.0 cluster with new collation, and run the following sql:
+```
+set @@session.tidb_enable_list_partition = ON;
+set @@tidb_partition_prune_mode = 'dynamic';
+drop table if exists github_events;
+CREATE TABLE `github_events` (
+`id` bigint(20) DEFAULT NULL,
+`type` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+PARTITION BY LIST COLUMNS(`type`)
+(PARTITION `push_event` VALUES IN ("PushEvent"),
+PARTITION `create_event` VALUES IN ("CreateEvent"),
+PARTITION `pull_request_event` VALUES IN ("PullRequestEvent"),
+PARTITION `watch_event` VALUES IN ("WatchEvent")
+);
+```
+```
+tidb> desc select id,type from github_events  where  type = 'WatchEvent';
++-------------------------+----------+-----------+-----------------------+-------------------------------------------+
+| id                      | estRows  | task      | access object         | operator info                             |
++-------------------------+----------+-----------+-----------------------+-------------------------------------------+
+| TableReader_7           | 10.00    | root      | partition:watch_event | data:Selection_6                          |
+| └─Selection_6           | 10.00    | cop[tikv] |                       | eq(test.github_events.type, "WatchEvent") |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:github_events   | keep order:false, stats:pseudo            |
++-------------------------+----------+-----------+-----------------------+-------------------------------------------+
+3 rows in set (0.00 sec)
+```
+
+Then **restart** tidb
+```
+tidb> desc select id,type from github_events  where  type = 'WatchEvent';
++-------------+---------+------+---------------+---------------+
+| id          | estRows | task | access object | operator info |
++-------------+---------+------+---------------+---------------+
+| TableDual_6 | 0.00    | root |               | rows:0        |
++-------------+---------+------+---------------+---------------+
+1 row in set (0.00 sec)
+
+set @@session.tidb_enable_list_partition = ON;
+set @@tidb_partition_prune_mode = 'dynamic';
+
+tidb>  desc select id,type from github_events  where  type = 'WatchEvent';
++-------------------------+----------+-----------+---------------------+-------------------------------------------+
+| id                      | estRows  | task      | access object       | operator info                             |
++-------------------------+----------+-----------+---------------------+-------------------------------------------+
+| TableReader_7           | 10.00    | root      | partition:dual      | data:Selection_6                          |
+| └─Selection_6           | 10.00    | cop[tikv] |                     | eq(test.github_events.type, "WatchEvent") |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:github_events | keep order:false, stats:pseudo            |
++-------------------------+----------+-----------+---------------------+-------------------------------------------+
+3 rows in set (0.00 sec)
+```
+
+And then upgrade to master(3738dec53efa46bd77001f13f7d0db6101dc3deb):
+it works..  But I don't think it is a fix.  There may be some potential problems.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+All veresion can works. Or some explicit bug fix.
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+v5.4, master
+<!-- Paste the output of SELECT tidb_version() -->
+

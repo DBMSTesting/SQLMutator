@@ -1,0 +1,183 @@
+ID: 43820
+Title: AWS S3 STS/IMDS segfault and implementation issues
+Description:
+Hello,
+Thank you for building and supporting ClickHouse, this is a great software.
+I would like to report a few issues encountered with the AWS/S3 implementations.
+
+**Describe what's wrong**
+
+Found multiple issues affecting the latest version around the AWS tokens to access S3.
+I preferred gathering them in a single bug report issue but happy to split them in multiple issues if it's preferrable.
+
+# The EC2 Credentials Segfault
+
+The major issue is a segfault when setting either:
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` or `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`
+
+Those environment variables are suggested in the [doc](https://clickhouse.com/docs/en/integrations/s3/s3-table-engine/).
+
+**Does it reproduce on recent release?**
+
+Latest 22.9.5.25-stable is affected, Mac and Linux versions. After quick testing, older seems affected too.
+
+**Enable crash reporting**
+
+Sentry indicates for the Segfault
+```
+Address: 0x4075988 Access: read. Attempted access has violated the permissions assigned to the memory area.
+clickhouse          0x000007b12469 null
+libpthread.so.0     0x7f4a57444420 null
+```
+[sentry-log.json.zip](https://github.com/ClickHouse/ClickHouse/files/10119835/sentry-log.json.zip)
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+
+Example with `clickhouse/clickhouse-server:22.9.5.25-alpine`
+
+With the following docker-compose.yaml
+```yaml
+version: "3"
+services:
+  db:
+    image: clickhouse/clickhouse-server:22.9.5.25-alpine
+    ports:
+      - 8123:8123
+    volumes:
+      - ./configuration:/etc/clickhouse-server/
+    environment:
+      - AWS_CONTAINER_CREDENTIALS_FULL_URI=http://host.docker.internal:8000
+```
+
+The environment variable does not have to be a proper URL or be reachable.
+Can be reproduced without credentials
+
+* Non-default settings (from the docker container)
+
+```xml
+<clickhouse>
+    <s3>
+        <endpoint-name>
+            <endpoint>https://s3.us-east-1.amazonaws.com/the-clickhouse-test</endpoint>
+            <region>us-east-1</region>
+            <use_environment_credentials>true</use_environment_credentials>
+        </endpoint-name>
+    </s3>
+
+    <logger>
+        <console>1</console>
+```
+
+* Queries
+
+```
+CREATE TABLE test (
+    date Date,
+    value UInt32
+)
+ENGINE=S3('https://s3.us-east-1.amazonaws.com/the-clickhouse-test/something.csv', 'CSVWithNames')
+PARTITION BY (date)
+ORDER BY (date)
+SETTINGS input_format_skip_unknown_fields=1;
+```
+
+This query will never return
+
+**Expected behavior**
+
+Expecting ClickHouse to query the [Process Credentials](https://docs.aws.amazon.com/sdkref/latest/guide/feature-container-credentials.html).
+A sample endpoint ([aws-credentials-exporter](https://github.com/benkehoe/aws-export-credentials#ecs) tool can be used) that could be queried would show the queries.
+
+**Error message and/or stacktrace**
+
+The following appears right after entering the SQL.
+Then ClickHouse starts shutting down.
+```
+db_1  | 2022.11.30 04:39:47.726960 [ 50 ] {} <Debug> TCP-Session: e338fabb-7af6-4c9d-9f84-c54b4b9fae8a Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+db_1  | 2022.11.30 04:39:47.727513 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Debug> executeQuery: (from 127.0.0.1:40604) CREATE TABLE test ( date Date, value UInt32 ) ENGINE=S3('https://s3.us-east-1.amazonaws.com/the-clickhouse-test/something.csv', 'CSVWithNames') PARTITION BY (date) ORDER BY (date) SETTINGS input_format_skip_unknown_fields=1; (stage: Complete)
+db_1  | 2022.11.30 04:39:47.727594 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Trace> ContextAccess (default): Access granted: CREATE TABLE ON default.test
+db_1  | 2022.11.30 04:39:47.727620 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Trace> ContextAccess (default): Access granted: S3 ON *.*
+db_1  | 2022.11.30 04:39:47.727650 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Trace> ContextAccess (default): Access granted: S3 ON *.*
+db_1  | 2022.11.30 04:39:47.728477 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Warning> AwsAuthSTSAssumeRoleWebIdentityCredentialsProvider: Token file must be specified to use STS AssumeRole web identity creds provider.
+db_1  | 2022.11.30 04:39:47.728586 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Debug> S3CredentialsProviderChain: The environment variable value AWS_CONTAINER_CREDENTIALS_RELATIVE_URI is
+db_1  | 2022.11.30 04:39:47.728683 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Debug> S3CredentialsProviderChain: The environment variable value AWS_CONTAINER_CREDENTIALS_FULL_URI is http://host.docker.internal:8000
+db_1  | 2022.11.30 04:39:47.728704 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Debug> S3CredentialsProviderChain: The environment variable value AWS_EC2_METADATA_DISABLED is
+db_1  | 2022.11.30 04:39:47.728783 [ 50 ] {2e41b071-5019-4179-b772-a28def213f20} <Information> AWSClient: ECSCredentialsClient: Creating AWSHttpResourceClient with max connections 2 and scheme http
+db_1  | 2022.11.30 04:39:47.780609 [ 49 ] {} <Trace> BaseDaemon: Received signal 11
+db_1  | 2022.11.30 04:39:47.781453 [ 257 ] {} <Fatal> BaseDaemon: ########################################
+db_1  | 2022.11.30 04:39:47.781600 [ 257 ] {} <Fatal> BaseDaemon: (version 22.9.5.25 (official build), build id: 2A8ECD7C7D9818BB475E6508936AFAE057BC1BDF) (from thread 50) (query_id: 2e41b071-5019-4179-b772-a28def213f20) (query: CREATE TABLE test ( date Date, value UInt32 ) ENGINE=S3('https://s3.us-east-1.amazonaws.com/the-clickhouse-test/something.csv', 'CSVWithNames') PARTITION BY (date) ORDER BY (date) SETTINGS input_format_skip_unknown_fields=1;) Received signal Segmentation fault (11)
+db_1  | 2022.11.30 04:39:47.781651 [ 257 ] {} <Fatal> BaseDaemon: Address: 0x4075988 Access: read. Attempted access has violated the permissions assigned to the memory area.
+db_1  | 2022.11.30 04:39:47.782139 [ 257 ] {} <Fatal> BaseDaemon: Stack trace: 0x7b12469 0x7f4a57444420
+db_1  | 2022.11.30 04:39:47.782290 [ 257 ] {} <Fatal> BaseDaemon: 0. ? @ 0x7b12469 in /usr/bin/clickhouse
+db_1  | 2022.11.30 04:39:47.782785 [ 257 ] {} <Fatal> BaseDaemon: 1. ? @ 0x7f4a57444420 in ?
+db_1  | 2022.11.30 04:39:47.964603 [ 257 ] {} <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 17A78BB672E17B57726E1258425F7248)
+db_1  | 2022.11.30 04:39:47.969795 [ 257 ] {} <Information> SentryWriter: Sending crash report
+db_1  | 2022.11.30 04:39:48.000675 [ 238 ] {} <Trace> AsynchronousMetrics: MemoryTracking: was 354.38 MiB, peak 358.21 MiB, will set to 376.60 MiB (RSS), difference: 16.77 MiB
+```
+
+# Various settings are missing
+
+When not using EC2 Credentials, but `<use_environment_credentials>` is specified, only a few environment variables and configuration settings are honored. The documentation remain unclear on those.
+
+`AWS_PROFILE`, `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` allow to set a value: for instance `/var/lib/clickhouse/creds/credentials` to be used instead of the SDK's default `$HOME/.aws/credentials.
+
+And for instance, the following `credentials` file
+```
+[default]
+aws_access_key_id=
+aws_secret_access_key=
+aws_session_token=
+```
+will work and have not seen listed.
+Furthermore, the behavior is unclear if the file is refreshed upon querying as the STS tokens expire.
+After trying it out those credentials seem to be cached when the table is created.
+
+The following `profile` or `credentials` per [AWS's specification](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html) also does not work
+```
+[profile default]
+credential_process = /opt/bin/awscreds-custom --username something
+```
+
+Whereas with default settings + using [aws-credentials-exporter](https://github.com/benkehoe/aws-export-credentials#imds) that can use the `credential_process`, ClickHouse will try to find credentials at `http://169.254.169.254/` (see following regarding the address)
+Unless `AWS_EC2_METADATA_DISABLED` is set to `true`.
+
+# Hardcoded IMDS path
+
+Likely more a feature request.
+
+The metadata IP address is hardcoded:
+https://github.com/ClickHouse/ClickHouse/blob/5c90d5aa7e0acec770f7c57329dedd30e61dd320/src/IO/S3Common.cpp#L152
+
+As specified by the [AWS documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html), it is used to find the credentials and tokens.
+It is available on EC2 machines. Nonetheless, it should be possible to use it outside.
+
+Additionally, hardcoding makes it impractical on IPv6 machines to reach `fd00:ec2::254`.
+
+A [configuration setting exists](https://docs.aws.amazon.com/sdkref/latest/guide/feature-imds-credentials.html)
+but ClickHouse does not seem to implement `AWS_EC2_METADATA_SERVICE_ENDPOINT`.
+
+For information, it is possible to bind the IP locally
+on Linux
+```bash
+ip route add 169.254.169.254/32 dev lo
+```
+on Mac
+```bash
+sudo ifconfig lo0 alias 169.254.169.254/32 up
+```
+
+# Missing information regarding `use_insecure_imds_request`
+
+Less important but the [documentation](https://clickhouse.com/docs/en/engines/table-engines/integrations/s3/#endpoint-settings) specifies the following 
+> `use_insecure_imds_request` — If set to `true`, S3 client will use insecure IMDS request while obtaining credentials from Amazon EC2 metadata. Optional, default value is `false`
+
+The more detailed behavior when `true` is that ClickHouse will not do the `PUT` request to `/latest/api/token` and then use the token in the header `X-aws-ec2-metadata-token` to query `/latest/meta-data/iam/security-credentials`.
+
+It is also possible that the current implementation is missing a slash at the end for certain implementations.
+
+
+
+
+Thank you

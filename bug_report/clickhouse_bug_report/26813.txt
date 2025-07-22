@@ -1,0 +1,92 @@
+ID: 26813
+Title: Docker container build fails when restarted with existing RabbitMQ table
+Description:
+**Describe the bug**
+
+When I try to re-build clickhouse-server in Docker with mounted volume ./ch_data:/var/lib/clickhouse and existing files in folder ./chdata, and also with existing table with Engine = RabbitMQ, it fails.
+
+**Does it reproduce on recent release?**
+
+I reproduce it on the latest release 21.7.4.18-alpine
+
+**How to reproduce**
+
+* Build docker with this sample
+```
+version: '3'
+services:
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: always
+    hostname: rabbit-server
+    ports:
+      - 15672:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+      RABBITMQ_DEFAULT_VHOST: '/'
+
+  clickhouse-server:
+    image: yandex/clickhouse-server:21.7.4.18-alpine
+    restart: always
+    ports:
+      - "8123:8123"
+    depends_on: [ rabbitmq ]
+    volumes:
+      - ../environment/clickhouse/server/config/users.xml:/etc/clickhouse-server/users.xml
+      - ../environment/clickhouse/server/config/rabbitmq.xml:/etc/clickhouse-server/config.d/rabbitmq.xml
+      - ../../ch_db:/var/lib/clickhouse
+```
+* Create table-consumer for rabbitmq
+```
+CREATE TABLE search (
+    query String,
+    area Nullable(Enum8('person' = 1, 'event' = 2, 'team' = 3)),
+    ip IPv4,
+    locale FixedString(2),
+    referer Nullable(String),
+    user_agent Nullable(String),
+    result_count UInt8,
+    source Enum8('website' = 1, 'api' = 2),
+    date DateTime('Europe/Moscow')
+) ENGINE = RabbitMQ
+  SETTINGS
+      rabbitmq_host_port = 'rabbitmq:5672',
+      rabbitmq_exchange_name = 'search_log',
+      rabbitmq_format = 'JSONEachRow';
+```
+* See that docker was built OK, table *search* was created
+* Down docker
+* Up docker again
+
+It will fail with the following error.
+
+**Expected behavior**
+
+Docker container has to be rebuilt normally.
+
+**Error message and/or stacktrace**
+
+```
+[28050981dc4a] 2021.07.26 13:55:17.001372 [ 218 ] <Fatal> BaseDaemon: ########################################
+[28050981dc4a] 2021.07.26 13:55:17.001420 [ 218 ] <Fatal> BaseDaemon: (version 21.7.4.18 (official build), build id: 697A9902DCE7A291C0E5CA723B17481126142A81) (from thread 43) (query_id: eba6c573-fc53-4198-b7b2-89be736ad731) Received signal Segmentation fault (11)
+[28050981dc4a] 2021.07.26 13:55:17.001438 [ 218 ] <Fatal> BaseDaemon: Address: 0x8 Access: read. Address not mapped to object.
+[28050981dc4a] 2021.07.26 13:55:17.001450 [ 218 ] <Fatal> BaseDaemon: Stack trace: 0x102982d7 0xf8c0c90 0xf8c30ff 0xf8bfa0b 0xf8bf38d 0xfe1a193 0xfe18823 0x10697d22 0x106aac59 0x13383a8f 0x1338551a 0x134b8399 0x134b462a 0x7fac67c06609 0x7fac67b1c293
+[28050981dc4a] 2021.07.26 13:55:17.001480 [ 218 ] <Fatal> BaseDaemon: 1. DB::StorageRabbitMQ::shutdown() @ 0x102982d7 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001504 [ 218 ] <Fatal> BaseDaemon: 2. DB::InterpreterDropQuery::executeToTableImpl(DB::ASTDropQuery&, std::__1::shared_ptr<DB::IDatabase>&, StrongTypedef<wide::integer<128ul, unsigned int>, DB::UUIDTag>&) @ 0xf8c0c90 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001519 [ 218 ] <Fatal> BaseDaemon: 3. DB::InterpreterDropQuery::executeToDatabaseImpl(DB::ASTDropQuery const&, std::__1::shared_ptr<DB::IDatabase>&, std::__1::vector<StrongTypedef<wide::integer<128ul, unsigned int>, DB::UUIDTag>, std::__1::allocator<StrongTypedef<wide::integer<128ul, unsigned int>, DB::UUIDTag> > >&) @ 0xf8c30ff in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001560 [ 218 ] <Fatal> BaseDaemon: 4. DB::InterpreterDropQuery::executeToDatabase(DB::ASTDropQuery const&) @ 0xf8bfa0b in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001584 [ 218 ] <Fatal> BaseDaemon: 5. DB::InterpreterDropQuery::execute() @ 0xf8bf38d in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001606 [ 218 ] <Fatal> BaseDaemon: 6. ? @ 0xfe1a193 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001636 [ 218 ] <Fatal> BaseDaemon: 7. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum, bool) @ 0xfe18823 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001655 [ 218 ] <Fatal> BaseDaemon: 8. DB::TCPHandler::runImpl() @ 0x10697d22 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001677 [ 218 ] <Fatal> BaseDaemon: 9. DB::TCPHandler::run() @ 0x106aac59 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001702 [ 218 ] <Fatal> BaseDaemon: 10. Poco::Net::TCPServerConnection::start() @ 0x13383a8f in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001735 [ 218 ] <Fatal> BaseDaemon: 11. Poco::Net::TCPServerDispatcher::run() @ 0x1338551a in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001761 [ 218 ] <Fatal> BaseDaemon: 12. Poco::PooledThread::run() @ 0x134b8399 in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001777 [ 218 ] <Fatal> BaseDaemon: 13. Poco::ThreadImpl::runnableEntry(void*) @ 0x134b462a in /usr/bin/clickhouse
+[28050981dc4a] 2021.07.26 13:55:17.001802 [ 218 ] <Fatal> BaseDaemon: 14. start_thread @ 0x9609 in /lib/libpthread.so.0
+[28050981dc4a] 2021.07.26 13:55:17.001828 [ 218 ] <Fatal> BaseDaemon: 15. clone @ 0x122293 in /lib/libc.so.6
+[28050981dc4a] 2021.07.26 13:55:17.092423 [ 218 ] <Fatal> BaseDaemon: Checksum of the binary: 29FC72CB092D5C4B8F07929DE59AD4B8, integrity check passed.
+```

@@ -1,0 +1,120 @@
+ID: 13059
+Title: Clickhouse throws exception on startup, if table contain materialized dictGet column
+Description:
+ClickHouse server didn't started, if table contains `MATERALIZED dictGet` column and dictionary is external.
+
+**How to reproduce**
+Clickhouse version
+```
+ClickHouse client version 20.3.15.133 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 20.3.15 revision 54433.
+```
+
+**dictionary.xml**
+```
+<yandex>
+    <dictionary>
+        <name>account</name>
+
+        <source>
+            <odbc>
+                <db>athena</db>
+                <table>dict.account</table>
+                <connection_string>DSN=athena_connection</connection_string>
+            </odbc>
+        </source>
+
+        <layout>
+            <hashed/>
+        </layout>
+
+        <structure>
+            <id>
+                <name>id</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <injective>true</injective>
+                <null_value />
+            </attribute>
+            <attribute>
+                <name>type</name>
+                <type>String</type>
+                <injective>true</injective>
+                <null_value />
+            </attribute>
+        </structure>
+
+        <lifetime>300</lifetime>
+    </dictionary>
+</yandex>
+```
+Dictionary loaded well
+```
+SELECT dictGet('account', 'name', toUInt64(7789))
+
+┌─dictGet('account', 'name', toUInt64(7789))─┐
+│ David's test account                       │
+└────────────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.063 sec. 
+```
+
+Test table with materialized column
+
+```
+CREATE TABLE test
+(
+    `id` UInt64, 
+    `account_name` String MATERIALIZED dictGet('account', 'name', id)
+)
+ENGINE = MergeTree()
+PARTITION BY tuple()
+ORDER BY tuple()
+
+Ok.
+
+0 rows in set. Elapsed: 0.004 sec. 
+```
+
+After restart
+```
+2020.07.29 07:25:36.597513 [ 16171 ] {} <Information> DatabaseOrdinary (system): Starting up tables.
+2020.07.29 07:25:36.599390 [ 16171 ] {} <Information> DatabaseOrdinary (default): Total 1 tables and 0 dictionaries.
+2020.07.29 07:25:36.638102 [ 16171 ] {} <Error> Application: Caught exception while loading metadata: Code: 36, e.displayText() = DB::Exception: external dictionary 'account' not found: default expression and column type are incompatible.: Cannot attach table `default`.`test` from metadata file /var/lib/clickhouse/metadata/default/test.sql from query ATTACH TABLE test (`id` UInt64, `account_name` String MATERIALIZED dictGet('account', 'name', id)) ENGINE = MergeTree() PARTITION BY tuple() ORDER BY tuple() SETTINGS index_granularity = 8192, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1059bf20 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8f9572d in /usr/bin/clickhouse
+2. ? @ 0xd06ef39 in /usr/bin/clickhouse
+3. std::__1::shared_ptr<DB::IExternalLoadable const> DB::ExternalLoader::load<std::__1::shared_ptr<DB::IExternalLoadable const>, void>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xd07a273 in /usr/bin/clickhouse
+4. DB::FunctionDictHelper::getDictionary(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x93f0d01 in /usr/bin/clickhouse
+5. DB::FunctionDictGetNoType::getReturnTypeImpl(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0x93f3473 in /usr/bin/clickhouse
+6. DB::DefaultOverloadResolver::getReturnType(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0x91d8ce5 in /usr/bin/clickhouse
+7. DB::FunctionOverloadResolverAdaptor::getReturnTypeWithoutLowCardinality(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0x91fcdda in /usr/bin/clickhouse
+8. DB::FunctionOverloadResolverAdaptor::getReturnType(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0x91fd1d2 in /usr/bin/clickhouse
+9. DB::FunctionOverloadResolverAdaptor::build(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0x920355c in /usr/bin/clickhouse
+10. DB::ExpressionActions::addImpl(DB::ExpressionAction, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0xd133abe in /usr/bin/clickhouse
+11. DB::ExpressionActions::add(DB::ExpressionAction const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&) @ 0xd133cbd in /usr/bin/clickhouse
+12. DB::ScopeStack::addAction(DB::ExpressionAction const&) @ 0xd35c0fd in /usr/bin/clickhouse
+13. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xd3628f5 in /usr/bin/clickhouse
+14. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xd36185f in /usr/bin/clickhouse
+15. ? @ 0xd34559e in /usr/bin/clickhouse
+16. DB::ExpressionAnalyzer::getActions(bool, bool) @ 0xd3480df in /usr/bin/clickhouse
+17. DB::validateColumnsDefaultsAndGetSampleBlock(std::__1::shared_ptr<DB::IAST>, DB::NamesAndTypesList const&, DB::Context const&) @ 0xd6a282a in /usr/bin/clickhouse
+18. DB::InterpreterCreateQuery::getColumnsDescription(DB::ASTExpressionList const&, DB::Context const&) @ 0xd08bb73 in /usr/bin/clickhouse
+19. DB::createTableFromAST(DB::ASTCreateQuery, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool) @ 0xd0a773a in /usr/bin/clickhouse
+20. ? @ 0xd09dddf in /usr/bin/clickhouse
+21. ? @ 0xd09e5c5 in /usr/bin/clickhouse
+22. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x8fba2c7 in /usr/bin/clickhouse
+23. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() const @ 0x8fba948 in /usr/bin/clickhouse
+24. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8fb97d7 in /usr/bin/clickhouse
+25. ? @ 0x8fb7c23 in /usr/bin/clickhouse
+26. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+27. __clone @ 0x121a3f in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.3.15.133 (official build))
+2020.07.29 07:25:36.638224 [ 16171 ] {} <Information> Application: Shutting down storages.
+```
+
+For a workaround I'm deleting `/var/lib/clickhouse/metadata/default/test.sql` and executing manually after restart.

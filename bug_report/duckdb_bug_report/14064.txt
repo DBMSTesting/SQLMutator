@@ -1,0 +1,166 @@
+ID: 14064
+Title: When writing geoparquet file from CSV I get malloc: double free for ptr 0x12aaaf600
+Description:
+### What happens?
+
+I have a CSV files compressed to zstd:
+
+```bash
+describe select * from read_csv('data/csv-files/AIS_2022_12_01.csv.zst',ignore_errors = true);
+┌──────────────────┬─────────────┬─────────┬─────────┬─────────┬─────────┐
+│   column_name    │ column_type │  null   │   key   │ default │  extra  │
+│     varchar      │   varchar   │ varchar │ varchar │ varchar │ varchar │
+├──────────────────┼─────────────┼─────────┼─────────┼─────────┼─────────┤
+│ MMSI             │ BIGINT      │ YES     │         │         │         │
+│ BaseDateTime     │ TIMESTAMP   │ YES     │         │         │         │
+│ LAT              │ DOUBLE      │ YES     │         │         │         │
+│ LON              │ DOUBLE      │ YES     │         │         │         │
+│ SOG              │ DOUBLE      │ YES     │         │         │         │
+│ COG              │ DOUBLE      │ YES     │         │         │         │
+│ Heading          │ DOUBLE      │ YES     │         │         │         │
+│ VesselName       │ VARCHAR     │ YES     │         │         │         │
+│ IMO              │ VARCHAR     │ YES     │         │         │         │
+│ CallSign         │ VARCHAR     │ YES     │         │         │         │
+│ VesselType       │ BIGINT      │ YES     │         │         │         │
+│ Status           │ BIGINT      │ YES     │         │         │         │
+│ Length           │ BIGINT      │ YES     │         │         │         │
+│ Width            │ BIGINT      │ YES     │         │         │         │
+│ Draft            │ DOUBLE      │ YES     │         │         │         │
+│ Cargo            │ BIGINT      │ YES     │         │         │         │
+│ TransceiverClass │ VARCHAR     │ YES     │         │         │         │
+├──────────────────┴─────────────┴─────────┴─────────┴─────────┴─────────┤
+│ 17 rows                                                      6 columns │
+└────────────────────────────────────────────────────────────────────────┘
+D select count(*) from read_csv('data/csv-files/AIS_2022_12_01.csv.zst',ignore_errors = true);
+┌──────────────┐
+│ count_star() │
+│    int64     │
+├──────────────┤
+│      8111056 │
+└──────────────┘
+```
+
+I am trying to create a geoparquet file with geometry column coming from LAT and LON columns.  
+
+First if I create a parquet file it works fine: ( note the extra in-memory `geom` column  which works)
+
+```bash
+SET preserve_insertion_order=false;
+INSTALL SPATIAL;
+LOAD SPATIAL;
+
+COPY
+    'data/csv-files/AIS_2022_12_01.csv.zst'
+TO  'data/parquet-files/AIS_2022_12_01.parquet'
+    (FORMAT 'parquet', COMPRESSION ZSTD,ROW_GROUP_SIZE 122_880);
+
+describe select *, ST_Point(LON, LAT) AS geom from 'data/parquet-files/AIS_2022_12_01.parquet';
+┌──────────────────┬─────────────┬─────────┬─────────┬─────────┬─────────┐
+│   column_name    │ column_type │  null   │   key   │ default │  extra  │
+│     varchar      │   varchar   │ varchar │ varchar │ varchar │ varchar │
+├──────────────────┼─────────────┼─────────┼─────────┼─────────┼─────────┤
+│ MMSI             │ BIGINT      │ YES     │         │         │         │
+│ BaseDateTime     │ TIMESTAMP   │ YES     │         │         │         │
+│ LAT              │ DOUBLE      │ YES     │         │         │         │
+│ LON              │ DOUBLE      │ YES     │         │         │         │
+│ SOG              │ DOUBLE      │ YES     │         │         │         │
+│ COG              │ DOUBLE      │ YES     │         │         │         │
+│ Heading          │ DOUBLE      │ YES     │         │         │         │
+│ VesselName       │ VARCHAR     │ YES     │         │         │         │
+│ IMO              │ VARCHAR     │ YES     │         │         │         │
+│ CallSign         │ VARCHAR     │ YES     │         │         │         │
+│ VesselType       │ BIGINT      │ YES     │         │         │         │
+│ Status           │ BIGINT      │ YES     │         │         │         │
+│ Length           │ BIGINT      │ YES     │         │         │         │
+│ Width            │ BIGINT      │ YES     │         │         │         │
+│ Draft            │ DOUBLE      │ YES     │         │         │         │
+│ Cargo            │ BIGINT      │ YES     │         │         │         │
+│ TransceiverClass │ VARCHAR     │ YES     │         │         │         │
+│ geom             │ GEOMETRY    │ YES     │         │         │         │
+├──────────────────┴─────────────┴─────────┴─────────┴─────────┴─────────┤
+│ 18 rows                                                      6 columns │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+select ST_Point(LON, LAT) as geom, * from 'data/parquet-files/AIS_2022_12_01.parquet' LIMIT 5;
+┌──────────────────────┬───────────┬─────────────────────┬──────────┬───────────┬────────┬───┬────────┬────────┬───────┬────────┬───────┬──────────────────┐
+│         geom         │   MMSI    │    BaseDateTime     │   LAT    │    LON    │  SOG   │ … │ Status │ Length │ Width │ Draft  │ Cargo │ TransceiverClass │
+│       geometry       │   int64   │      timestamp      │  double  │  double   │ double │   │ int64  │ int64  │ int64 │ double │ int64 │     varchar      │
+├──────────────────────┼───────────┼─────────────────────┼──────────┼───────────┼────────┼───┼────────┼────────┼───────┼────────┼───────┼──────────────────┤
+│ POINT (-90.17817 2…  │ 367057410 │ 2022-12-01 00:00:00 │ 29.94015 │ -90.17817 │    0.1 │ … │     12 │     30 │    10 │        │    31 │ A                │
+│ POINT (-92.1406 29…  │ 368024380 │ 2022-12-01 00:00:00 │ 29.97342 │  -92.1406 │    0.0 │ … │      0 │     36 │     7 │    3.5 │    60 │ A                │
+│ POINT (-76.24395 3…  │ 367590730 │ 2022-12-01 00:00:00 │ 36.72741 │ -76.24395 │    0.0 │ … │     15 │     30 │       │        │    99 │ A                │
+│ POINT (-89.91867 2…  │ 368106490 │ 2022-12-01 00:00:01 │ 29.62467 │ -89.91867 │    0.0 │ … │     12 │     22 │    10 │    3.0 │    57 │ A                │
+│ POINT (-95.1889 29…  │ 366921830 │ 2022-12-01 00:00:02 │ 29.74628 │  -95.1889 │    0.0 │ … │      0 │     30 │    11 │    4.5 │    52 │ A                │
+├──────────────────────┴───────────┴─────────────────────┴──────────┴───────────┴────────┴───┴────────┴────────┴───────┴────────┴───────┴──────────────────┤
+│ 5 rows                                                                                                                             18 columns (12 shown) │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+So far so good! shows that parquet is being written correctly. Also geometry column is being calculated correctly
+
+Now if I try to write the geoparquet I get a segmentation error: 
+
+```
+COPY
+    (select *, ST_Point(LON, LAT) AS geom  FROM read_csv('data/csv-files/AIS_2022_12_01.csv.zst',ignore_errors = true))
+TO  'data/parquet-files/AIS_2022_12_01.parquet'
+    (FORMAT 'parquet', COMPRESSION ZSTD,ROW_GROUP_SIZE 122_880);
+    
+duckdb(37647,0x16e08f000) malloc: double free for ptr 0x12aaaf600
+duckdb(37647,0x16e08f000) malloc: *** set a breakpoint in malloc_error_break to debug
+[1]    37647 abort      duckdb    
+```
+
+
+### To Reproduce
+
+Code the reproduce is above, the actual referenced csv compressed as zst can be downloaded until Oct 6th here: 
+
+https://www.file.io/DuWG/download/Wx0st1kmP0yU
+
+But if needed the actual CSV can be permanently downloaded from. Note this is a zipped CSV and not zst
+
+https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2022/AIS_2022_12_01.zip
+
+
+Note eventually I am planning to load multiple CSVs worth many years.  Writing a parquet file without geo info is working just fine. 
+
+### OS:
+
+McOS Sequoia version 15.0 
+
+### DuckDB Version:
+
+v1.1.0 fa5c2fe15f
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+M1 Max
+
+### Full Name:
+
+Shaunak Vairagare
+
+### Affiliation:
+
+NOAA ( [coast.noaa.gov](https://coast.noaa.gov/) )
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,41 @@
+ID: 7287
+Title: "Tagging already tagged part" 
+Description:
+I'm consistently seeing this error message from clickhouse server:
+```
+<Error> void DB::BackgroundProcessingPool::threadFunction(): Code: 49, e.displayText() = DB::Exception: Tagging already tagged part 20191011-4_1_32_2. This is a bug., Stack trace:
+// 
+// 0. 0x55e728cdde90 StackTrace::StackTrace() /home/phage/vendor/ClickHouse/build/../dbms/src/Common/StackTrace.cpp:228
+// 1. 0x55e728cddc65 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /home/phage/vendor/ClickHouse/build/../dbms/src/Common/Exception.h:27
+// 2. 0x55e72c123567 DB::CurrentlyMergingPartsTagger::CurrentlyMergingPartsTagger(DB::FutureMergedMutatedPart const&, unsigned long, DB::StorageMergeTree&, bool) /usr/include/c++/9/bits/basic_string.h:222
+// 3. 0x55e72c113eb8 DB::StorageMergeTree::merge(bool, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, bool, bool, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >*) /usr/include/x86_64-linux-gnu/c++/9/bits/gthr-default.h:778
+// 4. 0x55e72c119074 DB::StorageMergeTree::mergeMutateTask() /usr/include/c++/9/bits/basic_string.h:222
+// 5. 0x55e72c1abf94 DB::BackgroundProcessingPool::threadFunction() /usr/include/c++/9/bits/std_function.h:690
+// 6. 0x55e72c1ac90a ThreadFromGlobalPool::ThreadFromGlobalPool<DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::{lambda()#1}>(DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::{lambda()#1}&&)::{lambda()#1}::operator()() const /home/phage/vendor/ClickHouse/build/../dbms/src/Common/ThreadPool.h:150
+// 7. 0x55e728d269dc ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/include/c++/9/bits/atomic_base.h:551
+// 8. 0x55e72d7fce00 execute_native_thread_routine /home/phage/vendor/ClickHouse/build/dbms/programs/clickhouse
+// 9. 0x7f90fa33d6db start_thread /lib/x86_64-linux-gnu/libpthread-2.27.so
+// 10. 0x7f90f9e6288f clone /lib/x86_64-linux-gnu/libc-2.27.so
+// (version 19.16.1.1)
+```
+
+I can reproduce it when doing a high rate of multi-row inserts using the clickhouse-cpp library.  I've separated out the chunk of code causing this so I can post it.
+
+Full CREATE TABLE statement is in the code attachment.  It involves the MergeTree engine and the table TTL feature.  Basic format is:
+```
+create table if not exists spam(
+      date Date DEFAULT today(),
+      datetime DateTime DEFAULT now(),
+... bunch of other columns ...
+   ENGINE = MergeTree() 
+   PARTITION BY (toYYYYMMDD(date),toHour(datetime)) 
+   ORDER BY datetime 
+   TTL datetime + interval 1 minute 
+   SETTINGS merge_with_ttl_timeout=60");
+```
+
+For the purpose of duplicating the bug, I made the TTL `datetime + interval 1 minute` and `merge_with_ttl_timeout=60`, but it happens if I use longer intervals (just takes longer to reproduce). 
+
+The basic functionality/goal I'm after is writing ~5Gbps of this table data to the database and TTL-ing it out after a few days (e.g. TTL datetime + interval 3 days).  Partitioning by hour is useful based on the queries we expect.  In the production system, we have a lot of flexibility to batch up rows before inserting them.  We can do many rows in one big insert, or have multiple separate client processes doing smaller inserts.
+
+I'm using the same version of client and server.  Compiling from github sources on ubuntu 18.04 using GCC 9.

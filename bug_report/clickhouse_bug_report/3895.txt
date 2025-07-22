@@ -1,0 +1,54 @@
+ID: 3895
+Title: Seg fault on distributed distinct() query on LowCardinality column
+Description:
+Hey guys,
+
+we are running CH v. `18.14.9` and have a typical table setup:
+`Distributed` table -> `ReplicatedMergeTree` (3 different dbs / replicas / disks per node)
+Tables have a column `col1 LowCardinality(UInt64)`.
+
+When running query:
+```sql
+SELECT distinct(col1) FROM distributed
+```
+Rows start pouring in the client window (there are exactly `132` distinct values in the whole table, it seems `distinct` doesn't apply and many more rows are returned). Then the query fails with exception:
+```
+Received exception from server (version 18.14.9):
+Code: 32. DB::Exception: Received from node2:9001, xx.xx.xx.xx. DB::Exception: Attempt to read after eof: while receiving packet from node03:9001, xx.xx.xx.xx.
+```
+Moreover, random number of CH nodes (I observed 1 to 6) in the cluster fail with:
+```
+2018.12.21 10:16:13.961304 [ 2 ] {} <Error> BaseDaemon: ########################################
+2018.12.21 10:16:14.022041 [ 2 ] {} <Error> BaseDaemon: (from thread 34584) Received signal Segmentation fault (11).
+2018.12.21 10:16:14.022107 [ 2 ] {} <Error> BaseDaemon: Address: 0x7f35f3dab000
+2018.12.21 10:16:14.022124 [ 2 ] {} <Error> BaseDaemon: Access: read.
+2018.12.21 10:16:14.022140 [ 2 ] {} <Error> BaseDaemon: Address not mapped to object.
+2018.12.21 10:16:14.147133 [ 2 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(void DB::DistinctBlockInputStream::buildFilter<DB::SetMethodOneNumber<unsigned long, HashSetTable<unsigned long, HashTableCell<unsigned long, HashCRC32<unsigned long>, HashTableNoState>, HashCRC32<unsigned long>, HashTableGrower<8ul>, Allocator<true> > > >(DB::SetMethodOneNumber<unsigned long, HashSetTable<unsigned long, HashTableCell<unsigned long, HashCRC32<unsigned long>, HashTableNoState>, HashCRC32<unsigned long>, HashTableGrower<8ul>, Allocator<true> > >&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > const&, DB::PODArray<unsigned char, 4096ul, Allocator<false>, 15ul>&, unsigned long, DB::SetVariantsTemplate<DB::NonClearableSet>&) const+0x6f) [0x79a31ef]
+2018.12.21 10:16:14.147181 [ 2 ] {} <Error> BaseDaemon: 1. /usr/bin/clickhouse-server(DB::DistinctBlockInputStream::readImpl()+0x954) [0x79a2274]
+2018.12.21 10:16:14.147191 [ 2 ] {} <Error> BaseDaemon: 2. /usr/bin/clickhouse-server(DB::IProfilingBlockInputStream::read()+0x25a) [0x6ad979a]
+2018.12.21 10:16:14.147206 [ 2 ] {} <Error> BaseDaemon: 3. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::UnionBlockInputStream<(DB::StreamUnionMode)0>::Handler, (DB::StreamUnionMode)0>::loop(unsigned long)+0x125) [0x75fcf35]
+2018.12.21 10:16:14.147224 [ 2 ] {} <Error> BaseDaemon: 4. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::UnionBlockInputStream<(DB::StreamUnionMode)0>::Handler, (DB::StreamUnionMode)0>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x207) [0x75fd7d7]
+2018.12.21 10:16:14.147239 [ 2 ] {} <Error> BaseDaemon: 5. /usr/bin/clickhouse-server(std::thread::_State_impl<std::thread::_Invoker<std::tuple<DB::ParallelInputsProcessor<DB::UnionBlockInputStream<(DB::StreamUnionMode)0>::Handler, (DB::StreamUnionMode)0>::process()::{lambda()#1}> > >::_M_run()+0x4f) [0x75fdc9f]
+2018.12.21 10:16:14.147248 [ 2 ] {} <Error> BaseDaemon: 6. /usr/bin/clickhouse-server() [0xa3da90f]
+2018.12.21 10:16:14.147258 [ 2 ] {} <Error> BaseDaemon: 7. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f3a4e5bd6db]
+2018.12.21 10:16:14.336212 [ 2 ] {} <Error> BaseDaemon: ########################################
+2018.12.21 10:16:14.336247 [ 2 ] {} <Error> BaseDaemon: (from thread 34558) Received signal Segmentation fault (11).
+2018.12.21 10:16:14.336256 [ 2 ] {} <Error> BaseDaemon: Address: 0x7f393b7ff000
+2018.12.21 10:16:14.336265 [ 2 ] {} <Error> BaseDaemon: Access: read.
+2018.12.21 10:16:14.336273 [ 2 ] {} <Error> BaseDaemon: Address not mapped to object.
+2018.12.21 10:16:14.372260 [ 2 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(void DB::DistinctBlockInputStream::buildFilter<DB::SetMethodOneNumber<unsigned long, HashSetTable<unsigned long, HashTableCell<unsigned long, HashCRC32<unsigned long>, HashTableNoState>, HashCRC32<unsigned long>, HashTableGrower<8ul>, Allocator<true> > > >(DB::SetMethodOneNumber<unsigned long, HashSetTable<unsigned long, HashTableCell<unsigned long, HashCRC32<unsigned long>, HashTableNoState>, HashCRC32<unsigned long>, HashTableGrower<8ul>, Allocator<true> > >&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > const&, DB::PODArray<unsigned char, 4096ul, Allocator<false>, 15ul>&, unsigned long, DB::SetVariantsTemplate<DB::NonClearableSet>&) const+0x6f) [0x79a31ef]
+2018.12.21 10:16:14.372290 [ 2 ] {} <Error> BaseDaemon: 1. /usr/bin/clickhouse-server(DB::DistinctBlockInputStream::readImpl()+0x954) [0x79a2274]
+2018.12.21 10:16:14.372309 [ 2 ] {} <Error> BaseDaemon: 2. /usr/bin/clickhouse-server(DB::IProfilingBlockInputStream::read()+0x25a) [0x6ad979a]
+2018.12.21 10:16:14.372332 [ 2 ] {} <Error> BaseDaemon: 3. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2e) [0x79b2b7e]
+2018.12.21 10:16:14.372343 [ 2 ] {} <Error> BaseDaemon: 4. /usr/bin/clickhouse-server(DB::IProfilingBlockInputStream::read()+0x25a) [0x6ad979a]
+2018.12.21 10:16:14.372353 [ 2 ] {} <Error> BaseDaemon: 5. /usr/bin/clickhouse-server(DB::AsynchronousBlockInputStream::calculate()+0x56) [0x6acedb6]
+2018.12.21 10:16:14.372361 [ 2 ] {} <Error> BaseDaemon: 6. /usr/bin/clickhouse-server() [0x6acf220]
+2018.12.21 10:16:14.372369 [ 2 ] {} <Error> BaseDaemon: 7. /usr/bin/clickhouse-server(ThreadPool::worker()+0x19e) [0x9bea3ce]
+2018.12.21 10:16:14.372377 [ 2 ] {} <Error> BaseDaemon: 8. /usr/bin/clickhouse-server() [0xa3da90f]
+2018.12.21 10:16:14.372385 [ 2 ] {} <Error> BaseDaemon: 9. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f3a4e5bd6db]
+Segmentation fault
+```
+
+If I query local replicated table everything is fine and results are correct. If I add `toString(...)` around the column, everything works also on the distributed table.
+
+Sorry for not providing a complete test case to reproduce, no time to spare.

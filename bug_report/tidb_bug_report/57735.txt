@@ -1,0 +1,78 @@
+ID: 57735
+Title: Sync load will be still be triggered after async load the stats of a column which has no stats
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+create table t(a int);
+insert into t value(1),(2),(3);
+alter table t add column b int default 10;
+set tidb_stats_load_sync_wait = 0;
+explain select * from t where a = 1 and b = 1;
+explain select * from t where a = 1 and b = 1;
+set tidb_stats_load_sync_wait = 1;
+explain select * from t where a = 1 and b = 1;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The status of the statistics in the explain result are the same.
+
+### 3. What did you see instead (Required)
+```
+127.0.0.1:4000[test]> set tidb_stats_load_sync_wait = 0; 
+Query OK, 0 rows affected (0.000 sec) 
+
+127.0.0.1:4000[test]> explain select * from t where a = 1 and b = 1; 
++-------------------------+---------+-----------+---------------+----------------------------------+ 
+| id                      | estRows | task      | access object | operator info                    | 
++-------------------------+---------+-----------+---------------+----------------------------------+ 
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                 | 
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.a, 1), eq(test.t.b, 1) | 
+|   └─TableFullScan_5     | 3.00    | cop[tikv] | table:t       | keep order:false, stats:pseudo   | 
++-------------------------+---------+-----------+---------------+----------------------------------+ 
+3 rows in set (0.001 sec) 
+
+127.0.0.1:4000[test]> explain select * from t where a = 1 and b = 1; 
++-------------------------+---------+-----------+---------------+--------------------------------------------+ 
+| id                      | estRows | task      | access object | operator info                              | 
++-------------------------+---------+-----------+---------------+--------------------------------------------+ 
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                           | 
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.a, 1), eq(test.t.b, 1)           | 
+|   └─TableFullScan_5     | 3.00    | cop[tikv] | table:t       | keep order:false, stats:partial[a:missing] | 
++-------------------------+---------+-----------+---------------+--------------------------------------------+ 
+3 rows in set (0.001 sec) 
+
+127.0.0.1:4000[test]> set tidb_stats_load_sync_wait = 1; 
+Query OK, 0 rows affected (0.000 sec) 
+
+127.0.0.1:4000[test]> explain select * from t where a = 1 and b = 1; 
++-------------------------+---------+-----------+---------------+--------------------------------------------------+ 
+| id                      | estRows | task      | access object | operator info                                    | 
++-------------------------+---------+-----------+---------------+--------------------------------------------------+ 
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                                 | 
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.a, 1), eq(test.t.b, 1)                 | 
+|   └─TableFullScan_5     | 3.00    | cop[tikv] | table:t       | keep order:false, stats:partial[a:unInitialized] | 
++-------------------------+---------+-----------+---------------+--------------------------------------------------+ 
+3 rows in set (0.001 sec) 
+```
+
+After async loading, `a`'s stats is marked as missing while it's marked as uninitialized after sync loading.
+It will not cause problems in estimation.
+
+But we also have another issue https://github.com/pingcap/tidb/issues/57710. So:
+- Sync load is in blocking status. Always timeout.
+- Async load finished successfully but sync load will be still triggered.
+- Finally, the sync load is triggered again and again, and then all of them are blocked in the dead goroutine. CPU usage goes up.
+
+### 4. What is your TiDB version? (Required)
+
+v8.1.0
+<!-- Paste the output of SELECT tidb_version() -->
+

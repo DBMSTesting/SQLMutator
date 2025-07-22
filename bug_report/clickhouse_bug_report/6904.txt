@@ -1,0 +1,73 @@
+ID: 6904
+Title: alias & materialized columns unexpected ordering and issue using "create table" or "alter add column after"
+Description:
+```sql
+drop table if exists addColumnTest;
+create table addColumnTest
+(
+    dt   Date,
+    col1 UInt32,
+    colA UInt32 alias col1,
+    colM UInt32 materialized col1,
+    colD UInt32 default col1,
+    col2 UInt32
+)
+engine = MergeTree() partition by toYYYYMM(dt) order by (dt);
+DESCRIBE TABLE addColumnTest;
+
+┌─name─┬─type───┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┐
+│ dt   │ Date   │              │                    │         │                  │
+│ col1 │ UInt32 │              │                    │         │                  │
+│ colD │ UInt32 │ DEFAULT      │ col1               │         │                  │
+│ col2 │ UInt32 │              │                    │         │                  │
+│ colM │ UInt32 │ MATERIALIZED │ col1               │         │                  │
+│ colA │ UInt32 │ ALIAS        │ col1               │         │                  │
+└──────┴────────┴──────────────┴────────────────────┴─────────┴──────────────────┘
+```
+
+Expected result:
+```
+┌─name─┬─type───┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┐
+│ dt   │ Date   │              │                    │         │                  │
+│ col1 │ UInt32 │              │                    │         │                  │
+│ colA │ UInt32 │ ALIAS        │ col1               │         │                  │
+│ colM │ UInt32 │ MATERIALIZED │ col1               │         │                  │
+│ colD │ UInt32 │ DEFAULT      │ col1               │         │                  │
+│ col2 │ UInt32 │              │                    │         │                  │
+└──────┴────────┴──────────────┴────────────────────┴─────────┴──────────────────┘
+```
+
+Next, if I try to add new columns using "after" expression with "real" column col1:
+```sql
+alter table addColumnTest add column colA2 UInt32 alias col1 after col1;
+
+Received exception from server (version 19.4.0):
+Code: 44. DB::Exception: Received from localhost:9000, ::1. DB::Exception: Wrong column name. Cannot find column col1 to insert after.
+
+alter table addColumnTest add column colM2 UInt32 materialized col1 after col1;
+
+Received exception from server (version 19.4.0):
+Code: 44. DB::Exception: Received from localhost:9000, ::1. DB::Exception: Wrong column name. Cannot find column col1 to insert after.
+```
+
+BUT this works with after alias or materialized columns colA & colM:
+```sql
+alter table addColumnTest add column colA3 UInt32 alias col1 after colA;
+Ok.
+
+alter table addColumnTest add column colM3 UInt32 materialized col1 after colM;
+Ok.
+
+desc addColumnTest;
+┌─name──┬─type───┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┐
+│ dt    │ Date   │              │                    │         │                  │
+│ col1  │ UInt32 │              │                    │         │                  │
+│ colD  │ UInt32 │ DEFAULT      │ col1               │         │                  │
+│ col2  │ UInt32 │              │                    │         │                  │
+│ colM  │ UInt32 │ MATERIALIZED │ col1               │         │                  │
+│ colM3 │ UInt32 │ MATERIALIZED │ col1               │         │                  │
+│ colA  │ UInt32 │ ALIAS        │ col1               │         │                  │
+│ colA3 │ UInt32 │ ALIAS        │ col1               │         │                  │
+└───────┴────────┴──────────────┴────────────────────┴─────────┴──────────────────┘
+```
+

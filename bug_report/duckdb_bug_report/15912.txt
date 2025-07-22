@@ -1,0 +1,112 @@
+ID: 15912
+Title: python: `connect(x); <modify .duckdb file out of band>; connect(x)` results in stale connection
+Description:
+### What happens?
+
+See the repro below, it's a bit complicated.
+
+### To Reproduce
+
+```python
+import shutil
+
+import duckdb
+
+
+def main():
+    a = duckdb.connect("a.duckdb")
+    b = duckdb.connect("b.duckdb")
+    a.execute("CREATE OR REPLACE TABLE t AS (SELECT 'A' as c); CHECKPOINT;")
+    b.execute("CREATE OR REPLACE TABLE t AS (SELECT 'B' as c); CHECKPOINT;")
+    print("a before copy", a.execute("FROM t;").fetchall()[0][0])
+    print("b before copy", b.execute("FROM t;").fetchall()[0][0])
+    shutil.copy("a.duckdb", "b.duckdb")
+    shutil.copy("a.duckdb", "c.duckdb")
+    b2 = duckdb.connect("b.duckdb")
+    c = duckdb.connect("c.duckdb")
+    print("a after copy", a.execute("FROM t;").fetchall()[0][0])
+    print("b after copy", b.execute("FROM t;").fetchall()[0][0])
+    print("b2 after copy", b2.execute("FROM t;").fetchall()[0][0])
+    print("c after copy", c.execute("FROM t;").fetchall()[0][0])
+
+
+if __name__ == "__main__":
+    main()
+```
+
+This prints
+
+```
+a  before copy A
+b  before copy B
+a  after  copy A
+b  after  copy B
+b2 after  copy B
+c  after  copy A
+```
+
+- both before and after copy, `a` contains "A". Good, that's to be expected.
+- after the copy, `c` contains "A". Good, thats to be expected.
+- `b` and `b2` ALWAYS contain "B", even though we copied "a.duckdb" to "b.duckdb". Weird.
+
+My assumption here is that as soon as we do the first `duckdb.connect("b.duckdb")`, that creates and caches a connection,
+and any subsequent `duckdb.connect("b.duckdb")` calls use that cached connection, instead of creating a new one. Thus, we are left with the stale value of "B", instead of picking up the fresh "A" value that is on-disk.
+
+This was very confusing to me. I had this code:
+```
+<more code up here>
+...
+connx = duckdb.connect(x)
+connx.execute("CHECKPOINT;")
+shutil.copy(x, y)
+conny = duckdb.connect(y)
+```
+but then when I looked at the values in `connx` and `conny`, they were different! After debugging for a while, I discovered that somewhere in `<more code up here>`, I had accidentally already called `duckdb.connect(y)`. So there is some spooky action at a distance going on: if I get rid of the pre-copy connect(), then it works as intended.
+
+I'm not sure if this is fully fixable though. For example `b` got it's file pulled out from underneath it! What should happen if you INSERT some more data and CHECKPOINT with it? Should it then clobber over connection `b2`'s view of the world?
+
+Perhaps less surprising behavior in my mind would be for `b2` to be the only valid connection now. If you try to do anything with `b`, it throws an error, because its underlying file was yanked out from under it. But then we still need to be able to detect if a file is modified underneath us, which might not be possible.
+
+Anyway, I just wanted to point this paper cut out. If there's nothing to do then feel free to close it out. Thank you!
+
+
+
+### OS:
+
+mac m1
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Nick Crews
+
+### Affiliation:
+
+Ship Creek Group
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

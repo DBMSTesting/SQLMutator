@@ -1,0 +1,122 @@
+ID: 56287
+Title: CTE scope bug
+Description:
+
+**Describe what's wrong**
+
+This may be CTE scope bug. Same sql run without errors in mysql8. 
+
+**Does it reproduce on recent release?**
+
+yes.
+
+**How to reproduce**
+
+*  ClickHouse server version 23.9.3 revision 54466.
+* Run the following sql:
+```
+CREATE TEMPORARY TABLE IF NOT EXISTS tmp_a
+(
+  k1 Int32,
+  k2 Int32,
+  d1 Int32,
+  d2 Int32
+) ENGINE = Memory;
+INSERT INTO tmp_a VALUES (1,2,3,4);
+INSERT INTO tmp_a VALUES (5,6,7,8);
+CREATE TEMPORARY TABLE IF NOT EXISTS tmp_b (
+  k1 Int32,
+  k2 Int32,
+  d0 Float64
+) ENGINE = Memory;
+INSERT INTO tmp_b VALUES (1,2,0.3);
+INSERT INTO tmp_b VALUES (5,6,0.4);
+select tb1.*,tb2.* from (
+        with tmp0 as (select k1,k2,d1 from tmp_a),
+        tmp_s as (select k1,k2,d0 from tmp_b),
+        tmp1 as (select tmp0.*,tmp_s.d0 from tmp0 left join tmp_s on tmp0.k1=tmp_s.k1 and tmp0.k2=tmp_s.k2)
+        select * from tmp1
+        ) as tb1 left join (
+        with tmp0 as (select k1,k2,d2 from tmp_a),
+        tmp_s as (select k1,k2,d0 from tmp_b),
+        tmp1 as (select tmp0.*,tmp_s.d0 from tmp0 left join tmp_s on tmp0.k1=tmp_s.k1 and tmp0.k2=tmp_s.k2)
+        select * from tmp1
+    ) as tb2 on tb1.k1=tb2.k1 and tb1.k2=tb2.k2;
+```
+get error messages:
+```
+SQL Error [47] [07000]: Code: 47. DB::Exception: Missing columns: 'd1' while processing query: 'WITH tmp0 AS (SELECT k1, k2, d2 FROM tmp_a), tmp_s AS (SELECT k1, k2, d0 FROM tmp_b), tmp1 AS (SELECT tmp0.*, tmp_s.d0 FROM tmp0 LEFT JOIN tmp_s ON (tmp0.k1 = tmp_s.k1) AND (tmp0.k2 = tmp_s.k2)) SELECT k1, k2, d1, d0 FROM tmp1', required columns: 'k1' 'k2' 'd1' 'd0' 'k1' 'k2' 'd1' 'd0'. (UNKNOWN_IDENTIFIER) (version 23.9.3.12 (official build))
+```
+
+**Expected behavior**
+
+* modify the sql to get expected result.
+*  `tmp0` change to `tmp01` in the first CTE.
+```
+CREATE TEMPORARY TABLE IF NOT EXISTS tmp_a
+(
+  k1 Int32,
+  k2 Int32,
+  d1 Int32,
+  d2 Int32
+) ENGINE = Memory;
+INSERT INTO tmp_a VALUES (1,2,3,4);
+INSERT INTO tmp_a VALUES (5,6,7,8);
+CREATE TEMPORARY TABLE IF NOT EXISTS tmp_b (
+  k1 Int32,
+  k2 Int32,
+  d0 Float64
+) ENGINE = Memory;
+INSERT INTO tmp_b VALUES (1,2,0.3);
+INSERT INTO tmp_b VALUES (5,6,0.4);
+
+select tb1.*,tb2.* from (
+        with tmp01 as (select k1,k2,d1 from tmp_a),
+        tmp_s as (select k1,k2,d0 from tmp_b),
+        tmp1 as (select tmp01.*,tmp_s.d0 from tmp01 left join tmp_s on tmp01.k1=tmp_s.k1 and tmp01.k2=tmp_s.k2)
+        select * from tmp1
+        ) as tb1 left join (
+        with tmp0 as (select k1,k2,d2 from tmp_a),
+        tmp_s as (select k1,k2,d0 from tmp_b),
+        tmp1 as (select tmp0.*,tmp_s.d0 from tmp0 left join tmp_s on tmp0.k1=tmp_s.k1 and tmp0.k2=tmp_s.k2)
+        select * from tmp1
+    ) as tb2 on tb1.k1=tb2.k1 and tb1.k2=tb2.k2;
+```
+result:
+```
+k1|k2|d1|d0 |tb2.k1|tb2.k2|d2|tb2.d0|
+--+--+--+---+------+------+--+------+
+ 1| 2| 3|0.3|     1|     2| 4|   0.3|
+ 5| 6| 7|0.4|     5|     6| 8|   0.4|
+```
+
+> test the sql in mysql8 [db-fiddle](https://www.db-fiddle.com/). Sql is the same except the create table.
+```
+CREATE TABLE tmp_a (
+  k1 INTEGER,
+  k2 INTEGER,
+  d1 INTEGER,
+  d2 INTEGER
+);
+INSERT INTO tmp_a VALUES (1,2,3,4);
+INSERT INTO tmp_a VALUES (5,6,7,8);
+CREATE TABLE tmp_b (
+  k1 INTEGER,
+  k2 INTEGER,
+  d0 DOUBLE
+);
+INSERT INTO tmp_b VALUES (1,2,0.3);
+INSERT INTO tmp_b VALUES (5,6,0.4);
+select tb1.*,tb2.* from (
+        with tmp0 as (select k1,k2,d1 from tmp_a),
+        tmp_s as (select k1,k2,d0 from tmp_b),
+        tmp1 as (select tmp0.*,tmp_s.d0 from tmp0 left join tmp_s on tmp0.k1=tmp_s.k1 and tmp0.k2=tmp_s.k2)
+        select * from tmp1
+        ) as tb1 left join (
+        with tmp0 as (select k1,k2,d2 from tmp_a),
+        tmp_s as (select k1,k2,d0 from tmp_b),
+        tmp1 as (select tmp0.*,tmp_s.d0 from tmp0 left join tmp_s on tmp0.k1=tmp_s.k1 and tmp0.k2=tmp_s.k2)
+        select * from tmp1
+    ) as tb2 on tb1.k1=tb2.k1 and tb1.k2=tb2.k2;
+```
+

@@ -1,0 +1,116 @@
+ID: 35336
+Title: Result of a column using `if` and a subquery changing when using `WHERE 1=1` as a filter
+Description:
+**Describe what's wrong**
+
+When building a query using `if` and a subquery as a column, the inclusion of a trivial `WHERE` modifies the column.
+
+**Does it reproduce on recent release?**
+
+Yes, reproduced with 22.2.3.5.
+
+**How to reproduce**
+
+1. `docker run --rm -it clickhouse/clickhouse-server:22.2.3.5`
+2. `clickhouse client`
+
+```sql
+CREATE TABLE IF NOT EXISTS flows
+(
+    Date Date,
+    TimeReceived DateTime,
+    SrcAS UInt32,
+    Bytes UInt64
+) ENGINE = MergeTree()
+PARTITION BY Date
+ORDER BY TimeReceived;
+
+INSERT INTO TABLE flows VALUES
+(toDate('2022-03-16 15:04:00'), toDateTime('2022-03-16 15:04:00'), 15169, 83948),
+(toDate('2022-03-16 15:04:00'), toDateTime('2022-03-16 15:04:00'), 12322, 98989),
+(toDate('2022-03-16 15:04:00'), toDateTime('2022-03-16 15:04:00'), 60068, 99990),
+(toDate('2022-03-16 15:04:00'), toDateTime('2022-03-16 15:04:00'), 15169, 89898),
+(toDate('2022-03-16 15:05:00'), toDateTime('2022-03-16 15:05:00'), 15169, 83948),
+(toDate('2022-03-16 15:05:00'), toDateTime('2022-03-16 15:05:00'), 15169, 89898),
+(toDate('2022-03-16 15:06:00'), toDateTime('2022-03-16 15:06:00'), 15169, 83948),
+(toDate('2022-03-16 15:07:00'), toDateTime('2022-03-16 15:07:00'), 15169, 89898),
+(toDate('2022-03-16 15:08:00'), toDateTime('2022-03-16 15:08:00'), 15169, 83948),
+(toDate('2022-03-16 15:09:00'), toDateTime('2022-03-16 15:09:00'), 15169, 89898),
+(toDate('2022-03-16 15:10:00'), toDateTime('2022-03-16 15:10:00'), 15169, 83948),
+(toDate('2022-03-16 15:11:00'), toDateTime('2022-03-16 15:11:00'), 15169, 89898);
+
+SELECT toStartOfInterval(toDateTime(TimeReceived), INTERVAL 20 second) AS TimeReceived,
+       if(SrcAS in (SELECT SrcAS FROM flows GROUP BY SrcAS ORDER BY SUM(Bytes) DESC LIMIT 10) , SrcAS, 33) AS SrcAS
+FROM flows
+WHERE 2 == 2
+```
+
+This yields:
+
+```
+┌────────TimeReceived─┬─SrcAS─┐
+│ 2022-03-16 15:04:00 │    33 │
+│ 2022-03-16 15:04:00 │    33 │
+│ 2022-03-16 15:04:00 │    33 │
+│ 2022-03-16 15:04:00 │    33 │
+│ 2022-03-16 15:05:00 │    33 │
+│ 2022-03-16 15:05:00 │    33 │
+│ 2022-03-16 15:06:00 │    33 │
+│ 2022-03-16 15:07:00 │    33 │
+│ 2022-03-16 15:08:00 │    33 │
+│ 2022-03-16 15:09:00 │    33 │
+│ 2022-03-16 15:10:00 │    33 │
+│ 2022-03-16 15:11:00 │    33 │
+└─────────────────────┴───────┘
+```
+
+**Expected behavior**
+
+Remove the `WHERE` condition and we get:
+
+```
+┌────────TimeReceived─┬─SrcAS─┐
+│ 2022-03-16 15:04:00 │ 15169 │
+│ 2022-03-16 15:04:00 │ 12322 │
+│ 2022-03-16 15:04:00 │ 60068 │
+│ 2022-03-16 15:04:00 │ 15169 │
+│ 2022-03-16 15:05:00 │ 15169 │
+│ 2022-03-16 15:05:00 │ 15169 │
+│ 2022-03-16 15:06:00 │ 15169 │
+│ 2022-03-16 15:07:00 │ 15169 │
+│ 2022-03-16 15:08:00 │ 15169 │
+│ 2022-03-16 15:09:00 │ 15169 │
+│ 2022-03-16 15:10:00 │ 15169 │
+│ 2022-03-16 15:11:00 │ 15169 │
+└─────────────────────┴───────┘
+```
+
+This would be the expected result.
+
+Removing the subquery also works:
+
+```sql
+SELECT toStartOfInterval(toDateTime(TimeReceived), INTERVAL 20 second) AS TimeReceived,
+       if(SrcAS in (15169, 12322) , SrcAS, 33) AS SrcAS
+FROM flows
+WHERE 2 == 2;
+```
+
+This gives:
+
+```
+┌────────TimeReceived─┬─SrcAS─┐
+│ 2022-03-16 15:04:00 │ 15169 │
+│ 2022-03-16 15:04:00 │ 12322 │
+│ 2022-03-16 15:04:00 │    33 │
+│ 2022-03-16 15:04:00 │ 15169 │
+│ 2022-03-16 15:05:00 │ 15169 │
+│ 2022-03-16 15:05:00 │ 15169 │
+│ 2022-03-16 15:06:00 │ 15169 │
+│ 2022-03-16 15:07:00 │ 15169 │
+│ 2022-03-16 15:08:00 │ 15169 │
+│ 2022-03-16 15:09:00 │ 15169 │
+│ 2022-03-16 15:10:00 │ 15169 │
+│ 2022-03-16 15:11:00 │ 15169 │
+└─────────────────────┴───────┘
+```

@@ -1,0 +1,148 @@
+ID: 7772
+Title: Bug in query SELECT WHERE optimiser
+Description:
+In short - on newer version (19.16.3.6,  19.15.2,  19.14.7.15) of clickhouse SELECT query return no rows. Last version that returns 1 row - is 19.13.6.51
+
+Clickhouse runs in docker image
+I have table 
+
+```
+CREATE TABLE abn.hit_sh
+(
+    `hitDate` Date DEFAULT toDate(time), 
+    `time` UInt32, 
+    `ip` UInt32, 
+    `fwrd` UInt32, 
+    `domainID` UInt32, 
+    `pageID` UInt32, 
+    `cookie` UInt64, 
+    `siteID` UInt32, 
+    `zoneID` UInt32, 
+    `poolID0` UInt32, 
+    `poolID1` UInt32, 
+    `poolID2` UInt32, 
+    `mediaID` UInt32, 
+    `campaignID` UInt32, 
+    `countryID` UInt8, 
+    `cityID` UInt32, 
+    `os` UInt8, 
+    `osVer` UInt8, 
+    `browser` UInt8, 
+    `brVer` UInt8, 
+    `status` UInt8, 
+    `bh` UInt8, 
+    `tz` UInt8, 
+    `vc` UInt32, 
+    `width` UInt16, 
+    `height` UInt16, 
+    `cw` UInt16, 
+    `ch` UInt16, 
+    `timeLoad` UInt16, 
+    `hc` UInt8, 
+    `refDomain` UInt32, 
+    `refPage` UInt32, 
+    `np` UInt8, 
+    `nm` UInt8, 
+    `price` UInt32, 
+    `duration` UInt16, 
+    `viewTime` UInt16, 
+    `lang1` UInt8, 
+    `lang2` UInt8, 
+    `mem` UInt8, 
+    `publisherID` UInt32, 
+    `advertiserID` UInt32, 
+    `formatID` UInt16, 
+    `typeID` UInt16
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/abnhitcl', '{replica}', hitDate, campaignID, 8192)
+```
+
+```
+SELECT version()
+
+┌─version()──┐
+│ 19.13.6.51 │
+
+localhost :) SELECT countryID,count() as views FROM abn.hit_sh WHERE hitDate>=toDate('2019-11-07') AND bitAnd(status,  0x10) AND zoneID IN (1339803993,1200739130,1317373562,2136862789,1301506478,1961629277) AND countryID=33 GROUP BY countryID
+
+SELECT
+    countryID,
+    count() AS views
+FROM abn.hit_sh
+WHERE (hitDate >= toDate('2019-11-07')) AND bitAnd(status, 16) AND (zoneID IN (1339803993, 1200739130, 1317373562, 2136862789, 1301506478, 1961629277)) AND (countryID = 33)
+GROUP BY countryID
+
+┌─countryID─┬───views─┐
+│        33 │ 1137136  │
+└───────────┴─────────┘
+```
+
+1 rows in set. Elapsed: 0.848 sec. Processed 195.77 million rows, 616.45 MB (230.91 million rows/s., 727.07 MB/s.)
+
+log
+
+```
+2019.11.14 14:59:53.548088 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Debug> executeQuery: (from 127.0.0.1:4704) SELECT countryID, count() AS views FROM abn.hit_sh WHERE (hitDate >= toDate('2019-11-07')) AND bitAnd(status, 16) AND (zoneID IN (1339803993, 1200739130, 1317373562, 2136862789, 1301506478, 1961629277)) AND (countryID = 33) GROUP BY countryID
+2019.11.14 14:59:53.548655 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Debug> InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "countryID = 33" moved to PREWHERE
+2019.11.14 14:59:53.549653 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Debug> abn.hit_sh (SelectExecutor): Key condition: unknown, unknown, and, unknown, and, unknown, and
+2019.11.14 14:59:53.549682 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Debug> abn.hit_sh (SelectExecutor): MinMax index condition: (column 0 in [18207, +inf)), unknown, and, unknown, and, unknown, and
+2019.11.14 14:59:53.549712 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Debug> abn.hit_sh (SelectExecutor): Selected 4 parts by date, 4 parts by key, 23990 marks to read from 4 ranges
+2019.11.14 14:59:53.549897 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> abn.hit_sh (SelectExecutor): Reading approx. 195785430 rows with 4 streams
+2019.11.14 14:59:53.549998 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.11.14 14:59:53.550261 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Debug> executeQuery: Query pipeline:
+Expression
+ Expression
+  ParallelAggregating
+   Expression × 4
+    Filter
+     MergeTreeThread
+
+2019.11.14 14:59:53.550400 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> ParallelAggregatingBlockInputStream: Aggregating
+2019.11.14 14:59:53.559321 [ 45 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> Aggregator: Aggregation method: key8
+2019.11.14 14:59:53.626947 [ 46 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> Aggregator: Aggregation method: key8
+2019.11.14 14:59:53.715370 [ 48 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> Aggregator: Aggregation method: key8
+2019.11.14 14:59:53.912377 [ 49 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> Aggregator: Aggregation method: key8
+2019.11.14 14:59:54.352016 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 325449 to 1 rows (from 0.310 MiB) in 0.802 sec. (406020.709 rows/sec., 0.387 MiB/sec.)
+2019.11.14 14:59:54.352074 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 219169 to 1 rows (from 0.209 MiB) in 0.802 sec. (273428.872 rows/sec., 0.261 MiB/sec.)
+2019.11.14 14:59:54.352089 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 207842 to 1 rows (from 0.198 MiB) in 0.802 sec. (259297.636 rows/sec., 0.247 MiB/sec.)
+2019.11.14 14:59:54.352106 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 384676 to 1 rows (from 0.367 MiB) in 0.802 sec. (479910.592 rows/sec., 0.458 MiB/sec.)
+2019.11.14 14:59:54.352120 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> ParallelAggregatingBlockInputStream: Total aggregated. 1137136 rows (from 1.084 MiB) in 0.802 sec. (1418657.809 rows/sec., 1.353 MiB/sec.)
+2019.11.14 14:59:54.352133 [ 47 ] {25192297-3388-44b0-bcf4-098443c047eb} <Trace> Aggregator: Merging aggregated data
+2019.11.14 14:59:54.352385 [ 44 ] {25192297-3388-44b0-bcf4-098443c047eb} <Information> executeQuery: Read 195774954 rows, 587.89 MiB in 0.804 sec., 243433472 rows/sec., 731.01 MiB/sec.
+```
+
+all newer versions returns nothing on this query
+
+```
+> 2019.11.14 11:18:24.612907 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> executeQuery: (from 127.0.0.1:49188) SELECT countryID, count() AS views FROM abn.hit_sh WHERE (hitDate >= toDate('2019-11-07')) AND bitAnd(status, 16) AND (zoneID IN (1339803993, 1200739130, 1317373562, 2136862789, 1301506478, 1961629277)) AND (countryID = 33) GROUP BY countryID
+> 2019.11.14 11:18:24.613826 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "countryID = 33" moved to PREWHERE
+> 2019.11.14 11:18:24.614512 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> abn.hit_sh (SelectExecutor): Key condition: unknown, unknown, and, unknown, and, unknown, and
+> 2019.11.14 11:18:24.614539 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> abn.hit_sh (SelectExecutor): MinMax index condition: (column 0 in [18207, +inf)), unknown, and, unknown, and, unknown, and
+> 2019.11.14 11:18:24.614567 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> abn.hit_sh (SelectExecutor): Selected 4 parts by date, 4 parts by key, 23990 marks to read from 4 ranges
+> 2019.11.14 11:18:24.614773 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> abn.hit_sh (SelectExecutor): Reading approx. 195785430 rows with 4 streams
+> 2019.11.14 11:18:24.614884 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+> 2019.11.14 11:18:24.615207 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> executeQuery: Query pipeline:
+> Expression
+>  Expression
+>   ParallelAggregating
+>    Expression × 4
+>     Filter
+>      MergeTreeThread
+> 
+> 2019.11.14 11:18:24.615361 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> ParallelAggregatingBlockInputStream: Aggregating
+> 2019.11.14 11:18:25.412154 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 0 to 0 rows (from 0.000 MiB) in 0.797 sec. (0.000 rows/sec., 0.000 MiB/sec.)
+> 2019.11.14 11:18:25.412234 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 0 to 0 rows (from 0.000 MiB) in 0.797 sec. (0.000 rows/sec., 0.000 MiB/sec.)
+> 2019.11.14 11:18:25.412273 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 0 to 0 rows (from 0.000 MiB) in 0.797 sec. (0.000 rows/sec., 0.000 MiB/sec.)
+> 2019.11.14 11:18:25.412304 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> ParallelAggregatingBlockInputStream: Aggregated. 0 to 0 rows (from 0.000 MiB) in 0.797 sec. (0.000 rows/sec., 0.000 MiB/sec.)
+> 2019.11.14 11:18:25.412334 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> ParallelAggregatingBlockInputStream: Total aggregated. 0 rows (from 0.000 MiB) in 0.797 sec. (0.000 rows/sec., 0.000 MiB/sec.)
+> 2019.11.14 11:18:25.412359 [ 46 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Trace> Aggregator: Merging aggregated data
+> 2019.11.14 11:18:25.412619 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Information> executeQuery: Read 195774954 rows, 587.89 MiB in 0.800 sec., 244826572 rows/sec., 735.19 MiB/sec.
+> 2019.11.14 11:18:25.412666 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> MemoryTracker: Peak memory usage (for query): 16.51 MiB.
+> 2019.11.14 11:18:25.412802 [ 50 ] {aee6a4b9-dee9-4b5d-9167-554474bdcb3d} <Debug> MemoryTracker: Peak memory usage (total): 16.51 MiB.
+```
+
+I try 
+19.16.3.6 
+19.15.2
+19.14.7.15
+All returns empty set on same data

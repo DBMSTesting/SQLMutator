@@ -1,0 +1,104 @@
+ID: 7226
+Title: Join on index has incorrect range and will contain NULL value
+Description:
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+Make a simple join test which has NULL value with this file. [IndexTest.txt](https://github.com/pingcap/tidb/files/2248750/IndexTest.txt)
+```sql
+select a.id_dt, a.tp_decimal from full_data_type_table_idx a join full_data_type_table_idx b on a.tp_decimal = b.tp_decimal order by a.tp_decimal;
+```
+
+2. What did you expect to see?
+
+
+```sql
+mysql> select a.id_dt, a.tp_decimal from full_data_type_table_idx a join full_data_type_table_idx b on a.tp_decimal = b.tp_decimal order by a.tp_decimal;
++-------+------------+
+| id_dt | tp_decimal |
++-------+------------+
+|    -1 |          0 |
+|    -1 |          0 |
+|     0 |          0 |
+........
+|    98 |         98 |
+|    99 |         99 |
+|   100 |        100 |
++-------+------------+
+110 rows in set (0.02 sec)
+```
+
+
+3. What did you see instead?
+```sql
+mysql> select a.id_dt, a.tp_decimal from full_data_type_table_idx a join full_data_type_table_idx b on a.tp_decimal = b.tp_decimal order by a.tp_decimal;
++-------+------------+
+| id_dt | tp_decimal |
++-------+------------+
+| -1000 |       NULL |
+|    -1 |          0 |
+|    -1 |          0 |
+|     0 |          0 |
+..........
+|    98 |         98 |
+|    99 |         99 |
+|   100 |        100 |
++-------+------------+
+111 rows in set (0.02 sec)
+```
+
+```sql
+mysql> explain select a.id_dt, a.tp_decimal from full_data_type_table_idx a join full_data_type_table_idx b on a.tp_decimal = b.tp_decimal order by a.tp_decimal;
++--------------------------+--------+------+---------------------------------------------------------------+
+| id                       | count  | task | operator info                                                 |
++--------------------------+--------+------+---------------------------------------------------------------+
+| Projection_910           | 128.75 | root | a.id_dt, a.tp_decimal                                         |
+| └─MergeJoin_911          | 128.75 | root | inner join, left key:a.tp_decimal, right key:b.tp_decimal     |
+|   ├─IndexReader_44       | 103.00 | root | index:IndexScan_43                                            |
+|   │ └─IndexScan_43       | 103.00 | cop  | table:a, index:tp_decimal, range:[NULL,+inf], keep order:true |
+|   └─IndexReader_481      | 103.00 | root | index:IndexScan_480                                           |
+|     └─IndexScan_480      | 103.00 | cop  | table:b, index:tp_decimal, range:[NULL,+inf], keep order:true |
++--------------------------+--------+------+---------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+You can see that the range is [NULL, +inf]
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+Latest master build. It also **AFFECTS** release-2.0 branch 
+
+
+
+In addition, Hash join is correct. @winoros 
+```sql
+mysql> select /*+ TIDB_HJ(a, b) */ a.id_dt, a.tp_decimal from full_data_type_table_idx a use index(idx_tp_decimal) join full_data_type_table_idx b use index(idx_tp_decimal) on a.tp_decimal = b.tp_decimal order by a.tp_decimal;
++-------+------------+
+| id_dt | tp_decimal |
++-------+------------+
+|    -1 |          0 |
+|    -1 |          0 |
+|     0 |          0 |
+........
+|    98 |         98 |
+|    99 |         99 |
+|   100 |        100 |
++-------+------------+
+110 rows in set (0.02 sec)
+
+mysql> explain select /*+ TIDB_HJ(a, b) */ a.id_dt, a.tp_decimal from full_data_type_table_idx a use index(idx_tp_decimal) join full_data_type_table_idx b use index(idx_tp_decimal) on a.tp_decimal = b.tp_decimal order by a.tp_decimal;
++----------------------------+--------+------+--------------------------------------------------------------------------+
+| id                         | count  | task | operator info                                                            |
++----------------------------+--------+------+--------------------------------------------------------------------------+
+| Sort_6                     | 128.75 | root | a.tp_decimal:asc                                                         |
+| └─Projection_8             | 128.75 | root | a.id_dt, a.tp_decimal                                                    |
+|   └─HashLeftJoin_16        | 128.75 | root | inner join, inner:IndexReader_21, equal:[eq(a.tp_decimal, b.tp_decimal)] |
+|     ├─IndexReader_19       | 103.00 | root | index:IndexScan_18                                                       |
+|     │ └─IndexScan_18       | 103.00 | cop  | table:a, index:tp_decimal, range:[NULL,+inf], keep order:false           |
+|     └─IndexReader_21       | 103.00 | root | index:IndexScan_20                                                       |
+|       └─IndexScan_20       | 103.00 | cop  | table:b, index:tp_decimal, range:[NULL,+inf], keep order:false           |
++----------------------------+--------+------+--------------------------------------------------------------------------+
+7 rows in set (0.01 sec)
+```

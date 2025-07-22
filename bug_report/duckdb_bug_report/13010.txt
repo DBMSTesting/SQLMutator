@@ -1,0 +1,18 @@
+ID: 13010
+Title: Fix parallel creation and destruction of instances through the `DBInstanceCache`
+Description:
+Fix parallel creation and destruction of instances through the `DBInstanceCache`
+
+The `DBInstanceCache` (introduced in https://github.com/duckdb/duckdb/pull/4414) performs de-duplication of database connections that are opened towards the same database file on disk. This is used in various clients (e.g. the Python client and the JDBC/ODBC clients).
+
+The `DBInstanceCache` contains weak pointers to database instances. As a result, when the database object is destroyed, the entry is automatically removed from the database instance cache.
+
+One issue with this approach is that the instance being destroyed (and thus being removed from the database instance cache) is separate from the full destruction of the instance. As a result, when the `DBInstanceCache` is used in parallel, it is possible for a database entry to be removed from the cache before the destruction has fully completed. When used in parallel, this can lead to a situation where we would try to open a new database, even though the old one has not fully closed. This can then cause issues on Windows where we would run into file locking issues as the old file handle would still be open.
+
+This PR fixes this by, instead of storing a `weak_ptr` directly to the `DatabaseInstance`, storing a `weak_ptr` to a `DatabaseCacheEntry`. The `DatabaseInstance` itself holds the `shared_ptr` to the `DatabaseCacheEntry`. When the database instance is destroyed - the `DatabaseCacheEntry` is explicitly destroyed only at the very end after the entire shutdown process has completed. In `DBInstanceCache::GetInstanceInternal` - we can then detect the scenario where a database instance is *in process* of being destroyed, as we can observe that the weak pointer to the `DatabaseInstance` is invalid, while the pointer to the `DatabaseCacheEntry` is still valid. In this scenario, we then do a busy loop that waits until the `DatabaseCacheEntry` is destroyed which ensures we wait until the database instance has fully closed.
+
+#### Python Client
+
+In the Python client this race condition was a bit more egregious as the individual `GetInstance` and `CreateInstance` methods were used, instead of the combined `GetOrCreateInstance` that safely performs both operations behind a lock. The reason for this behavior was that the Python client needed to register a number of methods on instance creation. We rewrite the Python client to use `GetOrCreateInstance` by introducing a new `on_create` callback to the `DBInstanceCache`. This is then used by the Python client to register the necessary functions.
+
+We should likely deprecate the public `GetInstance`/`CreateInstance` methods entirely.

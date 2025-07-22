@@ -1,0 +1,82 @@
+ID: 14277
+Title: Can't create DB with RabbitMQ + Protobuf
+Description:
+**Describe the bug**
+I got errors in logs: "The format Protobuf requires a schema", but schema is specified in mat.view. 
+
+**How to reproduce**
+ClickHouse server version 20.6.4 revision 54436.
+
+Protobuf file (test.proto). Put in /var/lib/clickhouse/format_schemas to each server in cluster:
+
+```
+syntax = "proto3";
+
+package testproto;
+
+message TestPayload {
+  string event_date = 1;
+  uint32 company_id = 2;
+  uint32 product_id = 3;
+}
+```
+
+1) Create cluster test_cluster. I'm not sure that's necessary.
+
+2) Create DB: `CREATE DATABASE test_db ON CLUSTER test_cluster;`
+
+3) Create table for data from queue:
+`CREATE TABLE IF NOT EXISTS test_db.test_table ON CLUSTER test_cluster (
+    event_date           Date DEFAULT toDate(now()),
+    company_id           UInt32,
+    product_id           UInt32
+) ENGINE=ReplicatedMergeTree(
+    '/clickhouse/tables/{shard}/events_shard',
+    '{replica}',
+     event_date,
+     (company_id),
+     8192
+);`
+
+4) Create RabbitMQ queue table:
+`CREATE TABLE IF NOT EXISTS test_db.queue ON CLUSTER test_cluster (
+    event_date           Date DEFAULT toDate(now()),
+    company_id           UInt32,
+    product_id           UInt32
+) ENGINE=RabbitMQ SETTINGS
+    rabbitmq_host_port = 'rabbitmq:5672',
+    rabbitmq_exchange_name = 'exchange_test',
+    rabbitmq_format = 'Protobuf',
+    rabbitmq_num_consumers = 2;`
+
+5) Create consumer:
+`CREATE MATERIALIZED VIEW consumer ON CLUSTER test_cluster TO test_db.test_table
+AS SELECT event_date, company_id, product_id FROM test_db.queue SETTINGS format_schema='test.proto:TestPayload';`
+
+And I got error in logs: "The format Protobuf requires a schema", but I specified schema, when I created mat.view.
+
+**Expected behavior**
+A clear and concise description of what you expected to happen.
+
+**Error message and/or stacktrace**
+```
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x12400be0 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xa2433fd in /usr/bin/clickhouse
+2. ? @ 0xfc76c01 in /usr/bin/clickhouse
+3. ? @ 0xfd14f35 in /usr/bin/clickhouse
+4. DB::FormatFactory::getInputFormat(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ReadBuffer&, DB::Block const&, DB::Context const&, unsigned long, std::__1::function<void ()>) const @ 0xfb645b0 in /usr/bin/clickhouse
+5. DB::RabbitMQBlockInputStream::readImpl() @ 0xf81cd69 in /usr/bin/clickhouse
+6. DB::IBlockInputStream::read() @ 0xede92cd in /usr/bin/clickhouse
+7. DB::ConvertingBlockInputStream::readImpl() @ 0xede3b50 in /usr/bin/clickhouse
+8. DB::IBlockInputStream::read() @ 0xede92cd in /usr/bin/clickhouse
+9. DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::loop(unsigned long) @ 0xd0ab023 in /usr/bin/clickhouse
+10. DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::thread(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long) @ 0xd0acb54 in /usr/bin/clickhouse
+11. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*)(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*, std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long&>(void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*&&)(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*&&, std::__1::shared_ptr<DB::ThreadGroupStatus>&&, unsigned long&)::'lambda'()::operator()() const @ 0xd0ad4cb in /usr/bin/clickhouse
+12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xa271f67 in /usr/bin/clickhouse
+13. ? @ 0xa2704a3 in /usr/bin/clickhouse
+14. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+15. __clone @ 0x122103 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 20.6.4.44 (official build))
+2020.08.31 15:10:23.743477 [ 57 ] {} <Error> void DB::StorageRabbitMQ::threadFunc(): Code: 36, e.displayText() = DB::Exception: The format Protobuf requires a schema. The corresponding setting should be set, Stack trace (when copying this message, always include the lines below):
+
+```

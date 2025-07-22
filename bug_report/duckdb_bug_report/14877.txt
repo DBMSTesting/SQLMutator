@@ -1,0 +1,120 @@
+ID: 14877
+Title: S3 (COS) multipart upload neither (over)write the file or closes the file handle when using gzip compression
+Description:
+### What happens?
+
+Hi,
+
+* CSV file, 1.7 GB size (compressed gzip)
+* Uploading into IBM COS (S3)
+* Smaller files (with `=auto`) work without issues.
+
+When using the option `USE_TMP_FILE` either explicitly or via `auto` and having a large-enough file, following issues occur:
+1. The file is uploaded within 6 minutes, but then another ~14+ minutes pass where the multi-part upload idles without closing. This is reproduceable.
+2.  The multipart upload is not closed.
+3. The file is not written, even after duckDB says the statement finished successfully.
+4. I do not see any `TMP` file while observing the multipart upload, so the premise of `USE_TMP_FILE` seems not fulfilled
+5. if a file was present, it is not overwritten.
+
+important: on smaller files, even with `USE_TMP_FILE` enabled, everything works as expected.
+
+When using `=auto`, sometimes the overwrite works and the idle time is gone. I'm assuming in such cases, the tmp file is not used. I cannot exactly tell why it is sometimes used and sometimes not.
+
+When disabling the tmp file, everything works as expected:
+1. the file upload finishes within 6 minutes
+2. the multipart upload is closed
+3. existing files are overwritten, new files created
+
+### To Reproduce
+
+from example: https://duckdb.org/docs/guides/snippets/create_synthetic_data.html
+
+```python
+import duckdb
+
+from duckdb.typing import *
+from faker import Faker
+
+fake = Faker()
+
+def random_short_text():
+    return fake.text(max_nb_chars=20)
+
+con = duckdb.connect()
+con.create_function("random_short_text", random_short_text, [], VARCHAR, type="native", side_effects=True)
+
+res = con.sql("""
+CREATE TABLE DUCKDB_TABLE_NAME AS
+                 SELECT
+                    random_short_text() AS short,
+                    random_short_text() AS short
+                 FROM generate_series(1, 5) s(i)
+                 """)
+```
+
+I'm unsure how big it needs to be, probably at least 76.5 MiB, as that is the max size for a single part in COS.
+I've used 1.7 GB of real data, but the structure is very similar.
+
+```sql
+COPY (
+    SELECT ALL
+    	TRIM("COL1", concat(' ', chr(9), chr(10), chr(13))) AS "COL1",
+	IF(TRIM("COL2", concat(' ', chr(9), chr(10), chr(13))) != '', TRIM("COL2", concat(' ', chr(9), chr(10), chr(13))), null) AS "COL2"
+    FROM
+        "DUCKDB_TABLE_NAME"
+) TO
+    's3://--iz-bucket-name--/COS_BIG_TABLE.csv'
+    (
+        FORMAT CSV,
+        HEADER false,
+        DELIMITER '|',
+        ESCAPE '^',
+        QUOTE '"',
+        DATEFORMAT '%Y-%m-%d',
+        TIMESTAMPFORMAT '%Y-%m-%d %H:%M:%S.%f',
+        COMPRESSION 'gzip',
+        NULLSTR 'NULL',
+		USE_TMP_FILE true,        
+       FORCE_QUOTE("COL1","COL2")
+    )
+```
+
+### OS:
+
+Mac
+
+### DuckDB Version:
+
+v1.1.3
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Niels Korschinsky
+
+### Affiliation:
+
+IBM
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot easily share my data sets due to their large size
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

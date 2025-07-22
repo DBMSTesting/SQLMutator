@@ -1,0 +1,90 @@
+ID: 9514
+Title: Clickhouse-copier does not copy all data completely
+Description:
+Hello! I have a problem with a clickhouse-copier. When copying data between tables inside one database only partitions for 13 days are copied (Source table size is one month) and after copying is complete, the number of records in the tables is always different. Tables have same structure but the new one contains the TTL parameter. 
+There is no difference if a new table already exists or the copier creates it, anyway it copies only last 13 days. 
+I've tried to use different TTL periods - same result.
+
+CH version: 20.1.2.4 (official build).
+
+This is my task for copier:
+```
+<yandex>
+    <remote_servers>
+        <source_cluster>
+            <shard>
+                <internal_replication>false</internal_replication>
+                    <replica>
+                        <host>10.1.1.1</host>
+                        <port>9000</port>
+                    </replica>
+            </shard>
+            <shard>
+                <internal_replication>false</internal_replication>
+                    <replica>
+                        <host>10.1.1.2</host>
+                        <port>9000</port>
+                    </replica>
+            </shard>
+            <shard>
+                <internal_replication>false</internal_replication>
+                    <replica>
+                        <host>10.1.1.3</host>
+                        <port>9000</port>
+                    </replica>
+            </shard>
+        </source_cluster>
+    </remote_servers>
+    <max_workers>2</max_workers>
+    <settings_pull>
+        <readonly>1</readonly>
+    </settings_pull>
+    <settings_push>
+        <readonly>0</readonly>
+    </settings_push>
+    <settings>
+        <connect_timeout>3</connect_timeout>
+        <insert_distributed_sync>1</insert_distributed_sync>
+    </settings>
+    <tables>
+        <table_hits>
+            <cluster_pull>source_cluster</cluster_pull>
+            <database_pull>database</database_pull>
+            <table_pull>stat_old</table_pull>
+
+            <cluster_push>source_cluster</cluster_push>
+            <database_push>database</database_push>
+            <table_push>stat_rpl</table_push>
+            <sharding_key>cityHash64(programme_id, sid)</sharding_key>
+            <engine>
+              ENGINE = ReplicatedMergeTree('/clickhouse/tables/database/{shard}/stat_rpl_ttl', '{replica}') 
+              PARTITION BY mdate ORDER BY mdate TTL mdate + INTERVAL 1 MONTH TO VOLUME 'old_data_volume' 
+              SETTINGS storage_policy = 'main_policy';
+            </engine>
+        </table_hits>
+    </tables>
+</yandex>
+```
+Logs:
+
+3 times (for each node):
+```
+ClusterCopier: There are 30 destination partitions in shard N1 (having a replica 10.1.1.1:9000, pull table database.stat_old of cluster source_cluster)
+ClusterCopier: Will copy 30 partitions from shard N1 (having a replica 10.1.1.1:9000, pull table database.stat_old of cluster source_cluster)
+```
+
+`ClusterCopier: Processing partition '2020-02-27' for the whole cluster`
+and 3 times (for each node):
+```
+ClusterCopier: Processing /clickhouse/database/tables/source_cluster.database.stat_rpl/%272020%2D02%2D27%27/shards/1
+ClusterCopier: Partition '2020-02-27' appears to be clean
+ClusterCopier: Task /clickhouse/database/tables/source_cluster.database.stat_rpl/%272020%2D02%2D27%27/shards/1 has been successfully executed by zookeeper01#20200228182900_14771
+and finally:
+ClusterCopier: Check that all shards processed partition '2020-02-27' successfully
+ClusterCopier: Partition '2020-02-27' is copied successfully
+ClusterCopier: It took 1.04 seconds to copy partition '2020-02-27': 0.00 B uncompressed bytes, 0.00 rows and 0 source
+```
+It copies all 30 partitions this way, but after job finishes I see only 13 partitions in CH data dir.
+
+It would be great if someone already faced with the same problem or could help me.
+Thank you.

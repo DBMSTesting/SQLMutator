@@ -1,0 +1,119 @@
+ID: 17793
+Title: P1-[4.0-bug-hunting]-[AutoRandom Key]-auto_random is not true random, exhausts quickly and non recoverable
+Description:
+Bug Hunter issue tidb-challenge-program/bug-hunting-issue#30
+
+---
+
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. What did you do?
+
+Auto_random is not a true random value, but an auto_increment based on shard_bits. The lost numbers in the sequence are never reused, and the docs don't explain that it could lead to values being exhausted quickly.
+
+This is important because an exhausted space is non-recoverable by an `ALTER TABLE`:
+
+```
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+ id tinyint not null primary key auto_random,
+ pad varbinary(10) not null
+);
+ALTER TABLE t1 MODIFY id BIGINT NOT NULL auto_random;
+..
+
+mysql> ALTER TABLE t1 MODIFY id BIGINT NOT NULL auto_random;
+ERROR 8216 (HY000): Invalid auto random: adding/dropping/modifying auto_random is not supported
+```
+
+This differs from auto_increment which is extendable online:
+
+```
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+ id tinyint not null primary key auto_increment,
+ pad varbinary(10) not null
+);
+ALTER TABLE t1 MODIFY id BIGINT NOT NULL auto_increment;
+
+..
+
+
+mysql> ALTER TABLE t1 MODIFY id BIGINT NOT NULL auto_increment;
+Query OK, 0 rows affected (0.07 sec)
+```
+
+### 2. What did you expect to see?
+
+Because I am not modifying the auto_random property, the `ALTER TABLE` to change the datatype should be successful.
+
+Potentially `auto_random` should also be disabled on types except `BIGINT`, since it doesn't have a practical use on smaller data types.
+
+### 3. What did you see instead?
+
+Consider the following test case where values can be exhausted quickly:
+
+```
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+ id tinyint not null primary key auto_random,
+ pad varbinary(10) not null
+);
+
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10));
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10));
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10));
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10)); # fails
+SELECT * FROM t1;
+
+..
+
+Output:
+
+mysql> INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10)); # fails
+ERROR 8059 (HY000): Failed to read auto-random value from storage engine
+mysql> SELECT * FROM t1;
++-----+------------------------+
+| id  | pad                    |
++-----+------------------------+
+|  11 | 0x8CCC989CCC68A2FAB576 |
+|  30 | 0x827AAC9F71A9A697C311 |
+| 121 | 0xFD869ED6745A75864B2E |
++-----+------------------------+
+3 rows in set (0.00 sec)
+
+```
+
+Because the type can not be changed and the sequence can not be reset, there is also a potential denial of service. Here is another example (auto_increment has the limitation too, but supports change datatype online to fix it):
+
+```
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+ id int not null primary key auto_random,
+ pad varbinary(10) not null
+);
+
+INSERT INTO t1 (id, pad) VALUES (2147483647, RANDOM_BYTES(10));
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10)); # fails
+DELETE FROM t1 WHERE id = 2147483647;
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10)); # still fails
+ALTER TABLE t1 AUTO_INCREMENT=1;
+INSERT INTO t1 (pad) VALUES (RANDOM_BYTES(10)); # still fails
+```
+
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+```
+mysql> SELECT tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-beta.2-290-ga0c740784
+Git Commit Hash: a0c7407846fbc84f939afbc091f2db54f48c1bfa
+Git Branch: master
+UTC Build Time: 2020-04-17 04:04:45
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

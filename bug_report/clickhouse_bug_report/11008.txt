@@ -1,0 +1,231 @@
+ID: 11008
+Title: Default database is not used for IN/JOIN subqueries without GLOBAL
+Description:
+### Setup
+
+This is my cluster
+
+```
+c1088cdf0644 :) select * from system.clusters
+
+SELECT *
+FROM system.clusters
+
+┌─cluster─┬─shard_num─┬─shard_weight─┬─replica_num─┬─host_name────┬─host_address──┬─port─┬─is_local─┬─user────┬─default_database─┬─errors_count─┬─estimated_recovery_time─┐
+│ test    │         1 │            1 │           1 │ clickhouse-1 │ 192.168.176.4 │ 9000 │        1 │ default │                  │            0 │                       0 │
+│ test    │         2 │            1 │           1 │ clickhouse-2 │ 192.168.176.3 │ 9000 │        0 │ default │                  │            0 │                       0 │
+└─────────┴───────────┴──────────────┴─────────────┴──────────────┴───────────────┴──────┴──────────┴─────────┴──────────────────┴──────────────┴─────────────────────────┘
+
+2 rows in set. Elapsed: 0.012 sec. 
+```
+
+And this is my schema
+
+```sql
+CREATE DATABASE db1 ON CLUSTER test;
+
+CREATE TABLE db1.t1_sharded ON CLUSTER test (date Date, region String, keyword_hash UInt64, url_hash UInt64) ENGINE=Memory;
+CREATE TABLE db1.t1 ON CLUSTER test AS db1.t1_sharded ENGINE=Distributed('test', 'db1', t1_sharded);
+
+CREATE TABLE db1.t2_sharded ON CLUSTER test (date Date, region String, keyword_hash UInt64, url_hash UInt64) ENGINE=Memory;
+CREATE TABLE db1.t2 ON CLUSTER test AS db1.t2_sharded ENGINE=Distributed('test', 'db1', t2_sharded);
+```
+
+### Queries to reproduce
+
+IN and JOIN queries don't use default database passed via clickhouse-client (notice the `-d db1` argument):
+
+```
+root@5a9d3bca4c90:/# clickhouse-client -h clickhouse-1 -d db1
+ClickHouse client version 20.4.2.9 (official build).
+Connecting to database db1 at clickhouse-1:9000 as user default.
+Connected to ClickHouse server version 20.4.2 revision 54434.
+
+c1088cdf0644 :) SELECT DISTINCT url_hash FROM t1 any left join t2_sharded using url_hash
+
+SELECT DISTINCT url_hash
+FROM t1
+ANY LEFT JOIN t2_sharded USING (url_hash)
+
+→ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) Received exception from server (version 20.4.2):
+Code: 60. DB::Exception: Received from clickhouse-1:9000. DB::Exception: Received from clickhouse-2:9000. DB::Exception: Table default.t2_sharded doesn't exist.. 
+
+0 rows in set. Elapsed: 0.113 sec. 
+```
+```
+root@5a9d3bca4c90:/# clickhouse-client -h clickhouse-1 -d db1
+ClickHouse client version 20.4.2.9 (official build).
+Connecting to database db1 at clickhouse-1:9000 as user default.
+Connected to ClickHouse server version 20.4.2 revision 54434.
+
+c1088cdf0644 :) SELECT DISTINCT url_hash
+:-] FROM t1
+:-] WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq') AND (keyword_hash IN 
+:-] (
+:-]     SELECT DISTINCT keyword_hash
+:-]     FROM t2_sharded
+:-]     WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq')
+:-] ))
+
+SELECT DISTINCT url_hash
+FROM t1
+WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq') AND (keyword_hash IN 
+(
+    SELECT DISTINCT keyword_hash
+    FROM t2_sharded
+    WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq')
+))
+
+→ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) Received exception from server (version 20.4.2):
+Code: 60. DB::Exception: Received from clickhouse-1:9000. DB::Exception: Received from clickhouse-2:9000. DB::Exception: Table default.t2_sharded doesn't exist.. 
+
+0 rows in set. Elapsed: 0.113 sec. 
+```
+
+Amusingly, when used with `GLOBAL` it works:
+
+```
+root@5a9d3bca4c90:/# clickhouse-client -h clickhouse-1 -d db1
+ClickHouse client version 20.4.2.9 (official build).
+Connecting to database db1 at clickhouse-1:9000 as user default.
+Connected to ClickHouse server version 20.4.2 revision 54434.
+
+c1088cdf0644 :) SELECT DISTINCT url_hash
+:-] FROM t1
+:-] WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq') AND (keyword_hash GLOBAL IN 
+:-] (
+:-]     SELECT DISTINCT keyword_hash
+:-]     FROM t2_sharded
+:-]     WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq')
+:-] ))
+
+SELECT DISTINCT url_hash
+FROM t1
+WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq') AND (keyword_hash GLOBAL IN 
+(
+    SELECT DISTINCT keyword_hash
+    FROM t2_sharded
+    WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq')
+))
+
+Ok.
+
+0 rows in set. Elapsed: 0.020 sec. 
+```
+```
+root@5a9d3bca4c90:/# clickhouse-client -h clickhouse-1 -d db1
+ClickHouse client version 20.4.2.9 (official build).
+Connecting to database db1 at clickhouse-1:9000 as user default.
+Connected to ClickHouse server version 20.4.2 revision 54434.
+
+c1088cdf0644 :) SELECT DISTINCT url_hash FROM t1 GLOBAL any left join t2_sharded using url_hash
+
+SELECT DISTINCT url_hash
+FROM t1
+GLOBAL ANY LEFT JOIN t2_sharded USING (url_hash)
+
+Ok.
+
+0 rows in set. Elapsed: 0.015 sec. 
+```
+
+### Stack traces
+
+Stack trace for IN query
+
+```
+2020.05.18 12:36:26.470583 [ 63 ] {} <Trace> TCPHandlerFactory: TCP Request. Address: 192.168.176.4:55216
+2020.05.18 12:36:26.470853 [ 63 ] {} <Debug> TCPHandler: Connected ClickHouse server version 20.4.0, revision: 54434, user: default.
+2020.05.18 12:36:26.473514 [ 63 ] {61ad157e-58c3-42b7-a0bd-df579328558b} <Debug> executeQuery: (from 192.168.176.4:55216, initial_query_id: 54025fbb-1821-41fd-b908-b79ee6042efc) SELECT DISTINCT url_hash FROM db1.t1_sharded WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq') AND (keyword_hash IN ((SELECT DISTINCT keyword_hash FROM t2_sharded WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq')) AS _subquery6))
+2020.05.18 12:36:26.476159 [ 63 ] {61ad157e-58c3-42b7-a0bd-df579328558b} <Error> executeQuery: Code: 60, e.displayText() = DB::Exception: Table default.t2_sharded doesn't exist. (version 20.4.2.9 (official build)) (from 192.168.176.4:55216) (in query: SELECT DISTINCT url_hash FROM db1.t1_sharded WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq') AND (keyword_hash IN ((SELECT DISTINCT keyword_hash FROM t2_sharded WHERE (1 = 1) AND (date = '2020-05-01') AND (region = 'qq')) AS _subquery6))), Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x10406ef0 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8ff88ad in /usr/bin/clickhouse
+2. DB::DatabaseCatalog::getTableImpl(DB::StorageID const&, std::__1::optional<DB::Exception>*) const @ 0xd002330 in /usr/bin/clickhouse
+3. DB::DatabaseCatalog::getTable(DB::StorageID const&) const @ 0xd00254e in /usr/bin/clickhouse
+4. DB::JoinedTables::getLeftTableStorage() @ 0xd43c22e in /usr/bin/clickhouse
+5. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd228a63 in /usr/bin/clickhouse
+6. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd229939 in /usr/bin/clickhouse
+7. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd3fa361 in /usr/bin/clickhouse
+8. DB::interpretSubquery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::SelectQueryOptions const&) @ 0xd54a5b3 in /usr/bin/clickhouse
+9. DB::interpretSubquery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, unsigned long, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd54b984 in /usr/bin/clickhouse
+10. DB::ActionsMatcher::makeSet(DB::ASTFunction const&, DB::ActionsMatcher::Data&, bool) @ 0xd3d2a5d in /usr/bin/clickhouse
+11. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xd3d34e2 in /usr/bin/clickhouse
+12. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0xd3d3702 in /usr/bin/clickhouse
+13. ? @ 0xd3b5799 in /usr/bin/clickhouse
+14. DB::SelectQueryExpressionAnalyzer::appendWhere(DB::ExpressionActionsChain&, bool) @ 0xd3b65da in /usr/bin/clickhouse
+15. DB::ExpressionAnalysisResult::ExpressionAnalysisResult(DB::SelectQueryExpressionAnalyzer&, bool, bool, bool, std::__1::shared_ptr<DB::FilterInfo> const&, DB::Block const&) @ 0xd3be6dd in /usr/bin/clickhouse
+16. DB::InterpreterSelectQuery::getSampleBlockImpl(bool) @ 0xd225fa3 in /usr/bin/clickhouse
+17. ? @ 0xd2274bb in /usr/bin/clickhouse
+18. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd228284 in /usr/bin/clickhouse
+19. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd229939 in /usr/bin/clickhouse
+20. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd3fa361 in /usr/bin/clickhouse
+21. DB::InterpreterFactory::get(std::__1::shared_ptr<DB::IAST>&, DB::Context&, DB::QueryProcessingStage::Enum) @ 0xd197474 in /usr/bin/clickhouse
+22. ? @ 0xd5375ae in /usr/bin/clickhouse
+23. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, bool) @ 0xd53b0a5 in /usr/bin/clickhouse
+24. DB::TCPHandler::runImpl() @ 0x90ff678 in /usr/bin/clickhouse
+25. DB::TCPHandler::run() @ 0x9100650 in /usr/bin/clickhouse
+26. Poco::Net::TCPServerConnection::start() @ 0x102f2c6b in /usr/bin/clickhouse
+27. Poco::Net::TCPServerDispatcher::run() @ 0x102f30fb in /usr/bin/clickhouse
+28. Poco::PooledThread::run() @ 0x104a0cc6 in /usr/bin/clickhouse
+29. Poco::ThreadImpl::runnableEntry(void*) @ 0x1049bf80 in /usr/bin/clickhouse
+30. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+31. __clone @ 0x12188f in /lib/x86_64-linux-gnu/libc-2.27.so
+
+2020.05.18 12:36:26.476812 [ 63 ] {61ad157e-58c3-42b7-a0bd-df579328558b} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2020.05.18 12:36:26.476921 [ 63 ] {} <Information> TCPHandler: Processed in 0.005 sec.
+2020.05.18 12:36:26.478297 [ 63 ] {} <Information> TCPHandler: Done processing connection.
+```
+Stack trace for JOIN query:
+
+```
+2020.05.18 12:38:50.684098 [ 63 ] {} <Trace> TCPHandlerFactory: TCP Request. Address: 192.168.176.4:55232
+2020.05.18 12:38:50.684344 [ 63 ] {} <Debug> TCPHandler: Connected ClickHouse server version 20.4.0, revision: 54434, user: default.
+2020.05.18 12:38:50.686297 [ 63 ] {0b9b3db9-a536-445f-837c-fdce50009a23} <Debug> executeQuery: (from 192.168.176.4:55232, initial_query_id: 5e8a1ac9-cc81-493b-bb89-2e0ed9f11ffc) SELECT DISTINCT url_hash FROM db1.t1_sharded ANY LEFT JOIN (SELECT * FROM t2_sharded) AS t2_sharded USING (url_hash)
+2020.05.18 12:38:50.688070 [ 63 ] {0b9b3db9-a536-445f-837c-fdce50009a23} <Error> executeQuery: Code: 60, e.displayText() = DB::Exception: Table default.t2_sharded doesn't exist. (version 20.4.2.9 (official build)) (from 192.168.176.4:55232) (in query: SELECT DISTINCT url_hash FROM db1.t1_sharded ANY LEFT JOIN (SELECT * FROM t2_sharded) AS t2_sharded USING (url_hash)), Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x10406ef0 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8ff88ad in /usr/bin/clickhouse
+2. DB::DatabaseCatalog::getTableImpl(DB::StorageID const&, std::__1::optional<DB::Exception>*) const @ 0xd002330 in /usr/bin/clickhouse
+3. DB::DatabaseCatalog::getTable(DB::StorageID const&) const @ 0xd00254e in /usr/bin/clickhouse
+4. DB::JoinedTables::getLeftTableStorage() @ 0xd43c22e in /usr/bin/clickhouse
+5. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd228a63 in /usr/bin/clickhouse
+6. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd229939 in /usr/bin/clickhouse
+7. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd3fa361 in /usr/bin/clickhouse
+8. DB::InterpreterSelectWithUnionQuery::getSampleBlock(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&) @ 0xd3fb05a in /usr/bin/clickhouse
+9. ? @ 0xd5412a9 in /usr/bin/clickhouse
+10. DB::getDatabaseAndTablesWithColumns(std::__1::vector<DB::ASTTableExpression const*, std::__1::allocator<DB::ASTTableExpression const*> > const&, DB::Context const&) @ 0xd542672 in /usr/bin/clickhouse
+11. DB::JoinedTables::resolveTables() @ 0xd43c7a5 in /usr/bin/clickhouse
+12. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd228acd in /usr/bin/clickhouse
+13. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd229939 in /usr/bin/clickhouse
+14. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd3fa361 in /usr/bin/clickhouse
+15. DB::InterpreterFactory::get(std::__1::shared_ptr<DB::IAST>&, DB::Context&, DB::QueryProcessingStage::Enum) @ 0xd197474 in /usr/bin/clickhouse
+16. ? @ 0xd5375ae in /usr/bin/clickhouse
+17. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, bool) @ 0xd53b0a5 in /usr/bin/clickhouse
+18. DB::TCPHandler::runImpl() @ 0x90ff678 in /usr/bin/clickhouse
+19. DB::TCPHandler::run() @ 0x9100650 in /usr/bin/clickhouse
+20. Poco::Net::TCPServerConnection::start() @ 0x102f2c6b in /usr/bin/clickhouse
+21. Poco::Net::TCPServerDispatcher::run() @ 0x102f30fb in /usr/bin/clickhouse
+22. Poco::PooledThread::run() @ 0x104a0cc6 in /usr/bin/clickhouse
+23. Poco::ThreadImpl::runnableEntry(void*) @ 0x1049bf80 in /usr/bin/clickhouse
+24. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+25. __clone @ 0x12188f in /lib/x86_64-linux-gnu/libc-2.27.so
+
+2020.05.18 12:38:50.688707 [ 63 ] {0b9b3db9-a536-445f-837c-fdce50009a23} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2020.05.18 12:38:50.688792 [ 63 ] {} <Information> TCPHandler: Processed in 0.003 sec.
+2020.05.18 12:38:50.689317 [ 63 ] {} <Information> TCPHandler: Done processing connection.
+```
+
+### Additional info
+
+Also, reproduced via HTTP interface when added `&database=db1` query param.
+
+### Environment
+
+* Reproduced on the latest Clickhouse 20.4.2.9 and 19.17.6.36.
+* I've used cluster of 2 machines via docker-compose.
+* config.xml was changed to add zookeeper address.
+
+### Expected behavior
+
+I expect that nested IN and JOIN subqueries will use database passed via `-d, --database` argument.

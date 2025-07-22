@@ -1,0 +1,79 @@
+ID: 56809
+Title: SELECT ... AS OF TIMESTAMP statement with explicit time may break linearizability when TSO is drifting
+Description:
+## Bug Report
+
+### Summary
+
+When user explicitly specifies time in a `SELECT ... AS OF TIMESTAMP` statement to perform stale-read, it's possible that user specifies a time that's much larger than the latest ts that PD has allocated. Users usually don't actually want to read on a future time, but there are some cases that PD's TSO is significantly lagging from the actual physical time. Note that TSO lagging might not always be caused by system time drifts, but may also caused by PD's abnormal writing etcd latency.
+
+TiKV doesn't uses the timestamp from stale-read requests to push its `max_ts` (which is used for `commit_ts` calculation in Async Commit / 1PC transactions). However, when retries happens on stale-read requests, TiDB (client-go) usually fallback it to normal leader read mode, without resetting its read_ts. This can cause the retrying request have the manually-specified read ts, but without the stale read flag, and as a result TiKV can use it to push `max_ts`, and results in a value larger than that PD can allocate after that. This breaks the linearizablility of Async Commit / 1PC transactions.
+
+### Minimal reproduce step
+
+1. Create a cluster where PD's TSO is lagging. A simple way is to set `tso-update-physical-interval="2s"` on PD, which lets PD updates physical every 2 seconds.
+2. Continuously run some SELECT ... AS OF TIMESTAMP statement, specify a recent past time by representing the time in string. Let the stale read requests sent to TiKV retry due to regoin error or lock conflict. At the same time, let there be some transactions committing in Async Commit / 1PC mode.
+    * Case 1:  Prepare the table like this:
+        ```sql
+        create table t (id int primary key, v int);
+        insert into t values (1, 1);
+        ```
+        Then run the following procedure concurrently (some error handling omitted, c1 and c2 are two different connection)
+        ```go
+        for {
+            for {
+                readTime := time.Now().Add(-time.Second * 1)
+                readTimeStr := readTime.Format("2006-01-02 15:04:05.999")
+                _, err = c2.ExecContext(ctx, "select * from t as of timestamp '"+readTimeStr+"' where id = 1")
+                if err != nil {
+                    // Ignore the case that the time is rejected
+                    if strings.Contains(err.Error(), "cannot set read timestamp to a future time") {
+                        time.Sleep(time.Millisecond * 10)
+                        continue
+                    }
+                    panic(err)
+                }
+                break
+            }
+        
+            tx:= c1.BeginTx(ctx, &sql.TxOptions{})
+            tx.ExecContext(ctx, "update t set v = v + 1 where id = 1")
+            tx.Commit()
+        }
+        ```
+        Then the following error may be met on the `update` statement:
+        ```
+        Error 1105 (HY000): Txn 453423637808807957 Retrying aggressive locking with ForUpdateTS (453423637808807963) less than previous LockedWithConflictTS (453423637831352321)
+        ```
+        The reason is that concurrently running the above procedure may let the stale read statement meet the lock of the other transaction from other concurrent threads. It can let the stale read statement fallback to leader read mode. The statement `update t set v = v + 1 where id = 1` runs in fair locking mode, and when it encounters write conflict (another transaction committed on this key), the current transaction gets a new forUpdateTS from PD for retrying the statement, and it asserts the new ts from PD must be larger than the previously met conflicting commit record. However this assertion is violated.
+    * Case 2:
+        1. Hack the code to let all stale read returns `DataIsNotReady` error, which is a normal and commen error that may happen in stale read scenarios. This will force stale read requests always fallback to leader read mode.
+        2. Run the same procedure as in case 1, but it don't need to be run concurrently; or run on different tables for each thread. The there will be a same error as seen in case 1.
+    * Case 3: Run the following procedure repeatedly. It might need to set `pessimistic-txn.max-retry-count=100000` to TiDB's config file to avoid the `"pessimistic lock retry limit reached"` error.
+        ```sql
+        /* t1 */ set @@tidb_pessimistic_txn_fair_locking = 0;
+        /* t1 */ begin;
+        /* t1 */ update t set v = v + 1 where id = 1;
+        -- Calculate the time as the same way in case 1;
+        -- Retry if it reports "cannot set read timestamp to a future time"
+        /* t2 */ select * from t as of timestamp '...' where id = 1; 
+        -- Save this result as `value1`
+        /* t1 */ select v from t where id = 1;
+        /* t1 */ commit;
+        -- Save the commit_ts of this transaction as `ts1`
+        /* t1 */ select @@tidb_last_txn_info;
+        -- Save this result as `value2`. Do not use the `where` clause to avoid it using max_uint64 as ts for point-get.
+        /* t1 */ select v from t;
+        -- Save the start_ts of this querys as `ts2`
+        /* t1 */ select @@tidb_last_query_info;
+        -- Assert `value1` == `value2` and `ts1` <= `ts2`.
+        ```
+        In this procedure, the later query in t1 should read the result committed by the previous transaction, and the timestamps should be monotonic, no matter what t2 does. However, the assertion can sometimes fail. This is a sample output of such failure in our test program:
+        ```
+        t2 read at 2024-10-23 17:48:28.822
+        res1 128, res2 127, txnInfo {"txn_scope":"global","start_ts":453424423584662150,"commit_ts":453424423586234369,"txn_commit_mode":"1pc","async_commit_fallback":false,"one_pc_fallback":false}, lastQueryInfo {"txn_scope":"global","start_ts":453424423584662153,"for_update_ts":453424423584662153,"ru_consumption":0.5033112418619792}
+        ```
+
+### What is your TiDB version?
+
+v7.5.1

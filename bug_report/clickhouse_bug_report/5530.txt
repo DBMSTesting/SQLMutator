@@ -1,0 +1,68 @@
+ID: 5530
+Title: Unnecessary reverse DNS request for remote_servers replica host
+Description:
+I am trying to build a simple 2 nodes cluster with replication. I want to use an internal network for internode communication. Each host has two network interfaces with "external" and "internal" address. Each CH instance listens only on the internal 192.168.108.x address.
+host1: 
+   ext_ip: 10.0.208.161
+   int_ip: 192.168.108.1
+host2:
+  ext_ip: 10.0.208.139
+  int_ip: 192.168.108.2
+I mentioned these nodes in config.xml as follows:
+```
+<remote_servers>                                                                                                                                             
+    <!-- One shard, two replicas -->                                                                                                                         
+    <repikator>                                                                                                                                              
+       <shard>                                                                                                                                                                                                                                                                  
+           <replica>                                                                                                                                         
+               <host>192.168.108.1</host>                                                                                                                    
+                <port>9000</port>                                                                                                                                                                                                                            
+           </replica>                                                                                                                                        
+                                                                                                                      
+           <replica>                                                                                                                                         
+               <host>192.168.108.2</host>                                                                                                                    
+               <port>9000</port>                                                                                                                                                                                                                                 
+           </replica>                                                                                                                                        
+       </shard>                                                                                                                                              
+    </repikator>                                                                                                                                             
+</remote_servers>  
+```
+I created simple replicated table from documentation:
+```
+CREATE TABLE table_name
+(
+    EventDate DateTime,
+    CounterID UInt32,
+    UserID UInt32
+) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/table_name', '{replica}')
+PARTITION BY toYYYYMM(EventDate)
+ORDER BY (CounterID, EventDate, intHash32(UserID))
+SAMPLE BY intHash32(UserID)
+```
+But when I added one record to this table on the host1, it didn't appear on the host2. In logs on host2 I got:
+```
+2019.06.04 14:25:12.905392 [ 36 ] {} <Warning> default.table_name (ReplicatedMergeTreePartCheckThread): Checking part 201906_0_0_0                           
+2019.06.04 14:25:12.905910 [ 36 ] {} <Warning> default.table_name (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 201906_0_0_0. 
+2019.06.04 14:25:12.906631 [ 36 ] {} <Warning> default.table_name (ReplicatedMergeTreePartCheckThread): Found part 201906_0_0_0 on host1 that co
+vers the missing part 201906_0_0_0                                                                                                                           
+2019.06.04 14:25:22.170380 [ 6 ] {} <Error> default.table_name (StorageReplicatedMergeTree): DB::StorageReplicatedMergeTree::queueTask()::<lambda(DB::Storage
+ReplicatedMergeTree::LogEntryPtr&)>: Poco::Exception. Code: 1000, e.code() = 111, e.displayText() = Connection refused, e.what() = Connection refused
+```
+It seems like CH found part on **host1**, not on 192.168.108.1! In my setup hostname `host1` resolves to external ip, i.e. `10.0.208.161`, not to internal ip 192.168.108.1. So I got `Connection refused` because there is not CH instance listened on this ip address as I mention in the beginning of this issue.
+
+I tried to add lines to local `/etc/hosts` on host2:
+```
+192.168.108.1 host1
+192.168.108.2 host2
+```
+I look deeper and tried to use `remote` function on host2:
+1. `select * from remote('192.168.108.1', default.table_name)` return correct record as expected
+2. `select * from remote('host1', default.table_name)` return correct record!!! 
+But replication didn't work whatever. I tried
+3. `select * from remote('host1.full.domain', default.table_name)` return "Connection refused"
+
+It seems like CH resolves DNS names as operation system (i.e. Linux) using `search domain` from `/etc/resolv.conf` for replication purposes. But CH doesn't add `search domain` from `/etc/resolv.conf` for `remote` function.
+
+In any way, why CH use the hostname instead of ip address which directly written in the configuration file?
+
+Clickhouse version 18.16.1 revision 54412

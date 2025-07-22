@@ -1,0 +1,63 @@
+ID: 22685
+Title: mpp: the precision of avg(decimal) is wider than that from mysql
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+create table test.t (id int, value decimal(6,3));
+alter table test.t set tiflash replica 1;
+insert into test.t values(1,2.3),(3,4.5),(5,6.7);
+insert into test.t values(null,null),(1,null),(null,3.3);
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+mysql> select avg(value) from t group by id;
++------------+
+| avg(value) |
++------------+
+|  2.3000000 |
+|  6.7000000 |
+|  4.5000000 |
+|  3.3000000 |
++------------+
+
+
+### 3. What did you see instead (Required)
+````
+mysql> select avg(value) from t group by id;
++---------------+
+| avg(value)      |
++---------------+
+|  2.30000000000 |
+|  6.70000000000 |
+|  4.50000000000 |
+|  3.30000000000 |
++---------------+
+
+mysql>  set @@tidb_allow_mpp=1;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> desc select avg(value) as av from t group by id having av>4;
++--------------------------------------+---------+--------------+---------------+---------------------------------------------------------------------------------------------+
+| id                                   | estRows | task         | access object | operator info                                                                               |
++--------------------------------------+---------+--------------+---------------+---------------------------------------------------------------------------------------------+
+| Selection_7                          | 3.60    | root         |               | gt(Column#4, 4)                                                                             |
+| └─TableReader_30                     | 4.50    | root         |               | data:ExchangeSender_29                                                                      |
+|   └─ExchangeSender_29                | 4.50    | cop[tiflash] |               | ExchangeType: PassThrough                                                                   |
+|     └─Projection_25                  | 4.50    | cop[tiflash] |               | if(eq(Column#8, 0), <nil>, div(Column#4, cast(Column#8, decimal(20,0) BINARY)))->Column#4   |
+|       └─HashAgg_26                   | 4.50    | cop[tiflash] |               | group by:test.t.id, funcs:sum(Column#9)->Column#8, funcs:sum(Column#10)->Column#4           |
+|         └─ExchangeReceiver_28        | 4.50    | cop[tiflash] |               |                                                                                             |
+|           └─ExchangeSender_27        | 4.50    | cop[tiflash] |               | ExchangeType: HashPartition, Hash Cols: test.t.id                                           |
+|             └─HashAgg_11             | 4.50    | cop[tiflash] |               | group by:test.t.id, funcs:count(test.t.value)->Column#9, funcs:sum(test.t.value)->Column#10 |
+|               └─TableFullScan_24     | 9.00    | cop[tiflash] | table:t       | keep order:false                                                                            |
++--------------------------------------+---------+--------------+---------------+---------------------------------------------------------------------------------------------+
+9 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

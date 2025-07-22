@@ -1,0 +1,176 @@
+ID: 54755
+Title: right join using hash join v2 got wrong result for some complex query
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+First, need to build a tidb that enable hash join v2
+Data
+```
+mysql> desc t1;
++-------------------+------------+------+------+---------+----------------+
+| Field             | Type       | Null | Key  | Default | Extra          |
++-------------------+------------+------+------+---------+----------------+
+| pk                | int(11)    | NO   | PRI  | NULL    | auto_increment |
+| col_int_nokey     | int(11)    | YES  |      | NULL    |                |
+| col_int_key       | int(11)    | YES  | MUL  | NULL    |                |
+| col_varchar_key   | varchar(1) | YES  | MUL  | NULL    |                |
+| col_varchar_nokey | varchar(1) | YES  |      | NULL    |                |
++-------------------+------------+------+------+---------+----------------+
+5 rows in set (0.00 sec)
+
+mysql> select * from t1;
++----+---------------+-------------+-----------------+-------------------+
+| pk | col_int_nokey | col_int_key | col_varchar_key | col_varchar_nokey |
++----+---------------+-------------+-----------------+-------------------+
+|  1 |             2 |           4 | v               | v                 |
+|  2 |           150 |          62 | v               | v                 |
++----+---------------+-------------+-----------------+-------------------+
+2 rows in set (0.00 sec)
+
+mysql> desc t2;
++-------------------+------------+------+------+---------+----------------+
+| Field             | Type       | Null | Key  | Default | Extra          |
++-------------------+------------+------+------+---------+----------------+
+| pk                | int(11)    | NO   | PRI  | NULL    | auto_increment |
+| col_int_nokey     | int(11)    | YES  |      | NULL    |                |
+| col_int_key       | int(11)    | YES  | MUL  | NULL    |                |
+| col_varchar_key   | varchar(1) | YES  | MUL  | NULL    |                |
+| col_varchar_nokey | varchar(1) | YES  |      | NULL    |                |
++-------------------+------------+------+------+---------+----------------+
+5 rows in set (0.00 sec)
+
+mysql> select * from t2;
++----+---------------+-------------+-----------------+-------------------+
+| pk | col_int_nokey | col_int_key | col_varchar_key | col_varchar_nokey |
++----+---------------+-------------+-----------------+-------------------+
+|  1 |          NULL |           8 | x               | x                 |
+|  2 |             8 |           7 | d               | d                 |
++----+---------------+-------------+-----------------+-------------------+
+2 rows in set (0.00 sec)
+```
+Query:
+case 1 simple left join
+```
+select
+sq1_alias1.pk  as pk_a1,
+sq1_alias1.col_int_key as col_int_key_a1,
+sq1_alias1.col_int_nokey as col_int_nokey_a1,
+sq1_alias1.col_varchar_key  as col_varchar_key_a1,
+sq1_alias1.col_varchar_nokey as col_varchar_nokey_a1,
+sq1_alias2.pk  as pk_a2,
+sq1_alias2.col_int_key as col_int_key_a2,
+sq1_alias2.col_int_nokey as col_int_nokey_a2,
+sq1_alias2.col_varchar_key  as col_varchar_key_a2,
+sq1_alias2.col_varchar_nokey as col_varchar_nokey_a2
+from
+t1 AS SQ1_alias2 left JOIN t2 AS SQ1_alias1            ON ( SQ1_alias2.col_varchar_key = SQ1_alias1.col_varchar_nokey)
+```
+The equivalent form of right join
+```
+select
+sq1_alias1.pk  as pk_a1,
+sq1_alias1.col_int_key as col_int_key_a1,
+sq1_alias1.col_int_nokey as col_int_nokey_a1,
+sq1_alias1.col_varchar_key  as col_varchar_key_a1,
+sq1_alias1.col_varchar_nokey as col_varchar_nokey_a1,
+sq1_alias2.pk  as pk_a2,
+sq1_alias2.col_int_key as col_int_key_a2,
+sq1_alias2.col_int_nokey as col_int_nokey_a2,
+sq1_alias2.col_varchar_key  as col_varchar_key_a2,
+sq1_alias2.col_varchar_nokey as col_varchar_nokey_a2
+from
+t2 AS SQ1_alias1 RIGHT JOIN t1 AS SQ1_alias2            ON ( SQ1_alias2.col_varchar_key = SQ1_alias1.col_varchar_nokey)
+```
+result
+```
+mysql> source /tmp/left_join.sql
+Query OK, 0 rows affected (0.00 sec)
+
++-------+----------------+------------------+--------------------+----------------------+-------+----------------+------------------+--------------------+----------------------+
+| pk_a1 | col_int_key_a1 | col_int_nokey_a1 | col_varchar_key_a1 | col_varchar_nokey_a1 | pk_a2 | col_int_key_a2 | col_int_nokey_a2 | col_varchar_key_a2 | col_varchar_nokey_a2 |
++-------+----------------+------------------+--------------------+----------------------+-------+----------------+------------------+--------------------+----------------------+
+|  NULL |           NULL |             NULL | NULL               | NULL                 |     1 |              4 |                2 | v                  | v                    |
+|  NULL |           NULL |             NULL | NULL               | NULL                 |     2 |             62 |              150 | v                  | v                    |
++-------+----------------+------------------+--------------------+----------------------+-------+----------------+------------------+--------------------+----------------------+
+2 rows in set (0.00 sec)
+
+mysql> source /tmp/right_join.sql
+Query OK, 0 rows affected (0.00 sec)
+
++-------+----------------+------------------+--------------------+----------------------+-------+----------------+------------------+--------------------+----------------------+
+| pk_a1 | col_int_key_a1 | col_int_nokey_a1 | col_varchar_key_a1 | col_varchar_nokey_a1 | pk_a2 | col_int_key_a2 | col_int_nokey_a2 | col_varchar_key_a2 | col_varchar_nokey_a2 |
++-------+----------------+------------------+--------------------+----------------------+-------+----------------+------------------+--------------------+----------------------+
+|  NULL |           NULL |             NULL | NULL               | NULL                 |     1 |              4 |                2 | v                  | v                    |
+|  NULL |           NULL |             NULL | NULL               | NULL                 |     2 |             62 |              150 | v                  | v                    |
++-------+----------------+------------------+--------------------+----------------------+-------+----------------+------------------+--------------------+----------------------+
+2 rows in set (0.01 sec)
+```
+case 2 complex left join
+```
+SELECT MAX( col_int_nokey_a2 ) AS SQ1_field1     FROM (
+select
+sq1_alias1.pk  as pk_a1,
+sq1_alias1.col_int_key as col_int_key_a1,
+sq1_alias1.col_int_nokey as col_int_nokey_a1,
+sq1_alias1.col_varchar_key  as col_varchar_key_a1,
+sq1_alias1.col_varchar_nokey as col_varchar_nokey_a1,
+sq1_alias2.pk  as pk_a2,
+sq1_alias2.col_int_key as col_int_key_a2,
+sq1_alias2.col_int_nokey as col_int_nokey_a2,
+sq1_alias2.col_varchar_key  as col_varchar_key_a2,
+sq1_alias2.col_varchar_nokey as col_varchar_nokey_a2
+from
+t1 AS SQ1_alias2 left JOIN t2 AS SQ1_alias1            ON ( SQ1_alias2.col_varchar_key = SQ1_alias1.col_varchar_nokey)
+) d
+;
+```
+the equivalent form of right join
+```
+SELECT MAX( col_int_nokey_a2 ) AS SQ1_field1     FROM (
+select
+sq1_alias1.pk  as pk_a1,
+sq1_alias1.col_int_key as col_int_key_a1,
+sq1_alias1.col_int_nokey as col_int_nokey_a1,
+sq1_alias1.col_varchar_key  as col_varchar_key_a1,
+sq1_alias1.col_varchar_nokey as col_varchar_nokey_a1,
+sq1_alias2.pk  as pk_a2,
+sq1_alias2.col_int_key as col_int_key_a2,
+sq1_alias2.col_int_nokey as col_int_nokey_a2,
+sq1_alias2.col_varchar_key  as col_varchar_key_a2,
+sq1_alias2.col_varchar_nokey as col_varchar_nokey_a2
+from
+t2 AS SQ1_alias1 RIGHT JOIN t1 AS SQ1_alias2            ON ( SQ1_alias2.col_varchar_key = SQ1_alias1.col_varchar_nokey)
+) d
+;
+```
+result
+```
+mysql> source /tmp/left_join.sql
++------------+
+| SQ1_field1 |
++------------+
+|        150 |
++------------+
+1 row in set (0.00 sec)
+
+mysql> source /tmp/right_join.sql
++------------+
+| SQ1_field1 |
++------------+
+|       NULL |
++------------+
+1 row in set (0.00 sec)
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

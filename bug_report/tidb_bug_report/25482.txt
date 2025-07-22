@@ -1,0 +1,143 @@
+ID: 25482
+Title: prepare statement can't receive schema update
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+start a session, execute:
+
+```
+use test;
+create table t (a int);
+create table t_a (a int);
+insert into t values (1), (2), (3);
+```
+
+then, using the following code to connect
+
+```
+package main
+
+import (
+        // "bufio"
+
+        "fmt"
+        "log"
+        "os"
+
+        // "strings"
+        "time"
+
+        _ "github.com/go-sql-driver/mysql"
+        "github.com/jmoiron/sqlx"
+)
+
+const (
+        DBIp      = "127.0.0.1"
+        DBPort    = "4000"
+        DBUser    = "root"
+        DBPwd     = ""
+        DBName    = "test"
+        SelectSQL = "SELECT count(*) as cnt,CONNECTION_ID() as conntid FROM t where a = ?"
+        a1        = "1"
+)
+
+var (
+        dBDsnWithName = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=latin1&autocommit=1&parseTime=true&loc=Local&timeout=3000s&writeTimeout=1000s&readTimeout=1000s", DBUser, DBPwd, DBIp, DBPort, DBName)
+)
+
+// User for test
+type User struct {
+        Count  int `db:"cnt"`
+        Connid int `db:"conntid"`
+}
+
+func main() {
+        db, err := sqlx.Open("mysql", dBDsnWithName)
+        // db, err := sql.Open("mysql", dBDsnWithName)
+        if err != nil {
+                log.Fatalf("error in opening database: %+v", err)
+                os.Exit(1)
+        }
+        db.SetMaxOpenConns(8)
+        db.SetMaxIdleConns(2)
+        log.Println("finished database initialization...")
+        var u User
+        var i int
+        for i < 20 {
+                err = db.Get(&u, SelectSQL, a1)
+                // err := db.QueryRow(SelectSQL, c1).Scan(&cnt, &cnntid)
+                if err != nil {
+                        log.Printf("db error: %v", err)
+                }
+                log.Printf("user: %v", u)
+                // log.Printf("cnt: %v , connect_id: %v", cnt, cnntid)
+                time.Sleep(5 * time.Second)
+                i++
+        }
+        log.Println("finished testing...")
+}
+```
+
+while the above code is executing, rename the 2 tables in another session
+
+```
+alter table rename t to t_b;
+alter table rename t_a to t;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+No error.
+
+### 3. What did you see instead (Required)
+
+```
+$ go run ./test_main.go
+2021/06/16 16:32:48 finished database initialization...
+2021/06/16 16:32:48 user: {1 13}
+2021/06/16 16:32:53 user: {1 13}
+2021/06/16 16:32:58 user: {1 13}
+2021/06/16 16:33:03 user: {1 13}
+2021/06/16 16:33:08 user: {1 13}
+2021/06/16 16:33:13 db error: Error 1146: Table 'test.t' doesn't exist
+2021/06/16 16:33:13 user: {1 13}
+2021/06/16 16:33:18 db error: Error 1146: Table 'test.t' doesn't exist
+2021/06/16 16:33:18 user: {1 13}
+2021/06/16 16:33:23 db error: Error 1146: Table 'test.t' doesn't exist
+2021/06/16 16:33:23 user: {1 13}
+2021/06/16 16:33:28 db error: Error 1146: Table 'test.t' doesn't exist
+2021/06/16 16:33:28 user: {1 13}
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+select tidb_version();
+ERROR 2006 (HY000): MySQL server has gone away
+No connection. Trying to reconnect...
+Connection id:    15
+Current database: las_tc
+
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                             |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v5.1.0-alpha-6-gd5d433e49
+Edition: Community
+Git Commit Hash: d5d433e49dd20420f9165005c92b3e1592ab8c6b
+Git Branch: fix-prepare
+UTC Build Time: 2021-06-15 11:23:23
+GoVersion: go1.16
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+<!-- Paste the output of SELECT tidb_version() -->
+

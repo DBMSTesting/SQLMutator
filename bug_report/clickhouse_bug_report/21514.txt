@@ -1,0 +1,84 @@
+ID: 21514
+Title: clickhouse-client sometimes hangs on server exception
+Description:
+**Describe the bug**
+We're inserting data into ClickHouse using clickhouse-client. Sometimes when a server error occurs the client is stuck indefinitely with no output.
+
+**Does it reproduce on recent release?**
+21.2.5.5
+
+**How to reproduce**
+* Which ClickHouse server version to use
+21.2.5.5
+
+* Which interface to use, if matters
+clickhouse-client
+
+* Queries to run that lead to unexpected result
+```
+zstd -d --stdout file.tsv.zst |
+clickhouse-client --host localhost --port 9001 \
+  --min_insert_block_size_rows=100000000 \
+  --min_insert_block_size_bytes=4000000000 \
+  --max_insert_block_size=16777216 \
+  --query='
+    INSERT INTO database.tmp_table (column1, column2, ..., columnN) FORMAT TSV
+  '
+```
+The compressed input file is usually 5GB or larger in size. 
+We run quite a few such commands and sometimes there is an error and the process is stuck doing nothing.
+
+**Expected behavior**
+In case of errors, the clickhouse-client should exit properly.
+
+**Error message and/or stacktrace**
+```
+(gdb) bt
+#0  futex_wait_cancelable (private=0, expected=0, futex_word=0x7fa33d7ac4f4)
+    at ../sysdeps/unix/sysv/linux/futex-internal.h:88
+#1  __pthread_cond_wait_common (abstime=0x0, mutex=0x7fa33d7ac4a0, cond=0x7fa33d7ac4c8)
+    at pthread_cond_wait.c:502
+#2  __pthread_cond_wait (cond=0x7fa33d7ac4c8, mutex=0x7fa33d7ac4a0) at pthread_cond_wait.c:655
+#3  0x0000000011fde411 in Poco::EventImpl::waitImpl (this=0x7fa33d7ac498)
+    at ../contrib/poco/Foundation/src/Event_POSIX.cpp:106
+#4  0x000000000fa997ba in Poco::Event::wait (this=0x7fa33d7ac4f4)
+    at ../contrib/poco/Foundation/include/Poco/Event.h:97
+#5  ThreadFromGlobalPool::join (this=<optimized out>) at ../src/Common/ThreadPool.h:206
+#6  DB::ParallelParsingInputFormat::finishAndWait (this=0x7fa33d62f318)
+    at ../src/Processors/Formats/Impl/ParallelParsingInputFormat.h:266
+#7  0x000000000d11132a in DB::IProcessor::cancel (this=0x7fa33d7ac4f4)
+    at ../src/Processors/IProcessor.h:237
+#8  DB::InputStreamFromInputFormat::cancel (this=0x7fa33d62f698, kill=true)
+    at ../src/Processors/Formats/InputStreamFromInputFormat.h:31
+#9  0x000000000ea52d3c in DB::IBlockInputStream::cancel(bool)::$_2::operator()(DB::IBlockInputStream&) const (child=..., this=<optimized out>) at ../src/DataStreams/IBlockInputStream.cpp:286
+#10 DB::IBlockInputStream::forEachChild<DB::IBlockInputStream::cancel(bool)::$_2>(DB::IBlockInputStream::cancel(bool)::$_2&&) (this=<optimized out>, f=...)
+    at ../src/DataStreams/IBlockInputStream.h:287
+#11 DB::IBlockInputStream::cancel (this=<optimized out>, kill=true)
+    at ../src/DataStreams/IBlockInputStream.cpp:284
+#12 0x000000000ea4df29 in DB::AsynchronousBlockInputStream::cancel (this=0x7fa33d7b3118, 
+    kill=false) at ../src/DataStreams/AsynchronousBlockInputStream.h:84
+#13 0x00000000088b440c in DB::Client::sendDataFrom (this=0x7ffdb2c95730, buf=..., sample=..., 
+    columns_description=...) at ../programs/client/Client.cpp:1778
+#14 0x00000000088aff6b in DB::Client::sendData (this=0x7fa33d7ac4f4, sample=..., 
+    columns_description=...) at ../programs/client/Client.cpp:1729
+#15 0x00000000088ab48c in DB::Client::processInsertQuery (this=0x7ffdb2c95730)
+    at ../programs/client/Client.cpp:1654
+#16 0x00000000088a9ff0 in DB::Client::processParsedSingleQuery (this=0x7ffdb2c95730)
+    at ../programs/client/Client.cpp:1509
+#17 0x00000000088a60ef in DB::Client::processTextAsSingleQuery (this=0x7ffdb2c95730, text_=...)
+    at ../programs/client/Client.cpp:1433
+#18 0x000000000889df1a in DB::Client::processQueryText (this=0x7ffdb2c95730, text=...)
+    at ../programs/client/Client.cpp:860
+#19 0x000000000889e7f4 in DB::Client::nonInteractive (this=0x7ffdb2c95730)
+    at ../programs/client/Client.cpp:849
+#20 0x0000000008898f33 in DB::Client::mainImpl (this=<optimized out>)
+    at ../programs/client/Client.cpp:711
+#21 0x0000000008894f54 in DB::Client::main (this=0x7ffdb2c95730)
+    at ../programs/client/Client.cpp:280
+#22 0x0000000011f3ec33 in Poco::Util::Application::run (this=0x7ffdb2c95730)
+    at ../contrib/poco/Util/src/Application.cpp:334
+#23 0x00000000088892cf in mainEntryClickHouseClient (argc=9, argv=0x7fa33d617c30)
+    at ../programs/client/Client.cpp:2698
+#24 0x00000000087df7ae in main (argc_=<optimized out>, argv_=<optimized out>)
+    at ../programs/main.cpp:368
+```

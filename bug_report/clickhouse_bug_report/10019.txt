@@ -1,0 +1,100 @@
+ID: 10019
+Title: Row-based rules vs prewhere
+Description:
+We have some configuration
+
+```xml
+<?xml version="1.0"?>
+<yandex>
+    <users>
+        <unrelated_user>
+            <password></password>
+            <networks incl="networks">
+                <ip>::/0</ip>
+            </networks>
+            <profile>readonly</profile>
+            <quota>default</quota>
+            <allow_databases>
+                <database>default</database>
+            </allow_databases>
+            <databases>
+                <default>
+                    <data>
+                        <filter>group = 10</filter>
+                    </data>
+                    <data_dist>
+                        <filter>group = 10</filter>
+                    </data_dist>
+                </default>
+            </databases>
+        </unrelated_user>
+    </users>
+</yandex>
+```
+
+and clickhouse 20.3 using that configuration:
+```
+docker run --rm -d --name chtest -v $(pwd)/user_with_row_based_security.xml:/etc/clickhouse-server/users.d/user_with_row_based_security.xml yandex/clickhouse-server:20.3
+
+docker exec -it chtest clickhouse-client
+ClickHouse client version 20.3.5.21 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 20.3.5 revision 54433.
+```
+
+pay attention - filters were configured for `unrelated_user` we connect as **default** :bangbang:
+
+
+create table
+```
+create table data engine=MergeTree order by tuple() as select number, toUInt8(intDiv(number, 40000)) as group, randomPrintableASCII(1024) as datacol from numbers(10000000);
+```
+
+That works but slow:
+```
+select uniq(datacol) from data where group=1;
+
+1 rows in set. Elapsed: 5.361 sec. Processed 10.00 million rows, 10.34 GB (1.87 million rows/s., 1.93 GB/s.) 
+```
+
+That doesn't work and return exception giving a clue:
+It should not affect us as I was logged in as `default` user.
+```
+select uniq(datacol) from data prewhere group=1;
+
+SELECT uniq(datacol)
+FROM data
+PREWHERE group = 1
+
+Received exception from server (version 20.3.5):
+Code: 182. DB::Exception: Received from localhost:9000. DB::Exception: PREWHERE is not supported if the table is filtered by row-level security expression. 
+
+0 rows in set. Elapsed: 0.001 sec. 
+```
+
+That doesn't work, and very cryptic exception message:
+```
+5f898eb82949 :) SELECT count() FROM (SELECT number FROM data PREWHERE number>9000000)
+
+SELECT count()
+FROM 
+(
+    SELECT number
+    FROM data
+    PREWHERE number > 9000000
+)
+
+Received exception from server (version 20.3.5):
+Code: 10. DB::Exception: Received from localhost:9000. DB::Exception: Not found column greater(number, 9000000) in block. There are only columns: number, 1. 
+```
+
+TODO: check the same queries on distributed table:
+```
+create table data_dist Engine=Distributed('test_cluster_two_shards','default','data') as data;
+```
+
+Bugs:
+* [x] rules configured for user A affect user B.
+* [ ] instead of cryptic exception message - it should be 'PREWHERE is not supported'
+
+And the **perfect solution** would be to respect both PREWHERE and row-based filters at the same time, as otherwise, it makes impossible to migrate directly from configuration w/o row-based filters to configuration with it.

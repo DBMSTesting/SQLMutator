@@ -1,0 +1,90 @@
+ID: 23512
+Title: segfault from ParallelParsingInputFormat in case of error
+Description:
+Context: http protocol, some error during execution of the insert (in the tests it is just 'Table default.non_existing_table doesn't exist'), and segfault from fileSegmentationEngineCSVImpl
+
+Here is the test - it reproduces the segfault not every time, but often:
+```
+clickhouse-local -q "select col1, initializeAggregation('argMaxState', col2, insertTime) as col2, now() as insertTime FROM generateRandom('col1 String, col2 Array(Float64)') LIMIT 1000000 FORMAT CSV"  | curl 'http://localhost:8123/?query=INSERT%20INTO%20non_existing_table%20SELECT%20col1%2C%20initializeAggregation(%27argMaxState%27%2C%20col2%2C%20insertTime)%20as%20col2%2C%20now()%20as%20insertTime%20FROM%20input(%27col1%20String%2C%20col2%20Array(Float64)%27)%20FORMAT%20CSV' --data-binary @- 
+```
+
+Related stack traces from core file:
+```
+Thread 2 (Thread 0x7f204dbfe000 (LWP 1088378)):
+#0  futex_wait_cancelable (private=<optimized out>, expected=0, futex_word=0x7f204aec8a70) at ../sysdeps/nptl/futex-internal.h:183
+#1  __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x7f204aec8a20, cond=0x7f204aec8a48) at pthread_cond_wait.c:508
+#2  __pthread_cond_wait (cond=0x7f204aec8a48, mutex=0x7f204aec8a20) at pthread_cond_wait.c:638
+#3  0x000000001279f981 in Poco::EventImpl::waitImpl (this=0x7f204aec8a18) at ../contrib/poco/Foundation/src/Event_POSIX.cpp:106
+#4  0x000000001013e03a in Poco::Event::wait (this=0x7f204aec8a70) at ../contrib/poco/Foundation/include/Poco/Event.h:97
+#5  ThreadFromGlobalPool::join (this=<optimized out>) at ../src/Common/ThreadPool.h:206
+#6  DB::ParallelParsingInputFormat::finishAndWait (this=0x7f204af28818) at ../src/Processors/Formats/Impl/ParallelParsingInputFormat.h:275
+#7  0x000000001013d7f7 in DB::ParallelParsingInputFormat::~ParallelParsingInputFormat (this=0x7f204af28818) at ../src/Processors/Formats/Impl/ParallelParsingInputFormat.h:108
+#8  0x000000000d8663be in std::__1::__shared_count::__release_shared (this=0x7f204af28800) at ../contrib/libcxx/include/memory:2475
+#9  std::__1::__shared_weak_count::__release_shared (this=0x7f204af28800) at ../contrib/libcxx/include/memory:2517
+#10 std::__1::shared_ptr<DB::IInputFormat>::~shared_ptr (this=0x7f20317ee280) at ../contrib/libcxx/include/memory:3212
+#11 DB::InputStreamFromInputFormat::~InputStreamFromInputFormat (this=0x7f20317ee018) at ../src/Processors/Formats/InputStreamFromInputFormat.h:15
+#12 0x000000000f36aa55 in std::__1::__shared_count::__release_shared (this=0x7f20317ee000) at ../contrib/libcxx/include/memory:2475
+#13 std::__1::__shared_weak_count::__release_shared (this=0x7f20317ee000) at ../contrib/libcxx/include/memory:2517
+#14 std::__1::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=0x7f204aead990) at ../contrib/libcxx/include/memory:3212
+#15 DB::InputStreamFromASTInsertQuery::~InputStreamFromASTInsertQuery (this=0x7f204aead718) at ../src/DataStreams/InputStreamFromASTInsertQuery.h:21
+#16 0x000000000eae3ebb in std::__1::__shared_count::__release_shared (this=0x7f204aead700) at ../contrib/libcxx/include/memory:2475
+#17 std::__1::__shared_weak_count::__release_shared (this=0x7f204aead700) at ../contrib/libcxx/include/memory:2517
+#18 std::__1::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=0x7f204ae5b4e8) at ../contrib/libcxx/include/memory:3212
+#19 DB::StorageInput::~StorageInput (this=0x7f204ae5b400) at ../src/Storages/StorageInput.h:11
+#20 std::__1::default_delete<DB::StorageInput>::operator() (this=<optimized out>, __ptr=0x7f204ae5b400) at ../contrib/libcxx/include/memory:1397
+#21 std::__1::__shared_ptr_pointer<DB::StorageInput*, std::__1::shared_ptr<DB::StorageInput>::__shared_ptr_default_delete<DB::StorageInput, DB::StorageInput>, std::__1::allocator<DB::StorageInput> >::__on_zero_shared (this=<optimized out>) at ../contrib/libcxx/include/memory:2565
+#22 0x0000000008a11f4c in std::__1::__shared_count::__release_shared (this=0x7f204aee5e80) at ../contrib/libcxx/include/memory:2475
+#23 std::__1::__shared_weak_count::__release_shared (this=0x7f204aee5e80) at ../contrib/libcxx/include/memory:2517
+#24 std::__1::shared_ptr<DB::IStorage>::~shared_ptr (this=0x7f204ae23398) at ../contrib/libcxx/include/memory:3212
+#25 std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IStorage> >::~pair (this=0x7f204ae23380) at ../contrib/libcxx/include/utility:297
+#26 std::__1::destroy_at<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IStorage> > > (__loc=0x7f204ae23380) at ../contrib/libcxx/include/__memory/base.h:118
+#27 std::__1::allocator_traits<std::__1::allocator<std::__1::__tree_node<std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> >, void*> > >::__destroy<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IStorage> > > (__p=0x7f204ae23380) at ../contrib/libcxx/include/__memory/allocator_traits.h:547
+#28 std::__1::allocator_traits<std::__1::allocator<std::__1::__tree_node<std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> >, void*> > >::destroy<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IStorage> > > (__a=..., __p=0x7f204ae23380) at ../contrib/libcxx/include/__memory/allocator_traits.h:487
+#29 std::__1::__tree<std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> >, std::__1::__map_value_compare<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> >, std::__1::less<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, true>, std::__1::allocator<std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> > > >::destroy (this=0x7f204af45850, __nd=0x7f204ae23360) at ../contrib/libcxx/include/__tree:1801
+#30 0x000000000f1803b5 in std::__1::__tree<std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> >, std::__1::__map_value_compare<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> >, std::__1::less<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, true>, std::__1::allocator<std::__1::__value_type<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage> > > >::~__tree (this=0x7f204aec8a70) at ../contrib/libcxx/include/__tree:1789
+#31 std::__1::map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::shared_ptr<DB::IStorage>, std::__1::less<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, std::__1::shared_ptr<DB::IStorage> > > >::~map (this=0x7f204af45850) at ../contrib/libcxx/include/map:1092
+#32 DB::Context::~Context (this=0x7f204af44000) at ../src/Interpreters/Context.cpp:542
+#33 0x000000000f1b1732 in std::__1::default_delete<DB::Context>::operator() (this=<optimized out>, __ptr=0x7f204af44000) at ../contrib/libcxx/include/memory:1397
+#34 std::__1::__shared_ptr_pointer<DB::Context*, std::__1::shared_ptr<DB::Context>::__shared_ptr_default_delete<DB::Context, DB::Context>, std::__1::allocator<DB::Context> >::__on_zero_shared (this=<optimized out>) at ../contrib/libcxx/include/memory:2565
+#35 0x000000000ffcc68c in std::__1::__shared_count::__release_shared (this=0x7f204ae2fb40) at ../contrib/libcxx/include/memory:2475
+#36 std::__1::__shared_weak_count::__release_shared (this=0x7f204ae2fb40) at ../contrib/libcxx/include/memory:2517
+#37 std::__1::shared_ptr<DB::Context>::~shared_ptr (this=<optimized out>) at ../contrib/libcxx/include/memory:3212
+#38 std::__1::shared_ptr<DB::Context>::reset (this=<optimized out>) at ../contrib/libcxx/include/memory:3308
+#39 DB::HTTPHandler::handleRequest(DB::HTTPServerRequest&, DB::HTTPServerResponse&)::$_8::operator()() const (this=<optimized out>) at ../src/Server/HTTPHandler.cpp:869
+#40 ext::basic_scope_guard<DB::HTTPHandler::handleRequest(DB::HTTPServerRequest&, DB::HTTPServerResponse&)::$_8>::invoke() (this=<optimized out>) at ../base/common/../ext/scope_guard.h:97
+#41 ext::basic_scope_guard<DB::HTTPHandler::handleRequest(DB::HTTPServerRequest&, DB::HTTPServerResponse&)::$_8>::~basic_scope_guard() (this=<optimized out>) at ../base/common/../ext/scope_guard.h:47
+#42 DB::HTTPHandler::handleRequest (this=0x7f204ae553a0, request=..., response=...) at ../src/Server/HTTPHandler.cpp:933
+#43 0x0000000010050210 in DB::HTTPServerConnection::run (this=0x7f204ae55090) at ../src/Server/HTTP/HTTPServerConnection.cpp:48
+#44 0x00000000126e5e0f in Poco::Net::TCPServerConnection::start (this=0x7f204aec8a70) at ../contrib/poco/Net/src/TCPServerConnection.cpp:43
+#45 0x00000000126e789a in Poco::Net::TCPServerDispatcher::run (this=0x7f203c588100) at ../contrib/poco/Net/src/TCPServerDispatcher.cpp:115
+#46 0x0000000012821659 in Poco::PooledThread::run (this=0x7f2073faa700) at ../contrib/poco/Foundation/src/ThreadPool.cpp:199
+#47 0x000000001281d64a in Poco::ThreadImpl::runnableEntry (pThread=<optimized out>) at ../contrib/poco/Foundation/src/Thread_POSIX.cpp:345
+#48 0x00007f2074e4d609 in start_thread (arg=<optimized out>) at pthread_create.c:477
+#49 0x00007f2074d74293 in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+
+Thread 1 (Thread 0x7f20291f3000 (LWP 1088439)):
+#0  0x000000000f066695 in DB::ReadBuffer::next (this=0x7f204ae55720) at ../src/IO/ReadBuffer.h:62
+#1  DB::ConcatReadBuffer::nextImpl (this=0x7f204ae55790) at ../src/IO/ConcatReadBuffer.h:39
+#2  0x0000000008945bf8 in DB::ReadBuffer::next (this=0x7f204ae55790) at ../src/IO/ReadBuffer.h:62
+#3  DB::ReadBuffer::eof (this=0x7f204ae55790) at ../src/IO/ReadBuffer.h:93
+#4  DB::loadAtPosition (in=..., memory=..., current=@0x7f20291e6408: 0x7f202787f180 "") at ../src/IO/ReadHelpers.cpp:1150
+#5  0x0000000010108023 in DB::fileSegmentationEngineCSVImpl (in=..., memory=..., min_chunk_size=10485760) at ../src/Processors/Formats/Impl/CSVRowInputFormat.cpp:442
+#6  0x000000001013914c in std::__1::__function::__policy_func<std::__1::pair<bool, unsigned long> (DB::ReadBuffer&, DB::Memory<Allocator<false, false> >&, unsigned long)>::operator()(DB::ReadBuffer&, DB::Memory<Allocator<false, false> >&, unsigned long&&) const (this=0x7f204af28910, __args=<optimized out>, __args=<optimized out>, __args=<optimized out>) at ../contrib/libcxx/include/functional:2221
+#7  std::__1::function<std::__1::pair<bool, unsigned long> (DB::ReadBuffer&, DB::Memory<Allocator<false, false> >&, unsigned long)>::operator()(DB::ReadBuffer&, DB::Memory<Allocator<false, false> >&, unsigned long) const (this=0x7f204af28910, __arg=<optimized out>, __arg=<optimized out>, __arg=<optimized out>) at ../contrib/libcxx/include/functional:2560
+#8  DB::ParallelParsingInputFormat::segmentatorThreadFunction (this=0x7f204af28818, thread_group=...) at ../src/Processors/Formats/Impl/ParallelParsingInputFormat.cpp:41
+#9  0x0000000010064d18 in std::__1::__invoke_constexpr<void (DB::ParallelParsingInputFormat::*&)(std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ParallelParsingInputFormat*&, std::__1::shared_ptr<DB::ThreadGroupStatus>&, void> (__f=<optimized out>, __a0=@0x7f20291e6500: 0x7f204af28818, __args=...) at ../contrib/libcxx/include/type_traits:3624
+#10 std::__1::__apply_tuple_impl<void (DB::ParallelParsingInputFormat::*&)(std::__1::shared_ptr<DB::ThreadGroupStatus>), std::__1::tuple<DB::ParallelParsingInputFormat*, std::__1::shared_ptr<DB::ThreadGroupStatus> >&, 0ul, 1ul> (__f=<optimized out>, __t=...) at ../contrib/libcxx/include/tuple:1415
+#11 std::__1::apply<void (DB::ParallelParsingInputFormat::*&)(std::__1::shared_ptr<DB::ThreadGroupStatus>), std::__1::tuple<DB::ParallelParsingInputFormat*, std::__1::shared_ptr<DB::ThreadGroupStatus> >&> (__f=<optimized out>, __t=...) at ../contrib/libcxx/include/tuple:1424
+#12 ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelParsingInputFormat::*)(std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ParallelParsingInputFormat*, std::__1::shared_ptr<DB::ThreadGroupStatus> >(void (DB::ParallelParsingInputFormat::*&&)(std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ParallelParsingInputFormat*&&, std::__1::shared_ptr<DB::ThreadGroupStatus>&&)::{lambda()#1}::operator()() (this=<optimized out>) at ../src/Common/ThreadPool.h:178
+#13 0x00000000089290df in std::__1::__function::__policy_func<void ()>::operator()() const (this=0x7f20291e6770) at ../contrib/libcxx/include/functional:2221
+#14 std::__1::function<void ()>::operator()() const (this=0x7f20291e6770) at ../contrib/libcxx/include/functional:2560
+#15 ThreadPoolImpl<std::__1::thread>::worker (this=0x7f2073e36100, thread_it=...) at ../src/Common/ThreadPool.cpp:247
+#16 0x000000000892cc43 in ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}::operator()() const (this=0x7f2074699ca8) at ../src/Common/ThreadPool.cpp:124
+#17 std::__1::__invoke<ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}> (__f=...) at ../contrib/libcxx/include/type_traits:3676
+#18 std::__1::__thread_execute<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>&, std::__1::__tuple_indices<>) (__t=...) at ../contrib/libcxx/include/thread:280
+#19 std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}> >(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>) (__vp=<optimized out>) at ../contrib/libcxx/include/thread:291
+#20 0x00007f2074e4d609 in start_thread (arg=<optimized out>) at pthread_create.c:477
+#21 0x00007f2074d74293 in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+```
+
+Originally it was reported for 20.8.12.2, I've reproduced it on 21.6.1.6630-testing.

@@ -1,0 +1,111 @@
+ID: 35682
+Title: Pessimistic transaction may lock unused key as primary when the first DML fails
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+/* init */ drop table if exists t, t2;
+/* init */ create table t (id int primary key, v int, idx int unique);
+/* init */ insert into t values (1, 10, 1), (2, 20, 2);
+
+/* t1 */ begin;
+/* t1 */ select @@tidb_current_ts;
+/* t2 */ begin;
+/* t2 */ update t set v = v + 1 where id = 1;
+/* t1 */ set @@innodb_lock_wait_timeout = 3;
+-- stmt1:
+/* t1 */ select * from t where idx = 1 for update;
+/* t1 */ select @@tidb_current_ts;
+-- stmt2:
+/* t1 */ select * from t where idx = 2 for update;
+/* t2 */ commit;
+
+/* t3 */ begin;
+-- stmt3:
+/* t3 */ select * from t where idx = 1 for update;
+/* t3 */ rollback;
+
+/* t1 */ rollback;
+```
+
+### 2. What did you expect to see? (Required)
+
+* In session t1: stmt1 fails due to lock wait timeout, so that the locks on row 1 (and its corresponding index key) should be unlocked.
+* In session t3: stmt3 should successfully read row1 since nobody should holding its lock.
+
+### 3. What did you see instead (Required)
+
+* The index key (idx = 1) is still locked after stmt1 fails.
+* Transaction t1's primary lock is always the index key (idx = 1), so that stmt2 locks the keys of row 2 with the locks' primary pointing to the key (idx = 1) (which can be found via the mvcc http api of TiDB).
+* stmt3 is blocked by t1 since t1 is still locking index key (idx = 1).
+
+<details>
+<summary> The full output of the above program (expand to view)  </summary>
+
+```sql
+/* init */ drop table if exists t, t2;
+-- init >> 0 rows affected
+/* init */ create table t (id int primary key, v int, idx int unique);
+-- init >> 0 rows affected
+/* init */ insert into t values (1, 10, 1), (2, 20, 2);
+-- init >> 2 rows affected
+/* t1 */ begin;
+-- t1 >> 0 rows affected
+/* t1 */ select @@tidb_current_ts;
+-- t1 >> +--------------------+
+-- t1    | @@TIDB CURRENT TS  |
+-- t1    +--------------------+
+-- t1    | 434104022367993864 |
+-- t1    +--------------------+
+/* t2 */ begin;
+-- t2 >> 0 rows affected
+/* t2 */ update t set v = v + 1 where id = 1;
+-- t2 >> 1 rows affected
+/* t1 */ set @@innodb_lock_wait_timeout = 3;
+-- t1 >> 0 rows affected
+/* t1 */ select * from t where idx = 1 for update;
+-- t1 >> E1205: Lock wait timeout exceeded; try restarting transaction
+/* t1 */ select @@tidb_current_ts;
+-- t1 >> +--------------------+
+-- t1    | @@TIDB CURRENT TS  |
+-- t1    +--------------------+
+-- t1    | 434104022367993864 |
+-- t1    +--------------------+
+/* t1 */ select * from t where idx = 2 for update;
+-- t1 >> +----+----+-----+
+-- t1    | ID | V  | IDX |
+-- t1    +----+----+-----+
+-- t1    |  2 | 20 |   2 |
+-- t1    +----+----+-----+
+/* t2 */ commit;
+-- t2 >> 0 rows affected
+/* t3 */ begin;
+-- t3 >> 0 rows affected
+/* t3 */ select * from t where idx = 1 for update;
+-- t3 >> blocked
+/* t1 */ rollback;
+-- t1 >> 0 rows affected
+-- t3 >> resumed
+-- t3 >> +----+----+-----+
+-- t3    | ID | V  | IDX |
+-- t3    +----+----+-----+
+-- t3    |  1 | 11 |   1 |
+-- t3    +----+----+-----+
+/* t3 */ rollback;
+-- t3 >> 0 rows affected
+```
+
+</details>
+
+The reason is that when `PointGet` or `BatchPointGet` executor fails after successfully locking the index key it needs, it doesn't rollback the locks it already acquired. Neither do they reset the primary of the transaction, if it's the first DML in the transaction (which is responsible for deciding a primary if it succeeds).
+
+The problem doesn't affect the correctness of the transaction result, However it makes the transaction locks unnecessary keys.
+
+### 4. What is your TiDB version? (Required)
+
+nightly at 2022-06-23 (e0527ba27c72b0a533b126fedfa025d47a209ca9)
+

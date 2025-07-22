@@ -1,0 +1,33 @@
+ID: 15813
+Title: Join on tables with redundant indexes causes a server panic
+Description:
+Consider the following statements:
+```sql
+CREATE TABLE t0(c0 INT PRIMARY KEY);
+CREATE TABLE t1(c0 INT PRIMARY KEY);
+CREATE INDEX i0 ON t1(c0);
+CREATE INDEX i0 ON t0(c0);
+SELECT * FROM t0, t1 WHERE t1.c0=t0.c0;
+```
+Unexpectedly, the `SELECT` causes all connections to the server to drop. The following stack trace is printed:
+```
+[2020/03/29 21:11:30.043 +02:00] [ERROR] [conn.go:633] ["connection running loop panic"] [conn=6] [lastSQL="SELECT * FROM t0, t1 WHERE t1.c0=t0.c0"] [err="runtime error: makeslice: cap out of range"] [stack="goroutine 7658 [running]:\ngithub.com/pingcap/tidb/server.(*clientConn).Run.func1(0x2ccbee0, 0xc012853ad0, 0xc0010c64e0)\n\t/tidb/server/conn.go:631 +0xee\npanic(0x2658f40, 0x2c66d80)\n\t/usr/lib/go-1.13/src/runtime/panic.go:679 +0x1b2\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).moveEqualToOtherConditions(0xc00173f200, 0xc001817600, 0x2, 0x2, 0x0, 0x0, 0x0)\n\t/tidb/planner/core/exhaust_physical_plans.go:89 +0x116\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).GetMergeJoin(0xc00173f200, 0xc001189310, 0xc0126f51a0, 0xc0004d82c0, 0xc013221f40, 0xc0004d8080, 0x20, 0xc0004d83c0, 0xc0024e7b20)\n\t/tidb/planner/core/exhaust_physical_plans.go:174 +0x7a9\ngithub.com/pingcap/tidb/planner/core.(*LogicalJoin).exhaustPhysicalPlans(0xc00173f200, 0xc001189310, 0x2, 0xc0004d83c0, 0x42779e0)\n\t/tidb/planner/core/exhaust_physical_plans.go:1419 +0xf4\ngithub.com/pingcap/tidb/planner/core.(*baseLogicalPlan).findBestTask(0xc00173f220, 0xc001189310, 0x0, 0x0, 0x0, 0x0)\n\t/tidb/planner/core/find_best_task.go:172 +0x23b\ngithub.com/pingcap/tidb/planner/core.(*baseLogicalPlan).findBestTask(0xc00145c2e0, 0xc0011892c0, 0x0, 0x0, 0x0, 0x0)\n\t/tidb/planner/core/find_best_task.go:179 +0x61f\ngithub.com/pingcap/tidb/planner/core.physicalOptimize(0x2d031a0, 0xc00145c2c0, 0x30a2, 0x2d031a0, 0xc00145c2c0, 0x2d031a0, 0xc00145c2c0)\n\t/tidb/planner/core/optimizer.go:179 +0xb3\ngithub.com/pingcap/tidb/planner/core.DoOptimize(0x2ccbee0, 0xc012853ad0, 0x2d045a0, 0xc000154000, 0x30a2, 0x2d031a0, 0xc00145c2c0, 0x0, 0x0, 0x0, ...)\n\t/tidb/planner/core/optimizer.go:130 +0xa7\ngithub.com/pingcap/tidb/planner.optimize(0x2ccbee0, 0xc012853ad0, 0x2d045a0, 0xc000154000, 0x2ccdaa0, 0xc002cd3790, 0x2cf9680, 0xc0118125a0, 0x0, 0x0, ...)\n\t/tidb/planner/optimize.go:172 +0x5a9\ngithub.com/pingcap/tidb/planner.Optimize(0x2ccbee0, 0xc012853ad0, 0x2d045a0, 0xc000154000, 0x2ccdaa0, 0xc002cd3790, 0x2cf9680, 0xc0118125a0, 0x0, 0x0, ...)\n\t/tidb/planner/optimize.go:60 +0x3b2\ngithub.com/pingcap/tidb/executor.(*Compiler).Compile(0xc0008e8dc8, 0x2ccbee0, 0xc012853ad0, 0x2cd3220, 0xc002cd3790, 0x0, 0x0, 0x0)\n\t/tidb/executor/compiler.go:61 +0x253\ngithub.com/pingcap/tidb/session.(*session).execute(0xc000154000, 0x2ccbee0, 0xc012853ad0, 0xc00fb0ff21, 0x26, 0xc011c53b00, 0x0, 0x0, 0xc0008e9178, 0x23e8d5a)\n\t/tidb/session/session.go:1130 +0x5cf\ngithub.com/pingcap/tidb/session.(*session).Execute(0xc000154000, 0x2ccbee0, 0xc012853ad0, 0xc00fb0ff21, 0x26, 0x0, 0x0, 0x0, 0x0, 0x0)\n\t/tidb/session/session.go:1084 +0xdb\ngithub.com/pingcap/tidb/server.(*TiDBContext).Execute(0xc012853e30, 0x2ccbee0, 0xc012853ad0, 0xc00fb0ff21, 0x26, 0xefd1e1, 0x29f7658, 0xc0008e9278, 0xc0008e9268, 0xf9d572)\n\t/tidb/server/driver_tidb.go:248 +0x7c\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc0010c64e0, 0x2ccbee0, 0xc012853ad0, 0xc00fb0ff21, 0x26, 0x0, 0x0)\n\t/tidb/server/conn.go:1231 +0x91\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch(0xc0010c64e0, 0x2ccbee0, 0xc012853ad0, 0xc00fb0ff21, 0x27, 0x26, 0x0, 0x0)\n\t/tidb/server/conn.go:872 +0x5e2\ngithub.com/pingcap/tidb/server.(*clientConn).Run(0xc0010c64e0, 0x2ccbee0, 0xc012853ad0)\n\t/tidb/server/conn.go:686 +0x27c\ngithub.com/pingcap/tidb/server.(*Server).onConn(0xc00100e210, 0xc0010c64e0)\n\t/tidb/server/server.go:416 +0xb07\ncreated by github.com/pingcap/tidb/server.(*Server).Run\n\t/tidb/server/server.go:333 +0x709\n"]
+```
+
+Environment:
+```
+mysql> SELECT tidb_version();
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                               |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v4.0.0-beta.2-75-ga6de0e38d-dirty
+Git Commit Hash: a6de0e38d49c97671d316590c8c945eb518ca2b2
+Git Branch: master
+UTC Build Time: 2020-03-26 12:11:33
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

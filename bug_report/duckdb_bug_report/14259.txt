@@ -1,0 +1,186 @@
+ID: 14259
+Title: DuckDB v1.1.x and above JSON Schema Inference Error - leads to JSON transform error
+Description:
+### What happens?
+
+Since DuckDB v1.1.x, DuckDB parses JSON differently. The new versions throw this error when parsing files that worked just fine with v1.0.0 1f98600c2c:
+
+```
+Invalid Input Error: JSON transform error in file "recreate-issue.json", in line 4: Could not parse string "the team really needs an additional person to help" according to format specifier "%Y-%m-%d"
+the team really needs an additional person to help
+^
+Error: Expected a number
+Try increasing 'sample_size', reducing 'maximum_depth', specifying 'columns', 'format' or 'records' manually, setting 'ignore_errors' to true, or setting 'union_by_name' to true when reading multiple files with a different structure.
+```
+
+I tried a variety of things to create a file that has the simplest possible example that will produce the error. A file in json lines format with the following content will produce the error:
+
+```json
+{
+    "APPROVAL_STEP_COMPLETED_BY_EMPLOYEE_ID": null,
+    "APPROVAL_STEP_COMPLETED_BY_NAME":null,
+    "APPROVED_DATE": "2023-01-25",
+    "EMPLOYEE_FIRST_NAME": "first",
+    "EMPLOYEE_LAST_NAME": "last",
+    "BUSINESS_TITLE": null,
+    "BUSINESS_UNIT_ID": "bu-0001",
+    "BUSINESS_UNIT_NAME":null,
+    "APPLICANT_ID": "appl-0123456",
+    "APPLICANT_SOURCE_NAME": "linkedIn",
+    "APPLICANT_READY_TO_START_DATE": "2023-01-25",
+    "APPLICANT_STATUS_NAME": null,
+    "COST_CENTER_ID": "cc-12345678",
+    "COST_CENTER_NAME": "important stuff budget",
+    "POSITION_TYPE_NAME": "contractor",
+    "HR_APPROVAL_STEP_COMPLETED_BY_EMPLOYEE_ID": null,
+    "HR_DEPARTMENT_ID": "dept-01234",
+    "HR_DEPARTMENT_NAME": "Important Engineering",
+    "HR_DIVISION_ID":"div-01234",
+    "HR_DIVISION_NAME": "Important Stuff Division",
+    "JOB_CATEGORY_NAME": "Software Engineering",
+    "JOB_CODE": "job-1234",
+    "JOB_FAMILY_ID": "job-family-1234",
+    "JOB_FAMILY_NAME": "AI / ML Engineers",
+    "JOB_GRADE_CODE":"83",
+    "JOB_PROFILE_NAME": "Sr. Consultant",
+    "JUSTIFICATION_DESCRIPTION": "the team really needs an additional person to help",
+    "MOST_RECENT_APPROVAL_DATE": null
+}
+```
+
+duckDB seems to be inferring the schema as MAP(VARCHAR, DATE) and then throws the error when not all values are a Date string. Interestingly enough. If ANY of the other fields is a numeric data type, then the error will not occur. 
+
+I tested with all duckdb versions from 1.1.0 and beyond including the nightly build. 
+
+See the To Reproduce section for the command line and args to produce the error.  Here is what I have discovered so far:
+
+- The error only occurs via file import. Importing the same file from /dev/stdin will not produce the error but DOES still incorrectly infer the schema as MAP(VARCHAR, DATE). 
+- The error only occurs when duckdb has settled on a MAP as the target data type. Which seems to be triggered by having key names that have a number of fields that start with similar words. 
+- The error occurs when the first non-null column is detected as a `date` data type
+- The error does not occur when any other field is a number... all other fields where strings or nulls for the example above to trigger the error. 
+
+Here is the desired behavior from v1.0.0 1f98600c2c
+
+``` bash
+
+duckdb -c "SUMMARIZE FROM read_json('recreate-issue.json', sample_size = -1);"
+
+
+┌───────────────────────────────────────────┬─────────────┬────────────────────────────────────────────────────┬────────────────────────────────────────────────────┬───────────────┬───────┬───────┬───────┬───────┬───────┬───────┬─────────────────┐
+│                column_name                │ column_type │                        min                         │                        max                         │ approx_unique │  avg  │  std  │  q25  │  q50  │  q75  │ count │ null_percentage │
+│                  varchar                  │   varchar   │                      varchar                       │                      varchar                       │     int64     │ int32 │ int32 │ int32 │ int32 │ int32 │ int64 │  decimal(9,2)   │
+├───────────────────────────────────────────┼─────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────────────┼───────────────┼───────┼───────┼───────┼───────┼───────┼───────┼─────────────────┤
+│ APPROVAL_STEP_COMPLETED_BY_EMPLOYEE_ID    │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+│ APPROVAL_STEP_COMPLETED_BY_NAME           │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+│ APPROVED_DATE                             │ DATE        │ 2023-01-25                                         │ 2023-01-25                                         │             1 │       │       │       │       │       │     1 │            0.00 │
+│ EMPLOYEE_FIRST_NAME                       │ VARCHAR     │ first                                              │ first                                              │             1 │       │       │       │       │       │     1 │            0.00 │
+│ EMPLOYEE_LAST_NAME                        │ VARCHAR     │ last                                               │ last                                               │             1 │       │       │       │       │       │     1 │            0.00 │
+│ BUSINESS_TITLE                            │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+│ BUSINESS_UNIT_ID                          │ VARCHAR     │ bu-0001                                            │ bu-0001                                            │             1 │       │       │       │       │       │     1 │            0.00 │
+│ BUSINESS_UNIT_NAME                        │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+│ APPLICANT_ID                              │ VARCHAR     │ appl-0123456                                       │ appl-0123456                                       │             1 │       │       │       │       │       │     1 │            0.00 │
+│ APPLICANT_SOURCE_NAME                     │ VARCHAR     │ linkedIn                                           │ linkedIn                                           │             1 │       │       │       │       │       │     1 │            0.00 │
+│ APPLICANT_READY_TO_START_DATE             │ DATE        │ 2023-01-25                                         │ 2023-01-25                                         │             1 │       │       │       │       │       │     1 │            0.00 │
+│ APPLICANT_STATUS_NAME                     │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+│ COST_CENTER_ID                            │ VARCHAR     │ cc-12345678                                        │ cc-12345678                                        │             1 │       │       │       │       │       │     1 │            0.00 │
+│ COST_CENTER_NAME                          │ VARCHAR     │ important stuff budget                             │ important stuff budget                             │             1 │       │       │       │       │       │     1 │            0.00 │
+│ POSITION_TYPE_NAME                        │ VARCHAR     │ contractor                                         │ contractor                                         │             1 │       │       │       │       │       │     1 │            0.00 │
+│ HR_APPROVAL_STEP_COMPLETED_BY_EMPLOYEE_ID │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+│ HR_DEPARTMENT_ID                          │ VARCHAR     │ dept-01234                                         │ dept-01234                                         │             1 │       │       │       │       │       │     1 │            0.00 │
+│ HR_DEPARTMENT_NAME                        │ VARCHAR     │ Important Engineering                              │ Important Engineering                              │             1 │       │       │       │       │       │     1 │            0.00 │
+│ HR_DIVISION_ID                            │ VARCHAR     │ div-01234                                          │ div-01234                                          │             1 │       │       │       │       │       │     1 │            0.00 │
+│ HR_DIVISION_NAME                          │ VARCHAR     │ Important Stuff Division                           │ Important Stuff Division                           │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JOB_CATEGORY_NAME                         │ VARCHAR     │ Software Engineering                               │ Software Engineering                               │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JOB_CODE                                  │ VARCHAR     │ job-1234                                           │ job-1234                                           │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JOB_FAMILY_ID                             │ VARCHAR     │ job-family-1234                                    │ job-family-1234                                    │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JOB_FAMILY_NAME                           │ VARCHAR     │ AI / ML Engineers                                  │ AI / ML Engineers                                  │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JOB_GRADE_CODE                            │ VARCHAR     │ 83                                                 │ 83                                                 │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JOB_PROFILE_NAME                          │ VARCHAR     │ Sr. Consultant                                     │ Sr. Consultant                                     │             1 │       │       │       │       │       │     1 │            0.00 │
+│ JUSTIFICATION_DESCRIPTION                 │ VARCHAR     │ the team really needs an additional person to help │ the team really needs an additional person to help │             1 │       │       │       │       │       │     1 │            0.00 │
+│ MOST_RECENT_APPROVAL_DATE                 │ JSON        │                                                    │                                                    │             0 │       │       │       │       │       │     1 │          100.00 │
+├───────────────────────────────────────────┴─────────────┴────────────────────────────────────────────────────┴────────────────────────────────────────────────────┴───────────────┴───────┴───────┴───────┴───────┴───────┴───────┴─────────────────┤
+│ 28 rows                                                                                                                                                                                                                                  12 columns │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+```
+
+
+NOTE: A slight tangent from this error is that, the current versions of DuckDB seem more eager to classify json files with a lot of columns that have similar names as a map(VARCHAR, VARCHAR) which is different than the behavior in v1.0.0 1f98600c2c. 
+
+I use duckdb to import a lot of json files that have 100 - 400 columns and hope these won't become a map as standard behavior going forward. Otherwise the time savings of using duckDB disappears.... i.e. I have to specify the entire schema manually.... which for 400 columns is quite a bit of work. 
+
+
+### To Reproduce
+
+Take the json example from the above description and put it in a file named `recreate-issue.json` as single line or fully expanded. Both produce the same error. 
+
+
+``` bash
+./duckdb -version
+
+v1.1.2-dev87 897f93d865
+
+./duckdb -c "SUMMARIZE FROM read_json('recreate-issue.json', sample_size = -1);"
+
+Invalid Input Error: JSON transform error in file "recreate-issue.json", in line 4: Could not parse string "the team really needs an additional person to help" according to format specifier "%Y-%m-%d"
+the team really needs an additional person to help
+^
+Error: Expected a number
+Try increasing 'sample_size', reducing 'maximum_depth', specifying 'columns', 'format' or 'records' manually, setting 'ignore_errors' to true, or setting 'union_by_name' to true when reading multiple files with a different structure.
+```
+
+When run with ignore_errors = true, it won't throw the error but it will fail to import ALL columns that are not a Date. 
+
+``` bash
+./duckdb -c "SUMMARIZE FROM read_json('recreate-issue.json', sample_size = -1, ignore_errors = true );"
+
+
+┌─────────────┬────────────────────┬──────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────┬───────────────┬───────┬───────┬───────┬───────┬───────┬───────┬─────────────────┐
+│ column_name │    column_type     │         min          │                                                      max                                                      │ approx_unique │  avg  │  std  │  q25  │  q50  │  q75  │ count │ null_percentage │
+│   varchar   │      varchar       │       varchar        │                                                    varchar                                                    │     int64     │ int32 │ int32 │ int32 │ int32 │ int32 │ int64 │  decimal(9,2)   │
+├─────────────┼────────────────────┼──────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────┼───────┼───────┼───────┼───────┼───────┼───────┼─────────────────┤
+│ json        │ MAP(VARCHAR, DATE) │ {APPROVAL_STEP_COM…  │ {APPROVAL_STEP_COMPLETED_BY_EMPLOYEE_ID=NULL, APPROVAL_STEP_COMPLETED_BY_NAME=NULL, APPROVED_DATE=2023-01-2…  │             1 │       │       │       │       │       │     1 │            0.00 │
+└─────────────┴────────────────────┴──────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────┴───────────────┴───────┴───────┴───────┴───────┴───────┴───────┴─────────────────┘
+```
+
+
+
+### OS:
+
+osx - Apple M1 Max
+
+### DuckDB Version:
+
+1.1.0 through v1.1.2-dev87 897f93d865
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+Apple M1 Max
+
+### Full Name:
+
+Mike Dunn
+
+### Affiliation:
+
+none
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

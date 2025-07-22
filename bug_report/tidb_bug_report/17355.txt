@@ -1,0 +1,72 @@
+ID: 17355
+Title: max_execution_time sometimes fails
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+set @@max_execution_time=60000;
+select sleep(70);
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+mysql> select sleep(70);
++-----------+
+| sleep(70) |
++-----------+
+|        1 |
++-----------+
+1 row in set (1 min )
+### 3. What did you see instead (Required)
+```
+mysql> select sleep(70);
++-----------+
+| sleep(70) |
++-----------+
+|         0 |
++-----------+
+1 row in set (1 min 10.00 sec)
+```
+### 4. Affected version (Required)
+
+<!-- v3.0.0, v4.0.0, etc -->
+v3.0  v3.1  v4.0...
+### 5. Root Cause Analysis
+Recently, when I tested the version of TiDB3.0.14, I found that when max_execution_time is set and the execution time exceeds the value set by max_execution_time, these statements cannot be terminated, and I can only wait for the statement to be executed by myself. So I looked at the source code related to TiDB, there should be a problem with the logic here.
+```
+// Run starts a expensive query checker goroutine at the start time of the server.
+func (eqh *Handle) Run() {
+	threshold := atomic.LoadUint64(&variable.ExpensiveQueryTimeThreshold)
+	// use 100ms as tickInterval temply, may use given interval or use defined variable later
+	tickInterval := time.Millisecond * time.Duration(100)
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+	sm := eqh.sm.Load().(util.SessionManager)
+	for {
+		select {
+		case <-ticker.C:
+			processInfo := sm.ShowProcessList()
+			for _, info := range processInfo {
+				if len(info.Info) == 0 || info.ExceedExpensiveTimeThresh {
+					continue
+				}
+				costTime := time.Since(info.Time)
+				if costTime >= time.Second*time.Duration(threshold) && log.GetLevel() <= zapcore.WarnLevel {
+					logExpensiveQuery(costTime, info)
+					info.ExceedExpensiveTimeThresh = true
+
+				} else if info.MaxExecutionTime > 0 && costTime > time.Duration(info.MaxExecutionTime)*time.Millisecond {
+					sm.Kill(info.ID, true)
+				}
+			}
+			threshold = atomic.LoadUint64(&variable.ExpensiveQueryTimeThreshold)
+		case <-eqh.exitCh:
+			return
+		}
+	}
+}
+```
+Please assign this issue to me, I want to submit PR and fix it, thanks.
+<!-- should be filled by the investigator before it's closed -->

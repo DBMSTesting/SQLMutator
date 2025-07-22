@@ -1,0 +1,105 @@
+ID: 234
+Title: Clickhouse-server shuts down silently while trying to select from Array(T) inside Nested structure 
+Description:
+> Brief: inserts to Array(T) inside Nested runs OK. After that, if you try to select this column, server shuts down silently. But works well only for in-memory tables.
+
+Sample table
+```
+CREATE TABLE IF NOT EXISTS test_table(
+    dt Date,
+    id UInt32,
+    nested1 Nested(
+        nested_array Array(String),  // notice this field
+        nested_field1 UInt32,
+        nested_field2 UInt32
+    )
+) ENGINE=MergeTree(dt, (id, dt), 8192);
+```
+
+Let's try to insert something
+
+```
+:) INSERT INTO test_table FORMAT JSONEachRow
+:-] {"dt":"2016-01-01","id":123,"nested1.nested_field1":[0, 1],"nested1.nested_field2":[0, 1], "nested1.nested_array": [["a", "b"], ["c", "d"]]}
+
+INSERT INTO test_table FORMAT JSONEachRow
+
+Ok.
+
+1 rows in set. Elapsed: 0.002 sec.
+```
+
+So, everything is just fine. We can even select some fields easily too.
+
+```
+:) select nested1.nested_field1 from test_table;
+
+SELECT nested1.nested_field1
+FROM test_table
+
+┌─nested1.nested_field1─┐
+│ [0,1]                 │
+└───────────────────────┘
+
+1 rows in set. Elapsed: 0.002 sec.
+```
+
+But if we try to select from nested array
+
+```
+:) select nested1.nested_array from test_table;
+
+SELECT nested1.nested_array
+FROM test_table
+
+
+Exception on client:
+Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000, 127.0.0.1
+
+Connecting to localhost:9000.
+Code: 210. DB::NetException: Connection reset by peer: while reading from socket (127.0.0.1:9000)
+```
+our server silently shuts down.
+
+For in-memory tables everything is just fine.
+
+```
+CREATE TABLE IF NOT EXISTS test_table2(
+    dt Date,
+    id UInt32,
+    nested1 Nested(
+        nested_array Array(String),
+        nested_field1 UInt32,
+        nested_field2 UInt32
+    )
+) ENGINE=Memory;
+
+
+:) INSERT INTO test_table2 FORMAT JSONEachRow
+:-] {"dt":"2016-01-01","id":123,"nested1.nested_field1":[0, 1],"nested1.nested_field2":[0, 1], "nested1.nested_array": [["a", "b"], ["c", "d"]]}
+
+INSERT INTO test_table2 FORMAT JSONEachRow
+
+Ok.
+
+1 rows in set. Elapsed: 0.001 sec.
+
+
+:) select nested1.nested_array from test_table2;
+
+SELECT nested1.nested_array
+FROM test_table2
+
+┌─nested1.nested_array──┐
+│ [['a','b'],['c','d']] │
+└───────────────────────┘
+
+1 rows in set. Elapsed: 0.002 sec.
+```
+
+So, it's seems to be clickhouse doesn't support arrays inside nested structures, just like nested structures inside nested structures.
++ This limitation should be specified in the ClickHouse doc at least.
++ It would be great to prohibit all the attempts to create a new tables of this kind giving some clear error message.
++ Don't fail silently in these cases but rather giving some clear error message.
+
+Thank you!

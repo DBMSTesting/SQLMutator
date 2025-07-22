@@ -1,0 +1,66 @@
+ID: 53539
+Title: DDL cancellation stalled by DML: Expecting lock indication in mysql.tidb_mdl_view
+Description:
+### 1. Minimal reproduce step (Required)
+#Table Creation
+use test;
+create table job (
+    id bigint not null primary key,
+    job_state int
+);
+insert job select 1,66;
+ 
+#Session A: Maintains a long-running transaction without committing.
+begin;
+SELECT * FROM job WHERE id = 1;
+ 
+#Session B: Attempts to add an index to the table.
+alter table job add INDEX idx_job_state(job_state);
+ 
+#A Metadata Lock (MDL) is detected in mysql.tidb_mdl_view.
+MySQL [test]> SELECT * FROM mysql.tidb_mdl_view \G                                                                  
+*************************** 1. row ***************************     JOB_ID: 89    DB_NAME: test TABLE_NAME: job      QUERY: alter table job add INDEX idx_job_state(job_state) SESSION_ID: 7213735261140681119   TxnStart: 05-21 16:19:56.492(449912398542798849)                                                                 
+SQL_DIGESTS: ["begin","select * from job where id = ?"]                                                           
+1 row in set (0.01 sec)  
+ 
+#The ADD INDEX operation is cancelled, appearing successful, with no MDL visible afterward.
+MySQL [test]> ADMIN CANCEL DDL JOBS 89;                                                                             
++--------+------------+                                                                                             
+| JOB_ID | RESULT     |                                                                                             
++--------+------------+                                                                                             
+| 89     | successful |                                                                                             
++--------+------------+                                                                                             
+1 row in set (0.01 sec) 
+ 
+mysql> SELECT * FROM mysql.tidb_mdl_view \G                                                                         
+Empty set (0.01 sec)  
+ 
+ 
+#The DDL job state is shown as 'cancelling' when querying the DDL jobs.
+MySQL [test]> admin show ddl jobs \G                                                                               
+*************************** 1. row ***************************      JOB_ID: 89     DB_NAME: test  TABLE_NAME: job    JOB_TYPE: add index /* ingest */                                                                                
+SCHEMA_STATE: delete only   SCHEMA_ID: 2    TABLE_ID: 87   ROW_COUNT: 0 CREATE_TIME: 2024-05-21 16:20:02  START_TIME: 2024-05-21 16:20:02    END_TIME: NULL       STATE: cancelling
+ 
+#Logs reveal that the ADD INDEX operation is being blocked by another transaction.
+[2024/05/21 16:45:46.730 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip [172.16.201.108](http://172.16.201.108/), port 4001, id 93cd10c3-e97d-4f0b-9190-20c21a1295b4"] ["ddl id"=89] [ver=47]
+[2024/05/21 16:45:46.751 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip [172.16.201.108](http://172.16.201.108/), port 4001, id 93cd10c3-e97d-4f0b-9190-20c21a1295b4"] ["ddl id"=89] [ver=47]
+[2024/05/21 16:45:46.772 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip [172.16.201.108](http://172.16.201.108/), port 4001, id 93cd10c3-e97d-4f0b-9190-20c21a1295b4"] ["ddl id"=89] [ver=47]
+ 
+[2024/05/21 16:45:46.787 +08:00] [INFO] [session.go:4167] ["old running transaction block DDL"] ["table ID"=87] [jobID=89] ["connection ID"=7213735261140681119] ["elapsed time"=25m50.295171579s]
+ 
+[2024/05/21 16:45:46.794 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip [172.16.201.108](http://172.16.201.108/), port 4001, id 93cd10c3-e97d-4f0b-9190-20c21a1295b4"] ["ddl id"=89] [ver=47]
+[2024/05/21 16:45:46.815 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip [172.16.201.108](http://172.16.201.108/), port 4001, id 93cd10c3-e97d-4f0b-9190-20c21a1295b4"] ["ddl id"=89] [ver=47]
+[2024/05/21 16:45:46.836 +08:00] [INFO] [syncer.go:333] ["[ddl] syncer check all versions, someone is not synced"] [info="instance ip [172.16.201.108](http://172.16.201.108/), port 4001, id 93cd10c3-e97d-4f0b-9190-20c21a1295b4"] ["ddl id"=89] [ver=47]
+
+
+
+### 2. What did you expect to see? (Required)
+It is expected that executing SELECT * FROM mysql.tidb_mdl_view should display relevant lock information.
+
+
+### 3. What did you see instead (Required)
+It is unexpected that SELECT * FROM mysql.tidb_mdl_view returns no information.
+
+### 4. What is your TiDB version? (Required)
+v6.5.3
+

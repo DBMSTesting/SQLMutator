@@ -1,0 +1,70 @@
+ID: 9260
+Title: Can't adjust last granule because it has X rows, but try to subtract Y rows.
+Description:
+Version 20.1.4.14 (official build). Official Docker image. Default configuration.
+
+Got the following error on some queries after inserting data into an empty database.
+
+```
+DB::Exception: Can't adjust last granule because it has 1104 rows, but try to subtract 1352 rows.
+```
+
+SHOW CREATE TABLE:
+```SQL
+CREATE TABLE table (`did` UUID, `uuid` UUID, `timestamp` DateTime CODEC(DoubleDelta, LZ4), ... tons of other columns ...) ENGINE = AggregatingMergeTree() PARTITION BY (toMonday(timestamp), did) ORDER BY (uuid, timestamp) SETTINGS index_granularity = 8192
+```
+
+The table is a materialized view table. The error occurs only for some queries. For example,
+
+```SQL
+SELECT min(timestamp) as begin, max(timestamp) as end FROM table WHERE did = '...'
+```
+works correctly. However once we add `AND (uuid IN (...))` then the exception appears depending on the set of parameters in the IN (...) set. Notably, for a set that results in the error, removing a single parameter "fixes" the problem and running the query for that removed UUID also works!
+
+That is, separately, `IN(arg1, arg2, ... argN-1)` and `IN(argN)` work correctly, while `IN(arg1, arg2, ..., argN)` blows up.
+
+Tried running `OPTIMIZE FINAL` but it didn't make much difference. It changed the values of X and Y in the error message, but the problem persists. 
+
+system.parts
+
+```
+┌─partition─────────────────────────────────────────────┬─data_version─┬─name────────────────────────────────────┬─active─┬─marks─┬────rows─┬────────────min_time─┬────────────max_time─┬─min_block_number─┬─max_block_number─┬─level─┐
+│ ('2020-02-03','8c9fe762-2c0f-44e6-8d92-dc8e5da1439b') │            1 │ 7c3f11f25c4c18853de47f109efe9d11_1_15_2 │      1 │   719 │ 1175800 │ 2020-02-03 08:36:00 │ 2020-02-04 04:46:00 │                1 │               15 │     2 │
+└───────────────────────────────────────────────────────┴──────────────┴─────────────────────────────────────────┴────────┴───────┴─────────┴─────────────────────┴─────────────────────┴──────────────────┴──────────────────┴───────┘
+```
+
+Stack Trace:
+```
+0. 0xbc34d6c Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+1. 0x4f6e129 DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int)  in /usr/bin/clickhouse
+2. 0x4cb433a ?  in /usr/bin/clickhouse
+3. 0x97a7b45 DB::MergeTreeRangeReader::startReadingChain(unsigned long, std::__1::vector<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&)  in /usr/bin/clickhouse
+4. 0x97a9ad6 DB::MergeTreeRangeReader::read(unsigned long, std::__1::vector<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&)  in /usr/bin/clickhouse
+5. 0x97a975d DB::MergeTreeRangeReader::read(unsigned long, std::__1::vector<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&)  in /usr/bin/clickhouse
+6. 0x976c2d6 DB::MergeTreeBaseSelectProcessor::readFromPartImpl()  in /usr/bin/clickhouse
+7. 0x976dad3 DB::MergeTreeBaseSelectProcessor::generate()  in /usr/bin/clickhouse
+8. 0x91a7ef7 DB::ISource::work()  in /usr/bin/clickhouse
+9. 0x91da0f4 DB::TreeExecutorBlockInputStream::execute()  in /usr/bin/clickhouse
+10. 0x91da313 DB::TreeExecutorBlockInputStream::readImpl()  in /usr/bin/clickhouse
+11. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+12. 0x94a9a11 DB::FilterBlockInputStream::readImpl()  in /usr/bin/clickhouse
+13. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+14. 0x949f368 DB::ExpressionBlockInputStream::readImpl()  in /usr/bin/clickhouse
+15. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+16. 0x8c14bfd DB::ConcatBlockInputStream::readImpl()  in /usr/bin/clickhouse
+17. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+18. 0x95887a6 DB::Aggregator::execute(std::__1::shared_ptr<DB::IBlockInputStream> const&, DB::AggregatedDataVariants&)  in /usr/bin/clickhouse
+19. 0x945cc93 DB::AggregatingBlockInputStream::readImpl()  in /usr/bin/clickhouse
+20. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+21. 0x949f368 DB::ExpressionBlockInputStream::readImpl()  in /usr/bin/clickhouse
+22. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+23. 0x949f368 DB::ExpressionBlockInputStream::readImpl()  in /usr/bin/clickhouse
+24. 0x8a6f42f DB::IBlockInputStream::read()  in /usr/bin/clickhouse
+25. 0x8a61a14 DB::AsynchronousBlockInputStream::calculate()  in /usr/bin/clickhouse
+26. 0x8a631d4 ?  in /usr/bin/clickhouse
+27. 0x4fa5ab7 ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>)  in /usr/bin/clickhouse
+28. 0x4fa60e4 ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() const  in /usr/bin/clickhouse
+29. 0x4fa4fd7 ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>)  in /usr/bin/clickhouse
+30. 0x4fa358f ?  in /usr/bin/clickhouse
+31. 0x76db start_thread  in /lib/x86_64-linux-gnu/libpthread-2.27.so
+```

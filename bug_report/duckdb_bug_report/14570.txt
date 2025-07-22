@@ -1,0 +1,45 @@
+ID: 14570
+Title: Don't pre-initialize hash vector in DistinctStatistics construction
+Description:
+The `DistinctStatistics` constructor pre-initializes a hash vector of type `duckdb::Vector` with a size of `sizeof(uin64)*2048` = 16KB. This pre-initialization ends up consuming a lot of memory as seen in this massif output of a program that attaches 50 catalogs, each having 97 columns. We see that 78MB of the 116MB allocated is related to this vector.
+
+```
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 45 933,253,335,399      113,180,936      112,322,871       858,065            0
+ 46 933,265,400,713      114,960,272      114,086,884       873,388            0
+ 47 945,145,815,618      114,955,328      114,082,020       873,308            0
+ 48 948,725,400,279      116,662,272      115,778,767       883,505            0
+99.24% (115,778,767B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->67.65% (78,921,728B) 0xEB0B05: duckdb::VectorBuffer::CreateStandardVector(duckdb::PhysicalType, unsigned long) (in /home/admin/a.out)
+| ->67.65% (78,921,728B) 0xEB1F0D: duckdb::Vector::Initialize(bool, unsigned long) (in /home/admin/a.out)
+|   ->67.65% (78,921,728B) 0xEB2065: duckdb::Vector::Vector(duckdb::LogicalType, unsigned long) (in /home/admin/a.out)
+|     ->59.93% (69,910,528B) 0x2670C4F: duckdb::DistinctStatistics::DistinctStatistics(duckdb::unique_ptr<duckdb::HyperLogLog, std::__1::default_delete<duckdb::HyperLogLog>, true>, unsigned long, unsigned long) (in /home/admin/a.out)
+|     | ->59.93% (69,910,528B) 0x26573C6: duckdb::DistinctStatistics::Deserialize(duckdb::Deserializer&) (in /home/admin/a.out)
+|     |   ->59.93% (69,910,528B) 0x267340E: duckdb::unique_ptr<duckdb::DistinctStatistics, std::__1::default_delete<duckdb::DistinctStatistics>, true> duckdb::Deserializer::ReadPropertyWithExplicitDefault<duckdb::unique_ptr<duckdb::DistinctStatistics, std::__1::default_delete<duckdb::DistinctStatistics>, true> >(unsigned short, char const*, duckdb::unique_ptr<duckdb::DistinctStatistics, std::__1::default_delete<duckdb::DistinctStatistics>, true>&&) (in /home/admin/a.out)
+|     |     ->59.93% (69,910,528B) 0x2670A4E: duckdb::ColumnStatistics::Deserialize(duckdb::Deserializer&) (in /home/admin/a.out)
+|     |       ->59.93% (69,910,528B) 0x26AF648: duckdb::TableStatistics::Deserialize(duckdb::Deserializer&, duckdb::ColumnList&) (in /home/admin/a.out)
+|     |         ->59.93% (69,910,528B) 0x259D9FC: duckdb::TableDataReader::ReadTableData() (in /home/admin/a.out)
+```
+
+After this change, the same program only takes up 36MB and the dominant memory consumption is from `duckdb::FileBuffer` at 26MB (not surprising at all). 
+
+```
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 45 1,580,151,349,285       31,102,848       30,481,800       621,048            0
+ 46 1,580,163,374,582       31,273,928       30,640,637       633,291            0
+ 47 1,642,024,314,218       31,269,416       30,636,181       633,235            0
+ 48 1,645,707,202,738       36,805,360       36,075,097       730,263            0
+98.02% (36,075,097B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->71.81% (26,429,440B) 0xD76F48: duckdb::Allocator::DefaultAllocate(duckdb::PrivateAllocatorData*, unsigned long) (in /home/admin/a.out)
+| ->71.81% (26,429,440B) 0xD76FFF: duckdb::Allocator::AllocateData(unsigned long) (in /home/admin/a.out)
+|   ->71.78% (26,419,200B) 0xD8ADC3: duckdb::FileBuffer::Resize(unsigned long) (in /home/admin/a.out)
+|   | ->71.22% (26,214,400B) 0x255CBE3: duckdb::Block::Block(duckdb::Allocator&, long, unsigned long) (in /home/admin/a.out)
+|   | | ->71.22% (26,214,400B) 0x257A571: duckdb::SingleFileBlockManager::CreateBlock(long, duckdb::FileBuffer*) (in /home/admin/a.out)
+|   | |   ->71.22% (26,214,400B) 0x2596FBD: duckdb::BlockHandle::Load(duckdb::unique_ptr<duckdb::FileBuffer, std::__1::default_delete<duckdb::FileBuffer>, true>) (in /home/admin/a.out)
+|   | |     ->71.22% (26,214,400B) 0x256F56C: duckdb::StandardBufferManager::Pin(duckdb::shared_ptr<duckdb::BlockHandle, true>&) (in /home/admin/a.out)
+|   | |       ->71.22% (26,214,400B) 0x2625E40: duckdb::MetadataReader::ReadNextBlock() (in /home/admin/a.out)
+```

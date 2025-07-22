@@ -1,0 +1,160 @@
+ID: 13367
+Title: read decimal data error from C API.
+Description:
+### What happens?
+
+when I read parquet file with duckdb CAPI, sometimes, I got the value of decimal, but it turns to 'inf' or an incorrect value when I transfer it to double with `duckdb_decimal_to_double` function. And sometimes, 
+the transfer function throw an exception like this:
+
+```console
+Exception thrown at 0x00007FF7F80EE0DD (located in DBPerformanceTest.exe) :
+0xC0000005: Access conflict occurred at read position 0x000001517F5DE000.
+```
+
+### To Reproduce
+
+sometimes, I got the value of decimal, but it turns to 'inf' or an incorrect value when I transfer it to double with duckdb_decimal_to double function. And sometimes, 
+the transfer function throw an exception like this:
+
+```console
+Exception thrown at 0x00007FF7F80EE0DD (located in DBPerformanceTest.exe) :
+0xC0000005: Access conflict occurred at read position 0x000001517F5DE000.
+```
+the Demo Code is underlying. And I add the demo project here with Visual Studio 2022.
+
+```cpp
+#include <iostream>
+#include <vector>
+#include "include/duckdb.hpp"
+
+using namespace std;
+
+struct Tick
+{
+	int64_t UpdateTs;
+	double LastPrice;
+	double LastTraded;
+	double Volume;
+};
+
+int main()
+{
+    duckdb_database db;
+    duckdb_connection connection;
+	if (duckdb_open(nullptr, &db) == DuckDBError)
+	{
+		printf("duckdb_open Error.");
+		return -1;
+	}
+	if (duckdb_connect(db, &connection) == DuckDBError)
+	{
+		printf("duckdb_open Error.");
+		return -1;
+	}
+	std::vector<Tick*> ticks;
+	duckdb_result result;
+	auto sql = "select UpdateTs, LastPrice, LastTraded, Volume from read_parquet('./*.parquet');";
+	if (duckdb_query(connection, sql, &result) == DuckDBError)
+	{
+		printf("duckdb_query Error. Sql:%s", sql);
+		return -1;
+	}
+	while (true)
+	{
+		duckdb_data_chunk dataChunk = duckdb_fetch_chunk(result);
+		if (dataChunk == nullptr)
+		{
+			break;
+		}
+		idx_t rowCount = duckdb_data_chunk_get_size(dataChunk);
+
+		duckdb_vector column0 = duckdb_data_chunk_get_vector(dataChunk, 0);
+		duckdb_vector column1 = duckdb_data_chunk_get_vector(dataChunk, 1);
+		duckdb_vector column2 = duckdb_data_chunk_get_vector(dataChunk, 2);
+		duckdb_vector column3 = duckdb_data_chunk_get_vector(dataChunk, 3);
+
+		int64_t* dataColumn0 = (int64_t*)duckdb_vector_get_data(column0);
+		duckdb_decimal* dataColumn1 = (duckdb_decimal*)duckdb_vector_get_data(column1);
+		double* dataColumn2 = (double*)duckdb_vector_get_data(column2);
+		double* dataColumn3 = (double*)duckdb_vector_get_data(column3);
+
+		uint64_t* validityColumn0 = duckdb_vector_get_validity(column0);
+		uint64_t* validityColumn1 = duckdb_vector_get_validity(column1);
+		uint64_t* validityColumn2 = duckdb_vector_get_validity(column2);
+		uint64_t* validityColumn3 = duckdb_vector_get_validity(column3);
+
+		for (auto row = 0; row < rowCount; ++row)
+		{
+			Tick* tick = new Tick();
+			memset(tick, 0, sizeof(Tick));
+			if (duckdb_validity_row_is_valid(validityColumn0, row))
+			{
+				tick->UpdateTs = dataColumn0[row];
+			}
+			if (duckdb_validity_row_is_valid(validityColumn1, row))
+			{
+				tick->LastPrice = duckdb_decimal_to_double(dataColumn1[row]);
+			}
+			if (duckdb_validity_row_is_valid(validityColumn2, row))
+			{
+				tick->LastTraded = dataColumn2[row];
+			}
+			if (duckdb_validity_row_is_valid(validityColumn3, row))
+			{
+				tick->Volume = dataColumn3[row];
+			}
+			ticks.push_back(tick);
+		}
+
+		duckdb_destroy_data_chunk(&dataChunk);
+	}
+	printf("RecordCount:%lld", ticks.size());
+
+	duckdb_destroy_result(&result);
+	duckdb_disconnect(&connection);
+	duckdb_close(&db);
+	return 0;
+}
+```
+
+When I use duckdb Command Line to Select Data, it print successful:
+
+![image](https://github.com/user-attachments/assets/31c09f32-24be-4b2f-8496-b687c1ae925c)
+[TestDuckdbDemo.zip](https://github.com/user-attachments/files/16559508/TestDuckdbDemo.zip)
+
+
+### OS:
+
+window11,x64
+
+### DuckDB Version:
+
+1.0
+
+### DuckDB Client:
+
+CAPI
+
+### Full Name:
+
+慕容展云
+
+### Affiliation:
+
+150315803@qq.com
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - Other reason (please specify in the issue body)
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

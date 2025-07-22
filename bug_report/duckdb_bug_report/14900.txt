@@ -1,0 +1,50 @@
+ID: 14900
+Title: Top-N: Improve performance with large heaps, and correctly call Reduce
+Description:
+Follow-up from https://github.com/duckdb/duckdb/pull/14424
+
+Fixes #14896
+
+#### Large Heaps
+
+When using a large `offset`, the heap we generate in the Top-N operator is large. The previous implementation took some shortcuts that made it work poorly with large heaps, resulting in performance degradations compared to the previous implementation:
+
+* `TopNHeap::Combine` would scan and re-insert the values in the heaps, instead of directly merging heaps
+* `TopNHeap::Sink` would fully scan the heap at every iteration
+
+This PR fixes these issues.
+
+### `AddSmallHeap`/`AddLargeHeap`
+
+The previous heap insertion happened in two stages:
+
+* Insert the sort keys one-by-one into the heap
+* Scan the heap to figure out which **final sort keys** still remain inside the heap
+* Append the payload for the corresponding final sort keys
+
+The main reason for this two-stage approach is to deal with many conflicts *within the same data chunk*. For example, consider the query:
+
+```sql
+SELECT * FROM lineitem ORDER BY l_orderkey DESC LIMIT 5;
+```
+
+Since `lineitem` is sorted by `l_orderkey`, every chunk we stream into the operator will be full of the new highest values. Without this two-stage approach, we will append all rows to the payload data, only to then discard most rows again. Using the two stage approach we append at most 5 rows (the heap size) to the payload at each iteration, leading to lower memory usage and fewer calls to Reduce.
+
+### AddLargeHeap
+
+This PR adds a new, simpler, single-stage insertion where we insert the sort keys and immediately insert payload data. We switch to this approach for heaps `>= 100 rows`. By immediately inserting the payload data we don't need to scan the heap during the sink phase, which has great speed-ups for when we are dealing with larger heaps. 
+
+### Benchmarks
+
+Below is an example of a Top-N with a large heap that is sped up significantly by this approach:
+
+```sql
+select l_orderkey
+from lineitem
+where l_linestatus = 'O'
+order by l_quantity limit 100 offset 1000000;
+```
+
+| v1.1  | main |  new  |
+|-------|------|-------|
+| 0.86s | 6.9s | 0.77s |

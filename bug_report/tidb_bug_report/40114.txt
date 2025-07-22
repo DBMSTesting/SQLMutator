@@ -1,0 +1,75 @@
+ID: 40114
+Title: txn: the left pessimistic lock may break the constraint check
+Description:
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+```
+drop table if exists t;
+create table t(a int key, b int, key k(b));
+insert into t values(1, 2);
+
+begin pessimistic;
+// Here inject an error though that the pessimistic lock is executed successfully and 
+// skip the "asyncPessimisticRollback", so a pessimistic lock on row key "1" is left.  
+// A more common case the user would encounter is:
+// 1. The pessimistic lock requests are sent to serveral regions, for example, 2 regions.
+// 2. The first pessimistic lock request is executed successfully, but the second one fails because of lock wait.
+// 3. The statement receives lock wait timeout error, and the async pessimistic lock rollback fails.
+// 4. The pessimistic lock on region 1 is left.
+delete from t; 
+// Try to insert another row with the same row key, the insert should fail because of "duplicated entry".
+insert into t values(1, 5);
+commit;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```
+mysql> insert into t values(1, 5);
+ERROR 1062 (23000): Duplicate entry '1' for key 't.PRIMARY'
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> begin pessimistic;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> delete from t;insert into t values(1, 5);
+ERROR 1105 (HY000): injected error after successful locking for delete key={key 15 0 7480000000000001315f728000000000000001 <nil>}
+Query OK, 1 row affected (0.00 sec)
+
+mysql> commit;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> select * from t;
++---+------+
+| a | b    |
++---+------+
+| 1 |    5 |
++---+------+
+1 row in set (0.01 sec)
+
+mysql> select * from t use index(k);
++---+------+
+| a | b    |
++---+------+
+| 1 |    2 |
+| 1 |    5 |
++---+------+
+2 rows in set (0.01 sec)
+
+mysql> admin check table t;
+ERROR 8134 (HY000): data inconsistency in table: t, index: k, col: b, handle: "1", index-values:"KindInt64 2" != record-values:"KindInt64 5", compare err:<nil>
+```
+
+The pessimistic lock request raised by the `insert` statement contains a `presumeNotExist` flag, because the lock is left by 
+previous `delete` statement the constraint check is skipped, and the uniqueness constraint is broken.
+
+### 4. What is your TiDB version? (Required)
+Nightly with commit `aeccf77637e133b9c4edf04d422350d9db1a1822`
+
+<!-- Paste the output of SELECT tidb_version() -->
+

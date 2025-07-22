@@ -1,0 +1,64 @@
+ID: 58692
+Title: Update during reorg partition will cause data inconsistency
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```go
+func TestTest(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	defer ingesttestutil.InjectMockBackendMgr(t, store)()
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (a int, b int, index idx(a)) partition by hash(a) partitions 5")
+	tk.MustExec("insert into t (a, b) values (1, 1), (2, 2), (3, 3)")
+	var i atomic.Int32
+	i.Store(3)
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/afterWaitSchemaSynced", func(job *model.Job) {
+		tk2 := testkit.NewTestKit(t, store)
+		tmp := i.Add(1)
+		_, err := tk2.Exec(fmt.Sprintf("insert into test.t values (%d, %d)", tmp, tmp))
+		assert.Nil(t, err)
+
+		_, err = tk2.Exec(fmt.Sprintf("update test.t set b = b + 11, a = b where b = %d", tmp-1))
+		assert.Nil(t, err)
+	})
+	tk.MustExec("alter table t remove partitioning")
+	rsIndex := tk.MustQuery("select *,_tidb_rowid from t use index(idx)").Sort()
+	rsTable := tk.MustQuery("select *,_tidb_rowid from t use index()").Sort()
+	require.Equal(t, rsIndex.String(), rsTable.String())
+}
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+test pass
+
+### 3. What did you see instead (Required)
+
+```
+Error Trace:	/Users/mohangjie/tidb/pkg/ddl/ingest/integration_test.go:559
+        	Error:      	Not equal: 
+        	            	expected: "1 1 60001\n10 10 120002\n2 2 60002\n3 14 60003\n5 16 5\n6 17 30001\n7 18 90001\n8 19 90002\n9 20 120001"
+        	            	actual  : "1 1 60001\n10 10 120002\n2 2 60002\n3 14 60003\n4 15 4\n5 16 5\n6 17 30001\n7 18 90001\n8 19 90002\n9 20 120001"
+        	            	
+        	            	Diff:
+        	            	--- Expected
+        	            	+++ Actual
+        	            	@@ -4,2 +4,3 @@
+        	            	 3 14 60003
+        	            	+4 15 4
+        	            	 5 16 5
+```
+
+### 4. What is your TiDB version? (Required)
+
+e79d22f156ca8305de126297d1a85ff900cba586

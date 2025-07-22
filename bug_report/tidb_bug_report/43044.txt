@@ -1,0 +1,260 @@
+ID: 43044
+Title: prepare stmt with stale read get wrong result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Run playground with the following TiKV config:
+
+```toml
+[resolved-ts]
+advance-ts-interval = "100ms"
+```
+
+Run this case.
+
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t(id int primary key, v int);
+
+/* init */ insert into t values(1, 1), (2, 2);
+
+/* t1 */ select sleep(2);
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+/* t1 */ prepare stmt from 'select * from t as of timestamp now() - interval 1 second';
+/* t1 */ execute stmt;
+
+/* t2 */ insert into t values(3, 3);
+
+/* t1 */ select sleep(1);
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+/* t1 */ execute stmt;
+
+/* t1 */ select sleep(1);
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+/* t1 */ execute stmt;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+select and execute always returns the same result.
+
+### 3. What did you see instead (Required)
+
+<details>
+
+<summary><s>The previous result, there is a issue my test tool, which does not read data from a execute statement</s></summary>
+
+```sql
+/* init */ drop table if exists t;
+-- init >> 0 rows affected
+/* init */ create table t(id int primary key, v int);
+-- init >> 0 rows affected
+/* init */ insert into t values(1, 1), (2, 2);
+-- init >> 2 rows affected
+/* t1 */ select sleep(2);
+-- t1 >> +----------+
+-- t1    | SLEEP(2) |
+-- t1    +----------+
+-- t1    |        0 |
+-- t1    +----------+
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+-- t1 >> +----+---+
+-- t1    | ID | V |
+-- t1    +----+---+
+-- t1    |  1 | 1 |
+-- t1    |  2 | 2 |
+-- t1    +----+---+
+/* t1 */ prepare stmt from 'select * from t as of timestamp now() - interval 1 second';
+-- t1 >> 0 rows affected
+/* t1 */ execute stmt;
+-- t1 >> 0 rows affected
+/* t2 */ insert into t values(3, 3);
+-- t2 >> 1 rows affected
+/* t1 */ select sleep(1);
+-- t1 >> +----------+
+-- t1    | SLEEP(1) |
+-- t1    +----------+
+-- t1    |        0 |
+-- t1    +----------+
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+-- t1 >> +----+---+
+-- t1    | ID | V |
+-- t1    +----+---+
+-- t1    |  1 | 1 |
+-- t1    |  2 | 2 |
+-- t1    +----+---+
+/* t1 */ execute stmt;
+-- t1 >> 0 rows affected
+/* t1 */ select sleep(1);
+-- t1 >> +----------+
+-- t1    | SLEEP(1) |
+-- t1    +----------+
+-- t1    |        0 |
+-- t1    +----------+
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+-- t1 >> +----+---+
+-- t1    | ID | V |
+-- t1    +----+---+
+-- t1    |  1 | 1 |
+-- t1    |  2 | 2 |
+-- t1    |  3 | 3 |
+-- t1    +----+---+
+/* t1 */ execute stmt;
+-- t1 >> 0 rows affected
+```
+
+</details>
+
+~~Note this is also a anomaly. After sleep 1 second, `as of timestamp now() - interval 1 second` should see the previous insert `(3, 3)`.~~
+
+<details>
+
+<summary><s>Case details</s></summary>
+
+```sql
+/* t2 */ insert into t values(3, 3);
+-- t2 >> 1 rows affected
+/* t1 */ select sleep(1);
+-- t1 >> +----------+
+-- t1    | SLEEP(1) |
+-- t1    +----------+
+-- t1    |        0 |
+-- t1    +----------+
+/* t1 */ select * from t as of timestamp now() - interval 1 second;
+-- t1 >> +----+---+
+-- t1    | ID | V |
+-- t1    +----+---+
+-- t1    |  1 | 1 |
+-- t1    |  2 | 2 |
+-- t1    +----+---+
+```
+
+</details>
+
+It's caused by `now()` accurate issue.
+
+---
+
+Run this statement with mysql client, got the following output, the resultset of `execute stmt` is not updated after (3, 3) is inserted.
+
+```sql
+MySQL [test]> /* init */ create table t(id int primary key, v int);
+Query OK, 0 rows affected (0.134 sec)
+
+MySQL [test]> 
+MySQL [test]> /* init */ insert into t values(1, 1), (2, 2);
+Query OK, 2 rows affected (0.006 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+MySQL [test]> 
+MySQL [test]> /* t1 */ select sleep(2);
++----------+
+| sleep(2) |
++----------+
+|        0 |
++----------+
+1 row in set (2.001 sec)
+
+MySQL [test]> /* t1 */ select * from t as of timestamp now() - interval 1 second;
++----+------+
+| id | v    |
++----+------+
+|  1 |    1 |
+|  2 |    2 |
++----+------+
+2 rows in set (0.001 sec)
+
+MySQL [test]> /* t1 */ prepare stmt from 'select * from t as of timestamp now() - interval 1 second';
+Query OK, 0 rows affected (0.001 sec)
+
+MySQL [test]> /* t1 */ execute stmt;
++----+------+
+| id | v    |
++----+------+
+|  1 |    1 |
+|  2 |    2 |
++----+------+
+2 rows in set (0.001 sec)
+
+MySQL [test]> 
+MySQL [test]> /* t2 */ insert into t values(3, 3);
+Query OK, 1 row affected (0.004 sec)
+
+MySQL [test]> 
+MySQL [test]> /* t1 */ select sleep(1);
++----------+
+| sleep(1) |
++----------+
+|        0 |
++----------+
+1 row in set (1.002 sec)
+
+MySQL [test]> /* t1 */ select * from t as of timestamp now() - interval 1 second;
++----+------+
+| id | v    |
++----+------+
+|  1 |    1 |
+|  2 |    2 |
++----+------+
+2 rows in set (0.002 sec)
+
+MySQL [test]> /* t1 */ execute stmt;
++----+------+
+| id | v    |
++----+------+
+|  1 |    1 |
+|  2 |    2 |
++----+------+
+2 rows in set (0.001 sec)
+
+MySQL [test]> 
+MySQL [test]> /* t1 */ select sleep(1);
++----------+
+| sleep(1) |
++----------+
+|        0 |
++----------+
+1 row in set (1.001 sec)
+
+MySQL [test]> /* t1 */ select * from t as of timestamp now() - interval 1 second;
++----+------+
+| id | v    |
++----+------+
+|  1 |    1 |
+|  2 |    2 |
+|  3 |    3 |
++----+------+
+3 rows in set (0.002 sec)
+
+MySQL [test]> /* t1 */ execute stmt;
++----+------+
+| id | v    |
++----+------+
+|  1 |    1 |
+|  2 |    2 |
++----+------+
+2 rows in set (0.002 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+Release Version: v7.1.0-alpha
+Edition: Community
+Git Commit Hash: 8c9663941fc633bc57edfcfb3edc5da8533ace57
+Git Branch: heads/refs/tags/v7.1.0-alpha
+UTC Build Time: 2023-04-12 14:36:43
+GoVersion: go1.20.3
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv
+```

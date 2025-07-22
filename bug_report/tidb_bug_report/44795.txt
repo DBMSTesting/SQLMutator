@@ -1,0 +1,141 @@
+ID: 44795
+Title: got wrong result when enable `tidb_opt_agg_push_down`
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. deploy a cluster 
+2. prepare tpch data with 1sf `tiup bench tpch prepare -T 10`
+3. execute q13
+```sql
+set tidb_opt_agg_push_down=ON;
+SELECT c_count, count(*) as custdist
+from ( SELECT c_custkey, count(o_orderkey)  as  c_count
+       from customer left join orders on c_custkey = o_custkey and o_comment not like '%special%requests%'
+       group by c_custkey ) c_orders
+group by c_count
+order by custdist desc, c_count desc;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+[17:41:41]TiDB root:test> SELECT c_count, count(*) as custdist
+                       -> from ( SELECT c_custkey, count(o_orderkey)  as  c_count
+                       ->        from customer left join orders on c_custkey = o_custkey and o_comment not like '%special%requests%'
+                       ->        group by c_custkey ) c_orders
+                       -> group by c_count
+                       -> order by custdist desc, c_count desc;
++---------+----------+
+| c_count | custdist |
++---------+----------+
+| 0       | 50005    |
+| 9       | 6641     |
+| 10      | 6532     |
+| 11      | 6014     |
+| 8       | 5937     |
+| 12      | 5639     |
+| 13      | 5024     |
+| 19      | 4793     |
+| 7       | 4687     |
+| 17      | 4587     |
+| 18      | 4529     |
+| 20      | 4516     |
+| 15      | 4505     |
+| 14      | 4446     |
+| 16      | 4273     |
+| 21      | 4190     |
+| 22      | 3623     |
+| 6       | 3265     |
+| 23      | 3225     |
+| 24      | 2742     |
+| 25      | 2086     |
+| 5       | 1948     |
+| 26      | 1612     |
+| 27      | 1179     |
+| 4       | 1007     |
+| 28      | 893      |
+| 29      | 593      |
+| 3       | 415      |
+| 30      | 376      |
+| 31      | 226      |
+| 32      | 148      |
+| 2       | 134      |
+| 33      | 75       |
+| 34      | 50       |
+| 35      | 37       |
+| 1       | 17       |
+| 36      | 14       |
+| 38      | 5        |
+| 37      | 5        |
+| 40      | 4        |
+| 41      | 2        |
+| 39      | 1        |
++---------+----------+
+42 rows in set
+```
+
+### 3. What did you see instead (Required)
+with/without tiflash get the same wrong result
+```sql
+[17:40:39]TiDB root:test> SELECT c_count, count(*) as custdist
+                       -> from ( SELECT c_custkey, count(o_orderkey)  as  c_count
+                       ->        from customer left join orders on c_custkey = o_custkey and o_comment not like '%special%requests%'
+                       ->        group by c_custkey ) c_orders
+                       -> group by c_count
+                       -> order by custdist desc, c_count desc;
++---------+----------+
+| c_count | custdist |
++---------+----------+
+| 1       | 99995    |
+| 0       | 50005    |
++---------+----------+
+2 rows in set
+Time: 0.111s
+[17:43:33]TiDB root:test> explain analyze SELECT c_count, count(*) as custdist
+                       -> from ( SELECT c_custkey, count(o_orderkey)  as  c_count
+                       ->        from customer left join orders on c_custkey = o_custkey and o_comment not like '%special%requests%'
+                       ->        group by c_custkey ) c_orders
+                       -> group by c_count
+                       -> order by custdist desc, c_count desc;
++------------------------------------+------------+---------+-----------+----------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------+-----------+---------+
+| id                                 | estRows    | actRows | task      | access object  | execution info                                                                                                                                                                                                                                                                                                                                                               | operator info                                                                                                                   | memory    | disk    |
++------------------------------------+------------+---------+-----------+----------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------+-----------+---------+
+| Sort_12                            | 83671.94   | 2       | root      |                | time:990ms, loops:2, RU:4274.479285                                                                                                                                                                                                                                                                                                                                          | Column#19:desc, Column#18:desc                                                                                                  | 776 Bytes | 0 Bytes |
+| └─Projection_14                    | 83671.94   | 2       | root      |                | time:990ms, loops:2, Concurrency:5                                                                                                                                                                                                                                                                                                                                           | Column#18, Column#19                                                                                                            | 7.42 KB   | N/A     |
+|   └─HashAgg_15                     | 83671.94   | 2       | root      |                | time:990ms, loops:2, partial_worker:{wall_time:989.932625ms, concurrency:5, task_num:148, tot_wait:4.941367211s, tot_exec:8.08983ms, tot_time:4.949490251s, max:989.902625ms, p95:989.902625ms}, final_worker:{wall_time:989.942792ms, concurrency:5, task_num:5, tot_wait:4.949549334s, tot_exec:36.497µs, tot_time:4.949587749s, max:989.920708ms, p95:989.920708ms}       | group by:Column#18, funcs:count(1)->Column#19, funcs:firstrow(Column#18)->Column#18                                             | 298.0 KB  | N/A     |
+|     └─Projection_16                | 150000.00  | 150000  | root      |                | time:989.7ms, loops:149, Concurrency:5                                                                                                                                                                                                                                                                                                                                       | if(isnull(Column#20), 0, 1)->Column#18                                                                                          | 88.7 KB   | N/A     |
+|       └─HashJoin_17                | 150000.00  | 150000  | root      |                | time:989.7ms, loops:149, build_hash_table:{total:893ms, fetch:878.3ms, build:14.7ms}, probe:{concurrency:5, total:4.95s, max:989.8ms, probe:57.9ms, fetch:4.89s}                                                                                                                                                                                                             | left outer join, equal:[eq(test.customer.c_custkey, test.orders.o_custkey)]                                                     | 7.63 MB   | 0 Bytes |
+|         ├─HashAgg_26(Build)        | 83671.94   | 99995   | root      |                | time:878.1ms, loops:101, partial_worker:{wall_time:847.501791ms, concurrency:5, task_num:45, tot_wait:3.890344752s, tot_exec:268.351209ms, tot_time:4.204290752s, max:847.478542ms, p95:847.478542ms}, final_worker:{wall_time:892.7665ms, concurrency:5, task_num:25, tot_wait:4.189205s, tot_exec:269.197669ms, tot_time:4.458416416s, max:892.748875ms, p95:892.748875ms} | group by:test.orders.o_custkey, funcs:count(Column#21)->Column#20, funcs:firstrow(test.orders.o_custkey)->test.orders.o_custkey | 91.4 MB   | N/A     |
+|         │ └─TableReader_27         | 83671.94   | 1079832 | root      |                | time:830ms, loops:46, cop_task: {num: 45, max: 111.5ms, min: 1.66ms, avg: 47.2ms, p95: 106.9ms, max_proc_keys: 73728, p95_proc_keys: 73728, tot_proc: 2.07s, tot_wait: 2.52ms, rpc_num: 45, rpc_time: 2.12s, copr_cache_hit_ratio: 0.00, build_task_duration: 2.92µs, max_distsql_concurrency: 3}                                                                            | data:HashAgg_21                                                                                                                 | 1.54 MB   | N/A     |
+|         │   └─HashAgg_21           | 83671.94   | 1079832 | cop[tikv] |                | tikv_task:{proc max:106ms, min:1ms, avg: 45.7ms, p80:101ms, p95:105ms, iters:1467, tasks:45}, scan_detail: {total_process_keys: 1500000, total_process_keys_size: 227213890, total_keys: 1500045, get_snapshot_time: 1.3ms, rocksdb: {key_skipped_count: 1500000, block: {cache_hit_count: 7511}}}                                                                           | group by:test.orders.o_custkey, funcs:count(test.orders.o_orderkey)->Column#21                                                  | N/A       | N/A     |
+|         │     └─Selection_25       | 1264588.80 | 1483918 | cop[tikv] |                | tikv_task:{proc max:103ms, min:1ms, avg: 43.8ms, p80:96ms, p95:101ms, iters:1467, tasks:45}                                                                                                                                                                                                                                                                                  | not(like(test.orders.o_comment, "%special%requests%", 92))                                                                      | N/A       | N/A     |
+|         │       └─TableFullScan_24 | 1580736.00 | 1500000 | cop[tikv] | table:orders   | tikv_task:{proc max:38ms, min:0s, avg: 14.3ms, p80:32ms, p95:35ms, iters:1467, tasks:45}                                                                                                                                                                                                                                                                                     | keep order:false                                                                                                                | N/A       | N/A     |
+|         └─TableReader_20(Probe)    | 150000.00  | 150000  | root      |                | time:87.5ms, loops:149, cop_task: {num: 11, max: 27.4ms, min: 508.1µs, avg: 8.91ms, p95: 27.4ms, max_proc_keys: 50144, p95_proc_keys: 50144, tot_proc: 88.8ms, tot_wait: 760.3µs, rpc_num: 11, rpc_time: 97.9ms, copr_cache_hit_ratio: 0.00, build_task_duration: 3.33µs, max_distsql_concurrency: 1}                                                                        | data:TableFullScan_19                                                                                                           | 657.1 KB  | N/A     |
+|           └─TableFullScan_19       | 150000.00  | 150000  | cop[tikv] | table:customer | tikv_task:{proc max:27ms, min:0s, avg: 8.27ms, p80:18ms, p95:27ms, iters:190, tasks:11}, scan_detail: {total_process_keys: 150000, total_process_keys_size: 4050000, total_keys: 150011, get_snapshot_time: 250.7µs, rocksdb: {key_skipped_count: 150000, block: {cache_hit_count: 44, read_count: 987, read_byte: 11.6 MB, read_time: 10.3ms}}}                             | keep order:false                                                                                                                | N/A       | N/A     |
++------------------------------------+------------+---------+-----------+----------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------+-----------+---------+
+12 rows in set
+Time: 0.997s
+```
+### 4. What is your TiDB version? (Required)
+v6.5.2, v7.1.0
+```sql
+[17:44:25]TiDB root:test> select tidb_version();
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v7.2.0-alpha                             |
+| Edition: Community                                        |
+| Git Commit Hash: 5bd56cb5d5597e106a511007d42c93ee4fc20f50 |
+| Git Branch: heads/refs/tags/v7.2.0-alpha                  |
+| UTC Build Time: 2023-06-18 14:24:52                       |
+| GoVersion: go1.20.5                                       |
+| Race Enabled: false                                       |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

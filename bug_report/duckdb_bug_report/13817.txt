@@ -1,0 +1,58 @@
+ID: 13817
+Title: improve extension error message
+Description:
+Closes #13808 
+This PR improves the error message when failing to install or load a duckdb extension. 
+
+Mainly, it gets rid of the `Extension \"" + extension_name + "\" is an existing extension.\n.` error message created by `ExtensionHelper::CreateSuggestions` when the given candidate is an exact match.
+
+Before:
+* When there's an exact match for the given extension, mutate message to include `Extension \"" + extension_name + "\" is an existing extension.\n`. **This is confusing as part of the error message.**
+* When there is no exact match, mutate `message` to include alternative extension candidates using `StringUtil::CandidatesMessage`.
+
+```
+E       duckdb.duckdb.IOException: IO Error: Failed to download extension "iceberg" at URL "http://extensions.duckdb.org/v1.0.0/linux_amd64_gcc4/iceberg.duckdb_extension.gz"
+E       Extension "iceberg" is an existing extension.
+E        (ERROR Connection)
+```
+
+After:
+* When there's an exact match for the given extension, there's no need to suggest candidate extensions. `message` is not mutated
+* When there is no exact match, mutate `message` to include alternative extension candidates using `StringUtil::CandidatesMessage`.
+```
+E       duckdb.duckdb.IOException: IO Error: Failed to download extension "iceberg" at URL "http://extensions.duckdb.org/v1.0.0/linux_amd64_gcc4/iceberg.duckdb_extension.gz"
+E        (ERROR Connection)
+```
+
+### Context
+The `CreateSuggestions` function returns a boolean and also mutates the input `message` string. The function is used to suggest similar extension candidates in case of a typo. `CreateSuggestions` is called in by [`InstallFromHttpUrl`](https://github.com/duckdb/duckdb/blob/64bacde85e4c24134cf73f9b4ed3ae362510f287/src/main/extension/extension_install.cpp#L423) and [`TryInitialLoad`](https://github.com/duckdb/duckdb/blob/1d3fc5aec6b846c563d6d99c96df7c30117b5a94/src/main/extension/extension_load.cpp#L341). A `message` parameter is passed in to `CreateSuggestions` to add extra context and to suggest alternative extension candidates.
+
+### Test
+To build
+```
+OVERRIDE_GIT_DESCRIBE=v1.1.0 GEN=ninja make
+```
+Using `v1.1.0` here to ensure that extension installation will fail since `v1.1.0` is not yet released.
+
+`main` branch:
+```
+➜  duckdb git:(main) ./build/release/duckdb                     
+v1.1.0 64bacde
+Enter ".help" for usage hints.
+Connected to a transient in-memory database.
+Use ".open FILENAME" to reopen on a persistent database.
+D INSTALL iceberg;
+HTTP Error: Failed to download extension "iceberg" at URL "http://extensions.duckdb.org/v1.1.0/osx_arm64/iceberg.duckdb_extension.gz" (HTTP 403)
+Extension "iceberg" is an existing extension.
+```
+
+current branch:
+```
+➜  duckdb git:(main) ✗ ./build/release/duckdb                     
+v1.1.0 64bacde
+Enter ".help" for usage hints.
+Connected to a transient in-memory database.
+Use ".open FILENAME" to reopen on a persistent database.
+D INSTALL iceberg;
+HTTP Error: Failed to download extension "iceberg" at URL "http://extensions.duckdb.org/v1.1.0/osx_arm64/iceberg.duckdb_extension.gz" (HTTP 403)
+```

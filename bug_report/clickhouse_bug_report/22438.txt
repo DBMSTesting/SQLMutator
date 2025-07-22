@@ -1,0 +1,82 @@
+ID: 22438
+Title: Fetch may stuck until server reload
+Description:
+(you don't have to strictly follow this form)
+
+**Describe the bug**
+Symptoms: `system.replication_queue` contain fetch(s) like:
+```
+Row 1:
+──────
+database:               default
+table:                  my_table
+position:               0
+node_name:              queue-0132440116
+type:                   GET_PART
+is_currently_executing: 1
+source_replica:         sourse.replica
+parts_to_merge:         []
+new_part_name:          202103_5128275_5128275_0
+create_time:            2021-03-28 11:52:24
+attempt_time:           2021-03-28 11:52:24
+exception:
+postpone:               time: 1970-01-01 00:00:00, number: 0, reason:
+```
+Where `is_currently_executing` is `1`, and `create_time/attempt_time` are more then several hours from now.
+Such fetches block background pool and other `replication_queue` tasks. Replica delay is high.
+
+**Error message and/or stacktrace**
+If dump stacktrace of all threads, it will show, that some of them stuck in `ZooKeeper` (very often in `findReplicaHavingCoveringPart` function):
+```
+Thread 25 (Thread 0x7f3da39fb700 (LWP 3453483)):
+#0  0x00007f3e9cda99f3 in pthread_cond_wait@@GLIBC_2.3.2 () from /lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x0000000018cd125b in Poco::EventImpl::waitImpl (this=this@entry=0x7f3da39f4070) at ../contrib/poco/Foundation/src/Event_POSIX.cpp:106
+#2  0x00000000167586be in Poco::Event::wait (this=0x7f3da39f4070) at ../contrib/poco/Foundation/include/Poco/Event.h:97
+#3  zkutil::ZooKeeper::getChildrenImpl(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&, Coordination::Stat*, std::__1::function<void (Coordination::WatchResponse const&)>) (this=this@entry=0x7f3db3078218, path=..., res=..., stat=<optimized out>, watch_callback=...) at ../src/Common/ZooKeeper/ZooKeeper.cpp:232
+#4  0x000000001675cabc in zkutil::ZooKeeper::tryGetChildren (watch=..., stat=0x0, res=..., path=..., this=0x7f3db3078218) at ../contrib/libcxx/include/memory:4204
+#5  zkutil::ZooKeeper::getChildren (this=this@entry=0x7f3db3078218, path=..., stat=stat@entry=0x0, watch=...) at ../src/Common/ZooKeeper/ZooKeeper.cpp:240
+#6  0x0000000015f27fe0 in DB::StorageReplicatedMergeTree::findReplicaHavingCoveringPart (this=this@entry=0x7f3da0c6d000, entry=..., active=active@entry=true) at ../contrib/libcxx/include/string:1526
+#7  0x0000000015f70438 in DB::StorageReplicatedMergeTree::executeFetch (this=this@entry=0x7f3da0c6d000, entry=...) at ../src/Storages/StorageReplicatedMergeTree.cpp:1607
+#8  0x0000000015f72c51 in DB::StorageReplicatedMergeTree::executeLogEntry (this=0x7f3da0c6d000, entry=...) at ../src/Storages/StorageReplicatedMergeTree.cpp:1320
+#9  0x0000000015f7304d in DB::StorageReplicatedMergeTree::<lambda(DB::StorageReplicatedMergeTree::LogEntryPtr&)>::operator()(DB::StorageReplicatedMergeTree::LogEntryPtr &) (entry_to_process=..., __closure=<optimized out>) at ../src/Storages/StorageReplicatedMergeTree.cpp:2541
+#10 0x00000000162b97b2 in std::__1::__function::__value_func<bool (std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&)>::operator()(std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&) const (__args#0=..., this=0x7f3da39f4a30) at ../contrib/libcxx/include/functional:2471
+#11 std::__1::function<bool (std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&)>::operator()(std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&) const (__arg#0=..., this=0x7f3da39f4a30) at ../contrib/libcxx/include/functional:2473
+#12 DB::ReplicatedMergeTreeQueue::processEntry(std::__1::function<std::__1::shared_ptr<zkutil::ZooKeeper> ()>, std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&, std::__1::function<bool (std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>&)>) (this=this@entry=0x7f3da0c6d598, get_zookeeper=..., entry=..., func=...) at ../src/Storages/MergeTree/ReplicatedMergeTreeQueue.cpp:1313
+#13 0x0000000015f2316e in DB::StorageReplicatedMergeTree::queueTask (this=0x7f3da0c6d000) at ../contrib/libcxx/include/memory:2251
+#14 0x000000001609ad93 in std::__1::__function::__value_func<DB::BackgroundProcessingPoolTaskResult ()>::operator()() const (this=<optimized out>) at ../contrib/libcxx/include/functional:2471
+#15 std::__1::function<DB::BackgroundProcessingPoolTaskResult ()>::operator()() const (this=<optimized out>) at ../contrib/libcxx/include/functional:2473
+#16 DB::BackgroundProcessingPool::workLoopFunc (this=0x7f3e9b65aa18) at ../src/Storages/MergeTree/BackgroundProcessingPool.cpp:202
+#17 0x000000001609b6d2 in DB::BackgroundProcessingPool::<lambda()>::operator() (__closure=0x7f3e9bfc0ca8) at ../src/Storages/MergeTree/BackgroundProcessingPool.cpp:53
+#18 std::__1::__invoke_constexpr<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int, const DB::BackgroundProcessingPool::PoolSettings&, char const*, char const*)::<lambda()>&> (__f=...) at ../contrib/libcxx/include/type_traits:3525
+#19 std::__1::__apply_tuple_impl<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int, const DB::BackgroundProcessingPool::PoolSettings&, char const*, char const*)::<lambda()>&, const std::__1::tuple<>&> (__t=..., __f=...) at ../contrib/libcxx/include/tuple:1415
+#20 std::__1::apply<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int, const DB::BackgroundProcessingPool::PoolSettings&, char const*, char const*)::<lambda()>&, const std::__1::tuple<>&> (__t=..., __f=...) at ../contrib/libcxx/include/tuple:1424
+#21 ThreadFromGlobalPool::<lambda()>::operator()(void) const (this=0x7f3e9bfc0c98) at ../src/Common/ThreadPool.h:172
+#22 0x000000000e661ba7 in std::__1::__function::__value_func<void ()>::operator()() const (this=0x7f3da39f4e20) at ../contrib/libcxx/include/functional:2471
+#23 std::__1::function<void ()>::operator()() const (this=0x7f3da39f4e20) at ../contrib/libcxx/include/functional:2473
+#24 ThreadPoolImpl<std::__1::thread>::worker (this=0x7f3e9b654000, thread_it=...) at ../src/Common/ThreadPool.cpp:243
+#25 0x000000000e660093 in void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}::operator()() const (this=<optimized out>, this=<optimized out>) at ../src/Common/ThreadPool.cpp:124
+#26 std::__1::__invoke<void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}&&, (void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}&&)...) (__f=...) at ../contrib/libcxx/include/type_traits:3519
+#27 std::__1::__thread_execute<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>&, std::__1::__tuple_indices<>) (__t=...) at ../contrib/libcxx/include/thread:273
+#28 std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}> >(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>) (__vp=0x7f3e9b7402e0) at ../contrib/libcxx/include/thread:284
+#29 0x00007f3e9cda36db in start_thread () from /lib/x86_64-linux-gnu/libpthread.so.0
+#30 0x00007f3e9c6c0a3f in clone () from /lib/x86_64-linux-gnu/libc.so.6
+```
+
+Also, logs contain `Session expired` errors somewhere near `attempt_time`.
+Also, logs contain `Memory limit (total) exceeded` error from `ZooKeeper::receiveThread`:
+```
+2021.03.25 12:29:17.355923 [ 1523298 ] {} <Error> void Coordination::ZooKeeper::receiveThread(): Code: 241, e.displayText() = DB::Exception: Memory limit (total) exceeded: would use 42.45 GiB (attempt to allocate chunk of 4194336 bytes), maximum: 42.45 GiB, Stack trace (when copying this message, always include the lines below):
+
+0. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/src/Exception.cpp:27: Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x18cd37c0 in /usr/lib/debug/usr/bin/clickhouse
+1. /build/obj-x86_64-linux-gnu/../src/Common/Exception.cpp:37: DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xe63532d in /usr/lib/debug/usr/bin/clickhouse
+2. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/string:2134: MemoryTracker::alloc(long) (.cold) @ 0xe622dcf in /usr/lib/debug/usr/bin/clickhouse
+3. /build/obj-x86_64-linux-gnu/../src/Common/MemoryTracker.cpp:158: MemoryTracker::alloc(long) @ 0xe621736 in /usr/lib/debug/usr/bin/clickhouse
+4. /build/obj-x86_64-linux-gnu/../base/common/../common/memory.h:20: operator new(unsigned long) @ 0xe61ff2c in /usr/lib/debug/usr/bin/clickhouse
+5. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/string:1495: std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >::basic_string(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x19caa55c in /usr/lib/debug/usr/bin/clickhouse
+6. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/memory:1687: std::__1::enable_if<(std::__1::__is_cpp17_forward_iterator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >*>::value) && (std::__1::is_constructible<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::iterator_traits<std::__1::iterator_traits>::reference>::value), void>::type std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >::assign<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >*>(std::__1::iterator_traits, std::__1::iterator_traits) @ 0xe756ef3 in /usr/lib/debug/usr/bin/clickhouse
+7. /build/obj-x86_64-linux-gnu/../src/Common/ZooKeeper/ZooKeeper.cpp:225: std::__1::__function::__func<zkutil::ZooKeeper::getChildrenImpl(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&, Coordination::Stat*, std::__1::function<void (Coordination::WatchResponse const&)>)::'lambda'(Coordination::ListResponse const&), std::__1::allocator<zkutil::ZooKeeper::getChildrenImpl(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > >&, Coordination::Stat*, std::__1::function<void (Coordination::WatchResponse const&)>)::'lambda'(Coordination::ListResponse const&)>, void (Coordination::ListResponse const&)>::operator()(Coordination::ListResponse const&) @ 0x1675b05f in /usr/lib/debug/usr/bin/clickhouse
+8. /build/obj-x86_64-linux-gnu/../src/Common/ZooKeeper/ZooKeeperImpl.cpp:1203: Coordination::ZooKeeper::receiveEvent() @ 0x1677b097 in /usr/lib/debug/usr/bin/clickhouse
+9. /build/obj-x86_64-linux-gnu/../src/Common/ZooKeeper/ZooKeeperImpl.cpp:1166: Coordination::ZooKeeper::receiveThread() @ 0x1677c13c in /usr/lib/debug/usr/bin/clickhouse
+10. /build/obj-x86_64-linux-gnu/../src/Common/ThreadPool.h:171: ThreadFromGlobalPool::ThreadFromGlobalPool<Coordination::ZooKeeper::ZooKeeper(std::__1::vector<Coordination::ZooKeeper::Node, std::__1::allocator<Coordination::ZooKeeper::Node> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Timespan, Poco::Timespan, Poco::Timespan)::'lambda0'()>(Coordination::ZooKeeper::ZooKeeper(std::__1::vector<Coordination::ZooKeeper::Node, std::__1::allocator<Coordination::ZooKeeper::Node> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Timespan, Poco::Timespan, Poco::Timespan)::'lambda0'()&&)::'lambda'()::operator()() const @ 0x1677c1f0 in /usr/lib/debug/usr/bin/clickhouse
+11. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/atomic:856: ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xe662ba7 in /usr/lib/debug/usr/bin/clickhouse
+```

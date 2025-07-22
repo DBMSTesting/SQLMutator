@@ -1,0 +1,54 @@
+ID: 28461
+Title: Column `xxx` is not under aggregate function and not in GROUP BY (without aggregation)
+Description:
+```
+DROP TABLE IF EXISTS test;
+CREATE TABLE test
+(
+    `event_date` Date,
+    `query` String
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date);
+
+INSERT INTO test VALUES ('2021-09-01','test');
+INSERT INTO test VALUES ('2021-09-01','test');
+
+SELECT query FROM test PREWHERE (1 OR (NOT ignore(query))); 
+```
+
+```
+Received exception from server (version 21.8.4):
+Code: 215. DB::Exception: Received from localhost:9000. DB::Exception: Column `query` is not under aggregate function and not in GROUP BY: While processing query. Stack trace:
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x8f9557a in /usr/bin/clickhouse
+1. DB::ActionsMatcher::visit(DB::ASTIdentifier const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0x101bd5a1 in /usr/bin/clickhouse
+2. DB::ActionsMatcher::visit(DB::ASTExpressionList&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0x101cee32 in /usr/bin/clickhouse
+3. DB::InDepthNodeVisitor<DB::ActionsMatcher, true, std::__1::shared_ptr<DB::IAST> const>::visit(std::__1::shared_ptr<DB::IAST> const&) @ 0x1018e917 in /usr/bin/clickhouse
+4. DB::ExpressionAnalyzer::getRootActions(std::__1::shared_ptr<DB::IAST> const&, bool, std::__1::shared_ptr<DB::ActionsDAG>&, bool) @ 0x1018e605 in /usr/bin/clickhouse
+5. DB::SelectQueryExpressionAnalyzer::appendSelect(DB::ExpressionActionsChain&, bool) @ 0x1019bda8 in /usr/bin/clickhouse
+6. DB::ExpressionAnalysisResult::ExpressionAnalysisResult(DB::SelectQueryExpressionAnalyzer&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, bool, bool, bool, std::__1::shared_ptr<DB::FilterDAGInfo> const&, DB::Block const&) @ 0x101a1422 in /usr/bin/clickhouse
+7. DB::InterpreterSelectQuery::getSampleBlockImpl() @ 0x103a97e6 in /usr/bin/clickhouse
+8. ? @ 0x103a236b in /usr/bin/clickhouse
+9. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context const>, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&) @ 0x1039c77f in /usr/bin/clickhouse
+10. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context const>, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x1039af7e in /usr/bin/clickhouse
+11. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context const>, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x10575909 in /usr/bin/clickhouse
+12. DB::InterpreterFactory::get(std::__1::shared_ptr<DB::IAST>&, std::__1::shared_ptr<DB::Context>, DB::SelectQueryOptions const&) @ 0x1017c2b7 in /usr/bin/clickhouse
+13. ? @ 0x10739886 in /usr/bin/clickhouse
+14. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum, bool) @ 0x107381c3 in /usr/bin/clickhouse
+15. DB::TCPHandler::runImpl() @ 0x10fcd88d in /usr/bin/clickhouse
+16. DB::TCPHandler::run() @ 0x10fe06d9 in /usr/bin/clickhouse
+17. Poco::Net::TCPServerConnection::start() @ 0x13b5730f in /usr/bin/clickhouse
+18. Poco::Net::TCPServerDispatcher::run() @ 0x13b58d9a in /usr/bin/clickhouse
+19. Poco::PooledThread::run() @ 0x13c8bc19 in /usr/bin/clickhouse
+20. Poco::ThreadImpl::runnableEntry(void*) @ 0x13c87eaa in /usr/bin/clickhouse
+21. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+22. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```
+
+21.7 works ok.
+
+> @azat :
+> Проблема в этой оптимизации - https://github.com/ClickHouse/ClickHouse/blob/a67741b626418b6819c18950742e6963a3f21014/src/Interpreters/ExpressionAnalyzer.cpp#L1034-L1040
+> Видимо нужно сделать чтобы колонки не удалялялись если есть в SELECT

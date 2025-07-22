@@ -1,0 +1,81 @@
+ID: 16570
+Title: ANALYZE TABLE immediately after bulk update is unreliable
+Description:
+## Bug Report
+
+### 1. What did you do?
+
+After I bulk updated rows, I ran `ANALYZE TABLE`. The `ANALYZE` did not take into account the recent update, and statistics remained out of date.
+
+This appears to be a race condition. Consider the following:
+
+```
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+ id BIGINT NOT NULL PRIMARY KEY auto_increment,
+ b BIGINT NOT NULL,
+ pad VARBINARY(255),
+ INDEX (b)
+);
+
+INSERT INTO t1 SELECT NULL, 1, RANDOM_BYTES(255) FROM dual;
+INSERT INTO t1 SELECT NULL, 1, RANDOM_BYTES(255) FROM t1 a INNER JOIN t1 b INNER JOIN t1 c LIMIT 10000;
+INSERT INTO t1 SELECT NULL, 1, RANDOM_BYTES(255) FROM t1 a INNER JOIN t1 b INNER JOIN t1 c LIMIT 10000;
+INSERT INTO t1 SELECT NULL, 1, RANDOM_BYTES(255) FROM t1 a INNER JOIN t1 b INNER JOIN t1 c LIMIT 10000;
+INSERT INTO t1 SELECT NULL, 1, RANDOM_BYTES(255) FROM t1 a INNER JOIN t1 b INNER JOIN t1 c LIMIT 10000;
+INSERT INTO t1 SELECT NULL, 1, RANDOM_BYTES(255) FROM t1 a INNER JOIN t1 b INNER JOIN t1 c LIMIT 10000;
+UPDATE t1 SET b=id;
+SELECT SLEEP(5);
+ANALYZE TABLE t1;
+EXPLAIN ANALYZE SELECT * FROM t1 WHERE b < 5;
+```
+
+If you remove the `SLEEP(5)` you will get incorrect statistics.
+
+### 2. What did you expect to see?
+
+With the sleep call:
+
+```
+mysql> EXPLAIN ANALYZE SELECT * FROM t1 WHERE b < 5;
++-------------------------------+---------+---------+-----------+----------------------+------------------------------------------------------------------------------+----------------------------------+---------------+------+
+| id                            | estRows | actRows | task      | access object        | execution info                                                               | operator info                    | memory        | disk |
++-------------------------------+---------+---------+-----------+----------------------+------------------------------------------------------------------------------+----------------------------------+---------------+------+
+| IndexLookUp_10                | 4.00    | 4       | root      |                      | time:11.883687ms, loops:2, rpc num: 1, rpc time:11.148234ms, proc keys:21013 |                                  | 10.0234375 KB | N/A  |
+| ├─IndexRangeScan_8(Build)     | 4.00    | 4       | cop[tikv] | table:t1, index:b(b) | time:12ms, loops:1                                                           | range:[-inf,5), keep order:false | N/A           | N/A  |
+| └─TableRowIDScan_9(Probe)     | 4.00    | 4       | cop[tikv] | table:t1             | time:0s, loops:1                                                             | keep order:false                 | N/A           | N/A  |
++-------------------------------+---------+---------+-----------+----------------------+------------------------------------------------------------------------------+----------------------------------+---------------+------+
+3 rows in set (0.01 sec)
+```
+
+### 3. What did you see instead?
+
+Without the sleep call:
+
+```
+mysql> EXPLAIN ANALYZE SELECT * FROM t1 WHERE b < 5;
++-------------------------+----------+---------+-----------+---------------+-----------------------------------------------------------------------------+------------------+-----------------+------+
+| id                      | estRows  | actRows | task      | access object | execution info                                                              | operator info    | memory          | disk |
++-------------------------+----------+---------+-----------+---------------+-----------------------------------------------------------------------------+------------------+-----------------+------+
+| TableReader_7           | 21010.00 | 4       | root      |               | time:26.682049ms, loops:2, rpc num: 1, rpc time:26.58694ms, proc keys:21010 | data:Selection_6 | 1.7880859375 KB | N/A  |
+| └─Selection_6           | 21010.00 | 4       | cop[tikv] |               | time:24ms, loops:25                                                         | lt(test.t1.b, 5) | N/A             | N/A  |
+|   └─TableFullScan_5     | 21010.00 | 21010   | cop[tikv] | table:t1      | time:24ms, loops:25                                                         | keep order:false | N/A             | N/A  |
++-------------------------+----------+---------+-----------+---------------+-----------------------------------------------------------------------------+------------------+-----------------+------+
+3 rows in set (0.03 sec)
+```
+
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+
+```
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-beta.2-259-g2c8afe6e1
+Git Commit Hash: 2c8afe6e1621d4bc2074d17f6c09c17f99fd4d89
+Git Branch: master
+UTC Build Time: 2020-04-15 03:14:55
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

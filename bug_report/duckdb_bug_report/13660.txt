@@ -1,0 +1,133 @@
+ID: 13660
+Title: Conversion Error of a DATE column when reading a file to insert in table
+Description:
+### What happens?
+
+When reading from a tab-separated file using read_csv to insert into a previously created empty table, the execution gives a Conversion Error in a DATE value, although it's valid. The following is the original exception:
+```
+Conversion Error: CSV Error on Line: 1
+Original Line: 6	Esta es una prueba hecha por Felipe	Esta es una prueba hecha por Felipe	1	s3://internal-files/6/2020-11-19_14.29		2020-10-28								0.1.4	False		False
+Error when converting column "created_at". Could not convert string "2020-10-28" to 'DATE'
+Column created_at is being converted as type DATE
+This type was auto-detected from the CSV file.
+Possible solutions:
+* Override the type for this column manually by setting the type explicitly, e.g. types={'created_at': 'VARCHAR'}
+* Set the sample size to a larger value to enable the auto-detection to scan more values, e.g. sample_size=-1
+* Use a COPY statement to automatically derive types from an existing table.
+  file=input.tsv
+  delimiter = 	 (Set By User)
+  quote = " (Auto-Detected)
+  escape = " (Auto-Detected)
+  new_line = \r\n (Auto-Detected)
+  header = false (Set By User)
+  skip_rows = 0 (Auto-Detected)
+  date_format = %y.%m.%d (Auto-Detected)
+  timestamp_format =  (Auto-Detected)
+  null_padding=0
+  sample_size=20480
+  ignore_errors=false
+  all_varchar=0
+The Column types set by the user do not match the ones found by the sniffer. 
+Column at position: 5 Set type: DATE Sniffed type: VARCHAR
+Column at position: 16 Set type: INTEGER Sniffed type: VARCHAR
+```
+
+### To Reproduce
+
+The following is the content for a test file to reproduce (`test.tsv`):
+```
+6	Esta es una prueba hecha por Felipe	Esta es una prueba hecha por Felipe	1	s3://internal-files/6/2020-11-19_14.29		2020-10-28								0.1.4	False		False
+```
+
+The following is the script to reproduce. Create the test file and update the paths at the beginning:
+
+```python
+from pathlib import Path
+
+import duckdb
+
+duckdb_path = Path("duckdb.db")
+input_path = Path("test.tsv")
+
+create_table = """
+CREATE TABLE "_test_table"
+    (id int4, description varchar, comment varchar, x_version int8, s3_path varchar, eta date, created_at date, a_id int4, b_id int4, c_id int4, d_id int4, e_id int4, version int4, is_std bool, y_version varchar, is_a bool, f_id int4, is_b bool)
+;
+"""
+insert_query = f"""
+        INSERT INTO "_test_table"
+        SELECT * FROM read_csv(
+            '{input_path}',
+            delim = '	',
+            header = false,
+            columns = {{'id': 'int4', 'description': 'varchar', 'comment': 'varchar', 'x_version': 'int8', 's3_path': 'varchar', 'eta': 'date', 'created_at': 'date', 'a_id': 'int4', 'b_id': 'int4', 'c_id': 'int4', 'd_id': 'int4', 'e_id': 'int4', 'version': 'int4', 'is_std': 'bool', 'y_version': 'varchar', 'is_a': 'bool', 'f_id': 'int4', 'is_b': 'bool'}}
+        );
+"""
+
+duckdb_path.unlink(missing_ok=True)
+conn_duck = duckdb.connect(str(duckdb_path))
+
+print("#####")
+print(
+    conn_duck.query(
+        f"SELECT Prompt FROM sniff_csv('{input_path}',header = false);"
+    ).to_df()["Prompt"].to_list()
+)
+
+print("#####")
+print("#####")
+conn_duck.execute(create_table)
+try:
+    conn_duck.execute(insert_query)
+except Exception as e:
+    print(e)
+
+print("#####")
+print("#####")
+print(conn_duck.query("SELECT * FROM '_test_table';"))
+```
+Since I only put 1 line (the original has many more), and that line example has lots of NULL values, there will be more "type do not match" warnings in the output. But the error remains:
+```
+Conversion Error: CSV Error on Line: 1
+Original Line: 6	Esta es una prueba hecha por Felipe	Esta es una prueba hecha por Felipe	1	s3://internal-files/6/2020-11-19_14.29		2020-10-28	0.1.4	False		False
+Error when converting column "created_at". Could not convert string "2020-10-28" to 'DATE'
+
+Column created_at is being converted as type DATE
+```
+The "2020-10-28" is a valid DATE, matching the type I configured in the read_csv arguments, but it still crashes.
+
+### OS:
+
+Ubuntu 23.10
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python 3.11.6
+
+### Full Name:
+
+Francisco Ossandon
+
+### Affiliation:
+
+Biome Makers
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

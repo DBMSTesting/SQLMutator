@@ -1,0 +1,200 @@
+ID: 41987
+Title: Wrong result when using window functions with plan cache
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+CREATE TABLE `t1` (
+  `row_id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `ast_id` varchar(20) DEFAULT NULL,
+  `col1` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`row_id`) NONCLUSTERED);
+create index t1_ast_id on t1(ast_id);
+insert into t1 values (null,'ID_1','a'),(null,'ID_1','b');
+insert into t1 values (null,'ID_2','a'),(null,'ID_2','b');
+
+set cte_max_recursion_depth=100000;
+insert into t1
+with RECURSIVE cte as (
+select 1 as level,FLOOR(1 + (RAND() * 1000000)) id,substr(md5(rand()),1,10) col1,substr(md5(rand()),1,10) col2,substr(md5(rand()),1,10) col3
+union all
+select level+1 level,FLOOR(1 + (RAND() * 1000000)) id,substr(md5(rand()),1,10) col1,substr(md5(rand()),1,10) col2,substr(md5(rand()),1,10) col3 
+from cte 
+where level<10000
+)
+select null,col1,col2 from cte;
+
+analyze table t1;
+
+
+prepare stmt from "select ast_id,col1 from 
+(select ast_id,col1,row_number()over(partition by ast_id order by col1) seq_no from t1 where ast_id in (?)) t
+where seq_no=1";
+set @a='ID_1';
+execute stmt using @a;
+select @@last_plan_from_cache;
+set @b='ID_2';
+execute stmt using @b;
+select @@last_plan_from_cache;
+
+select version();
+show variables like '%plan_cache%';
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+MySQL [test]> prepare stmt from "select ast_id,col1 from 
+    "> (select ast_id,col1,row_number()over(partition by ast_id order by col1) seq_no from t1 where ast_id in (?)) t
+    "> where seq_no=1";
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [test]> set @a='ID_1';
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [test]> execute stmt using @a;
++--------+------+
+| ast_id | col1 |
++--------+------+
+| ID_1   | a    |
++--------+------+
+1 row in set (0.02 sec)
+
+MySQL [test]> select @@last_plan_from_cache;
++------------------------+
+| @@last_plan_from_cache |
++------------------------+
+|                      0 |
++------------------------+
+1 row in set (0.00 sec)
+
+MySQL [test]> set @b='ID_2';
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [test]> execute stmt using @b;
++--------+------+
+| ast_id | col1 |
++--------+------+
+| ID_2   | a    |
++--------+------+
+1 row in set (0.02 sec)
+
+MySQL [test]> select @@last_plan_from_cache;
++------------------------+
+| @@last_plan_from_cache |
++------------------------+
+|                      1 |
++------------------------+
+1 row in set (0.00 sec)
+
+MySQL [test]> 
+MySQL [test]> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v6.6.0 |
++--------------------+
+1 row in set (0.00 sec)
+
+MySQL [test]> show variables like '%plan_cache%';
++------------------------------------------------+-------+
+| Variable_name                                  | Value |
++------------------------------------------------+-------+
+| tidb_enable_non_prepared_plan_cache            | OFF   |
+| tidb_enable_plan_cache_for_param_limit         | ON    |
+| tidb_enable_prepared_plan_cache                | ON    |
+| tidb_enable_prepared_plan_cache_memory_monitor | ON    |
+| tidb_non_prepared_plan_cache_size              | 100   |
+| tidb_prepared_plan_cache_memory_guard_ratio    | 0.1   |
+| tidb_prepared_plan_cache_size                  | 100   |
++------------------------------------------------+-------+
+7 rows in set (0.01 sec)
+
+MySQL [test]> 
+```
+
+### 3. What did you see instead (Required)
+
+```
+MySQL [test]> prepare stmt from "select ast_id,col1 from 
+    "> (select ast_id,col1,row_number()over(partition by ast_id order by col1) seq_no from t1 where ast_id in (?)) t
+    "> where seq_no=1";
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [test]> set @a='ID_1';
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [test]> execute stmt using @a;
++--------+------+
+| ast_id | col1 |
++--------+------+
+| ID_1   | a    |
++--------+------+
+1 row in set (0.02 sec)
+
+MySQL [test]> select @@last_plan_from_cache;
++------------------------+
+| @@last_plan_from_cache |
++------------------------+
+|                      0 |
++------------------------+
+1 row in set (0.00 sec)
+
+MySQL [test]> set @b='ID_2';
+Query OK, 0 rows affected (0.00 sec)
+
+MySQL [test]> execute stmt using @b;
+Empty set (0.00 sec)
+
+MySQL [test]> select @@last_plan_from_cache;
++------------------------+
+| @@last_plan_from_cache |
++------------------------+
+|                      1 |
++------------------------+
+1 row in set (0.00 sec)
+
+MySQL [test]> 
+MySQL [test]> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v6.6.0 |
++--------------------+
+1 row in set (0.00 sec)
+
+MySQL [test]> show variables like '%plan_cache%';
++------------------------------------------------+-------+
+| Variable_name                                  | Value |
++------------------------------------------------+-------+
+| tidb_enable_non_prepared_plan_cache            | OFF   |
+| tidb_enable_plan_cache_for_param_limit         | ON    |
+| tidb_enable_prepared_plan_cache                | ON    |
+| tidb_enable_prepared_plan_cache_memory_monitor | ON    |
+| tidb_non_prepared_plan_cache_size              | 100   |
+| tidb_prepared_plan_cache_memory_guard_ratio    | 0.1   |
+| tidb_prepared_plan_cache_size                  | 100   |
++------------------------------------------------+-------+
+7 rows in set (0.01 sec)
+
+MySQL [test]> 
+```
+### 4. What is your TiDB version? (Required)
+
+MySQL [test]> SELECT tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v6.6.0
+Edition: Community
+Git Commit Hash: f4ca0821fb96a2bdd37d2fb97eb26c07fc58d4e4
+Git Branch: heads/refs/tags/v6.6.0
+UTC Build Time: 2023-02-17 14:49:02
+GoVersion: go1.19.5
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv
+1 row in set (0.00 sec)

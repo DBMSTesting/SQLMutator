@@ -1,0 +1,71 @@
+ID: 50481
+Title: `fail_reason` not properly set when analyze that involves multiple tasks fails
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table t(a int, b int, index ia(a), index ib(b), index iab(a,b)) partition by range(a)
+(partition p0 values less than (10), partition p1 values less than(20), partition p2 values less than (30),
+partition p3 values less than (40), partition p4 values less than (50), partition pmx values less than (MAXVALUE));
+-- insert lots of data
+```
+
+session1:
+```sql
+show processlist;
+-- wait for analyze start in session 2
+-- then kill the analyze query quickly
+kill xxx
+```
+session 2:
+```sql
+set tidb_build_stats_concurrency = 1, tidb_build_sampling_stats_concurrency = 1, tidb_analyze_distsql_scan_concurrency = 1;
+analyze table t with 1 samplerate;
+```
+
+### 2. What did you expect to see? (Required)
+
+In `mysql.analyze_jobs` and `show analyze status`, the failed tasks are properly recorded.
+
+### 3. What did you see instead (Required)
+
+Right after the killing:
+```sql
+> select * from mysql.analyze_jobs order by id desc limit 6;
++----+---------------------+--------------+------------+----------------+--------------------------------------------------------------------+----------------+---------------------+---------------------+---------+------------------------------------------------+----------------+------------+
+| id | update_time         | table_schema | table_name | partition_name | job_info                                                           | processed_rows | start_time          | end_time            | state   | fail_reason                                    | instance       | process_id |
++----+---------------------+--------------+------------+----------------+--------------------------------------------------------------------+----------------+---------------------+---------------------+---------+------------------------------------------------+----------------+------------+
+| 56 | 2024-01-16 23:24:27 | test         | t          | pmx            | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | pending | NULL                                           | 127.0.0.1:4000 |  106954756 |
+| 55 | 2024-01-16 23:24:27 | test         | t          | p4             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | pending | NULL                                           | 127.0.0.1:4000 |  106954756 |
+| 54 | 2024-01-16 23:24:27 | test         | t          | p3             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | pending | NULL                                           | 127.0.0.1:4000 |  106954756 |
+| 53 | 2024-01-16 23:24:27 | test         | t          | p2             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | pending | NULL                                           | 127.0.0.1:4000 |  106954756 |
+| 52 | 2024-01-16 23:24:27 | test         | t          | p1             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | 2024-01-16 23:24:27 | NULL                | running | NULL                                           | 127.0.0.1:4000 |  106954756 |
+| 51 | 2024-01-16 23:24:27 | test         | t          | p0             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |         450560 | 2024-01-16 23:24:27 | 2024-01-16 23:24:27 | failed  | [executor:1317]Query execution was interrupted | 127.0.0.1:4000 |       NULL |
++----+---------------------+--------------+------------+----------------+--------------------------------------------------------------------+----------------+---------------------+---------------------+---------+------------------------------------------------+----------------+------------+
+```
+
+Note that you need to run another query or disconnect session 2 for tidb to be able to clean up the tasks.
+
+After cleaning up failed tasks (5 mins by default):
+The "TiDB Server is down when running the analyze job" is wrong.
+```sql
+127.0.0.1:4001[(none)]> select * from mysql.analyze_jobs order by id desc limit 6;
++----+---------------------+--------------+------------+----------------+--------------------------------------------------------------------+----------------+---------------------+---------------------+--------+--------------------------------------------------+----------------+------------+
+| id | update_time         | table_schema | table_name | partition_name | job_info                                                           | processed_rows | start_time          | end_time            | state  | fail_reason                                      | instance       | process_id |
++----+---------------------+--------------+------------+----------------+--------------------------------------------------------------------+----------------+---------------------+---------------------+--------+--------------------------------------------------+----------------+------------+
+| 56 | 2024-01-16 23:35:51 | test         | t          | pmx            | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | failed | TiDB Server is down when running the analyze job | 127.0.0.1:4000 |       NULL |
+| 55 | 2024-01-16 23:35:51 | test         | t          | p4             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | failed | TiDB Server is down when running the analyze job | 127.0.0.1:4000 |       NULL |
+| 54 | 2024-01-16 23:35:51 | test         | t          | p3             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | failed | TiDB Server is down when running the analyze job | 127.0.0.1:4000 |       NULL |
+| 53 | 2024-01-16 23:35:51 | test         | t          | p2             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | NULL                | NULL                | failed | TiDB Server is down when running the analyze job | 127.0.0.1:4000 |       NULL |
+| 52 | 2024-01-16 23:35:51 | test         | t          | p1             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |              0 | 2024-01-16 23:24:27 | NULL                | failed | TiDB Server is down when running the analyze job | 127.0.0.1:4000 |       NULL |
+| 51 | 2024-01-16 23:24:27 | test         | t          | p0             | analyze table all columns with 256 buckets, 500 topn, 1 samplerate |         450560 | 2024-01-16 23:24:27 | 2024-01-16 23:24:27 | failed | [executor:1317]Query execution was interrupted   | 127.0.0.1:4000 |       NULL |
++----+---------------------+--------------+------------+----------------+--------------------------------------------------------------------+----------------+---------------------+---------------------+--------+--------------------------------------------------+----------------+------------+
+```
+### 4. What is your TiDB version? (Required)
+
+v7.6.0
+

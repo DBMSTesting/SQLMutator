@@ -1,0 +1,100 @@
+ID: 9699
+Title: mysql() table function + join = broken after update to 20.3.1.2564
+Description:
+**Describe the bug**
+after upgrade to Clickhouse Server 20.3.1.2564 some queries had broke
+
+**How to reproduce**
+* Test which works without errors
+```sql
+CREATE TABLE default.t1_local
+(
+    service String,
+    opco    String,
+    pays    String
+) ENGINE MergeTree() ORDER BY tuple();
+
+CREATE TABLE default.t2_local
+(
+    service String,
+    opco    String
+) ENGINE MergeTree() ORDER BY tuple();
+
+CREATE TABLE default.t1_remote AS remote('127.0.0.1:9000',default.t1_local,'default','');
+CREATE TABLE default.t2_remote AS remote('127.0.0.1:9000',default.t2_local,'default','');
+
+/* doesn't return any error and return empty recordset */
+SELECT s.pays
+FROM default.t1_remote AS s
+LEFT JOIN default.t2_remote AS s_ref ON (s_ref.opco = s.opco AND s_ref.service = s.service);
+
+DROP TABLE default.t1_remote;
+DROP TABLE default.t2_remote;
+```
+
+* Test which reproduces unexpected behavior
+** create tables on MySQL Server
+```sql
+CREATE DATABASE IF NOT EXISTS test;
+CREATE TABLE test.t1_mysql_local
+(
+    pays    VARCHAR(55) DEFAULT 'FRA' NOT NULL,
+    service VARCHAR(5)  DEFAULT ''    NOT NULL,
+    opco    CHAR(3)     DEFAULT ''    NOT NULL
+);
+
+CREATE TABLE test.t2_mysql_local
+(
+    service VARCHAR(5) DEFAULT '' NOT NULL,
+    opco    VARCHAR(5) DEFAULT ''
+);
+
+```
+** create mysql() table function tables on Clickhouse
+```sql
+CREATE TABLE default.t1_remote_mysql AS mysql('127.0.0.1:3306','test','t1_mysql_local','root','pass');
+CREATE TABLE default.t2_remote_mysql AS mysql('127.0.0.1:3306','test','t2_mysql_local','root','pass');
+```
+** query which return error
+```sql
+SELECT s.pays
+FROM default.t1_remote_mysql AS s
+LEFT JOIN default.t2_remote_mysql AS s_ref ON (s_ref.opco = s.opco AND s_ref.service = s.service);
+```
+** error message
+```
+Code: 47, e.displayText() = DB::Exception: Missing columns: 's_ref.opco' 's_ref.service' while processing query: 'SELECT pays FROM default.t1_remote_mysql AS s ALL LEFT JOIN default.t1_remote_mysql AS s_ref ON (s_ref.opco = opco) AND (s_ref.service = service)', required columns: 'pays' 's_ref.service' 's_ref.opco' 'opco' 'service', source columns: 'opco' 'service' 'pays', joined columns: (version 20.3.1.2564 (official build))
+```
+
+* WhichClickHouse server version to use
+20.3.1.2564
+
+* Which interface to use, if matters
+remote() and mysql() table functions + JOIN
+
+**Additional context**
+```
+SET send_logs_level='trace'; 
+SET enable_debug_queries = 1;
+ ANALYZE SELECT s.pays FROM default.t1_remote_mysql AS s LEFT JOIN default.t1_remote_mysql AS s_ref ON (s_ref.opco = s.opco AND s_ref.service = s.service);
+
+ANALYZE SELECT s.pays
+FROM default.t1_remote_mysql AS s
+LEFT JOIN default.t1_remote_mysql AS s_ref ON (s_ref.opco = s.opco) AND (s_ref.service = s.service)
+
+[bdd2] 2020.03.17 06:56:04.933763 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Debug> executeQuery: (from 127.0.0.1:51424) ANALYZE SELECT s.pays FROM default.t1_remote_mysql AS s LEFT JOIN default.t1_remote_mysql AS s_ref ON (s_ref.opco = s.opco) AND (s_ref.service = s.service)
+↑ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) [bdd2] 2020.03.17 06:56:04.935274 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Trace> AccessRightsContext (default): Access granted: SELECT(service, opco) ON default.t1_remote_mysql
+[bdd2] 2020.03.17 06:56:04.935388 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Debug> Join: setSampleBlock: s_ref.opco String String(size = 0), s_ref.service String String(size = 0)
+[bdd2] 2020.03.17 06:56:04.935602 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Trace> AccessRightsContext (default): Access granted: SELECT(pays, service, opco) ON default.t1_remote_mysql
+[bdd2] 2020.03.17 06:56:04.935810 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Debug> executeQuery: Query pipeline:
+One
+
+┌─explain─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ SELECT pays
+FROM default.t1_remote_mysql AS s
+ALL LEFT JOIN default.t1_remote_mysql AS s_ref ON (s_ref.opco = opco) AND (s_ref.service = service) │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+[bdd2] 2020.03.17 06:56:04.936522 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Information> executeQuery: Read 1 rows, 154.00 B in 0.003 sec., 375 rows/sec., 56.54 KiB/sec.
+[bdd2] 2020.03.17 06:56:04.936622 [ 88375 ] {b1442d2e-bd66-475a-9fd9-3efae1b1ba5d} <Debug> MemoryTracker: Peak memory usage (for query): 192.00 B.
+
+1 rows in set. Elapsed: 0.009 sec.

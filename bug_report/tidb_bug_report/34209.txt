@@ -1,0 +1,240 @@
+ID: 34209
+Title: tidb-lightning doesn't report warnings issued by statements sent to tidb backend
+Description:
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+```
+$ ls t/
+metadata                test-schema-create.sql  test.t1-schema.sql      test.t1.000000000.csv
+
+$ cat t/test.t1-schema.sql
+/*!40101 SET NAMES binary*/;
+CREATE TABLE `t1` (
+  `d` decimal(10,6) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+$ cat t/test.t1.000000000.csv
+2,234567
+```
+
+_note that the decimal separator is a comma (",") instead of a period (".")_
+
+```
+$ cat tidb-lightning.toml
+[tidb]
+host = '127.0.0.1'
+port = 4000
+user = 'root'
+
+[tikv-importer]
+backend = "tidb"
+
+[mydumper]
+no-schema = false
+data-source-dir = "/Users/kolbe/t"
+
+[mydumper.csv]
+separator = ';'
+delimiter = ''
+header = false
+```
+
+2. What did you expect to see?
+
+The data in the file cannot be inserted into the table, so TiDB Lightning should exit with an error.
+
+Barring that, TiDB Lightning should pass on the warnings issued by the TiDB server.
+
+3. What did you see instead?
+
+TiDB Lightning exits without any error, even though the data could not be inserted correctly!
+
+```
+$ mysql -e 'select * from test.t1'
++----------+
+| d        |
++----------+
+| 2.000000 |
++----------+
+```
+
+Note that the table contains "2.000000" instead of "2.234567" or "2,234567" or some other representation of the actual value in the file.
+
+From the TiDB general log, we can see that TiDB Lightning changes the SQL mode (which is required to allow it to try to insert this invalid value in the first place):
+
+```
+SET sql_mode='ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER';
+```
+
+TiDB Lightning then executes this REPLACE statement to insert the value into the row:
+
+```
+REPLACE INTO `test`.`t1` VALUES('2,234567')
+```
+
+If we instead do those steps interactively in the MySQL command-line client, we will see that TiDB issues a warning:
+
+```
+5.7.25-TiDB-v5.0.1 (root) [test]> SET sql_mode='ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER';
+Query OK, 0 rows affected (0.001 sec)
+
+5.7.25-TiDB-v5.0.1 (root) [test]> REPLACE INTO `test`.`t1` VALUES('2,234567');
+Query OK, 1 row affected, 1 warning (0.011 sec)
+
+5.7.25-TiDB-v5.0.1 (root) [test]> show warnings;
++---------+------+------------+
+| Level   | Code | Message    |
++---------+------+------------+
+| Warning | 8029 | Bad Number |
++---------+------+------------+
+1 row in set (0.001 sec)
+```
+
+This shows us that there was a potentially serious problem in trying to insert this row. This should be reported back to the user who invoked TiDB Lightning as a warning. It should also be logged at the WARN level to the TiDB Lightning log file.
+
+
+4. What version of BR and TiDB/TiKV/PD are you using?
+
+```
+$ tidb-lightning -V
+Release Version: v5.0.1
+Git Commit Hash: b3bd5495369244cfb1d3f2c49763a7fdb55d4ecd
+Git Branch: HEAD
+Go Version: go1.13.4
+UTC Build Time: 2021-04-24 12:57:15
+Race Enabled: false
+```
+
+```
+Release Version: v5.0.1
+Edition: Community
+Git Commit Hash: 1145e347d3469d8e89f88dce86f6926ca44b3cd8
+Git Branch: heads/refs/tags/v5.0.1
+UTC Build Time: 2021-04-23 05:50:09
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+
+5. Operation logs
+
+```
+$ cat /var/folders/_1/hv8fy2sx5qs3f2qkj7cfm4rm0000gn/T/lightning.log.2021-05-19T16.34.21-0700
+[2021/05/19 16:34:21.428 -07:00] [INFO] [info.go:40] ["Welcome to TiDB-Lightning"] [release-version=v5.0.1] [git-hash=b3bd5495369244cfb1d3f2c49763a7fdb55d4ecd] [git-branch=HEAD] [go-version=go1.13.4] [utc-build-time="2021-04-24 12:57:15"] [race-enabled=false]
+[2021/05/19 16:34:21.428 -07:00] [INFO] [lightning.go:218] [cfg] [cfg="{\"id\":1621467261428048000,\"lightning\":{\"table-concurrency\":4,\"index-concurrency\":4,\"region-concurrency\":4,\"io-concurrency\":5,\"check-requirements\":true},\"tidb\":{\"host\":\"127.0.0.1\",\"port\":4000,\"user\":\"root\",\"status-port\":10080,\"pd-addr\":\"\",\"sql-mode\":\"ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER\",\"tls\":\"false\",\"security\":{\"ca-path\":\"\",\"cert-path\":\"\",\"key-path\":\"\",\"redact-info-log\":false},\"max-allowed-packet\":67108864,\"distsql-scan-concurrency\":15,\"build-stats-concurrency\":20,\"index-serial-scan-concurrency\":20,\"checksum-table-concurrency\":2},\"checkpoint\":{\"schema\":\"tidb_lightning_checkpoint\",\"driver\":\"file\",\"enable\":true,\"keep-after-success\":false},\"mydumper\":{\"read-block-size\":65536,\"batch-size\":107374182400,\"batch-import-ratio\":0,\"data-source-dir\":\"file:///Users/kolbe/t\",\"character-set\":\"auto\",\"csv\":{\"separator\":\";\",\"delimiter\":\"\",\"null\":\"\\\\N\",\"header\":false,\"trim-last-separator\":false,\"not-null\":false,\"backslash-escape\":true},\"max-region-size\":268435456,\"filter\":[\"*.*\",\"!mysql.*\",\"!sys.*\",\"!INFORMATION_SCHEMA.*\",\"!PERFORMANCE_SCHEMA.*\",\"!METRICS_SCHEMA.*\",\"!INSPECTION_SCHEMA.*\"],\"files\":null,\"no-schema\":false,\"case-sensitive\":false,\"strict-format\":false,\"default-file-rules\":true},\"tikv-importer\":{\"addr\":\"\",\"backend\":\"tidb\",\"on-duplicate\":\"replace\",\"max-kv-pairs\":4096,\"send-kv-pairs\":32768,\"region-split-size\":100663296,\"sorted-kv-dir\":\"\",\"disk-quota\":0,\"range-concurrency\":0,\"engine-mem-cache-size\":536870912,\"local-writer-mem-cache-size\":134217728},\"post-restore\":{\"checksum\":\"off\",\"analyze\":\"off\",\"level-1-compact\":false,\"post-process-at-last\":true,\"compact\":false},\"cron\":{\"switch-mode\":\"5m0s\",\"log-progress\":\"5m0s\",\"check-disk-quota\":\"0s\"},\"routes\":null,\"security\":{\"ca-path\":\"\",\"cert-path\":\"\",\"key-path\":\"\",\"redact-info-log\":false},\"black-white-list\":{\"do-tables\":null,\"do-dbs\":null,\"ignore-tables\":null,\"ignore-dbs\":null}}"]
+[2021/05/19 16:34:21.439 -07:00] [INFO] [lightning.go:285] ["load data source start"]
+[2021/05/19 16:34:21.440 -07:00] [INFO] [loader.go:299] ["[loader] file is filtered by file router"] [path=.test.t1.0.csv.swp]
+[2021/05/19 16:34:21.440 -07:00] [INFO] [loader.go:299] ["[loader] file is filtered by file router"] [path=metadata]
+[2021/05/19 16:34:21.440 -07:00] [INFO] [lightning.go:288] ["load data source completed"] [takeTime=571.321µs] []
+[2021/05/19 16:34:21.441 -07:00] [INFO] [checkpoints.go:954] ["open checkpoint file failed, going to create a new one"] [path=/tmp/tidb_lightning_checkpoint.pb] [error="open /tmp/tidb_lightning_checkpoint.pb: no such file or directory"]
+[2021/05/19 16:34:21.446 -07:00] [INFO] [restore.go:312] ["the whole procedure start"]
+[2021/05/19 16:34:21.446 -07:00] [INFO] [tidb.go:331] ["skipping check requirements for tidb backend"]
+[2021/05/19 16:34:21.448 -07:00] [INFO] [restore.go:601] ["restore all schema start"]
+[2021/05/19 16:34:21.552 -07:00] [INFO] [restore.go:616] ["restore all schema completed"] [takeTime=104.081908ms] []
+[2021/05/19 16:34:21.895 -07:00] [INFO] [restore.go:1060] ["restore all tables data start"]
+[2021/05/19 16:34:21.895 -07:00] [INFO] [restore.go:1117] ["restore table start"] [table=`test`.`t1`]
+[2021/05/19 16:34:21.895 -07:00] [INFO] [restore.go:2097] ["load engines and files start"] [table=`test`.`t1`]
+[2021/05/19 16:34:21.895 -07:00] [INFO] [region.go:228] [makeTableRegions] [filesCount=1] [maxRegionSize=268435456] [RegionsCount=1] [cost=45.898µs]
+[2021/05/19 16:34:21.895 -07:00] [INFO] [restore.go:2135] ["load engines and files completed"] [table=`test`.`t1`] [enginesCnt=2] [filesCnt=1] [takeTime=76.877µs] []
+[2021/05/19 16:34:21.896 -07:00] [INFO] [backend.go:307] ["open engine"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf]
+[2021/05/19 16:34:21.896 -07:00] [INFO] [restore.go:1371] ["import whole table start"] [table=`test`.`t1`]
+[2021/05/19 16:34:21.896 -07:00] [INFO] [restore.go:1421] ["restore engine start"] [table=`test`.`t1`] [engineNumber=0]
+[2021/05/19 16:34:21.896 -07:00] [INFO] [restore.go:1503] ["encode kv data and write start"] [table=`test`.`t1`] [engineNumber=0]
+[2021/05/19 16:34:21.896 -07:00] [INFO] [backend.go:307] ["open engine"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a]
+[2021/05/19 16:34:21.896 -07:00] [INFO] [restore.go:2616] ["restore file start"] [table=`test`.`t1`] [engineNumber=0] [fileIndex=0] [path=test.t1.000000000.csv:0]
+[2021/05/19 16:34:21.906 -07:00] [INFO] [restore.go:2626] ["restore file completed"] [table=`test`.`t1`] [engineNumber=0] [fileIndex=0] [path=test.t1.000000000.csv:0] [readDur=38.578µs] [encodeDur=11.351µs] [deliverDur=9.139978ms] [checksum="{cksum=0,size=12,kvs=1}"] [takeTime=9.343942ms] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [restore.go:1591] ["encode kv data and write completed"] [table=`test`.`t1`] [engineNumber=0] [read=0] [written=12] [takeTime=9.815463ms] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:384] ["engine close start"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a]
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:386] ["engine close completed"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a] [takeTime=730ns] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [restore.go:1423] ["restore engine completed"] [table=`test`.`t1`] [engineNumber=0] [takeTime=9.972831ms] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [restore.go:2260] ["import and cleanup engine start"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a]
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:398] ["import start"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a] [retryCnt=0]
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:401] ["import completed"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a] [retryCnt=0] [takeTime=1.195µs] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:413] ["cleanup start"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a]
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:415] ["cleanup completed"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a] [takeTime=948ns] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [restore.go:2268] ["import and cleanup engine completed"] [engineTag=`test`.`t1`:0] [engineUUID=0f60f9dd-9dcc-569a-b79c-d7532506ca3a] [takeTime=184.352µs] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [restore.go:1446] ["import whole table completed"] [table=`test`.`t1`] [takeTime=10.383691ms] []
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:384] ["engine close start"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf]
+[2021/05/19 16:34:21.906 -07:00] [INFO] [backend.go:386] ["engine close completed"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf] [takeTime=539ns] []
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:2260] ["import and cleanup engine start"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf]
+[2021/05/19 16:34:21.907 -07:00] [INFO] [backend.go:398] ["import start"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf] [retryCnt=0]
+[2021/05/19 16:34:21.907 -07:00] [INFO] [backend.go:401] ["import completed"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf] [retryCnt=0] [takeTime=828ns] []
+[2021/05/19 16:34:21.907 -07:00] [INFO] [backend.go:413] ["cleanup start"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf]
+[2021/05/19 16:34:21.907 -07:00] [INFO] [backend.go:415] ["cleanup completed"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf] [takeTime=769ns] []
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:2268] ["import and cleanup engine completed"] [engineTag=`test`.`t1`:-1] [engineUUID=42d2ff27-9a20-5305-a1de-e38dae00fbcf] [takeTime=226.783µs] []
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:1728] ["skip checksum"] [table=`test`.`t1`]
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:1766] ["skip analyze"] [table=`test`.`t1`]
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:1121] ["restore table completed"] [table=`test`.`t1`] [takeTime=11.771239ms] []
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:1266] ["restore all tables data completed"] [takeTime=11.958368ms] []
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:1794] ["skip full compaction"]
+[2021/05/19 16:34:21.907 -07:00] [INFO] [restore.go:955] ["everything imported, stopping periodic actions"]
+[2021/05/19 16:34:21.908 -07:00] [INFO] [restore.go:1979] ["clean checkpoints start"] [keepAfterSuccess=false] [taskID=1621467261428048000]
+[2021/05/19 16:34:21.908 -07:00] [INFO] [restore.go:1986] ["clean checkpoints completed"] [keepAfterSuccess=false] [taskID=1621467261428048000] [takeTime=116.055µs] []
+[2021/05/19 16:34:21.908 -07:00] [INFO] [restore.go:342] ["the whole procedure completed"] [takeTime=462.338744ms] []
+[2021/05/19 16:34:21.909 -07:00] [INFO] [main.go:94] ["tidb lightning exit"]
+```
+
+TiDB General log:
+```
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_opt_write_row_id=1"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_build_stats_concurrency=20"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_distsql_scan_concurrency=15"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_index_serial_scan_concurrency=20"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_checksum_table_concurrency=2"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET NAMES utf8mb4"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET sql_mode='ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER'"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET allow_auto_random_explicit_insert=1"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET allow_auto_random_explicit_insert=1"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_opt_write_row_id=1"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_build_stats_concurrency=20"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_distsql_scan_concurrency=15"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET NAMES utf8mb4"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET sql_mode='ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER'"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_index_serial_scan_concurrency=20"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_checksum_table_concurrency=2"]
+[session.go:2782] [GENERAL_LOG] [conn=193] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SELECT variable_value FROM mysql.tidb WHERE variable_name = 'new_collation_enabled'"]
+[session.go:2764] ["CRUCIAL OPERATION"] [conn=193] [schemaVersion=66] [cur_db=] [sql="CREATE DATABASE IF NOT EXISTS `test`"] [user=root@127.0.0.1]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_distsql_scan_concurrency=15"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_index_serial_scan_concurrency=20"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_checksum_table_concurrency=2"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET NAMES utf8mb4"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET sql_mode='ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER'"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET allow_auto_random_explicit_insert=1"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_opt_write_row_id=1"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=66] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SET tidb_build_stats_concurrency=20"]
+[session.go:2764] ["CRUCIAL OPERATION"] [conn=197] [schemaVersion=66] [cur_db=] [sql="CREATE TABLE IF NOT EXISTS `test`.`t1` (`d` DECIMAL(10,6) DEFAULT NULL) ENGINE = InnoDB DEFAULT CHARACTER SET = UTF8MB4 DEFAULT COLLATE = UTF8MB4_GENERAL_CI;"] [user=root@127.0.0.1]
+[ddl_worker.go:297] ["[ddl] add DDL jobs"] ["batch count"=1] [jobs="ID:83, Type:create table, State:none, SchemaState:none, SchemaID:1, TableID:82, RowCount:0, ArgLen:1, start time: 2021-05-19 16:35:43.743 -0700 PDT, Err:<nil>, ErrCount:0, SnapshotVersion:0; "]
+[ddl.go:535] ["[ddl] start DDL job"] [job="ID:83, Type:create table, State:none, SchemaState:none, SchemaID:1, TableID:82, RowCount:0, ArgLen:1, start time: 2021-05-19 16:35:43.743 -0700 PDT, Err:<nil>, ErrCount:0, SnapshotVersion:0"] [query="CREATE TABLE IF NOT EXISTS `test`.`t1` (`d` DECIMAL(10,6) DEFAULT NULL) ENGINE = InnoDB DEFAULT CHARACTER SET = UTF8MB4 DEFAULT COLLATE = UTF8MB4_GENERAL_CI;"]
+[ddl_worker.go:678] ["[ddl] run DDL job"] [worker="worker 3, tp general"] [job="ID:83, Type:create table, State:none, SchemaState:none, SchemaID:1, TableID:82, RowCount:0, ArgLen:0, start time: 2021-05-19 16:35:43.743 -0700 PDT, Err:<nil>, ErrCount:0, SnapshotVersion:0"]
+[domain.go:137] ["diff load InfoSchema success"] [usedSchemaVersion=66] [neededSchemaVersion=67] ["start time"=1.391464ms] [phyTblIDs="[82]"] [actionTypes="[8]"]
+[ddl_worker.go:861] ["[ddl] wait latest schema version changed"] [worker="worker 3, tp general"] [ver=67] ["take time"=60.296805ms] [job="ID:83, Type:create table, State:done, SchemaState:public, SchemaID:1, TableID:82, RowCount:0, ArgLen:1, start time: 2021-05-19 16:35:43.743 -0700 PDT, Err:<nil>, ErrCount:0, SnapshotVersion:0"]
+[ddl_worker.go:402] ["[ddl] finish DDL job"] [worker="worker 3, tp general"] [job="ID:83, Type:create table, State:synced, SchemaState:public, SchemaID:1, TableID:82, RowCount:0, ArgLen:0, start time: 2021-05-19 16:35:43.743 -0700 PDT, Err:<nil>, ErrCount:0, SnapshotVersion:0"]
+[ddl.go:590] ["[ddl] DDL job is finished"] [jobID=83]
+[domain.go:661] ["performing DDL change, must reload"]
+[split_region.go:59] ["split batch regions request"] ["split key count"=1] ["batch count"=1] ["first batch, region ID"=2] ["first split key"=748000000000000052]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="START TRANSACTION"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=425057935373107207] [forUpdateTS=425057935373107207] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SELECT version()"]
+[split_region.go:160] ["batch split regions complete"] ["batch region ID"=2] ["first at"=748000000000000052] ["first new region left"="{Id:70 StartKey:7480000000000000ff4f00000000000000f8 EndKey:7480000000000000ff5200000000000000f8 RegionEpoch:{ConfVer:1 Version:35} Peers:[id:71 store_id:1 ] EncryptionMeta:<nil>}"] ["new region count"=1]
+[split_region.go:204] ["split regions complete"] ["region count"=1] ["region IDs"="[70]"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=425057935373107207] [forUpdateTS=425057935373107207] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="   SELECT table_name, column_name, column_type, extra    FROM information_schema.columns    WHERE table_schema = ?    ORDER BY table_name, ordinal_position [arguments: test]"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=425057935373107207] [forUpdateTS=425057935373107207] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SHOW TABLE `test`.`t1` NEXT_ROW_ID"]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=425057935373107207] [forUpdateTS=425057935373107207] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql=COMMIT]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="START TRANSACTION"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=425057935386738690] [forUpdateTS=425057935386738690] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="SHOW VARIABLES WHERE Variable_name IN ('max_allowed_packet','div_precision_increment','time_zone','lc_time_names','default_week_format','block_encryption_mode','group_concat_max_len','tidb_row_format_version')"]
+[session.go:2782] [GENERAL_LOG] [conn=197] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=425057935386738690] [forUpdateTS=425057935386738690] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql=COMMIT]
+[session.go:2782] [GENERAL_LOG] [conn=195] [user=root@127.0.0.1] [schemaVersion=67] [txnStartTS=0] [forUpdateTS=0] [isReadConsistency=false] [current_db=] [txn_mode=PESSIMISTIC] [sql="REPLACE INTO `test`.`t1` VALUES('2,234567')"]
+[2pc.go:1406] ["schemaLeaseChecker is not set for this transaction"] [conn=195] [sessionID=195] [startTS=425057935503654918] [commitTS=425057935503654919]
+```
+
+
+6. Configuration of the cluster and the task
+   - `tidb-lightning.toml` for TiDB-Lightning if possible
+   - `tikv-importer.toml` for TiKV-Importer if possible
+   - `topology.yml` if deployed by TiUP
+
+
+7. Screenshot/exported-PDF of Grafana dashboard or metrics' graph in Prometheus if possible

@@ -1,0 +1,148 @@
+ID: 6972
+Title: Strange behavior of multiple joins in view
+Description:
+1. We have a query:
+```
+SELECT
+    DB,
+    argMax(date_start, test_id) AS date_start,
+    max(test_id) AS last_test,
+    argMax(event_action, test_id) AS event_action
+FROM 
+(
+    SELECT
+        s.dbName AS DB,
+        b24_test_db.test_id AS test_id,
+        s.date AS date_start, 
+        v_b24_hit_event_abcrm_2019.event_action AS event_action
+    FROM
+    (
+        SELECT
+            toDate(siteRegistration) AS date, 
+            dbName
+        FROM b24Sites
+    ) AS s
+    ANY INNER JOIN b24_test_db ON s.dbName = b24_test_db.db_name
+    ANY INNER JOIN v_b24_hit_event_abcrm_2019 ON (v_b24_hit_event_abcrm_2019.date = s.date) AND (v_b24_hit_event_abcrm_2019.db_name = s.dbName)
+    WHERE (b24_test_db.test_id IN (7, 8)) AND (v_b24_hit_event_abcrm_2019.event_action = ' section_open') AND (v_b24_hit_event_abcrm_2019.event_category = 'crm')
+)
+GROUP BY DB
+```
+Then we run it with WHERE DB = 'b10178995' we got _one row_
+2. When we created a view based on this query
+```
+create view BI_ab_test_db2 as 
+SELECT
+    DB,
+    argMax(date_start, test_id) AS date_start,
+    max(test_id) AS last_test,
+    argMax(event_action, test_id) AS event_action
+FROM 
+(
+    SELECT
+        s.dbName AS DB,
+        b24_test_db.test_id AS test_id,
+        s.date AS date_start, 
+        v_b24_hit_event_abcrm_2019.event_action AS event_action
+    FROM
+    (
+        SELECT
+            toDate(siteRegistration) AS date, 
+            dbName
+        FROM b24Sites
+    ) AS s
+    ANY INNER JOIN b24_test_db ON s.dbName = b24_test_db.db_name
+    ANY INNER JOIN v_b24_hit_event_abcrm_2019 ON (v_b24_hit_event_abcrm_2019.date = s.date) AND (v_b24_hit_event_abcrm_2019.db_name = s.dbName)
+    WHERE (b24_test_db.test_id IN (7, 8)) AND (v_b24_hit_event_abcrm_2019.event_action = ' section_open') AND (v_b24_hit_event_abcrm_2019.event_category = 'crm')
+)
+GROUP BY DB
+```
+Then we try to run:
+`select * from BI_ab_test_db2 where DB='b10178995'`
+it returns _NO ROWS_
+3. So we tried to rewrite it using "previous" syntax (nested selects)
+```
+CREATE VIEW BI_ab_test_db3 AS
+SELECT
+    DB,
+    argMax(date_start, test_id) AS date_start, 
+    max(test_id) AS last_test, 
+    argMax(event_action, test_id) AS event_action
+FROM
+(
+    SELECT
+        DB,
+        test_id,
+        date_start,
+        event_action
+    FROM 
+    (
+        SELECT
+            dbName as DB,
+            test_id,
+            date_start
+        FROM 
+        (
+            SELECT
+                toDate(siteRegistration) AS date_start,
+                dbName
+            FROM b24Sites
+        )
+        ANY INNER JOIN
+        (
+            SELECT
+                db_name AS dbName,
+                test_id
+            FROM b24_test_db
+            WHERE test_id IN (7, 8)
+        ) USING (dbName)
+    )
+    ANY INNER JOIN 
+    (
+        SELECT
+            date AS date_start,
+            db_name AS DB,
+            event_action,
+            event_category
+        FROM v_b24_hit_event_abcrm_2019
+        WHERE (event_action = ' section_open') AND (event_category = 'crm')
+    ) USING (date_start, DB)
+)
+GROUP BY DB
+```
+Then the query
+`select * from BI_ab_test_db3 where DB='b10178995'`
+returns _a row_
+
+Select count(*) shows different results for queries and views:
+```
+node02 :) select count(*) from BI_ab_test_db2
+
+SELECT count(*)
+FROM BI_ab_test_db2
+
+┌─count()─┐
+│   11345 │
+└─────────┘
+
+1 rows in set. Elapsed: 4.894 sec. Processed 35.15 million rows, 1.56 GB (7.18 million rows/s., 318.63 MB/s.) 
+
+node02 :) select count(*) from BI_ab_test_db3
+
+SELECT count(*)
+FROM BI_ab_test_db3
+
+┌─count()─┐
+│   13687 │
+└─────────┘
+
+1 rows in set. Elapsed: 3.354 sec. Processed 34.65 million rows, 1.55 GB (10.33 million rows/s., 461.58 MB/s.) 
+
+```
+
+while select count(*) from (place a select here) always returns
+```
+─count()─┐
+│   13687 │
+└─────────┘
+```

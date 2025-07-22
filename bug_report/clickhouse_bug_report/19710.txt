@@ -1,0 +1,96 @@
+ID: 19710
+Title: Wrong cast if query reads multiple partitions with do_not_merge_across_partitions_select_final enabled.
+Description:
+
+**Does it reproduce on recent release?**
+Yes, on 21.1.1
+
+**How to reproduce**
+
+```
+
+CREATE TABLE table_merge_across
+(
+    `ts` DateTime,
+    `val` String
+)
+ENGINE = ReplacingMergeTree()
+PARTITION BY toYYYYMMDD(ts)
+ORDER BY (ts)
+SETTINGS index_granularity = 8192
+
+INSERT INTO table_merge_across(ts) SELECT toDateTime(toDate('2021-01-27')) FROM numbers(1);
+INSERT INTO table_merge_across(ts) SELECT toDateTime(toDate('2021-02-27')) FROM numbers(1);
+OPTIMIZE TABLE table_merge_across PARTITION ID '20210127' FINAL;
+SELECT count() FROM  table_merge_across FINAL WHERE not ignore(val) AND not ignore(ts) SETTINGS do_not_merge_across_partitions_select_final = 1; 
+
+
+Received exception from server (version 21.1.1):
+Code: 41. DB::Exception: Received from localhost:9000. DB::Exception: Cannot parse datetime{}: Cannot parse DateTime from String: while converting source column val to destination column ts: while executing 'FUNCTION CAST(val :: 0, DateTime :: 2) -> CAST(val, DateTime) DateTime : 4'.
+
+SELECT count()
+FROM table_merge_across
+FINAL
+WHERE (NOT ignore(val)) AND (NOT ignore(ts))
+SETTINGS do_not_merge_across_partitions_select_final = 0
+
+Query id: 55192480-10e8-495e-af75-21325c573405
+
+┌─count()─┐
+│       2 │
+└─────────┘
+```
+* Non-default settings, if any
+```
+do_not_merge_across_partitions_select_final = 1
+```
+
+**Expected behavior**
+Query works.
+
+**Error message and/or stacktrace**
+```
+Code: 41, e.displayText() = DB::ParsingException: Cannot parse datetime: Cannot parse DateTime from String: while converting source column val to destination column ts: while executing 'FUNCTION CAST(val :: 0, DateTime :: 2) -> CAST(val, DateTime) DateTime : 4' (version 21.1.1.5719 (official build)) (from 127.0.0.1:37882) (in query: SELECT count() FROM table_merge_across FINAL WHERE not ignore(val) AND not ignore(ts) SETTINGS do_not_merge_across_partitions_select_final = 1;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::ParsingException::ParsingException(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8401b57 in /usr/bin/clickhouse
+1. void DB::readDateTimeTextFallback<void>(long&, DB::ReadBuffer&, DateLUTImpl const&) @ 0x844b5bf in /usr/bin/clickhouse
+2. COW<DB::IColumn>::immutable_ptr<DB::IColumn> DB::ConvertThroughParsing<DB::DataTypeString, DB::DataTypeDateTime, DB::NameToDateTime, (DB::ConvertFromStringExceptionMode)0, (DB::ConvertFromStringParsingMode)0>::execute<void*>(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, void*) @ 0x9f2fb25 in /usr/bin/clickhouse
+3. bool DB::callOnIndexAndDataType<DB::DataTypeDateTime, DB::FunctionConvert<DB::DataTypeDateTime, DB::NameToDateTime, DB::ToDateTimeMonotonicity>::executeInternal(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const::'lambda'(auto const&, auto const&)&, DB::ConvertDefaultBehaviorTag>(DB::TypeIndex, auto&&, DB::ToDateTimeMonotonicity&&...) @ 0x9f1c0ee in /usr/bin/clickhouse
+4. DB::FunctionConvert<DB::DataTypeDateTime, DB::NameToDateTime, DB::ToDateTimeMonotonicity>::executeInternal(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x9f1b321 in /usr/bin/clickhouse
+5. DB::FunctionConvert<DB::DataTypeDateTime, DB::NameToDateTime, DB::ToDateTimeMonotonicity>::executeImpl(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x9f1a88c in /usr/bin/clickhouse
+6. DB::DefaultExecutable::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x9d884ee in /usr/bin/clickhouse
+7. DB::ExecutableFunctionAdaptor::executeWithoutLowCardinalityColumns(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x9d8c510 in /usr/bin/clickhouse
+8. DB::ExecutableFunctionAdaptor::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x9d8cc9d in /usr/bin/clickhouse
+9. DB::IFunctionBase::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x9d9463b in /usr/bin/clickhouse
+10. COW<DB::IColumn>::immutable_ptr<DB::IColumn> std::__1::__function::__policy_invoker<COW<DB::IColumn>::immutable_ptr<DB::IColumn> (std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long)>::__call_impl<std::__1::__function::__default_alloc_func<DB::FunctionCast::createFunctionAdaptor(std::__1::shared_ptr<DB::IFunction>, std::__1::shared_ptr<DB::IDataType const> const&) const::'lambda'(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long), COW<DB::IColumn>::immutable_ptr<DB::IColumn> (std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long)> >(std::__1::__function::__policy_storage const*, std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long) @ 0x9f7e7e6 in /usr/bin/clickhouse
+11. DB::ExecutableFunctionCast::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x9f75e0e in /usr/bin/clickhouse
+12. DB::ExecutableFunctionAdaptor::executeWithoutLowCardinalityColumns(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x9d8c510 in /usr/bin/clickhouse
+13. DB::ExecutableFunctionAdaptor::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x9d8cc6c in /usr/bin/clickhouse
+14. DB::ExpressionActions::execute(DB::Block&, unsigned long&, bool) const @ 0xea615c3 in /usr/bin/clickhouse
+15. DB::ExpressionTransform::transform(DB::Chunk&) @ 0xf854f1c in /usr/bin/clickhouse
+16. DB::ISimpleTransform::transform(DB::Chunk&, DB::Chunk&) @ 0xf20e980 in /usr/bin/clickhouse
+17. DB::ISimpleTransform::work() @ 0xf72a667 in /usr/bin/clickhouse
+18. ? @ 0xf767e3d in /usr/bin/clickhouse
+19. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xf764c61 in /usr/bin/clickhouse
+20. ? @ 0xf769636 in /usr/bin/clickhouse
+21. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8437dff in /usr/bin/clickhouse
+22. ? @ 0x843b883 in /usr/bin/clickhouse
+23. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+24. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```
+
+**Additional context**
+Query working fine, if we didn't cross boundary between partitions.
+```
+SELECT count()
+FROM table_merge_across
+FINAL
+WHERE (NOT ignore(val)) AND (ts < '2021-01-28 00:00:00')
+SETTINGS do_not_merge_across_partitions_select_final = 1
+
+Query id: 63152ddd-da47-4c4c-88ee-421416a67206
+
+┌─count()─┐
+│       1 │
+└─────────┘
+```

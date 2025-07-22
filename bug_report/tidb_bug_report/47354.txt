@@ -1,0 +1,105 @@
+ID: 47354
+Title: TiDB can not update stats correctly after exchange a partition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. Create a table: `create table pt(a int, b varchar(10), index idx_b (b)) partition by range(a) (partition p0 values less than (10), partition p1 values less than (20), partition p2 values less than (30));`
+2. Insert some data: `insert into pt(a, b) values(1,'a'); insert into pt(a, b) values(5,'a');`
+3. Check the meta:
+```sql
+mysql> select * from mysql.stats_meta;
++--------------------+----------+--------------+-------+----------+
+| version            | table_id | modify_count | count | snapshot |
++--------------------+----------+--------------+-------+----------+
+| 444565530978025482 |      103 |            2 |     2 |        0 |
+| 444565516821987331 |      104 |            0 |     0 |        0 |
+| 444565516821987336 |      105 |            0 |     0 |        0 |
+| 444565530978025482 |      102 |            2 |     2 |        0 |
++--------------------+----------+--------------+-------+----------+
+4 rows in set (0.00 sec)
+```
+4. Create a new table: `create table t1(a int, b varchar(10), index idx_b (b));`
+5. Insert data to t1: `insert into t1(a, b) values(1,'a');`
+6. Check the meta again: 
+```sql
+mysql> select * from mysql.stats_meta;
++--------------------+----------+--------------+-------+----------+
+| version            | table_id | modify_count | count | snapshot |
++--------------------+----------+--------------+-------+----------+
+| 444565530978025482 |      103 |            2 |     2 |        0 |
+| 444565516821987331 |      104 |            0 |     0 |        0 |
+| 444565516821987336 |      105 |            0 |     0 |        0 |
+| 444565530978025482 |      102 |            2 |     2 |        0 |
+| 444565546707976206 |      107 |            1 |     1 |        0 |
++--------------------+----------+--------------+-------+----------+
+5 rows in set (0.00 sec)
+```
+7. Exchange the partition: `alter table pt exchange partition p0 with table t1;`
+8. Check the meta:
+```sql
+mysql> show stats_meta;
++---------+------------+----------------+---------------------+--------------+-----------+
+| Db_name | Table_name | Partition_name | Update_time         | Modify_count | Row_count |
++---------+------------+----------------+---------------------+--------------+-----------+
+| test    | t1         |                | 2023-09-28 14:35:15 |            2 |         2 |
+| test    | pt         | global         | 2023-09-28 14:35:15 |            2 |         2 |
+| test    | pt         | p0             | 2023-09-28 14:36:15 |            1 |         1 |
+| test    | pt         | p1             | 2023-09-28 14:34:21 |            0 |         0 |
+| test    | pt         | p2             | 2023-09-28 14:34:21 |            0 |         0 |
++---------+------------+----------------+---------------------+--------------+-----------+
+5 rows in set (0.00 sec)
+```
+### 2. What did you expect to see? (Required)
+```diff
+mysql> show stats_meta;
++---------+------------+----------------+---------------------+--------------+-----------+
+| Db_name | Table_name | Partition_name | Update_time         | Modify_count | Row_count |
++---------+------------+----------------+---------------------+--------------+-----------+
+| test    | t1         |                | 2023-09-28 14:35:15 |            2 |         2 |
+- | test    | pt         | global         | 2023-09-28 14:35:15 |            2 |         2 |
++ | test    | pt         | global         | 2023-09-28 14:35:15 |            1 |         1 |
+| test    | pt         | p0             | 2023-09-28 14:36:15 |            1 |         1 |
+| test    | pt         | p1             | 2023-09-28 14:34:21 |            0 |         0 |
+| test    | pt         | p2             | 2023-09-28 14:34:21 |            0 |         0 |
++---------+------------+----------------+---------------------+--------------+-----------+
+5 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+```sql
+mysql> show stats_meta;
++---------+------------+----------------+---------------------+--------------+-----------+
+| Db_name | Table_name | Partition_name | Update_time         | Modify_count | Row_count |
++---------+------------+----------------+---------------------+--------------+-----------+
+| test    | t1         |                | 2023-09-28 14:35:15 |            2 |         2 |
+| test    | pt         | global         | 2023-09-28 14:35:15 |            2 |         2 |
+| test    | pt         | p0             | 2023-09-28 14:36:15 |            1 |         1 |
+| test    | pt         | p1             | 2023-09-28 14:34:21 |            0 |         0 |
+| test    | pt         | p2             | 2023-09-28 14:34:21 |            0 |         0 |
++---------+------------+----------------+---------------------+--------------+-----------+
+5 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql> SELECT tidb_version();
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                     |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.5.0-alpha-1-g22e9be7d4e
+Edition: Community
+Git Commit Hash: 22e9be7d4e440ec87cf5c8407866ca0a9b49c91a
+Git Branch: master
+UTC Build Time: 2023-09-28 06:24:13
+GoVersion: go1.21.1
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+

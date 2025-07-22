@@ -1,0 +1,245 @@
+ID: 21073
+Title: dictionaries `SOURCE(POSTGRESQL(...))` doesn't work
+Description:
+**Describe the bug**
+XML and SQL definition for PostgreSQL external dictionaries successful created, but doesn't load data
+
+**Does it reproduce on recent release?**
+Yes
+
+**How to reproduce**
+* Which ClickHouse server version to use
+21.2.4
+
+
+* `CREATE TABLE` statements for all tables involved
+`/etc/clickhouse-server/postgresql_dictionary.xml`
+
+```xml
+<yandex>
+    <dictionary>
+        <name>postgres_dict</name>
+        <structure>
+            <key>
+                <name>service_name</name>
+                <type>String</type>
+            </key>
+            <attribute>
+                <name>service_type</name>
+                <type>String</type>
+            </attribute>
+        </structure>
+
+        <source>
+            <postgresql>
+                <host>postgres</host>
+                <port>5432</port>
+                <user>grafana</user>
+                <password>grafana</password>
+                <database>grafana</database>
+                <table>test_grafana_dict</table>
+                <!--
+                <replica>
+                    <host>postgres</host>
+                </replica>
+                <where>service_name='mysql'</where>
+                <invalidate_query>SELECT now()</invalidate_query>
+                -->
+            </postgresql>
+        </source>
+
+        <layout>
+            <hashed/>
+        </layout>
+
+        <lifetime>
+            <min>10</min>
+            <max>20</max>
+        </lifetime>
+    </dictionary>
+</yandex>
+```
+
+Also, I try to create the dictionary via SQL
+```sql
+CREATE DICTIONARY postgres_dict_sql
+(
+    `service_name` String,
+    `service_type` String
+)
+PRIMARY KEY service_name
+SOURCE(POSTGRESQL(HOST 'postgres' PORT '5432' USER 'grafana' PASSWORD 'grafana' DATABASE 'grafana' TABLE 'test_grafana_dict'))
+LIFETIME(MIN 0 MAX 10)
+LAYOUT(HASHED());
+```
+
+PostgreSQL queries
+```
+CREATE USER grafana WITH PASSWORD 'grafana';
+CREATE DATABASE grafana;
+ALTER DATABASE grafana OWNER TO grafana;
+GRANT ALL PRIVILEGES ON DATABASE grafana TO grafana;
+
+\c grafana
+DROP TABLE IF EXISTS test_grafana_dict;
+CREATE TABLE IF NOT EXISTS test_grafana_dict(service_name VARCHAR(100), service_type VARCHAR(100));
+ALTER TABLE test_grafana_dict OWNER TO grafana;
+
+INSERT INTO test_grafana_dict(service_name, service_type) VALUES ('mysql','sql'),('postgresql','sql');
+```
+
+* Queries to run that lead to unexpected result
+```sql
+SYSTEM RELOAD DICTIOANRIES;
+SELECT * FROM postgres_dict;
+SELECT * FROM postgres_dict_sql;
+SELECT * FROM system.dictionaries FORMAT Vertical;
+```
+
+**Expected behavior**
+Successful dictionaries data reload, or clear error description 
+
+**Error message and/or stacktrace**
+
+### SYSTEM RELOAD DICTIOANRIES;
+```
+2021.02.22 13:34:50.436902 [ 115 ] {52718587-ad3b-49ae-9fcd-d8f23a8dad7c} <Error> executeQuery: Code: 156, e.displayText() = DB::Exception: Code: 156, e.displayText() = DB::Exception: Failed to load dictionary '3a4ee965-7a0d-464f-982b-2da94373e85f': std::exception. Code: 1001, type: pqxx::conversion_error, e.what() = Could not convert string to m: 'mysql'., (version 21.2.4.6 (official build)) (version 21.2.4.6 (official build)) (from 127.0.0.1:46706) (in query: SYSTEM RELOAD DICTIONARIES;), Stack trace (when copying this message, always include the lines below):
+
+0. ? @ 0xed4972a in /usr/bin/clickhouse
+1. DB::InterpreterSystemQuery::execute() @ 0xed47f6d in /usr/bin/clickhouse
+2. ? @ 0xeeb94f2 in /usr/bin/clickhouse
+3. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0xeeb7e4c in /usr/bin/clickhouse
+4. DB::TCPHandler::runImpl() @ 0xf5b2b15 in /usr/bin/clickhouse
+5. DB::TCPHandler::run() @ 0xf5c2799 in /usr/bin/clickhouse
+6. Poco::Net::TCPServerConnection::start() @ 0x11b6018f in /usr/bin/clickhouse
+7. Poco::Net::TCPServerDispatcher::run() @ 0x11b61ba1 in /usr/bin/clickhouse
+8. Poco::PooledThread::run() @ 0x11c98c49 in /usr/bin/clickhouse
+9. Poco::ThreadImpl::runnableEntry(void*) @ 0x11c94aaa in /usr/bin/clickhouse
+10. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+11. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```
+
+### SELECT * FROM postgres_dict_sql;
+```
+2021.02.22 13:36:50.197753 [ 115 ] {8e7bb45b-269e-48aa-a4ab-6a1c9b4e5506} <Error> TCPHandler: Code: 156, e.displayText() = DB::Exception: Failed to load dictionary '3a4ee965-7a0d-464f-982b-2da94373e85f': std::exception. Code: 1001, type: pqxx::conversion_error, e.what() = Could not convert string to m: 'mysql'., Stack trace (when copying this message, always include the lines below):
+
+0. pqxx::internal::integral_traits<unsigned long>::from_string(std::__1::basic_string_view<char, std::__1::char_traits<char> >) @ 0x1349cae4 in /usr/bin/clickhouse
+1. DB::PostgreSQLBlockInputStream::insertValue(DB::IColumn&, std::__1::basic_string_view<char, std::__1::char_traits<char> >, DB::ExternalResultDescription::ValueType, std::__1::shared_ptr<DB::IDataType const>, unsigned long) @ 0xe69e78b in /usr/bin/clickhouse
+2. DB::PostgreSQLBlockInputStream::readImpl() @ 0xe69e1ff in /usr/bin/clickhouse
+3. DB::IBlockInputStream::read() @ 0xe691785 in /usr/bin/clickhouse
+4. DB::HashedDictionary::loadData() @ 0xcd458bb in /usr/bin/clickhouse
+5. DB::HashedDictionary::HashedDictionary(DB::StorageID const&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1::default_delete<DB::IDictionarySource> >, DB::ExternalLoadableLifetime, bool, bool, std::__1::shared_ptr<DB::Block>) @ 0xcd4547e in /usr/bin/clickhouse
+6. ? @ 0xcda29e6 in /usr/bin/clickhouse
+7. DB::DictionaryFactory::create(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context const&, bool) const @ 0xe3cba18 in /usr/bin/clickhouse
+8. DB::ExternalDictionariesLoader::create(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xe9513f1 in /usr/bin/clickhouse
+9. DB::ExternalLoader::LoadingDispatcher::loadSingleObject(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ExternalLoader::ObjectConfig const&, std::__1::shared_ptr<DB::IExternalLoadable const>) @ 0xe95c227 in /usr/bin/clickhouse
+10. DB::ExternalLoader::LoadingDispatcher::doLoading(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool) @ 0xe959679 in /usr/bin/clickhouse
+11. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool>(void (DB::ExternalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool), DB::ExternalLoader::LoadingDispatcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&)::'lambda'()::operator()() @ 0xe95e861 in /usr/bin/clickhouse
+12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x84f6e4f in /usr/bin/clickhouse
+13. ? @ 0x84fa8e3 in /usr/bin/clickhouse
+14. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+15. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 21.2.4.6 (official build)), Stack trace:
+
+0. DB::Exception::Exception<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >(int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&&) @ 0xcdc72ec in /usr/bin/clickhouse
+1. DB::ExternalLoader::checkLoaded(DB::ExternalLoader::LoadResult const&, bool) const @ 0xe952935 in /usr/bin/clickhouse
+2. std::__1::shared_ptr<DB::IExternalLoadable const> DB::ExternalLoader::load<std::__1::shared_ptr<DB::IExternalLoadable const>, void>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0xe95225f in /usr/bin/clickhouse
+3. DB::StorageDictionary::read(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xf04535f in /usr/bin/clickhouse
+4. DB::IStorage::read(DB::QueryPlan&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xf03297f in /usr/bin/clickhouse
+5. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&, std::__1::shared_ptr<DB::PrewhereDAGInfo> const&, std::__1::unordered_set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xeb952a3 in /usr/bin/clickhouse
+6. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>) @ 0xeb8a2f1 in /usr/bin/clickhouse
+7. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0xeb89a14 in /usr/bin/clickhouse
+8. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0xed2f363 in /usr/bin/clickhouse
+9. DB::InterpreterSelectWithUnionQuery::execute() @ 0xed304e4 in /usr/bin/clickhouse
+10. ? @ 0xeeb94f2 in /usr/bin/clickhouse
+11. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0xeeb7e4c in /usr/bin/clickhouse
+12. DB::TCPHandler::runImpl() @ 0xf5b2b15 in /usr/bin/clickhouse
+13. DB::TCPHandler::run() @ 0xf5c2799 in /usr/bin/clickhouse
+14. Poco::Net::TCPServerConnection::start() @ 0x11b6018f in /usr/bin/clickhouse
+15. Poco::Net::TCPServerDispatcher::run() @ 0x11b61ba1 in /usr/bin/clickhouse
+16. Poco::PooledThread::run() @ 0x11c98c49 in /usr/bin/clickhouse
+17. Poco::ThreadImpl::runnableEntry(void*) @ 0x11c94aaa in /usr/bin/clickhouse
+18. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+19. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```
+
+### SELECT * FROM postgres_dict;
+```
+Code: 60. DB::Exception: Received from localhost:9000. DB::Exception: Table default.postgres_dict doesn't exist.
+```
+
+### SELECT * FROM system.dictionaries FORMAT Vertical;
+```
+Row 1:
+──────
+database:                    default
+name:                        postgres_dict_sql
+uuid:                        3a4ee965-7a0d-464f-982b-2da94373e85f
+status:                      FAILED
+origin:                      3a4ee965-7a0d-464f-982b-2da94373e85f
+type:
+key:
+attribute.names:             []
+attribute.types:             []
+bytes_allocated:             0
+query_count:                 0
+hit_rate:                    0
+element_count:               0
+load_factor:                 0
+source:
+lifetime_min:                0
+lifetime_max:                0
+loading_start_time:          2021-02-22 13:39:35
+last_successful_update_time: 1970-01-01 00:00:00
+loading_duration:            0.008
+last_exception:              std::exception. Code: 1001, type: pqxx::conversion_error, e.what() = Could not convert string to m: 'mysql'. (version 21.2.4.6 (official build))
+
+Row 2:
+──────
+database:
+name:                        postgres_dict
+uuid:                        00000000-0000-0000-0000-000000000000
+status:                      NOT_LOADED
+origin:                      /etc/clickhouse-server/postgres_dictionary.xml
+type:
+key:
+attribute.names:             []
+attribute.types:             []
+bytes_allocated:             0
+query_count:                 0
+hit_rate:                    0
+element_count:               0
+load_factor:                 0
+source:
+lifetime_min:                0
+lifetime_max:                0
+loading_start_time:          1970-01-01 00:00:00
+last_successful_update_time: 1970-01-01 00:00:00
+loading_duration:            0
+last_exception:
+```
+
+## Additional context
+### Table function works fine
+
+```sql
+SELECT * FROM postgresql('postgres:5432', 'grafana', 'test_grafana_dict', 'grafana', 'grafana')
+```
+
+```
+
+Query id: 7b1b34f7-7953-450e-b803-c2be097264fa
+
+┌─service_name─┬─service_type─┐
+│ mysql        │ sql          │
+│ postgresql   │ sql          │
+└──────────────┴──────────────┘
+
+2 rows in set. Elapsed: 0.016 sec.
+```
+
+Also, look like from PostgreSQL side SYSTEM RELOAD DICTIONARIES works OK
+![image](https://user-images.githubusercontent.com/105560/108717826-8d5cf100-753f-11eb-980b-cca20cf52eed.png)
+![image](https://user-images.githubusercontent.com/105560/108717935-ad8cb000-753f-11eb-9dcc-4725d8ef0ddb.png)
+
+

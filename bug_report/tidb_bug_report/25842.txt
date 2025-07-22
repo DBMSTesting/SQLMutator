@@ -1,0 +1,88 @@
+ID: 25842
+Title: inconsistent SQL bind caches after recreating bind with different bind_sql for a same original_sql
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Start 2 tidb-servers, execute create / drop binding statements on tidb-1, and observe the results of `show global bindings` on tidb-2.
+
+This is the output on tidb-1, which is as expected.
+```
+mysql> create global binding for select * from t0 using select * from t0 use index(a);
+Query OK, 0 rows affected (0.03 sec)
+
+mysql> show global bindings;
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| Original_sql            | Bind_sql                            | Default_db | Status | Create_time             | Update_time             | Charset | Collation       | Source |
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| select * from test . t0 | SELECT * FROM test.t0 USE INDEX (a) | test       | using  | 2021-06-30 12:57:31.121 | 2021-06-30 12:57:31.121 | utf8    | utf8_general_ci | manual |
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+1 row in set (0.00 sec)
+
+mysql> create global binding for select * from t0 using select /*+ use_index(t0,a) */ * from t0;
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> show global bindings;
++-------------------------+---------------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| Original_sql            | Bind_sql                                    | Default_db | Status | Create_time             | Update_time             | Charset | Collation       | Source |
++-------------------------+---------------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| select * from test . t0 | SELECT /*+ use_index(t0 a)*/ * FROM test.t0 | test       | using  | 2021-06-30 12:57:59.102 | 2021-06-30 12:57:59.102 | utf8    | utf8_general_ci | manual |
++-------------------------+---------------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+1 row in set (0.00 sec)
+
+mysql> drop global binding for select * from t0;
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> show global bindings;
+Empty set (0.00 sec)
+```
+
+This is the output on tidb-2:
+```
+-- after the first create binding executed on tidb-1
+mysql> show global bindings;
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| Original_sql            | Bind_sql                            | Default_db | Status | Create_time             | Update_time             | Charset | Collation       | Source |
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| select * from test . t0 | SELECT * FROM test.t0 USE INDEX (a) | test       | using  | 2021-06-30 12:57:31.121 | 2021-06-30 12:57:31.121 | utf8    | utf8_general_ci | manual |
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+1 row in set (0.00 sec)
+
+-- after the second create binding executed on tidb-1
+mysql> show global bindings;
++-------------------------+---------------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| Original_sql            | Bind_sql                                    | Default_db | Status | Create_time             | Update_time             | Charset | Collation       | Source |
++-------------------------+---------------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| select * from test . t0 | SELECT * FROM test.t0 USE INDEX (a)         | test       | using  | 2021-06-30 12:57:31.121 | 2021-06-30 12:57:31.121 | utf8    | utf8_general_ci | manual |
+| select * from test . t0 | SELECT /*+ use_index(t0 a)*/ * FROM test.t0 | test       | using  | 2021-06-30 12:57:59.102 | 2021-06-30 12:57:59.102 | utf8    | utf8_general_ci | manual |
++-------------------------+---------------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+2 rows in set (0.00 sec)
+
+-- after the drop binding executed on tidb-1
+mysql> show global bindings;
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| Original_sql            | Bind_sql                            | Default_db | Status | Create_time             | Update_time             | Charset | Collation       | Source |
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+| select * from test . t0 | SELECT * FROM test.t0 USE INDEX (a) | test       | using  | 2021-06-30 12:57:31.121 | 2021-06-30 12:57:31.121 | utf8    | utf8_general_ci | manual |
++-------------------------+-------------------------------------+------------+--------+-------------------------+-------------------------+---------+-----------------+--------+
+1 row in set (0.01 sec)
+```
+
+We can see that, tidb-2 has an invalid cached bind for `use index(a)` hint.
+
+### 2. What did you expect to see? (Required)
+
+tidb-1 and tidb-2 have same cached bindings.
+
+### 3. What did you see instead (Required)
+
+tidb-2 has one more cached binding than tidb-1, which is expected to be removed.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+4.0.12, master

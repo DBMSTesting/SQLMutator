@@ -1,0 +1,126 @@
+ID: 13850
+Title: Binder error when manually materializing a CTE
+Description:
+### What happens?
+
+The new automatic CTE materialization mechanism clashes with manually requesting a CTE to be materialized.
+
+
+
+### To Reproduce
+
+Run
+
+```sql
+create table batch (
+    entity text,
+    start_ts timestamptz,
+    duration interval
+)
+;
+
+create table active_events (
+    entity text,
+    start_ts timestamptz,
+    end_ts timestamptz
+)
+;
+
+create table active_events as
+with
+    new_events as materialized (  -- Does not make much sense in this example, but my original query was a union of a bunch of things
+        select
+            entity,
+            start_ts as start_ts,
+            start_ts + duration as end_ts
+        from
+            batch
+    ), events_to_deduplicate as (
+        select
+            *
+        from  -- We need to deduplicate events for old entites with new data
+            active_events old
+            semi join new_events new on
+                old.entity = new.entity
+        union all
+        select *
+        from
+            new_events
+    ), combined_deduplicated_events as (
+        select
+            entity,
+            min(start_ts) as start_ts,
+            max(end_ts) as end_ts
+        from
+            events_to_deduplicate
+        group by
+            entity
+    ), all_events as (
+        select
+            entity,
+            start_ts,
+            end_ts
+        from
+            combined_deduplicated_events
+        where
+            end_ts > start_ts
+        union all
+        select
+            *
+        from  -- The data we did not need to deduplicate
+            active_events old
+            anti join new_events new on
+                old.entity = new.entity
+    )
+select
+    *
+from
+    combined_leases
+;
+```
+
+and observe a Binder Error: Duplicate alias "new_events" in query!
+
+Removing the `materialized` clause makes the query pass.
+
+
+
+### OS:
+
+Ubuntu x64 in WSL on Windows 11
+
+### DuckDB Version:
+
+v1.1.0 fa5c2fe15f
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Míma Hlaváček
+
+### Affiliation:
+
+Arista Networks
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,132 @@
+ID: 12751
+Title: Improve performance of memory usage counters
+Description:
+In some cases, concurrent updates to the global memory usage counter can cause performance issues(#12749). This PR optimizes the performance of the memory usage counter but sacrifices some accuracy. A cache for memory statistics counters is created based on `cpuid`. Each update first updates the cache, and update the global counter only when the cache value exceeds a threshold. There will be some discrepancy between the global counter value and the actual memory, but this difference is relatively small (several MBs) and should not cause significant issues.
+
+## Benchmark
+
+create test data:
+```
+SET threads TO 64;
+SET memory_limit='1TB';
+create macro randint() as cast(random() * 9 as int);
+create macro randstr(len) as list_aggregate(list_transform(list_resize([], len), x -> randint()), 'string_agg', '');
+create table trange as from range(1000000000);
+create table prefixed_data as select concat('com.', randstr(20)) as key from trange;
+```
+127s -> 75s
+```
+explain analyze create or replace table sorted as select * from prefixed_data order by key;
+```
+
+before:
+```
+D explain analyze create or replace table sorted as select * from prefixed_data order by key;
+100% ▕████████████████████████████████████████████████████████████▏ 
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze create or replace table sorted as select * from prefixed_data order by key;
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││        Total Time: 127.82s        ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌───────────────────────────┐
+│      RESULT_COLLECTOR     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│   BATCH_CREATE_TABLE_AS   │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             1             │
+│         (339.32s)         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│          ORDER_BY         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          ORDERS:          │
+│  prefixed_data."key" ASC  │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│         (1635.20s)        │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       prefixed_data       │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            key            │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       EC: 1000000000      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│          (15.58s)         │
+└───────────────────────────┘
+```
+
+after:
+```
+D explain analyze create or replace table sorted as select * from prefixed_data order by key;
+100% ▕████████████████████████████████████████████████████████████▏ 
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze create or replace table sorted as select * from prefixed_data order by key;
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         Total Time: 74.86s        ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌───────────────────────────┐
+│      RESULT_COLLECTOR     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│   BATCH_CREATE_TABLE_AS   │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             1             │
+│         (307.26s)         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│          ORDER_BY         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          ORDERS:          │
+│  prefixed_data."key" ASC  │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│         (2221.19s)        │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       prefixed_data       │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            key            │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       EC: 1000000000      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│          (15.94s)         │
+└───────────────────────────┘
+```

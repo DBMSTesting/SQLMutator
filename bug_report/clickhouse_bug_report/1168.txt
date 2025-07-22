@@ -1,0 +1,67 @@
+ID: 1168
+Title: ClickHouse allows creating Distributed view onto itself, leading to infinite query loop
+Description:
+It's currently possible to create a loop such as this:
+
+```
+:) CREATE TABLE loop AS system.parts ENGINE = Distributed('cluster', 'default', loop, rand())
+```
+
+When queried, it will infinitely spawn new subqueries. Attempts to connect to the server will fails, because all connection slots are exhausted:
+
+```
+$ clickhouse-client -h server -u me --stacktrace
+Connecting to server:9000 as user me.
+Code: 32. DB::Exception: Attempt to read after eof
+
+Stack trace:
+0. clickhouse-client(StackTrace::StackTrace()+0x16) [0x2a95a76]
+1. clickhouse-client(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x1f) [0x109ec0f]
+2. clickhouse-client(DB::throwReadAfterEOF()+0x47) [0x109ec77]
+3. clickhouse-client(DB::Connection::receiveHello()+0xa8a) [0x2cb97fa]
+4. clickhouse-client(DB::Connection::connect()+0x6d4) [0x2cbb714]
+5. clickhouse-client(DB::Connection::getServerVersion(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, unsigned long&, unsigned long&, unsigned long&)+0x2e) [0x2cbc33e]
+6. clickhouse-client(DB::Client::connect()+0xa4e) [0x10e2efe]
+7. clickhouse-client(DB::Client::mainImpl(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x2ff) [0x10f33df]
+8. clickhouse-client(DB::Client::main(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x26) [0x108ce26]
+9. clickhouse-client(Poco::Util::Application::run()+0x33) [0x3342853]
+10. clickhouse-client(mainEntryClickHouseClient(int, char**)+0x62c) [0x10c90cc]
+11. clickhouse-client(main+0x164) [0x1086dc4]
+12. /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xf1) [0x7fd70c7c52b1]
+13. clickhouse-client(_start+0x2a) [0x109bcda]
+```
+
+The HTTP interface just hangs, or fails with maximum simultaneous queries exception:
+
+```
+$ clickhouse-cli -h server -p 8123
+clickhouse-cli version: 0.2.3
+Connecting to server:8123
+Error:
+Too much simultaneous queries. Maximum: 256
+```
+
+The client can be lucky and get a connection at some point, but KILL QUERY doesn't seem to terminate the recursing query completely:
+
+```
+KILL QUERY WHERE query LIKE 'SELECT count() FROM loop%'
+
+waiting	63fd27d2-36f6-4317-9f75-afff83dbb6a0	default	SELECT count() FROM loop
+waiting	c898f8fe-d716-4a37-9101-e22930ec2ef5	default	SELECT count() FROM loop
+waiting	68913e52-621e-4ce5-9249-e7cf856bea45	default	SELECT count() FROM loop
+waiting	1ad8db4c-f09f-47c8-9ad5-9a3f35a61736	default	SELECT count() FROM loop
+waiting	8e7c3cd8-7e70-447d-815c-175aa8fbbc95	default	SELECT count() FROM loop
+waiting	6fcc9f92-76d2-4ac0-8aa6-6175603e2c7d	default	SELECT count() FROM loop
+waiting	02d94565-b932-40f2-b029-8426a6fdbaaa	default	SELECT count() FROM loop
+waiting	18460600-0a68-41cf-93bb-fad9344621d5	default	SELECT count() FROM loop
+waiting	495d0f51-3445-4f4f-865f-b0e4684f9c06	default	SELECT count() FROM loop
+finished	d9f4a435-0de4-4d09-8a13-65989ab25ce8	default	SELECT count() FROM loop
+finished	e584e524-09a6-4722-888e-3af5afc750f0	default	SELECT count() FROM loop
+finished	00b13cfd-2fde-47d6-91dd-63c9760dcd98	default	SELECT count() FROM loop
+finished	44638e19-aaa5-487c-b6cb-6daed71c032f	default	SELECT count() FROM loop
+finished	cbcbffa0-678a-496a-acfe-a737166c8a62	default	SELECT count() FROM loop
+finished	2405bb3a-039d-4f70-bf6f-b96a6500d47f	default	SELECT count() FROM loop
+finished	62af974f-0de4-4b0d-9e2c-7de267f53251	default	SELECT count() FROM loop
+```
+
+So it's impossible to recover from this other than stopping and then starting all servers I guess.

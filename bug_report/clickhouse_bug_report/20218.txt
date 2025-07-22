@@ -1,0 +1,54 @@
+ID: 20218
+Title: Data Corruption // Invalid number of rows in Chunk (21.2.2.8)
+Description:
+I am having reproducible data corruption issues. Even deleted the clickhouse data directory and set up everything from scratch. 
+
+I have a materialized view on top of a raw data table, which gets filled in chunks and has a JSON column, which the MV extracts data from.
+
+After a couple of inserts (parquet files, about 10k records), the count(1) query starts to fail. 
+
+
+```
+DB::Exception: Invalid number of rows in Chunk column UInt8 position 0: expected 14840, got 6648: While executing MergeTreeThread (version 21.2.2.8 (official build))
+```
+
+Query: 
+```
+SELECT count(1) FROM trackings;
+```
+
+Error Log:
+
+```
+2021.02.08 21:56:29.077827 [ 49700 ] {d7af1139-0a83-442b-8ccd-de064b250ba8} <Warning> AWSClient: ClientConfiguration: Retry Strategy will use the default max attempts.
+2021.02.08 21:56:30.257540 [ 49701 ] {d0a589b5-54cb-43f6-8fb7-700747bc55d0} <Error> executeQuery: Code: 49, e.displayText() = DB::Exception: Invalid number of rows in Chunk column UInt8 position 0: expected 14611, got 6419: While executing MergeTreeThread (version 21.2.2.8 (official build)) (from 127.0.0.1:55572) (in query: SELECT count(1) FROM trackings WHERE courier IS NOT null FORMAT TabSeparatedWithNamesAndTypes;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Chunk::checkNumRowsIsConsistent() @ 0xf613833 in /usr/bin/clickhouse
+1. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0xf44a2d0 in /usr/bin/clickhouse
+2. DB::MergeTreeBaseSelectProcessor::readFromPart() @ 0xf44aa5d in /usr/bin/clickhouse
+3. DB::MergeTreeBaseSelectProcessor::generate() @ 0xf44927b in /usr/bin/clickhouse
+4. DB::ISource::tryGenerate() @ 0xf61e8f5 in /usr/bin/clickhouse
+5. DB::ISource::work() @ 0xf61e60a in /usr/bin/clickhouse
+6. DB::SourceWithProgress::work() @ 0xf77977a in /usr/bin/clickhouse
+7. ? @ 0xf65920d in /usr/bin/clickhouse
+8. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xf656001 in /usr/bin/clickhouse
+9. ? @ 0xf65aa06 in /usr/bin/clickhouse
+10. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x851158f in /usr/bin/clickhouse
+11. ? @ 0x8515023 in /usr/bin/clickhouse
+12. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+13. __clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```
+
+Table Defintion: 
+``` 
+CREATE MATERIALIZED VIEW trackings
+ENGINE = ReplacingMergeTree(update_ts)
+ORDER BY (created, user_id, oid)
+PARTITION BY (toYYYYMM(created))
+AS
+SELECT 
+    FROM_UNIXTIME(toInt32(JSONExtractInt(anyLast(_doc), 'created', '$date')/1000)) as created,
+    anyLast(user_id) AS user_id,
+    _id AS oid,
+    JSONExtractString(anyLast(_doc), 'tracking_number') as tracking_number,
+```

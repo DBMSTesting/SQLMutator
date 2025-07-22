@@ -1,0 +1,60 @@
+ID: 6571
+Title: Join between distributed (locally defined) and sharded table (not locally defined)
+Description:
+ORDERS is a distributed table defined over many ORDERS_shard tables.
+LINEITEM is a distributed table defined over many LINEITEM_shard tables.
+
+This query
+
+```
+select 
+	O_ORDERPRIORITY,
+	count(*) as order_count
+from ORDERS  JOIN (
+	select L_ORDERKEY
+	from
+	LINEITEM_shard
+	group by L_ORDERKEY
+	having any(L_COMMITDATE < L_RECEIPTDATE)
+) on O_ORDERKEY=L_ORDERKEY
+group by O_ORDERPRIORITY
+order by O_ORDERPRIORITY
+limit 1;
+```
+
+works by performing local joins between ORDERS_shard and LINEITEM_shard but **requires LINEITEM_shard to be defined in the node that receives the initial query (just for validating the query)**. 
+If not we get: 
+
+```
+Code: 60. DB::Exception: Received from ...:9000, .... DB::Exception: Table LINEITEM_shard doesn't exist.. 
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x72865f6]
+1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x22) [0x39a90f2]
+2. /usr/bin/clickhouse-server(DB::Context::getTableImpl(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Exception*) const+0x382) [0x668b0e2]
+3. /usr/bin/clickhouse-server(DB::Context::getTable(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) const+0x73) [0x668b2d3]
+4. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, std::shared_ptr<DB::IBlockInputStream> const&, std::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x10b0) [0x66e4c50]
+5. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x4a) [0x66e4e9a]
+6. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x76f) [0x66f1e9f]
+7. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::getSampleBlock(std::shared_ptr<DB::IAST> const&, DB::Context const&)+0x149) [0x66f2f79]
+8. /usr/bin/clickhouse-server(DB::getNamesAndTypeListFromTableExpression(DB::ASTTableExpression const&, DB::Context const&)+0x74) [0x6c8c934]
+9. /usr/bin/clickhouse-server(DB::SyntaxAnalyzer::analyze(std::shared_ptr<DB::IAST>&, DB::NamesAndTypesList const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, std::shared_ptr<DB::IStorage>) const+0x952) [0x67ad5a2]
+10. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, std::shared_ptr<DB::IBlockInputStream> const&, std::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x49e) [0x66e403e]
+11. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x4a) [0x66e4e9a]12. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x76f) [0x66f1e9f]
+13. /usr/bin/clickhouse-server(DB::InterpreterFactory::get(std::shared_ptr<DB::IAST>&, DB::Context&, DB::QueryProcessingStage::Enum)+0x164) [0x66c9464]
+14. /usr/bin/clickhouse-server() [0x67e2bc9]
+15. /usr/bin/clickhouse-server(DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool)+0x74) [0x67e2e44]
+16. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x730) [0x39b49f0]
+17. /usr/bin/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x39b503b]
+18. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x73956bf]
+19. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0xe9) [0x7395df9]
+20. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x81) [0x7446a71]
+21. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0x7442e78]
+22. /usr/bin/clickhouse-server() [0xb1a35df]
+23. /lib64/libpthread.so.0(+0x7dd5) [0x7f18a79eedd5]
+24. /lib64/libc.so.6(clone+0x6d) [0x7f18a7009ead]
+```
+
+If the nodes that process the query don't store data (ORDERS is a Distributed query defined over a remote cluster) we need to setup an empty (don't use the data, just the definition) LINEITEM_shard to be able to execute the query.
+
+**I'd expect that validation to be done on the remote cluster.**
+

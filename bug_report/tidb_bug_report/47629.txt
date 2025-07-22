@@ -1,0 +1,70 @@
+ID: 47629
+Title: collation_connection affects the passing of constants cause wrong query plan
+Description:
+## Bug Report
+
+collation_connection affects the passing of constants cause wrong query plan
+### 1. Minimal reproduce step (Required)
+```
+CREATE TABLE `t2` (
+  `id1` char(8) NOT NULL COMMENT '编号',
+  `id2` varchar(180) NOT NULL COMMENT '姓名',
+  `id3` varchar(12) NOT NULL COMMENT '岗位编号',
+  `id4` char(9) NOT NULL COMMENT '机构编号',
+  `id5` varchar(10) NOT NULL COMMENT '角色编号',
+  `id6` varchar(60) DEFAULT NULL COMMENT '登录名',
+  PRIMARY KEY (`id1`,`id2`,`id3`) /*T![clustered_index] NONCLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+CREATE TABLE `t1` (
+  `id1` varchar(200) NOT NULL COMMENT '编号',
+  `id2` varchar(200) DEFAULT NULL COMMENT '账号',
+  `id3` varchar(600) DEFAULT NULL COMMENT '姓名',
+  `id4` varchar(600) DEFAULT NULL COMMENT '电话',
+  PRIMARY KEY (`id1`) /*T![clustered_index] NONCLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+set collation_connection=utf8_general_ci;
+
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```
+mysql> explain format='verbose'  SELECT  t.id1, t.id2, t.id3 FROM t1 t
+    ->  JOIN t2
+    -> ON t.id1 = t2.id1
+    -> WHERE t2.id1 = '63812828';
++-----------------------------+---------+---------+-----------+----------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| id                          | estRows | estCost | task      | access object                          | operator info                                                                                                           |
++-----------------------------+---------+---------+-----------+----------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| IndexJoin_12                | 1.25    | 38.15   | root      |                                        | inner join, inner:IndexReader_11, outer key:test.t1.id1, inner key:test.t2.id1, equal cond:eq(test.t1.id1, test.t2.id1) |
+| ├─Point_Get_38(Build)   | 1.00    | 5.60    | root      | table:t1, index:PRIMARY(id1)           |                                                                                                                         |
+| └─IndexReader_11(Probe) | 1.25    | 9.11    | root      |                                        | index:IndexRangeScan_10                                                                                                 |
+|   └─IndexRangeScan_10   | 1.25    | 0.00    | cop[tikv] | table:t2, index:PRIMARY(id1, id2, id3) | range: decided by [eq(test.t2.id1, test.t1.id1)], keep order:false, stats:pseudo                                        |
++-----------------------------+---------+---------+-----------+----------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+4 rows in set, 1 warning (0.00 sec)
+```
+### 3. What did you see instead (Required)
+```
+mysql> explain format='verbose'  SELECT /*+ INL_JOIN(t2) */ t.id1, t.id2, t.id3 FROM t1 t use index(PRIMARY)
+    ->  JOIN t2
+    -> ON t.id1 = t2.id1
+    -> WHERE t2.id1 = '63812828';
++------------------------------------+----------+-----------+-----------+----------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| id                                 | estRows  | estCost   | task      | access object                          | operator info                                                                                                           |
++------------------------------------+----------+-----------+-----------+----------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| IndexJoin_12                       | 12.50    | 399770.41 | root      |                                        | inner join, inner:IndexReader_11, outer key:test.t1.id1, inner key:test.t2.id1, equal cond:eq(test.t1.id1, test.t2.id1) |
+| ├─IndexLookUp_22(Build)        | 10000.00 | 229828.94 | root      |                                        |                                                                                                                         |
+| │ ├─IndexFullScan_20(Build)  | 10000.00 | 555000.00 | cop[tikv] | table:t, index:PRIMARY(id1)            | keep order:false, stats:pseudo                                                                                          |
+| │ └─TableRowIDScan_21(Probe) | 10000.00 | 555000.00 | cop[tikv] | table:t                                | keep order:false, stats:pseudo                                                                                          |
+| └─IndexReader_11(Probe)        | 0.00     | 7.34      | root      |                                        | index:Selection_10                                                                                                      |
+|   └─Selection_10               | 0.00     | 0.00      | cop[tikv] |                                        | eq(test.t2.id1, "63812828")                                                                                             |
+|     └─IndexRangeScan_9         | 1.25     | 0.00      | cop[tikv] | table:t2, index:PRIMARY(id1, id2, id3) | range: decided by [eq(test.t2.id1, test.t1.id1)], keep order:false, stats:pseudo                                        |
++------------------------------------+----------+-----------+-----------+----------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+7 rows in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v6.1.1

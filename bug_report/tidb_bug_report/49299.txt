@@ -1,0 +1,103 @@
+ID: 49299
+Title: value of `tidb_sysdate_is_now` seems cached in expression in planCache and not respect the current setting
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+TiDB root@127.0.0.1:test> create table t (a int);
+Query OK, 0 rows affected
+Time: 0.088s
+TiDB root@127.0.0.1:test> insert into t values(1);
+Query OK, 1 row affected
+Time: 0.005s
+TiDB root@127.0.0.1:test> set @@tidb_sysdate_is_now=0;
+Query OK, 0 rows affected
+Time: 0.000s
+TiDB root@127.0.0.1:test> prepare s from "select sleep(a), now(6), sysdate(6), sysdate(6)=now(6) from t";
+Query OK, 0 rows affected
+Time: 0.001s
+TiDB root@127.0.0.1:test> execute s;
++----------+----------------------------+----------------------------+-------------------+
+| sleep(a) | now(6)                     | sysdate(6)                 | sysdate(6)=now(6) |
++----------+----------------------------+----------------------------+-------------------+
+| 0        | 2023-12-08 17:55:36.618077 | 2023-12-08 17:55:36.618089 | 0                 |
++----------+----------------------------+----------------------------+-------------------+
+1 row in set
+Time: 1.009s
+TiDB root@127.0.0.1:test> set @@tidb_sysdate_is_now=1;
+Query OK, 0 rows affected
+Time: 0.001s
+TiDB root@127.0.0.1:test> execute s;
++----------+----------------------------+----------------------------+-------------------+
+| sleep(a) | now(6)                     | sysdate(6)                 | sysdate(6)=now(6) |
++----------+----------------------------+----------------------------+-------------------+
+| 0        | 2023-12-08 17:55:43.594673 | 2023-12-08 17:55:43.594688 | 0                 |
++----------+----------------------------+----------------------------+-------------------+
+1 row in set
+Time: 1.013s
+```
+
+### 2. What did you expect to see? (Required)
+
+It should respect the current value of `tidb_sysdate_is_now` like no use plan cache:
+
+```
+TiDB root@127.0.0.1:test> set @@tidb_enable_prepared_plan_cache=0;
+Query OK, 0 rows affected
+Time: 0.001s
+TiDB root@127.0.0.1:test> set @@tidb_sysdate_is_now=0;
+Query OK, 0 rows affected
+Time: 0.001s
+TiDB root@127.0.0.1:test> prepare s from "select sleep(a), now(6), sysdate(6), sysdate(6)=now(6) from t";
+Query OK, 0 rows affected
+Time: 0.001s
+TiDB root@127.0.0.1:test> execute s;
++----------+----------------------------+----------------------------+-------------------+
+| sleep(a) | now(6)                     | sysdate(6)                 | sysdate(6)=now(6) |
++----------+----------------------------+----------------------------+-------------------+
+| 0        | 2023-12-08 17:59:51.246963 | 2023-12-08 17:59:52.248985 | 0                 |
++----------+----------------------------+----------------------------+-------------------+
+1 row in set
+
+TiDB root@127.0.0.1:test> set @@tidb_sysdate_is_now=1;
+Query OK, 0 rows affected
+Time: 0.001s
+TiDB root@127.0.0.1:test> execute s;
++----------+----------------------------+----------------------------+-------------------+
+| sleep(a) | now(6)                     | sysdate(6)                 | sysdate(6)=now(6) |
++----------+----------------------------+----------------------------+-------------------+
+| 0        | 2023-12-08 18:00:28.162819 | 2023-12-08 18:00:28.162819 | 1                 |
++----------+----------------------------+----------------------------+-------------------+
+1 row in set
+```
+
+### 3. What did you see instead (Required)
+
+The `sysdate(6) = now(6)` is false even we change `tidb_sysdate_is_now` to 1 when plan cache enabled.
+
+### 4. What is your TiDB version? (Required)
+
+Tested in nightly build
+
+```
+TiDB root@127.0.0.1:test> select tidb_version();
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v7.6.0-alpha                             |
+| Edition: Community                                        |
+| Git Commit Hash: b74d64c7a48189f00fbae0c29ad1435b60b8c51d |
+| Git Branch: heads/refs/tags/v7.6.0-alpha                  |
+| UTC Build Time: 2023-12-07 14:25:39                       |
+| GoVersion: go1.21.4                                       |
+| Race Enabled: false                                       |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+1 row in set
+```
+

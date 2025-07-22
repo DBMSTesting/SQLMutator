@@ -1,0 +1,135 @@
+ID: 27458
+Title: show processlist show point-get SQL as null.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+1. create test table in TiDB
+connect database `test`
+```MySQL
+create table if not exists t_point_get (
+a bigint auto_increment,
+b bigint not null,
+c timestamp(6) default current_timestamp(6),
+d decimal(48,3)
+);
+```
+2. Generate data and test with following golang code:
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+)
+
+func prepareData(db *sql.DB) error {
+	stmt, err := db.Prepare("Insert into t_point_get (b, d) values (?, ?);")
+	if err != nil {
+		fmt.Println("load error:", err)
+		return err
+	}
+	for i := 0; i < 10000; i++ {
+		_, err = stmt.Exec([]interface{}{i, i})
+		if err != nil {
+			fmt.Println("load error:", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	var counter int64
+	ticker := time.NewTicker(time.Second)
+	var wg sync.WaitGroup
+
+	cfg := mysql.Config{
+		User:                 "root",
+		Passwd:               "",
+		Net:                  "tcp",
+		Addr:                 "127.0.0.1:4000",
+		DBName:               "test",
+		AllowNativePasswords: true,
+	}
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		fmt.Println("connection error:", err)
+		return
+	}
+	
+        prepareData(db)
+
+	stmt, err := db.Prepare("select * from t_point_get where a=?;")
+	if err != nil {
+		fmt.Println("prepared statement error:", err)
+		return
+	}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					fmt.Println("query run", atomic.LoadInt64(&counter), "times")
+				default:
+				}
+				atomic.AddInt64(&counter, 1)
+				_, err = stmt.Exec([]interface{}{1}...)
+				if err != nil {
+					fmt.Println("exec error:", err)
+					cancel()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+```
+3. while running test, connect to TiDB and run `show processlist`
+
+### 2. What did you expect to see? (Required)
+All currently run SQLs are fully show in table.
+
+| Id    | User | Host            | db   | Command | Time | State      | Info             |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 12241 | root | 127.0.0.1:38774 | test | Sleep   | 0    | autocommit | select * from t_point_get where a = ?           |
+| 12239 | root | 127.0.0.1:38770 | test | Sleep   | 0    | autocommit | select * from t_point_get where a = ? |
+| 1009  | root | 127.0.0.1:52196 | test | Query   | 0    | autocommit | show processlist |
+| 12243 | root | 127.0.0.1:38772 | test | Sleep   | 0    | autocommit | select * from t_point_get where a = ?  |
+| 12221 | root | 127.0.0.1:38748 | test | Sleep   | 0    | autocommit | select * from t_point_get where a = ? |
+| 12233 | root | 127.0.0.1:38762 | test | Sleep   | 0    | autocommit | select * from t_point_get where a = ?  |
+
+### 3. What did you see instead (Required)
+| Id    | User | Host            | db   | Command | Time | State      | Info             |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 12241 | root | 127.0.0.1:38774 | test | Sleep   | 0    | autocommit | < null > |
+| 12239 | root | 127.0.0.1:38770 | test | Sleep   | 0    | autocommit | < null > |
+| 1009  | root | 127.0.0.1:52196 | test | Query   | 0    | autocommit | show processlist |
+| 12243 | root | 127.0.0.1:38772 | test | Sleep   | 0    | autocommit | < null > |
+| 12221 | root | 127.0.0.1:38748 | test | Sleep   | 0    | autocommit | < null > |
+| 12233 | root | 127.0.0.1:38762 | test | Sleep   | 0    | autocommit | < null > |
+
+### 4. What is your TiDB version? (Required)
+TiDB 5.1.1
+```
+| Release Version: v5.1.1\nEdition: Community\nGit Commit Hash: 797bddd25310ed42f0791c8eccb78be8cce2f502\nGit Branch: heads/refs/tags/v5.1.1\nUTC Build Time: 2021-07-28 11:00:26\nGoVersion: go1.16.4\nRace Enabled: false\nTiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306\nCheck Table Before Drop: false |
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

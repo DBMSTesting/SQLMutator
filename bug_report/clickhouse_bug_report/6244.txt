@@ -1,0 +1,131 @@
+ID: 6244
+Title: Segfault on INSERT into source table for several MATERIALIZED VIEWs.
+Description:
+We are seeing segfaults on INSERT in ClickHouse installed on Ubuntu Xenial from stable deb packages from 19.11.2.7 onwards. From the backtraces I believe several are related, so am reporting these as a single issue. This was discovered while updating from 18.5.1 to 19.11.3.11. So far in our testing it appears 19.10.1.5 does not have the problem.
+
+The segfaults are frequent, but cannot be reliably triggered by a particular insert. At this point we have not managed to isolate a simple method to reproduce, but hope the backtraces may give sufficient clues.
+
+The inserts are to a simple table, but that table is in turn used as the source for a collection of MATERIALIZED VIEWs, using either SummingMergeTree or AggregatingMergeTree.
+
+ClickHouse 19.11.3.11:
+```
+019.07.30 16:00:38.403442 [ 75 ] {} <Error> BaseDaemon: ########################################
+2019.07.30 16:00:38.403610 [ 75 ] {} <Error> BaseDaemon: (version 19.11.3.11 (official build)) (from thread 66) Received signal Segmentation fault (11).
+2019.07.30 16:00:38.403644 [ 75 ] {} <Error> BaseDaemon: Address: 0x8 Access: read. Address not mapped to object.
+2019.07.30 16:00:38.572606 [ 75 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(StackTrace::StackTrace(ucontext_t const&)+0x22) [0x781c2a2]
+1. /usr/bin/clickhouse-server() [0x3b139ce]
+2. /lib/x86_64-linux-gnu/libpthread.so.0(+0x11390) [0x7f7aa705f390]
+3. /usr/bin/clickhouse-server(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> >::merge(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> > const&)+0xe9) [0x64c75d9]
+4. /usr/bin/clickhouse-server() [0x6d04ab3]
+5. /usr/bin/clickhouse-server(DB::Aggregator::mergeStream(std::shared_ptr<DB::IBlockInputStream> const&, DB::AggregatedDataVariants&, unsigned long)+0x11a1) [0x6cd3911]
+6. /usr/bin/clickhouse-server(DB::MergingAggregatedBlockInputStream::readImpl()+0x428) [0x6c682c8]
+7. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6635628]
+8. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6c5286d]
+9. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6635628]
+10. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6c5286d]
+11. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6635628]
+12. /usr/bin/clickhouse-server(DB::LazyBlockInputStream::readImpl()+0x38) [0x6985958]
+13. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6635628]
+14. /usr/bin/clickhouse-server(DB::CreatingSetsBlockInputStream::createOne(DB::SubqueryForSet&)+0x564) [0x6c3a6a4]
+15. /usr/bin/clickhouse-server(DB::CreatingSetsBlockInputStream::readPrefixImpl()+0x3f) [0x6c3c74f]
+16. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x7a) [0x66313fa]
+17. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x59) [0x66313d9]
+18. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x59) [0x66313d9]
+19. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x59) [0x66313d9]
+20. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::process(DB::Block const&, unsigned long)+0x781) [0x6c84e51]
+21. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::write(DB::Block const&)+0x2e2) [0x6c85782]
+22. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::finalize()+0x13e) [0x6c8eece]
+23. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::writeSuffix()+0x11) [0x6c8f0f1]
+24. /usr/bin/clickhouse-server(DB::DistributedBlockOutputStream::writeToLocal(DB::Block const&, unsigned long)+0x96) [0x69f4846]
+25. /usr/bin/clickhouse-server(DB::DistributedBlockOutputStream::writeAsyncImpl(DB::Block const&, unsigned long)+0x84) [0x69f86e4]
+26. /usr/bin/clickhouse-server(DB::DistributedBlockOutputStream::writeSplitAsync(DB::Block const&)+0x9a) [0x69f8a6a]
+27. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::write(DB::Block const&)+0x51) [0x6c854f1]
+28. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::finalize()+0x13e) [0x6c8eece]
+29. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::writeSuffix()+0x11) [0x6c8f0f1]
+30. /usr/bin/clickhouse-server(DB::TCPHandler::processInsertQuery(DB::Settings const&)+0x3ba) [0x3a153ba]
+31. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x8d0) [0x3a15cc0]
+```
+
+ClickHouse 19.11.2.7:
+```
+2019.07.30 17:10:48.291135 [ 78 ] {} <Error> BaseDaemon: ########################################
+2019.07.30 17:10:48.291159 [ 78 ] {} <Error> BaseDaemon: (version 19.11.2.7 (official build)) (from thread 46) Received signal Segmentation fault (11).
+2019.07.30 17:10:48.291176 [ 78 ] {} <Error> BaseDaemon: Address: 0x20 Access: read. Address not mapped to object.
+2019.07.30 17:10:48.438636 [ 78 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(StackTrace::StackTrace(ucontext_t const&)+0x22) [0x781b0a2]
+1. /usr/bin/clickhouse-server() [0x3b1337e]
+2. /lib/x86_64-linux-gnu/libpthread.so.0(+0x11390) [0x7f75285e7390]
+3. /usr/bin/clickhouse-server(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> >::merge(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> > const&)+0x227) [0x64c70a7]
+4. /usr/bin/clickhouse-server() [0x6d038c3]
+5. /usr/bin/clickhouse-server(DB::Aggregator::mergeStream(std::shared_ptr<DB::IBlockInputStream> const&, DB::AggregatedDataVariants&, unsigned long)+0x11a1) [0x6cd2721]
+6. /usr/bin/clickhouse-server(DB::MergingAggregatedBlockInputStream::readImpl()+0x428) [0x6c670d8]
+7. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6634da8]
+8. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6c5167d]
+9. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6634da8]
+10. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6c5167d]
+11. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6634da8]
+12. /usr/bin/clickhouse-server(DB::LazyBlockInputStream::readImpl()+0x38) [0x6984798]
+13. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x6634da8]
+14. /usr/bin/clickhouse-server(DB::CreatingSetsBlockInputStream::createOne(DB::SubqueryForSet&)+0x564) [0x6c394b4]
+15. /usr/bin/clickhouse-server(DB::CreatingSetsBlockInputStream::readPrefixImpl()+0x3f) [0x6c3b55f]
+16. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x7a) [0x6630b7a]
+17. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x59) [0x6630b59]
+18. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x59) [0x6630b59]
+19. /usr/bin/clickhouse-server(DB::IBlockInputStream::readPrefix()+0x59) [0x6630b59]
+20. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::process(DB::Block const&, unsigned long)+0x781) [0x6c83c61]
+21. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::write(DB::Block const&)+0x2e2) [0x6c84592]
+22. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::finalize()+0x13e) [0x6c8dcde]
+23. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::writeSuffix()+0x11) [0x6c8df01]
+24. /usr/bin/clickhouse-server(DB::DistributedBlockOutputStream::writeToLocal(DB::Block const&, unsigned long)+0x96) [0x69f3666]
+25. /usr/bin/clickhouse-server(DB::DistributedBlockOutputStream::writeAsyncImpl(DB::Block const&, unsigned long)+0x84) [0x69f7504]
+26. /usr/bin/clickhouse-server(DB::DistributedBlockOutputStream::writeSplitAsync(DB::Block const&)+0x9a) [0x69f788a]
+27. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::write(DB::Block const&)+0x51) [0x6c84301]
+28. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::finalize()+0x13e) [0x6c8dcde]
+29. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::writeSuffix()+0x11) [0x6c8df01]
+30. /usr/bin/clickhouse-server(DB::TCPHandler::processInsertQuery(DB::Settings const&)+0x3ba) [0x3a14dca]
+31. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x8d0) [0x3a156d0]
+```
+
+```
+2019.07.31 13:20:58.585594 [ 64 ] {} <Error> BaseDaemon: ########################################
+2019.07.31 13:20:58.585660 [ 64 ] {} <Error> BaseDaemon: (version 19.11.2.7 (official build)) (from thread 48) Received signal Segmentation fault (11).
+2019.07.31 13:20:58.585677 [ 64 ] {} <Error> BaseDaemon: Address: 0x7f7d39dbd008 Access: write. Attempted access has violated the permissions assigned to the memory area.
+2019.07.31 13:20:58.645794 [ 64 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(StackTrace::StackTrace(ucontext_t const&)+0x22) [0x781b0a2]
+1. /usr/bin/clickhouse-server() [0x3b1337e]
+2. /lib/x86_64-linux-gnu/libpthread.so.0(+0x11390) [0x7f7d3e1c1390]
+3. /usr/bin/clickhouse-server(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> >::insert(StringRef const&, unsigned long, unsigned long)+0x343) [0x64c6b03]
+4. /usr/bin/clickhouse-server(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> >::merge(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> > const&)+0x12b) [0x64c6fab]
+5. /usr/bin/clickhouse-server(void DB::Aggregator::executeImplCase<false, DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > > >(DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > >&, DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > >::State&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, DB::Aggregator::AggregateFunctionInstruction*, std::vector<StringRef, std::allocator<StringRef> >&, char*) const+0x13d) [0x6cfb02d]
+6. /usr/bin/clickhouse-server(void DB::Aggregator::executeImpl<DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > > >(DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > >&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, DB::Aggregator::AggregateFunctionInstruction*, std::vector<StringRef, std::allocator<StringRef> >&, bool, char*) const+0x9a) [0x6cfb13a]
+7. /usr/bin/clickhouse-server(DB::Aggregator::executeOnBlock(DB::Block const&, DB::AggregatedDataVariants&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, std::vector<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >, std::allocator<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > > >&, std::vector<StringRef, std::allocator<StringRef> >&, bool&)+0xf48) [0x6cd8b18]
+8. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::loop(unsigned long)+0x259) [0x6c7e339]
+9. /usr/bin/clickhouse-server(DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x209) [0x6c7ea89]
+10. /usr/bin/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::*)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>*, std::shared_ptr<DB::ThreadGroupStatus>, unsigned long&>(void (DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>::*&&)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::ParallelAggregatingBlockInputStream::Handler>*&&, std::shared_ptr<DB::ThreadGroupStatus>&&, unsigned long&)::{lambda()#1}::operator()() const+0x7f) [0x6c7efdf]
+11. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1af) [0x71c659f]
+12. /usr/bin/clickhouse-server() [0xb2ab3bf]
+13. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76ba) [0x7f7d3e1b76ba]
+14. /lib/x86_64-linux-gnu/libc.so.6(clone+0x6d) [0x7f7d3d9e041d]
+```
+
+And from prestable, ClickHouse 19.12.2.2:
+```
+2019.07.30 17:30:56.767384 [ 56 ] {} <Error> BaseDaemon: (version 19.12.2.2 (official build)) (from thread 53) Received signal Segmentation fault (11).
+2019.07.30 17:30:56.767402 [ 56 ] {} <Error> BaseDaemon: Address: 0x8 Access: read. Address not mapped to object.
+2019.07.30 17:30:56.873364 [ 56 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server(StackTrace::StackTrace(ucontext_t const&)+0x22) [0x79bc822]
+1. /usr/bin/clickhouse-server() [0x3b9011e]
+2. /lib/x86_64-linux-gnu/libpthread.so.0(+0x11390) [0x7f35d27c9390]
+3. /usr/bin/clickhouse-server(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> >::merge(DB::SpaceSaving<StringRef, StringRefHash, HashTableGrower<4ul>, AllocatorWithStackMemory<AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul>, 256ul> > const&)+0xe9) [0x654f959]
+4. /usr/bin/clickhouse-server(void DB::Aggregator::executeImplCase<false, DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > > >(DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > >&, DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > >::State&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, DB::Aggregator::AggregateFunctionInstruction*, std::vector<StringRef, std::allocator<StringRef> >&, char*) const+0x13d) [0x6eb5a2d]
+5. /usr/bin/clickhouse-server(void DB::Aggregator::executeImpl<DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > > >(DB::AggregationMethodOneNumber<unsigned short, FixedHashMap<unsigned short, char*, AllocatorWithHint<true, AllocatorHints::DefaultHint, 67108864ul> > >&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, DB::Aggregator::AggregateFunctionInstruction*, std::vector<StringRef, std::allocator<StringRef> >&, bool, char*) const+0x9a) [0x6eb5b3a]
+6. /usr/bin/clickhouse-server(DB::Aggregator::executeOnBlock(DB::Block const&, DB::AggregatedDataVariants&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, std::vector<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >, std::allocator<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > > >&, std::vector<StringRef, std::allocator<StringRef> >&, bool&)+0x1000) [0x6e92590]
+7. /usr/bin/clickhouse-server(DB::Aggregator::execute(std::shared_ptr<DB::IBlockInputStream> const&, DB::AggregatedDataVariants&)+0x383) [0x6e936a3]
+8. /usr/bin/clickhouse-server(DB::AggregatingBlockInputStream::readImpl()+0x44b) [0x6dd5a8b]
+9. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x188) [0x66bee28]
+10. /usr/bin/clickhouse-server(DB::AsynchronousBlockInputStream::calculate()+0x58) [0x66b7c68]
+11. /usr/bin/clickhouse-server() [0x66b8040]
+12. /usr/bin/clickhouse-server(ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::_List_iterator<ThreadFromGlobalPool>)+0x1af) [0x737fc4f]
+13. /usr/bin/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}>(ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}&&)::{lambda()#1}::operator()() const+0x3c) [0x738109c]
+14. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1af) [0x737ee2f]
+15. /usr/bin/clickhouse-server() [0xb44d1af]
+16. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76ba) [0x7f35d27bf6ba]
+17. /lib/x86_64-linux-gnu/libc.so.6(clone+0x6d) [0x7f35d1fe841d]
+```

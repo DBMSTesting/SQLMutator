@@ -1,0 +1,95 @@
+ID: 48983
+Title: Query result may miss rows that end with space when use `like` with `_` to do index range scan on PAD SPACE column
+Description:
+## Bug Report
+
+
+This bug is related to the same mechanism as #48821, which is the behavior that trailing space will be trimmed in the stored index key on PAD SPACE column, but this bug is caused by another place in the code.
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table t(a varchar(25) collate utf8mb4_bin, index ia(a));
+insert into t value('xxx ');
+select * from t use index (ia) where a like 'xxx_';
+explain select * from t use index (ia) where a like 'xxx_';
+select * from t use index () where a like 'xxx_';
+explain select * from t use index () where a like 'xxx_';
+```
+
+### 2. What did you expect to see? (Required)
+
+From MySQL:
+```
+> select * from t use index (ia) where a like 'xxx_';
++------+
+| a    |
++------+
+| xxx  |
++------+
+1 row in set (0.000 sec)
+
+> explain select * from t use index (ia) where a like 'xxx_';
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+| id | select_type | table | partitions | type  | possible_keys | key  | key_len | ref  | rows | filtered | Extra                    |
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+|  1 | SIMPLE      | t     | NULL       | index | ia            | ia   | 103     | NULL |    1 |   100.00 | Using where; Using index |
++----+-------------+-------+------------+-------+---------------+------+---------+------+------+----------+--------------------------+
+1 row in set, 1 warning (0.000 sec)
+
+> select * from t use index () where a like 'xxx_';
++------+
+| a    |
++------+
+| xxx  |
++------+
+1 row in set (0.000 sec)
+
+> explain select * from t use index () where a like 'xxx_';
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | t     | NULL       | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | Using where |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0.001 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+127.0.0.1:4000[test]> select * from t use index (ia) where a like 'xxx_';
+Empty set (0.001 sec)
+
+127.0.0.1:4000[test]> explain select * from t use index (ia) where a like 'xxx_';
++--------------------------+---------+-----------+----------------------+-----------------------------------------------------+
+| id                       | estRows | task      | access object        | operator info                                       |
++--------------------------+---------+-----------+----------------------+-----------------------------------------------------+
+| IndexReader_7            | 250.00  | root      |                      | index:Selection_6                                   |
+| └─Selection_6            | 250.00  | cop[tikv] |                      | like(test.t.a, "xxx_", 92)                          |
+|   └─IndexRangeScan_5     | 250.00  | cop[tikv] | table:t, index:ia(a) | range:("xxx","xxy"), keep order:false, stats:pseudo |
++--------------------------+---------+-----------+----------------------+-----------------------------------------------------+
+3 rows in set (0.001 sec)
+
+127.0.0.1:4000[test]> select * from t use index () where a like 'xxx_';
++------+
+| a    |
++------+
+| xxx  |
++------+
+1 row in set (0.001 sec)
+
+127.0.0.1:4000[test]> explain select * from t use index () where a like 'xxx_';
++-------------------------+----------+-----------+---------------+--------------------------------+
+| id                      | estRows  | task      | access object | operator info                  |
++-------------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_7           | 250.00   | root      |               | data:Selection_6               |
+| └─Selection_6           | 250.00   | cop[tikv] |               | like(test.t.a, "xxx_", 92)     |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+---------------+--------------------------------+
+3 rows in set (0.000 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+From v6.0.0 to latest master
+

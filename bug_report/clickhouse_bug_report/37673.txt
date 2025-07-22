@@ -1,0 +1,111 @@
+ID: 37673
+Title: ORDER BY gives unsorted results when there are duplicate rows in table and projection is used
+Description:
+**Describe what's wrong**
+
+
+
+**Does it reproduce on recent release?**
+Yes, it's happening in latest release of 19th May
+
+**How to reproduce**
+
+* Which ClickHouse server version to use: v22.5.1.2079-stable
+* Non-default settings, if any: `SET allow_experimental_projection_optimization=1;`
+* `CREATE TABLE` statements for all tables involved
+
+```
+CREATE TABLE IF NOT EXISTS signoz_traces.signoz_index_v2 (
+  timestamp DateTime64(9) CODEC(DoubleDelta, LZ4),
+  traceID FixedString(32) CODEC(ZSTD(1)),
+  spanID String CODEC(ZSTD(1)),
+  parentSpanID String CODEC(ZSTD(1)),
+  serviceName LowCardinality(String) CODEC(ZSTD(1)),
+  name LowCardinality(String) CODEC(ZSTD(1)),
+  kind Int8 CODEC(T64, ZSTD(1)),
+  durationNano UInt64 CODEC(T64, ZSTD(1)),
+  statusCode Int16 CODEC(T64, ZSTD(1)),
+  externalHttpMethod LowCardinality(String) CODEC(ZSTD(1)),
+  externalHttpUrl LowCardinality(String) CODEC(ZSTD(1)),
+  component LowCardinality(String) CODEC(ZSTD(1)),
+  dbSystem LowCardinality(String) CODEC(ZSTD(1)),
+  dbName LowCardinality(String) CODEC(ZSTD(1)),
+  dbOperation LowCardinality(String) CODEC(ZSTD(1)),
+  peerService LowCardinality(String) CODEC(ZSTD(1)),
+  events Array(String) CODEC(ZSTD(2)),
+  httpMethod LowCardinality(String) CODEC(ZSTD(1)),
+  httpUrl LowCardinality(String) CODEC(ZSTD(1)), 
+  httpCode LowCardinality(String) CODEC(ZSTD(1)), 
+  httpRoute LowCardinality(String) CODEC(ZSTD(1)), 
+  httpHost LowCardinality(String) CODEC(ZSTD(1)), 
+  msgSystem LowCardinality(String) CODEC(ZSTD(1)), 
+  msgOperation LowCardinality(String) CODEC(ZSTD(1)),
+  hasError bool CODEC(T64, ZSTD(1)),
+  tagMap Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+  gRPCMethod LowCardinality(String) CODEC(ZSTD(1)),
+  gRPCCode LowCardinality(String) CODEC(ZSTD(1)),
+  PROJECTION timestampSort (SELECT * ORDER BY timestamp),
+  INDEX idx_service serviceName TYPE bloom_filter GRANULARITY 4,
+  INDEX idx_name name TYPE bloom_filter GRANULARITY 4,
+  INDEX idx_kind kind TYPE minmax GRANULARITY 4,
+  INDEX idx_duration durationNano TYPE minmax GRANULARITY 1,
+  INDEX idx_httpCode httpCode TYPE set(0) GRANULARITY 1,
+  INDEX idx_hasError hasError TYPE set(2) GRANULARITY 1,
+  INDEX idx_tagMapKeys mapKeys(tagMap) TYPE bloom_filter(0.01) GRANULARITY 64,
+  INDEX idx_tagMapValues mapValues(tagMap) TYPE bloom_filter(0.01) GRANULARITY 64,
+  INDEX idx_httpRoute httpRoute TYPE bloom_filter GRANULARITY 4,
+  INDEX idx_httpUrl httpUrl TYPE bloom_filter GRANULARITY 4,
+  INDEX idx_httpHost httpHost TYPE bloom_filter GRANULARITY 4,
+  INDEX idx_httpMethod httpMethod TYPE bloom_filter GRANULARITY 4,
+  INDEX idx_timestamp timestamp TYPE minmax GRANULARITY 1
+) ENGINE MergeTree()
+PARTITION BY toDate(timestamp)
+PRIMARY KEY (serviceName, hasError, toStartOfHour(timestamp), name)
+ORDER BY (serviceName, hasError, toStartOfHour(timestamp), name, timestamp)
+SETTINGS index_granularity = 8192;
+```
+
+
+* Sample data for all these tables, use [clickhouse-obfuscator]
+Tabseparated data
+```
+timestamp	spanID	traceID	serviceName	name	durationNano	httpCode	gRPCCode	gRPCMethod	httpMethod
+DateTime64(9)	String	FixedString(32)	LowCardinality(String)	LowCardinality(String)	UInt64	LowCardinality(String)	LowCardinality(String)	LowCardinality(String)	LowCardinality(String)
+2022-05-31 17:53:50.947806000	138b4e5f791a98a1	e5d9ad80ff09593792ed91829080ffc8goApp	/books	3273333	200			GET
+2022-05-31 17:53:50.947806000	138b4e5f791a98a1	e5d9ad80ff09593792ed91829080ffc8goApp	/books	3273333	200			GET
+2022-05-31 17:53:50.947920000	b8df70866457c1de	e5d9ad80ff09593792ed91829080ffc8goApp	gorm.Query	550458
+2022-05-31 17:53:50.947920000	b8df70866457c1de	e5d9ad80ff09593792ed91829080ffc8goApp	gorm.Query	550458
+2022-05-31 17:53:51.121918000	e642fa8ca4c76a9f	983577555041547a24f1ffa29aea887cgoApp	HTTP GET route not found	10917	404			GET
+2022-05-31 17:53:51.121918000	e642fa8ca4c76a9f	983577555041547a24f1ffa29aea887cgoApp	HTTP GET route not found	10917	404			GET
+2022-05-31 11:06:59.635748000	c49213a4a49fd0bf	84270251231caf828b24c3e07edaf78fgoApp	/books/:id	32253250	400			GET
+2022-05-31 11:06:59.635748000	c49213a4a49fd0bf	84270251231caf828b24c3e07edaf78fgoApp	/books/:id	32253250	400			GET
+2022-05-31 11:06:59.638262000	5bc90a538f105fd2	84270251231caf828b24c3e07edaf78fgoApp	gorm.Query	11877708
+2022-05-31 11:06:59.638262000	5bc90a538f105fd2	84270251231caf828b24c3e07edaf78fgoApp	gorm.Query	11877708
+2022-05-31 11:07:00.072359000	09de3156dfaad430	5679075bd4dc193dabe98b1211c97c23goApp	HTTP GET route not found	11500	404			GET
+2022-05-31 11:07:00.072359000	09de3156dfaad430	5679075bd4dc193dabe98b1211c97c23goApp	HTTP GET route not found	11500	404			GET
+2022-05-31 11:07:40.285432000	e7ccad4fcbb6d42f	4f8dfcd16dcffa19242c401a445e12a0goApp	/books	10019125	200			GET
+2022-05-31 11:07:40.285432000	e7ccad4fcbb6d42f	4f8dfcd16dcffa19242c401a445e12a0goApp	/books	10019125	200			GET
+2022-05-31 11:07:40.285521000	18d39d06881d0856	4f8dfcd16dcffa19242c401a445e12a0goApp	gorm.Query	2040208
+2022-05-31 11:07:40.285521000	18d39d06881d0856	4f8dfcd16dcffa19242c401a445e12a0goApp	gorm.Query	2040208
+2022-05-31 11:07:40.480975000	dd9cec91fc5da1d4	beb68c69aafa89eb0fad3cfbd333ba17goApp	HTTP GET route not found	8167	404			GET
+2022-05-31 11:07:40.480975000	dd9cec91fc5da1d4	beb68c69aafa89eb0fad3cfbd333ba17goApp	HTTP GET route not found	8167	404			GET
+2022-05-31 11:07:43.999741000	1ac50b417268d0b1	030b881f77630915e08ac4d20632c557goApp	HTTP GET route not found	11500	404			GET
+2022-05-31 11:07:43.999741000	1ac50b417268d0b1	030b881f77630915e08ac4d20632c557goApp	HTTP GET route not found	11500	404			GET
+2022-05-31 11:07:44.159637000	18a71371c304bfa3	e84c6b1ce677325a9d9af931e79fd14egoApp	HTTP GET route not found	16000	404			GET
+2022-05-31 11:07:44.159637000	18a71371c304bfa3	e84c6b1ce677325a9d9af931e79fd14egoApp	HTTP GET route not found	16000	404			GET
+2022-05-31 17:53:42.264991000	65de937350431b80	65ad07f99eb2c54ffea397e4d0a24b4cgoApp	/books	64672584	200			GET
+2022-05-31 17:53:42.264991000	65de937350431b80	65ad07f99eb2c54ffea397e4d0a24b4cgoApp	/books	64672584	200			GET
+2022-05-31 17:53:42.265070000	4a0c5b2d6bd6b07a	65ad07f99eb2c54ffea397e4d0a24b4cgoApp	gorm.Query	519917
+2022-05-31 17:53:42.265070000	4a0c5b2d6bd6b07a	65ad07f99eb2c54ffea397e4d0a24b4cgoApp	gorm.Query	519917
+2022-05-31 17:53:42.579637000	7718219790279e80	20a5404c009e5e3f889204da7ae1e716goApp	HTTP GET route not found	8083	404			GET
+2022-05-31 17:53:42.579637000	7718219790279e80	20a5404c009e5e3f889204da7ae1e716goApp	HTTP GET route not found	8083	404			GET
+```
+
+* Queries to run that lead to unexpected result
+
+```
+SELECT timestamp, spanID, traceID, serviceName, name, durationNano, httpCode, gRPCCode, gRPCMethod, httpMethod FROM signoz_traces.signoz_index_v2 WHERE timestamp >= '1553562083201000000' AND timestamp <= '1753563883201000000' ORDER BY timestamp ASC LIMIT 10 FORMAT TabSeparatedRawWithNamesAndTypes
+```
+
+**Expected behavior**
+The data should be sorted in ascending order by timestamp and running this query multiple times should return consistent results of order.

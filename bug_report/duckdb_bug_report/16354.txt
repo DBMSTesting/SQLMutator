@@ -1,0 +1,92 @@
+ID: 16354
+Title: Crash during UPDATE (with a struct column and Foreign Key Constraints??)
+Description:
+### What happens?
+
+In a DB with this schema:
+
+```sql
+CREATE TABLE people(person__id UUID, person__prefix VARCHAR, person__given VARCHAR, person__middle VARCHAR, person__surname VARCHAR, person__suffix VARCHAR, person__nickname VARCHAR, person__dob DATE, person__gender VARCHAR, person__races VARCHAR[], person__partisan_score SMALLINT, person__most_common_party VARCHAR, person__voting_info STRUCT(ascension_id BIGINT, registered_party VARCHAR, district UTINYINT, precinct USMALLINT, voting_history STRUCT("year" SMALLINT, "level" VARCHAR, locality VARCHAR, stage VARCHAR, "method" VARCHAR)[]), person__airtable_id VARCHAR, PRIMARY KEY(person__id));
+CREATE TABLE addresses(address__id UUID, person__id UUID NOT NULL, address__street1 VARCHAR, address__street2 VARCHAR, address__city VARCHAR, address__state VARCHAR, address__zipcode VARCHAR, address__country VARCHAR, address__is_mailing BOOLEAN, address__is_voting BOOLEAN, address__latitude DOUBLE, address__longitude DOUBLE, address__last_used DATE, address__source VARCHAR, PRIMARY KEY(address__id), FOREIGN KEY (person__id) REFERENCES people(person__id));
+```
+
+when I try to run this UPDATE statement:
+
+```sql
+UPDATE people
+SET person__voting_info = {
+    'ascension_id': "people"."person__voting_info"."ascension_id",
+    'registered_party': 'AK_IND',
+    'district': "people"."person__voting_info"."district",
+    'precinct': "people"."person__voting_info"."precinct",
+    'voting_history': "people"."person__voting_info"."voting_history"
+}
+where "people"."person__voting_info"."registered_party" = 'A';
+```
+
+I get a kernel crash in the python client. Full repro:
+
+```python
+import duckdb
+
+conn = duckdb.connect("bug.duckdb")
+conn.sql(
+    """
+    UPDATE people
+    SET person__voting_info = {
+        'ascension_id': "people"."person__voting_info"."ascension_id",
+        'registered_party': 'AK_IND',
+        'district': "people"."person__voting_info"."district",
+        'precinct': "people"."person__voting_info"."precinct",
+        'voting_history': "people"."person__voting_info"."voting_history"
+    }
+    where "people"."person__voting_info"."registered_party" = 'A'
+    """
+)
+```
+
+### To Reproduce
+
+If I `"EXPORT DATABASE 'bug' (FORMAT PARQUET)"` and re-import, I still get the bug. I've simplified the problem by removing as many tables as possible for the crash to still be present. If I remove the `addresses` table, then there is no crash. If I try updating one of the non-struct columns in the `people` table, then no crash. So I am thinking this bug only appears when both 1. there is a foreign key constraint on the table being updated and 2. the column we are trying to update is a struct
+
+The actual DB with the data (~250MB) has semi-sensitive data, so I would love to email it directly to a maintainer to avoid posting it publicly. Let me know if that isn't an option, and I can do more effort to remove the PII.
+
+### OS:
+
+MacOS Sonoma 14.6.1
+
+### DuckDB Version:
+
+1.2.0
+
+### DuckDB Client:
+
+python
+
+### Hardware:
+
+Apple M1
+
+### Full Name:
+
+Nick Crews
+
+### Affiliation:
+
+Ship Creek Group
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

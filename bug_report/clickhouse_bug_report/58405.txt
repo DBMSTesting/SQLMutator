@@ -1,0 +1,46 @@
+ID: 58405
+Title: Materialized View Regression for Kafka input tables (23.12.1 version)
+Description:
+**Describe what's wrong**
+
+We are using Kafka Engine table to ingest the data from Kafka to Clickhouse. Then we connect materialized view to it and store the results to target table. As we want to achieve first write wins strategy we need to check the target contents first to deduplicate incoming records. The fastest way based on benchmark was to use IN operator (JOINS were slow). To be able to do that we need to read records from source table (insert batch) twice inside materialized view. AFAIK it should be supported.
+
+This stops to work in 23.12 with this error:
+
+```
+com.clickhouse.client.ClickHouseException: Code: 620. DB::Exception: Direct select is not allowed. To enable use setting 
+`stream_like_engine_allow_direct_select`: While processing id IN ((SELECT id FROM kafka_input GROUP BY id) AS _subquery72): 
+While processing id NOT IN ((SELECT id FROM deduplicate WHERE id IN (SELECT id FROM kafka_input GROUP BY id)) AS 
+_subquery71). (QUERY_NOT_ALLOWED) (version 23.12.1.1368 (official build))
+```
+
+The view looks like this. Notice that we query FROM kafka_input twice (source table for materialized view)
+```
+CREATE MATERIALIZED VIEW IF NOT EXISTS deduplicate_mv TO deduplicate 
+AS SELECT 
+	id,time,any(value) AS value
+FROM kafka_input 
+WHERE id NOT IN (
+	SELECT id FROM deduplicate WHERE id IN (
+		SELECT id FROM kafka_input GROUP BY id)
+	)
+GROUP BY id,time;
+```
+
+Similar example using NULL engine works as expected. Here is a fiddle:
+https://fiddle.clickhouse.com/a0207085-22c8-44f4-9c7f-acf751058644
+
+**Does it reproduce on recent release?**
+
+Yes. It is a regression of 23.12 release.
+
+
+**How to reproduce**
+
+* Use ClickHouse 23.12
+* Use Kafka engine input table
+* Use Materialized view that uses Kafka input table twice as in our example
+
+**Expected behavior**
+
+It should be possible to create such a materialized view as query is not querying kafka table itself, but the batch of inserts produced by Kafka engine table.

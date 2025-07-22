@@ -1,0 +1,63 @@
+ID: 50089
+Title: query returns incorrect result when context done in the middle
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+suppose we have this patch added to help reproduce
+```patch
+diff --git a/pkg/executor/table_reader.go b/pkg/executor/table_reader.go
+index 4d87861c95..fddbfe284a 100644
+--- a/pkg/executor/table_reader.go
++++ b/pkg/executor/table_reader.go
+@@ -250,6 +250,9 @@ func (e *TableReaderExecutor) Next(ctx context.Context, req *chunk.Chunk) error
+                }
+                return tableName
+        }), e.ranges)
++       if e.columns[0].Name.L == "a" {
++               time.Sleep(5 * time.Second)
++       }
+        if err := e.resultHandler.nextChunk(ctx, req); err != nil {
+                return err
+        }
+```
+
+then run this test 
+```go
+func TestIncorrectQuery(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int)")
+	tk.MustExec("insert into t values(1)")
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelFunc()
+	ctx = util.WithInternalSourceType(ctx, "scheduler")
+	rs, err := tk.Session().ExecuteInternal(ctx, "select * from test.t")
+	rows, err2 := session.ResultSetToStringSlice(ctx, tk.Session(), rs)
+	t.Log("result&err: ", len(rows), err, err2)
+}
+```
+might need to run it for a few times
+```
+    scheduler_test.go:720: result&err:  0 <nil> <nil>
+```
+
+here we don't return context error, if context cancelled in the middle the query returns incorrect result.
+Query from normal client don't have issue, as we don't cancel context except when kill where it's handled.
+https://github.com/pingcap/tidb/blob/e8861cf6d69547b202bfa41e51912fbcd4898a45/pkg/store/copr/coprocessor.go#L945-L951
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+got err: context deadline exceed
+### 3. What did you see instead (Required)
+no error, result set is empty
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

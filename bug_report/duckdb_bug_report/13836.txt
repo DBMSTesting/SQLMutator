@@ -1,0 +1,232 @@
+ID: 13836
+Title: Eatoni v1.1.0 does not work with pandas API as it did earlier
+Description:
+### What happens?
+
+Duckdb v1.1.0 introduces a new error:
+```
+CatalogException: Catalog Error: Table with name df does not exist!
+```
+
+### To Reproduce
+
+We have a `utils.duckdb.py` the contents of which are:
+```python
+import duckdb
+import time
+import pandas
+
+import logging, os
+_logs = logging.getLogger(os.path.relpath(__file__, start=os.getcwd()))
+
+with duckdb.connect(database=':memory:') as con:
+    output = con.sql(
+        f"""
+        INSTALL httpfs;
+        LOAD httpfs;
+        CREATE PERSISTENT SECRET IF NOT EXISTS (
+            TYPE S3,
+            PROVIDER CREDENTIAL_CHAIN
+        );
+    """).fetchall()
+    _logs.info(f'Loaded extensions and secrets {output}')
+
+
+def connect_db(
+    db: str=':memory:',
+    max_retries: int=20,
+    max_retry_duration: int=300,
+    start_retry_time: int=10,
+    read_only: bool=False,
+    temp_directory: str='./'
+) -> duckdb.DuckDBPyConnection:
+    """
+    Connects to a duckDB database and returns the connection object.
+
+    Args:
+        db (str, optional): The path to the database file. Defaults to ':memory:', in-memory database.
+        max_retries (int, optional): The maximum number of connection retries. Defaults to 20.
+        max_retry_duration (int, optional): The maximum duration (in seconds) for connection retries. Defaults to 300.
+        start_retry_time (int, optional): The initial wait time (in seconds) between connection retries. Defaults to 10.
+        read_only (bool, optional): Specifies if the connection should be read-only. Defaults to `False`
+        temp_directory (str, optional): The temporary directory path. Defaults to './', the current directory
+
+    Returns:
+        duckdb.Connection: The connection object to the duckDB database.
+
+    Raises:
+        Exception: If an error occurs during the connection process.
+
+    NOTE:
+        If connection fails, ensure that we have permission to rwx on the db file using: sudo chmod -R a+rwx ~/db_folder
+
+    Example:
+        ```python
+        with connect_db(db=':memory:', read_only=False) as con:
+            con.execute("CREATE TABLE test (a INTEGER)")
+        ```
+    """
+    con = None
+    retries = 0
+    successful = False
+
+    if db == ':memory:':
+        read_only = False
+
+    while not successful and retries <= max_retries:
+        try:
+            con = duckdb.connect(database=db, read_only=read_only)
+            con.execute(
+                f"""
+                SET old_implicit_casting=true;
+                SET http_keep_alive=false;
+                SET temp_directory = "{temp_directory}";"""
+            )
+            successful = True
+            _logs.info(f'duckDB connection successful with {db}, read_only={read_only}')
+        except Exception as e:
+            if isinstance(e, duckdb.IOException):
+                _logs.warning(f"Database is busy. We'll wait {db}: {e}")
+                time.sleep(min(start_retry_time * retries, max_retry_duration))
+            else:
+                # Raise the original exception
+                raise e
+        finally:
+            retries += 1
+    if con is None:
+        _logs.error(f'Failed to establish connection with {db}')
+    return con
+
+
+def fetch_query(
+    query: str,
+    db: str=':memory:',
+    read_only: bool=True,
+    temp_directory: str='./'
+) -> pandas.DataFrame:
+    """Executes the given query on the specified DuckDB database and returns the result as a pandas DataFrame.
+
+    Uses [connect_db][utils.duckdb.connect_db] for connection
+
+    Parameters:
+        query (str): The SQL query to execute.
+        db (str, optional): The path to the DuckDB database file. Defaults to ':memory:'.
+        read_only (bool, optional): Specifies whether the database should be opened in read-only mode. Defaults to `True` except when `db = ':memory:'`
+        temp_directory (str, optional): The path to the directory where temporary files will be stored. Defaults to './'.
+
+    Returns:
+        pandas.DataFrame: The result of the query as a pandas DataFrame.
+
+    Example:
+        ```python
+        df = fetch_query(
+            query = "SELECT * FROM test",
+            db = ':memory:',
+            read_only = False
+        )
+        ```
+    """
+    with connect_db(
+        db = db,
+        read_only = read_only,
+        temp_directory = temp_directory
+    ) as con:
+        return con.execute(query).fetchdf()
+```
+
+
+This works for all duckdb >= 0:
+```python
+import duckdb
+import pandas
+print(duckdb.sql("SELECT version()").df())
+df = pandas.DataFrame.from_dict({'a': [42]})
+results = duckdb.sql("SELECT * FROM df").df()
+print(results)
+```
+
+This works for all duckdb v<=1.0.0 but not for v==1.1.0:
+```python
+from utils.duckdb import *
+import pandas
+print(duckdb.sql("SELECT version()").df())
+df = pandas.DataFrame.from_dict({'a': [42]})
+results = fetch_query("SELECT * FROM df")
+print(results)
+```
+The error thrown in v1.1.0 is:
+```console
+---------------------------------------------------------------------------
+CatalogException                          Traceback (most recent call last)
+Cell In[8], line 12
+      8 df = pandas.DataFrame.from_dict({'a': [42]})
+     10 # query the Pandas DataFrame "df"
+     11 # Note: duckdb.sql connects to the default in-memory database connection
+---> 12 results = fetch_query("SELECT * FROM df")
+     13 print(results)
+
+File ~/utils/duckdb.py:138, in fetch_query(query, db, read_only, temp_directory)
+    110 def fetch_query(
+    111     query: str,
+    112     db: str=':memory:',
+    113     read_only: bool=True,
+    114     temp_directory: str='./'
+    115 ) -> pandas.DataFrame:
+    116     """Executes the given query on the specified DuckDB database and returns the result as a pandas DataFrame.
+    117 
+    118     Uses [connect_db][utils.duckdb.connect_db] for connection
+   (...)
+    136         ```
+    137     """
+--> 138     with connect_db(
+    139         db = db,
+    140         read_only = read_only,
+...
+
+CatalogException: Catalog Error: Table with name df does not exist!
+Did you mean "pg_depend"?
+LINE 1: SELECT * FROM df
+                      ^
+```
+
+However it works if I replace the line:
+```python
+from utils.duckdb import *
+```
+with the functions definitions in `utils.duckdb.py`. Why does this happen in the new version?
+
+### OS:
+
+x86
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+Python 3.12
+
+### Full Name:
+
+Rajiv Patki
+
+### Affiliation:
+
+Jodaro
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

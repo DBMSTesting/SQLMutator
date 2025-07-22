@@ -1,0 +1,129 @@
+ID: 66294
+Title: dictGet, dictGetOrDefault, dictGetOrNull works inconsistent 
+Description:
+**Which ClickHouse server version to use**
+version 24.6.1
+
+**`CREATE TABLE` statements for all tables involved**
+```
+CREATE TABLE IF NOT EXISTS data
+(
+    id                 UInt64,
+    value            Float64
+)
+ENGINE = ReplacingMergeTree
+ORDER BY (id, value);
+
+CREATE DICTIONARY IF NOT EXISTS data_dict
+(
+    id    UInt64,
+    value Float64
+)
+PRIMARY KEY id
+SOURCE (CLICKHOUSE(
+    host '${CLICKHOUSE_HOST}'
+    port '${CLICKHOUSE_PORT}'
+    user '${CLICKHOUSE_USER}'
+    password '${CLICKHOUSE_PASSWORD}'
+    query 'SELECT id, value FROM ${CLICKHOUSE_DB}.data'
+))
+LAYOUT (FLAT())
+LIFETIME (MIN 30 MAX 60);
+```
+
+**Queries to run that lead to an unexpected result**
+I'm going to compare two use cases
+- key is NULL
+- key does not exist
+
+1) dictGet
+1.1) key is NULL
+```
+SELECT dictGet('data_dict', 'value', NULL)
+
+Query id: 17484f2c-894c-4b13-b0f2-a55f12b26a4d
+
+   ┌─dictGet('data_dict', 'value', NULL)─┐
+1. │                                ᴺᵁᴸᴸ │
+   └─────────────────────────────────────┘
+```
+Okay, let's suppose if key is NULL then NULL will be returned instead of the <null_value> of the type Float64(that is 0).
+
+1.2) key does not exist
+```
+SELECT dictGet('data_dict', 'value', 1)
+
+Query id: 6d672eb6-14ae-41d9-91e7-0d37652bdb11
+
+   ┌─dictGet('data_dict', 'value', 1)─┐
+1. │                                0 │
+   └──────────────────────────────────┘
+```
+Okay, clear, key cannot be found so <null_value> of type Float64 was returned (that is 0)
+
+2) dictGetOrDefault
+2.1) key is NULL
+```
+SELECT dictGetOrDefault('data_dict', 'value', NULL, NULL)
+
+Query id: add5fe29-8ab2-44c5-b08a-5505269078e7
+
+   ┌─dictGetOrDefault('data_dict', 'value', NULL, NULL)─┐
+1. │                                               ᴺᵁᴸᴸ │
+   └────────────────────────────────────────────────────┘
+```
+
+Hm, that's strange because the default value is NULL that does not match the data type of Float64 (it's not Nullable type). According to the documentation
+
+```
+ClickHouse throws an exception if it cannot parse the value of the attribute or the value does not match the attribute data type.
+```
+
+2.2)  key does not exist
+```
+SELECT dictGetOrDefault('data_dict', 'value', 12, NULL)
+
+Query id: f2fbf594-40e5-4269-881b-36e866a86050
+
+Received exception from server (version 24.6.1):
+Code: 70. DB::Exception: Received from localhost:9000. DB::Exception: Cannot convert NULL to a non-nullable type: In scope SELECT dictGetOrDefault('data_dict', 'value', 12, NULL). (CANNOT_CONVERT_TYPE)
+```
+Here it's not working and it's clear since default value should be a type of Float64, but NULL was provided
+
+3) dictGetOrNull
+3.1) key is NULL
+```
+SELECT dictGetOrNull('data_dict', 'value', NULL)
+
+Query id: 2b8349d3-aa48-44de-9526-b898ff43eb91
+
+Received exception from server (version 24.6.1):
+Code: 70. DB::Exception: Received from localhost:9000. DB::Exception: Cannot convert NULL to a non-nullable type: In scope SELECT dictGetOrNull('data_dict', 'value', NULL). (CANNOT_CONVERT_TYPE)
+```
+But wait, it means that ```dictGetOrNull('data_dict', 'value', NULL) != dictGetOrDefault('data_dict', 'value', NULL, NULL)```. Sounds strange
+
+3.2) key does not exist
+```
+SELECT dictGetOrNull('data_dict', 'value', 12)
+
+Query id: 1900547b-697e-4cac-9dd7-bba6dfe1b635
+
+   ┌─dictGetOrNull('data_dict', 'value', 12)─┐
+1. │                                    ᴺᵁᴸᴸ │
+   └─────────────────────────────────────────┘
+```
+Okay, this response is clear
+
+**Expected behavior**
+It's hard to say what should be expected, because as I can see the rules for such cases does not specified in the documentation.
+
+But my personal opinion: NULL key or key was not found  should be considered as the same use case. It means:
+
+| query                                                     | actual | expected | comment                                                                   |
+|-----------------------------------------------------------|--------|----------|---------------------------------------------------------------------------|
+| SELECT dictGet('data_dict', 'value', NULL)                | NULL   | 0        | 0 since key was not found and default value for type Float64 was returned |
+| SELECT dictGet('data_dict', 'value', 1)                   | 0      | 0        | 0 since key was not found and default value for type Float64 was returned |
+| SELECT dictGetOrDefault('data_dict', 'value', NULL, NULL) | NULL   | error    | default value is NULL that does not match the data type of Float64        |
+| SELECT dictGetOrDefault('data_dict', 'value', 12, NULL)   | error  | error    | default value is NULL that does not match the data type of Float64        |
+| SELECT dictGetOrNull('data_dict', 'value', NULL)          | error  | NULL     | since NULL key was not found                                              |
+| SELECT dictGetOrNull('data_dict', 'value', 12)            | NULL   | NULL     | since key was not found                                                   |

@@ -1,0 +1,57 @@
+ID: 10158
+Title: Too large t-digest summary size: (while reading column percentile): (while reading from part ... from mark 0 with max_rows_to_read = 8192)
+Description:
+Hello, at our company we are using clickhouse to collect statistics from the server. Unfurtunatelly our error log is spammed with the following error:
+
+```
+2020.04.09 17:59:03.003127 [ 19321 ] {} <Error> default.`.inner.rtt_50p_graph_day`: Cannot quickly remove directory /var/lib/clickhouse/data/default/%2Einner%2Ertt_50p_graph_day/delete_tmp_20200408_280071_401482_7307 by removing files; fallback to recursive removal. Reason: Code: 458, e.displayText() = DB::ErrnoException: Cannot unlink file /var/lib/clickhouse/data/default/%2Einner%2Ertt_50p_graph_day/delete_tmp_20200408_280071_401482_7307/checksums.txt, errno: 2, strerror: No such file or directory (version 20.3.4.10 (official build))
+2020.04.09 17:59:03.003519 [ 19321 ] {} <Error> void DB::BackgroundProcessingPool::threadFunction(): Code: 128, e.displayText() = DB::Exception: Too large t-digest summary size: (while reading column percentile): (while reading from part /var/lib/clickhouse/data/default/%2Einner%2Ertt_50p_graph_day/20200408_280071_341853_7306/ from mark 0 with max_rows_to_read = 8192), Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x102e0d8c in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8f2d989 in /usr/bin/clickhouse
+2. DB::QuantileTDigest<unsigned int>::deserialize(DB::ReadBuffer&) @ 0xc21e21e in /usr/bin/clickhouse
+3. DB::DataTypeAggregateFunction::deserializeBinaryBulk(DB::IColumn&, DB::ReadBuffer&, unsigned long, double) const @ 0xcd1c495 in /usr/bin/clickhouse
+4. DB::MergeTreeReaderWide::readData(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::IDataType const&, DB::IColumn&, unsigned long, bool, unsigned long, bool) @ 0xd88e426 in /usr/bin/clickhouse
+5. DB::MergeTreeReaderWide::readRows(unsigned long, bool, unsigned long, std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0xd88f601 in /usr/bin/clickhouse
+6. DB::MergeTreeSequentialBlockInputStream::readImpl() @ 0xd8b7b11 in /usr/bin/clickhouse
+7. DB::IBlockInputStream::read() @ 0xccd503f in /usr/bin/clickhouse
+8. DB::ExpressionBlockInputStream::readImpl() @ 0xd0ec4f6 in /usr/bin/clickhouse
+9. DB::IBlockInputStream::read() @ 0xccd503f in /usr/bin/clickhouse
+10. DB::MaterializingBlockInputStream::readImpl() @ 0xcf4a2a3 in /usr/bin/clickhouse
+11. DB::IBlockInputStream::read() @ 0xccd503f in /usr/bin/clickhouse
+12. DB::MergingSortedBlockInputStream::init(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&) @ 0xd12f350 in /usr/bin/clickhouse
+13. DB::AggregatingSortedBlockInputStream::readImpl() @ 0xd7addb2 in /usr/bin/clickhouse
+14. DB::IBlockInputStream::read() @ 0xccd503f in /usr/bin/clickhouse
+15. DB::MergeTreeDataMergerMutator::mergePartsToTemporaryPart(DB::FutureMergedMutatedPart const&, DB::MergeListEntry&, DB::TableStructureReadLockHolder&, long, std::__1::unique_ptr<DB::IReservation, std::__1::default_delete<DB::IReservation> > const&, bool, bool) @ 0xd77c32c in /usr/bin/clickhouse
+16. DB::StorageMergeTree::merge(bool, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, bool, bool, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >*) @ 0xd587ebc in /usr/bin/clickhouse
+17. DB::StorageMergeTree::mergeMutateTask() @ 0xd58ecfc in /usr/bin/clickhouse
+18. DB::BackgroundProcessingPool::threadFunction() @ 0xd6f72cb in /usr/bin/clickhouse
+19. ? @ 0xd6f7c90 in /usr/bin/clickhouse
+20. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8f50b4b in /usr/bin/clickhouse
+21. ? @ 0x8f4f00f in /usr/bin/clickhouse
+22. start_thread @ 0x7fa3 in /usr/lib/x86_64-linux-gnu/libpthread-2.28.so
+23. __clone @ 0xf94cf in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+ (version 20.3.4.10 (official build))
+```
+
+We have one main table where we insert all records and then we have a lot of `MATERIALZED VIEWS` above it.
+
+Example of `MATERIALZED VIEW`:
+```
+CREATE MATERIALIZED VIEW rtt_50p_graph_day
+ENGINE = AggregatingMergeTree()
+PARTITION BY metric_date ORDER BY (metric_date, metric_time, machine_name)
+AS SELECT
+                                                    metric_date,
+                                                    machine_name,
+  toStartOfInterval(metric_time, INTERVAL 1 day)    metric_time,
+  quantileTDigestState(0.5)(RTT)                    percentile
+FROM metrics
+GROUP BY metric_date, machine_name, metric_time;
+```
+
+At the start we were using `qunatilesState` instes of `quantileTDigestState`, but default `qunatiles` performed queries really slow so we changed it to the `quantileTDigestState`. We collect multiple percentiles (50, 90, 95, 99). And every table where we use `quantileTDigestState` logs this error to the error log. But everything seems to work normally (quantile should be displaying correctly). 
+
+Should we ignore the error or is this some kind of a bug?
+
+Thank you and have a nice day! 

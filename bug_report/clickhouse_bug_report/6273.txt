@@ -1,0 +1,87 @@
+ID: 6273
+Title: Materialized views do not store data complaining about missing columns
+Description:
+**Describe the bug**
+Given the following tables:
+```sql
+CREATE TABLE IF NOT EXISTS source
+(
+  `timestamp` DateTime, 
+  `number` UInt32,
+  `date1` Date,
+  `date2` Date
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY (timestamp);
+
+CREATE TABLE IF NOT EXISTS number_date (
+  date Date,
+  number UInt32,
+  dates_in_between Date,
+  count UInt32
+) ENGINE = SummingMergeTree(count)
+PARTITION BY toYYYYMMDD(date)
+ORDER BY (date, number, dates_in_between);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS number_date_view TO number_date AS
+SELECT date, number, toDate(dates) as dates_in_between, CAST(count(*), 'UInt32') AS count
+FROM 
+(
+    WITH 86400 AS dayseconds
+    SELECT 
+        toDate(timestamp) AS date, 
+        number, 
+        timeSlots(toDateTime(date1, 'Zulu'), toUInt32((dateDiff('day', date1, date2) - 1) * dayseconds), toUInt32(dayseconds)) AS dates
+    FROM source
+) ARRAY JOIN dates
+GROUP BY date, number, dates_in_between;
+```
+
+When I insert data in `source` table with
+```sql
+INSERT INTO source (timestamp, number, date1, date2) VALUES('2019-12-01 12:00:00', 77, '2020-10-01', '2020-10-03');
+```
+
+ClickHouse complains about missing columns:
+```
+Received exception from server (version 19.11.2):
+Code: 47. DB::Exception: Received from localhost:9001. DB::Exception: Missing columns: 'date' while processing query: 'SELECT date, number, toDate(dates) AS dates_in_between, CAST(count(), 'UInt32') AS count FROM (WITH 86400 AS dayseconds SELECT toDate(timestamp) AS date, number, timeSlots(toDateTime(date1, 'Zulu'), toUInt32((dateDiff('day', date1, date2) - 1) * dayseconds), toUInt32(dayseconds)) AS dates FROM default.source) ARRAY JOIN dates GROUP BY date, number, dates_in_between', required columns: 'number' 'date', source columns: 'date1' 'timestamp' 'date2' 'number', arrayJoin columns: 'dates': while pushing to view default.number_date_view. 
+```
+
+Now. It is quite weird, since, the INSERT works perfectly if I don't create the views and it also works fine with an `INSERT FROM SELECT`
+```sql
+INSERT INTO number_date SELECT 
+    date, 
+    number, 
+    toDate(dates) AS dates_in_between, 
+    CAST(count(*), 'UInt32') AS count
+FROM 
+(
+    WITH 86400 AS dayseconds
+    SELECT 
+        toDate(timestamp) AS date, 
+        number, 
+        timeSlots(toDateTime(date1, 'Zulu'), toUInt32((dateDiff('day', date1, date2) - 1) * dayseconds), toUInt32(dayseconds)) AS dates
+    FROM source
+)
+ARRAY JOIN dates
+GROUP BY 
+    date, 
+    number, 
+    dates_in_between
+```
+I am running:
+```
+SELECT version()
+
+┌─version()─┐
+│ 19.11.2.7 │
+└───────────┘
+```
+In docker.
+
+Am I don't something wrongly? 
+Let me know if I you need extra data.
+
+Thanks in advance

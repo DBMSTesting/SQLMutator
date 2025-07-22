@@ -1,0 +1,34 @@
+ID: 67461
+Title: Invalid number of rows when executing query with parallel replicas
+Description:
+It is caught by stress fairly often when executing `03017_analyzer_groupby_fuzz_61600.sql` with parallel replicas.
+E.g. https://s3.amazonaws.com/clickhouse-test-reports/66952/051f0f8ceba4fa1b94a1b9df07598c2ca6b51577/stress_test__tsan_.html
+
+```
+[ 21794 ] {8afd5662-03ef-418c-93b0-2928ee67b8cf} <Fatal> : Logical error: \'Expected the argument №2 (\'_CAST(NULL_Nullable(String), \'Nullable(String)\'_String)\' of type Nullable(String)) to have 2 rows, but it has 0\'.
+ [ 3306 ] {} <Fatal> Application: Child process was terminated by signal 6.
+ [ 21794 ] {8afd5662-03ef-418c-93b0-2928ee67b8cf} <Fatal> : Logical error: \'Expected the argument №2 (\'_CAST(NULL_Nullable(String), \'Nullable(String)\'_String)\' of type Nullable(String)) to have 2 rows, but it has 0\'.
+ [ 3306 ] {} <Fatal> Application: Child process was terminated by signal 6.
+ ```
+
+How to reproduce:
+
+```sql
+CREATE TABLE set_index_not__fuzz_0 (`name` String, `status` Enum8('alive' = 0, 'rip' = 1), INDEX idx_status status TYPE set(2) GRANULARITY 1)
+ENGINE = MergeTree ORDER BY name
+SETTINGS index_granularity = 8192;
+
+INSERT INTO set_index_not__fuzz_0 SELECT * from generateRandom() limit 1;
+
+SELECT
+    38,
+    concat(position(concat(concat(position(concat(toUInt256(3)), 'ca', 2), 3), NULLIF(1, materialize(toLowCardinality(1)))), toLowCardinality(toNullable('ca'))), concat(NULLIF(1, 1), concat(3), toNullable(3)))
+FROM set_index_not__fuzz_0
+GROUP BY
+    toNullable(3),
+    concat(concat(NULLIF(1, 1), toNullable(toNullable(3))))
+SETTINGS allow_experimental_analyzer = 1, allow_experimental_parallel_reading_from_replicas = 1, cluster_for_parallel_replicas = 'parallel_replicas', max_parallel_replicas = 2, parallel_replicas_for_non_replicated_merge_tree = 1'
+```
+
+Seems to be happening since Jun 4th
+https://play.clickhouse.com/play?user=play#U0VMRUNUIGNoZWNrX25hbWUsIGNoZWNrX3N0YXJ0X3RpbWUsIHJlcG9ydF91cmwKRlJPTSBjaGVja3MKV0hFUkUgMQogICAgQU5EIGNoZWNrX3N0YXJ0X3RpbWUgPj0gbm93KCkgLSBJTlRFUlZBTCA2IE1PTlRICiAgICBBTkQgdGVzdF9zdGF0dXMgIT0gJ1NLSVBQRUQnCiAgICBBTkQgKHRlc3Rfc3RhdHVzIExJS0UgJ0YlJyBPUiB0ZXN0X3N0YXR1cyBMSUtFICdFJScpIAogICAgQU5EIGNoZWNrX3N0YXR1cyAhPSAnc3VjY2VzcycKICAgIEFORCBjaGVja19uYW1lIE5PVCBMSUtFICdTUUxhbmNlciUnCiAgICBhbmQgdGVzdF9uYW1lIGxpa2UgJyVmYXRhbF9tZXNzYWdlcyUnCiAgICBhbmQgdGVzdF9jb250ZXh0X3JhdyBsaWtlICclRXhwZWN0ZWQgdGhlIGFyZ3VtZW50JTIlX0NBU1QoTlVMTF9OdWxsYWJsZShTdHJpbmcpLCAlTnVsbGFibGUoU3RyaW5nKSVfU3RyaW5nKSUgb2YgdHlwZSBOdWxsYWJsZShTdHJpbmcpKSB0byBoYXZlIDIgcm93cyUnCk9SREVSIGJ5IGNoZWNrX3N0YXJ0X3RpbWU=

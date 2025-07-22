@@ -1,0 +1,117 @@
+ID: 4476
+Title: Last view value replaced by zero in function calls
+Description:
+**Describe the bug**
+
+I have a simple table with two columns `date` (used for ordering and partitioning) and `hits`. I have created a materialized view to compute total hits per day using an AggregatingMergeTree, and a plain view to easily query / display the data from the AggregatingMergeTree (see below). The rows in the view look correct.
+
+However, `sum(hits)` on the view is lower than the expected result, as if the last row was ignored. Its value does not appear in `groupArray(hits)`, whereas an unexpected `0` is present.
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+
+Tested on 19.3.4 (Debian) and 18.16.1 (Docker).
+
+* Which interface to use, if matters
+
+TCP (native client).
+
+* Non-default settings, if any
+
+TCP server running on port 10000.
+
+* `CREATE TABLE` statements for all tables involved
+
+```sql
+CREATE TABLE test_base
+(
+    date Date,
+    hits UInt32
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(date)
+ORDER BY date;
+
+CREATE MATERIALIZED VIEW test_aggr
+(
+    date Date,
+    hits_state AggregateFunction(sum, UInt32)
+)
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(date)
+ORDER BY date AS
+SELECT
+    date,
+    sumState(hits) AS hits_state
+FROM test_base
+GROUP BY date;
+
+CREATE VIEW test_view
+(
+    date Date,
+    hits UInt32
+) AS
+SELECT
+    date,
+    sumMerge(hits_state) AS hits
+FROM test_aggr
+GROUP BY date;
+```
+
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/yandex/ClickHouse/blob/master/dbms/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+
+```sql
+INSERT INTO test_base FORMAT JSONEachRow
+{"date":"2018-09-26","hits":1}
+{"date":"2018-09-26","hits":2}
+{"date":"2018-09-27","hits":4}
+{"date":"2018-09-28","hits":8};
+```
+
+The query
+
+```sql
+SELECT *
+FROM test_view;
+```
+
+returns as expected
+
+```
+┌───────date─┬─hits─┐
+│ 2018-09-26 │    3 │
+│ 2018-09-27 │    4 │
+│ 2018-09-28 │    8 │
+└────────────┴──────┘
+```
+
+* Queries to run that lead to unexpected result
+
+```sql
+SELECT
+    count(),
+    sum(hits),
+    groupArray(hits)
+FROM test_view;
+```
+
+Returns:
+
+```
+┌─count()─┬─sum(hits)─┬─groupArray(hits)─┐
+│       3 │         7 │ [3,0,4]          │
+└─────────┴───────────┴──────────────────┘
+```
+
+**Expected behavior**
+
+I would have expected:
+
+```
+┌─count()─┬─sum(hits)─┬─groupArray(hits)─┐
+│       3 │        15 │ [3,4,8]          │
+└─────────┴───────────┴──────────────────┘
+```
+
+Why is the last value (`8`) missing? Where does the `0` come from in `groupArray(hits)`?

@@ -1,0 +1,53 @@
+ID: 64487
+Title: Incorrect optimization of multiple OR in the WHERE clause when analyzer is enabled
+Description:
+Tested with 24.4 in Docker.
+
+With 3 or more variants provided in the WHERE clause with OR, a seemingly correct query returns zero results.
+
+A minimal repro: 
+
+```sql
+SET allow_experimental_analyzer=1;
+CREATE OR REPLACE TABLE foo (i Date) ENGINE MergeTree ORDER BY i;
+INSERT INTO foo VALUES ('2020-01-01');
+INSERT INTO foo VALUES ('2020-01-02');
+```
+
+This query returns two records, as expected:
+
+```sql
+SELECT *
+FROM default.foo
+WHERE (default.foo.i = parseDateTimeBestEffort('2020-01-01')) 
+    OR (default.foo.i = parseDateTimeBestEffort('2020-01-02'))
+ORDER BY i ASC
+LIMIT 1048575
+```
+
+```
+   ┌──────────i─┐
+1. │ 2020-01-01 │
+   └────────────┘
+   ┌──────────i─┐
+2. │ 2020-01-02 │
+   └────────────┘
+```
+
+However, if we add a third variant via OR, the query returns an empty result set:
+
+```sql
+SELECT *
+FROM default.foo
+WHERE (default.foo.i = parseDateTimeBestEffort('2020-01-01'))
+   OR (default.foo.i = parseDateTimeBestEffort('2020-01-02'))
+   OR (default.foo.i = parseDateTimeBestEffort('2020-01-03'))
+ORDER BY default.foo.i ASC
+LIMIT 1048575
+```
+
+A quote from @vdimir:
+
+> It's a bug in query tree optimization (if you are interested, check out `EXPLAIN QUERY TREE dump_ast = 1` for 3 conditions they are rewritten to `default.foo.i IN (...)` and seems this particular rewrite is incorrect). Current workaround is to disable this optimization with `SET optimize_min_equality_disjunction_chain_length = 4294967295;`
+
+Fiddle: https://fiddle.clickhouse.com/9dd6a6a5-2496-4343-8b40-aabf57aa8bc1

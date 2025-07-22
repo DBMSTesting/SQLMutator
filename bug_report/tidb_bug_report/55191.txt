@@ -1,0 +1,208 @@
+ID: 55191
+Title: With the same sql, the results on v6.5 are inconsistent with the results on v7.5/8.1
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+table schema and SQL：
+```sql
+SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT
+    FROM (
+    SELECT id,@rowNum :=@rowNum + 1 as rn
+    from(
+    SELECT id
+    FROM tbl_data_a,(SELECT @rowNum := -1) b
+    where 1=1
+    and status = 'SUCCESS'
+    and   data_date='2023-04-01'
+    group by id
+    order by id) a
+    order by id) c
+    GROUP BY rn DIV 3;
+
+DROP TABLE IF EXISTS `tbl_data_a`;
+CREATE TABLE `tbl_data_a` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `col_a` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '数据标识A',
+  `col_b` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '数据标识B',
+  `data_date` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '数据日期:YYYY-MM-DD',
+  `col_c` decimal(17,2) NOT NULL COMMENT '数值',
+  `status` varchar(2) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '状态',
+  `description` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '状态描述',
+  `col_d` varchar(8) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '日期',
+  `created_date` date NOT NULL COMMENT '创建时间',
+  `created_by` varchar(32) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '创建人',
+  `updated_by` varchar(32) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '更新人',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+  KEY `idx_created_date` (`created_date`),
+  KEY `idx_col_a` (`col_a`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci AUTO_INCREMENT=120001 COMMENT='数据表A';
+INSERT INTO `tbl_data_a` VALUES 
+(90001,'DATA_A_00001','DATA_B_00001','2023-04-01',2000.00,'SUCCESS','成功','20230428','2023-04-01',NULL,NULL,'2024-08-01 07:58:20','2024-08-01 07:58:20'),
+(90002,'DATA_A_00002','DATA_B_00002','2023-04-01',2000.00,'SUCCESS','成功','20230428','2023-04-01',NULL,NULL,'2024-08-01 07:58:20','2024-08-01 07:58:20'),
+(90003,'DATA_A_00003','DATA_B_00003','2023-04-01',2000.00,'SUCCESS','成功','20230428','2023-04-01',NULL,NULL,'2024-08-01 07:58:20','2024-08-01 07:58:20');
+```
+The top is desensitized
+
+Real execution plan:
+
+```sql
+# v6.5.2
+MySQL [test]> SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT
+    ->     FROM (
+    ->     SELECT id,@rowNum :=@rowNum + 1 as rn
+    ->     from(
+    ->     SELECT id
+    ->     FROM sllxjt_loan_detail,(SELECT @rowNum := -1) b
+    ->     where 1=1
+    ->     and loan_result = '00'
+    ->     and   run_date='2021-09-28'
+    ->     group by id
+    ->     order by id) a
+    ->     order by id) c
+    ->     GROUP BY rn DIV 3 order by 1;
++-----------+---------+-----------+
+| START_KEY | END_KEY | ROW_COUNT |
++-----------+---------+-----------+
+|     90001 |   90003 |         3 |
+|     90004 |   90006 |         3 |
+|     90007 |   90010 |         3 |
+|     90011 |   90013 |         3 |
+|     90014 |   90016 |         3 |
+|     90017 |   90019 |         3 |
+|     90020 |   90022 |         3 |
+|     90023 |   90025 |         3 |
+|     90026 |   90028 |         3 |
+|     90029 |   90031 |         3 |
+|     90032 |   90033 |         2 |
++-----------+---------+-----------+
+11 rows in set (0.00 sec)
+
+MySQL [test]> explain SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT     FROM (     SELECT id,@rowNum :=@rowNum + 1 as rn     from(     SELECT id     FROM sllxjt_loan_detail,(SELECT @rowNum := -1) b     where 1=1     and loan_result = '00'     and   run_date='2021-09-28'     group by id     order by id) a     order by id) c     GROUP BY rn DIV 3 order by 1;
++------------------------------------------------+---------+-----------+--------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+
+| id                                             | estRows | task      | access object                                          | operator info                                                                                                   |
++------------------------------------------------+---------+-----------+--------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+
+| Sort_15                                        | 1.00    | root      |                                                        | Column#16                                                                                                       |
+| └─HashAgg_18                                   | 1.00    | root      |                                                        | group by:Column#24, funcs:min(Column#22)->Column#16, funcs:max(Column#23)->Column#17, funcs:count(1)->Column#18 |
+|   └─Projection_44                              | 1.00    | root      |                                                        | test.sllxjt_loan_detail.id, test.sllxjt_loan_detail.id, intdiv(Column#15, 3)->Column#24                         |
+|     └─Projection_40                            | 1.00    | root      |                                                        | test.sllxjt_loan_detail.id, setvar(rownum, plus(getvar(rownum), 1))->Column#15                                  |
+|       └─Sort_41                                | 1.00    | root      |                                                        | test.sllxjt_loan_detail.id                                                                                      |
+|         └─HashAgg_24                           | 1.00    | root      |                                                        | group by:test.sllxjt_loan_detail.id, funcs:firstrow(test.sllxjt_loan_detail.id)->test.sllxjt_loan_detail.id     |
+|           └─HashJoin_28                        | 0.01    | root      |                                                        | CARTESIAN inner join                                                                                            |
+|             ├─IndexLookUp_35(Build)            | 0.01    | root      |                                                        |                                                                                                                 |
+|             │ ├─IndexRangeScan_32(Build)       | 10.00   | cop[tikv] | table:SLLXJT_LOAN_DETAIL, index:idx_RUN_DATE(RUN_DATE) | range:[2021-09-28,2021-09-28], keep order:false, stats:pseudo                                                   |
+|             │ └─Selection_34(Probe)            | 0.01    | cop[tikv] |                                                        | eq(test.sllxjt_loan_detail.loan_result, "00")                                                                   |
+|             │   └─TableRowIDScan_33            | 10.00   | cop[tikv] | table:SLLXJT_LOAN_DETAIL                               | keep order:false, stats:pseudo                                                                                  |
+|             └─Projection_36(Probe)             | 1.00    | root      |                                                        | setvar(rownum, -1)->Column#14                                                                                   |
+|               └─TableDual_37                   | 1.00    | root      |                                                        | rows:1                                                                                                          |
++------------------------------------------------+---------+-----------+--------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+
+13 rows in set (0.00 sec)
+
+MySQL [test]> explain analyze SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT     FROM (     SELECT id,@rowNum :=@rowNum + 1 as rn     from(     SELECT id     FROM sllxjt_loan_detail,(SELECT @rowNum := -1) b     where 1=1     and loan_result = '00'     and   run_date='2021-09-28'     group by id     order by id) a     order by id) c     GROUP BY rn DIV 3 order by 1;
++------------------------------------------------+---------+---------+-----------+--------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+---------+
+| id                                             | estRows | actRows | task      | access object                                          | execution info                                                                                                                                                                                                                                                                                                                                                               | operator info                                                                                                   | memory    | disk    |
++------------------------------------------------+---------+---------+-----------+--------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+---------+
+| Sort_15                                        | 1.00    | 11      | root      |                                                        | time:2.21ms, loops:2                                                                                                                                                                                                                                                                                                                                                         | Column#16                                                                                                       | 5.65 KB   | 0 Bytes |
+| └─HashAgg_18                                   | 1.00    | 11      | root      |                                                        | time:2.18ms, loops:6, partial_worker:{wall_time:2.138343ms, concurrency:5, task_num:1, tot_wait:10.391164ms, tot_exec:18.013µs, tot_time:10.420631ms, max:2.095516ms, p95:2.095516ms}, final_worker:{wall_time:0s, concurrency:5, task_num:5, tot_wait:10.583006ms, tot_exec:132.676µs, tot_time:10.719287ms, max:2.162571ms, p95:2.162571ms}                                | group by:Column#24, funcs:min(Column#22)->Column#16, funcs:max(Column#23)->Column#17, funcs:count(1)->Column#18 | 33.0 KB   | N/A     |
+|   └─Projection_44                              | 1.00    | 32      | root      |                                                        | time:2.07ms, loops:2, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                        | test.sllxjt_loan_detail.id, test.sllxjt_loan_detail.id, intdiv(Column#15, 3)->Column#24                         | 760 Bytes | N/A     |
+|     └─Projection_40                            | 1.00    | 32      | root      |                                                        | time:2.06ms, loops:2, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                        | test.sllxjt_loan_detail.id, setvar(rownum, plus(getvar(rownum), 1))->Column#15                                  | 380 Bytes | N/A     |
+|       └─Sort_41                                | 1.00    | 32      | root      |                                                        | time:2.02ms, loops:2                                                                                                                                                                                                                                                                                                                                                         | test.sllxjt_loan_detail.id                                                                                      | 2.11 KB   | 0 Bytes |
+|         └─HashAgg_24                           | 1.00    | 32      | root      |                                                        | time:1.97ms, loops:6, partial_worker:{wall_time:1.940807ms, concurrency:5, task_num:1, tot_wait:9.229549ms, tot_exec:29.424µs, tot_time:9.267408ms, max:1.859717ms, p95:1.859717ms}, final_worker:{wall_time:2.014394ms, concurrency:5, task_num:5, tot_wait:9.565513ms, tot_exec:142.522µs, tot_time:9.711696ms, max:1.961963ms, p95:1.961963ms}                            | group by:test.sllxjt_loan_detail.id, funcs:firstrow(test.sllxjt_loan_detail.id)->test.sllxjt_loan_detail.id     | 14.3 KB   | N/A     |
+|           └─HashJoin_28                        | 0.01    | 32      | root      |                                                        | time:1.83ms, loops:2, build_hash_table:{total:1.66ms, fetch:1.65ms, build:7.98µs}, probe:{concurrency:5, total:8.15ms, max:1.65ms, probe:20.2µs, fetch:8.13ms}                                                                                                                                                                                                               | CARTESIAN inner join                                                                                            | 33.9 KB   | 0 Bytes |
+|             ├─IndexLookUp_35(Build)            | 0.01    | 32      | root      |                                                        | time:1.59ms, loops:2, index_task: {total_time: 732.8µs, fetch_handle: 731.1µs, build: 672ns, wait: 1.01µs}, table_task: {total_time: 709µs, num: 1, concurrency: 5}, next: {wait_index: 922.9µs, wait_table_lookup_build: 0s, wait_table_lookup_resp: 634.1µs}                                                                                                               |                                                                                                                 | 9.88 KB   | N/A     |
+|             │ ├─IndexRangeScan_32(Build)       | 10.00   | 33      | cop[tikv] | table:SLLXJT_LOAN_DETAIL, index:idx_RUN_DATE(RUN_DATE) | time:719.8µs, loops:3, cop_task: {num: 1, max: 660.8µs, proc_keys: 33, rpc_num: 1, rpc_time: 638.5µs, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}, tikv_task:{time:0s, loops:2}, scan_detail: {total_process_keys: 33, total_process_keys_size: 1518, total_keys: 34, get_snapshot_time: 24µs, rocksdb: {key_skipped_count: 33, block: {cache_hit_count: 2}}}       | range:[2021-09-28,2021-09-28], keep order:false, stats:pseudo                                                   | N/A       | N/A     |
+|             │ └─Selection_34(Probe)            | 0.01    | 32      | cop[tikv] |                                                        | time:617.3µs, loops:2, cop_task: {num: 1, max: 556.3µs, proc_keys: 33, rpc_num: 1, rpc_time: 537.1µs, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}, tikv_task:{time:0s, loops:2}, scan_detail: {total_process_keys: 33, total_process_keys_size: 5734, total_keys: 34, get_snapshot_time: 15.1µs, rocksdb: {key_skipped_count: 33, block: {cache_hit_count: 2}}}     | eq(test.sllxjt_loan_detail.loan_result, "00")                                                                   | N/A       | N/A     |
+|             │   └─TableRowIDScan_33            | 10.00   | 33      | cop[tikv] | table:SLLXJT_LOAN_DETAIL                               | tikv_task:{time:0s, loops:2}                                                                                                                                                                                                                                                                                                                                                 | keep order:false, stats:pseudo                                                                                  | N/A       | N/A     |
+|             └─Projection_36(Probe)             | 1.00    | 1       | root      |                                                        | time:13.4µs, loops:2, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                        | setvar(rownum, -1)->Column#14                                                                                   | 0 Bytes   | N/A     |
+|               └─TableDual_37                   | 1.00    | 1       | root      |                                                        | time:504ns, loops:2                                                                                                                                                                                                                                                                                                                                                          | rows:1                                                                                                          | N/A       | N/A     |
++------------------------------------------------+---------+---------+-----------+--------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+---------+
+13 rows in set (0.01 sec)
+
+MySQL [test]> 
+
+# v8.1.0
+MySQL [test]> SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT
+    ->     FROM (
+    ->     SELECT id,@rowNum :=@rowNum + 1 as rn
+    ->     from(
+    ->     SELECT id
+    ->     FROM sllxjt_loan_detail,(SELECT @rowNum := -1) b
+    ->     where 1=1
+    ->     and loan_result = '00'
+    ->     and   run_date='2021-09-28'
+    ->     group by id
+    ->     order by id) a
+    ->     order by id) c
+    ->     GROUP BY rn DIV 3 order by 1;
++-----------+---------+-----------+
+| START_KEY | END_KEY | ROW_COUNT |
++-----------+---------+-----------+
+|     90001 |   90008 |         3 |
+|     90002 |   90007 |         3 |
+|     90004 |   90025 |         3 |
+|     90006 |   90027 |         3 |
+|     90010 |   90028 |         3 |
+|     90012 |   90018 |         3 |
+|     90013 |   90032 |         3 |
+|     90014 |   90031 |         3 |
+|     90019 |   90022 |         2 |
+|     90021 |   90033 |         3 |
+|     90023 |   90030 |         3 |
++-----------+---------+-----------+
+11 rows in set (0.01 sec)
+
+MySQL [test]> explain SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT     FROM (     SELECT id,@rowNum :=@rowNum + 1 as rn     from(     SELECT id     FROM sllxjt_loan_detail,(SELECT @rowNum := -1) b     where 1=1     and loan_result = '00'     and   run_date='2021-09-28'     group by id     order by id) a     order by id) c     GROUP BY rn DIV 3 order by 1;
++----------------------------------------------+---------+-----------+--------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+
+| id                                           | estRows | task      | access object                                          | operator info                                                                                                   |
++----------------------------------------------+---------+-----------+--------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+
+| Sort_13                                      | 1.00    | root      |                                                        | Column#16                                                                                                       |
+| └─HashAgg_16                                 | 1.00    | root      |                                                        | group by:Column#24, funcs:min(Column#22)->Column#16, funcs:max(Column#23)->Column#17, funcs:count(1)->Column#18 |
+|   └─Projection_33                            | 1.00    | root      |                                                        | test.sllxjt_loan_detail.id->Column#22, test.sllxjt_loan_detail.id->Column#23, intdiv(Column#15, 3)->Column#24   |
+|     └─Projection_17                          | 1.00    | root      |                                                        | test.sllxjt_loan_detail.id, setvar(rownum, plus(getvar(rownum), 1))->Column#15                                  |
+|       └─HashAgg_18                           | 1.00    | root      |                                                        | group by:test.sllxjt_loan_detail.id, funcs:firstrow(test.sllxjt_loan_detail.id)->test.sllxjt_loan_detail.id     |
+|         └─HashJoin_22                        | 0.00    | root      |                                                        | CARTESIAN inner join                                                                                            |
+|           ├─IndexLookUp_29(Build)            | 0.00    | root      |                                                        |                                                                                                                 |
+|           │ ├─IndexRangeScan_26(Build)       | 0.03    | cop[tikv] | table:SLLXJT_LOAN_DETAIL, index:idx_RUN_DATE(RUN_DATE) | range:[2021-09-28,2021-09-28], keep order:false, stats:pseudo                                                   |
+|           │ └─Selection_28(Probe)            | 0.00    | cop[tikv] |                                                        | eq(test.sllxjt_loan_detail.loan_result, "00")                                                                   |
+|           │   └─TableRowIDScan_27            | 0.03    | cop[tikv] | table:SLLXJT_LOAN_DETAIL                               | keep order:false, stats:pseudo                                                                                  |
+|           └─Projection_30(Probe)             | 1.00    | root      |                                                        | setvar(rownum, -1)->Column#14                                                                                   |
+|             └─TableDual_31                   | 1.00    | root      |                                                        | rows:1                                                                                                          |
++----------------------------------------------+---------+-----------+--------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+
+12 rows in set (0.00 sec)
+
+MySQL [test]> explain analyze SELECT  MIN(id) START_KEY, MAX(id) END_KEY,COUNT(1) ROW_COUNT     FROM (     SELECT id,@rowNum :=@rowNum + 1 as rn     from(     SELECT id     FROM sllxjt_loan_detail,(SELECT @rowNum := -1) b     where 1=1     and loan_result = '00'     and   run_date='2021-09-28'     group by id     order by id) a     order by id) c     GROUP BY rn DIV 3 order by 1;
++----------------------------------------------+---------+---------+-----------+--------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+---------+
+| id                                           | estRows | actRows | task      | access object                                          | execution info                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | operator info                                                                                                   | memory    | disk    |
++----------------------------------------------+---------+---------+-----------+--------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+---------+
+| Sort_13                                      | 1.00    | 11      | root      |                                                        | time:2.15ms, loops:2, RU:1.133984                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Column#16                                                                                                       | 5.74 KB   | 0 Bytes |
+| └─HashAgg_16                                 | 1.00    | 11      | root      |                                                        | time:2.12ms, loops:6, partial_worker:{wall_time:2.082232ms, concurrency:5, task_num:5, tot_wait:10.248094ms, tot_exec:42.475µs, tot_time:10.296686ms, max:2.063629ms, p95:2.063629ms}, final_worker:{wall_time:0s, concurrency:5, task_num:20, tot_wait:4.63µs, tot_exec:2.57µs, tot_time:10.458656ms, max:2.10436ms, p95:2.10436ms}                                                                                                                                                                                                                                   | group by:Column#24, funcs:min(Column#22)->Column#16, funcs:max(Column#23)->Column#17, funcs:count(1)->Column#18 | 49.2 KB   | 0 Bytes |
+|   └─Projection_33                            | 1.00    | 32      | root      |                                                        | time:2.04ms, loops:6, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | test.sllxjt_loan_detail.id->Column#22, test.sllxjt_loan_detail.id->Column#23, intdiv(Column#15, 3)->Column#24   | 760 Bytes | N/A     |
+|     └─Projection_17                          | 1.00    | 32      | root      |                                                        | time:2ms, loops:6, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | test.sllxjt_loan_detail.id, setvar(rownum, plus(getvar(rownum), 1))->Column#15                                  | 380 Bytes | N/A     |
+|       └─HashAgg_18                           | 1.00    | 32      | root      |                                                        | time:1.97ms, loops:6, partial_worker:{wall_time:1.886204ms, concurrency:5, task_num:1, tot_wait:9.242913ms, tot_exec:26.255µs, tot_time:9.282116ms, max:1.858844ms, p95:1.858844ms}, final_worker:{wall_time:2.030998ms, concurrency:5, task_num:5, tot_wait:3.398µs, tot_exec:150ns, tot_time:9.756796ms, max:1.990277ms, p95:1.990277ms}                                                                                                                                                                                                                             | group by:test.sllxjt_loan_detail.id, funcs:firstrow(test.sllxjt_loan_detail.id)->test.sllxjt_loan_detail.id     | 11.1 KB   | 0 Bytes |
+|         └─HashJoin_22                        | 0.00    | 32      | root      |                                                        | time:1.83ms, loops:2, build_hash_table:{total:1.73ms, fetch:1.72ms, build:7.12µs}, probe:{concurrency:5, total:8.73ms, max:1.76ms, probe:19.6µs, fetch and wait:8.71ms}                                                                                                                                                                                                                                                                                                                                                                                                | CARTESIAN inner join                                                                                            | 33.9 KB   | 0 Bytes |
+|           ├─IndexLookUp_29(Build)            | 0.00    | 32      | root      |                                                        | time:1.64ms, loops:2, index_task: {total_time: 717.2µs, fetch_handle: 711.3µs, build: 1.03µs, wait: 4.85µs}, table_task: {total_time: 779.3µs, num: 1, concurrency: 5}, next: {wait_index: 818.5µs, wait_table_lookup_build: 81.9µs, wait_table_lookup_resp: 702.2µs}                                                                                                                                                                                                                                                                                                  |                                                                                                                 | 19.1 KB   | N/A     |
+|           │ ├─IndexRangeScan_26(Build)       | 0.03    | 33      | cop[tikv] | table:SLLXJT_LOAN_DETAIL, index:idx_RUN_DATE(RUN_DATE) | time:704.6µs, loops:3, cop_task: {num: 1, max: 636.2µs, proc_keys: 33, tot_proc: 104.8µs, tot_wait: 70.6µs, copr_cache_hit_ratio: 0.00, build_task_duration: 29.5µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:1, total_time:609.3µs}}, tikv_task:{time:0s, loops:2}, scan_detail: {total_process_keys: 33, total_process_keys_size: 1518, total_keys: 34, get_snapshot_time: 37.2µs, rocksdb: {key_skipped_count: 33, block: {cache_hit_count: 2}}}, time_detail: {total_process_time: 104.8µs, total_wait_time: 70.6µs, tikv_wall_time: 310.7µs}           | range:[2021-09-28,2021-09-28], keep order:false, stats:pseudo                                                   | N/A       | N/A     |
+|           │ └─Selection_28(Probe)            | 0.00    | 32      | cop[tikv] |                                                        | time:668.8µs, loops:2, cop_task: {num: 1, max: 557.9µs, proc_keys: 33, tot_proc: 115.2µs, tot_wait: 48µs, copr_cache_hit_ratio: 0.00, build_task_duration: 28.5µs, max_distsql_concurrency: 1}, rpc_info:{Cop:{num_rpc:1, total_time:541.1µs}}, tikv_task:{time:0s, loops:2}, scan_detail: {total_process_keys: 33, total_process_keys_size: 5734, total_keys: 34, get_snapshot_time: 20.9µs, rocksdb: {key_skipped_count: 33, block: {cache_hit_count: 2}}}, time_detail: {total_process_time: 115.2µs, total_wait_time: 48µs, tikv_wall_time: 286µs}                 | eq(test.sllxjt_loan_detail.loan_result, "00")                                                                   | N/A       | N/A     |
+|           │   └─TableRowIDScan_27            | 0.03    | 33      | cop[tikv] | table:SLLXJT_LOAN_DETAIL                               | tikv_task:{time:0s, loops:2}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | keep order:false, stats:pseudo                                                                                  | N/A       | N/A     |
+|           └─Projection_30(Probe)             | 1.00    | 1       | root      |                                                        | time:13.5µs, loops:2, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | setvar(rownum, -1)->Column#14                                                                                   | 0 Bytes   | N/A     |
+|             └─TableDual_31                   | 1.00    | 1       | root      |                                                        | time:1.67µs, loops:2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | rows:1                                                                                                          | N/A       | N/A     |
++----------------------------------------------+---------+---------+-----------+--------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-----------+---------+
+12 rows in set (0.00 sec)
+
+```
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+tidb version: 6.5.x & 8.1.0

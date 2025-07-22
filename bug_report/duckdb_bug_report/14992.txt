@@ -1,0 +1,113 @@
+ID: 14992
+Title: Bump Extension C API to stable
+Description:
+This (draft) PR stabilizes (part of) the Extension C API. It achieves this by bumping the version in `duckdb_extension.h` to `v1.2.0`(the upcoming DuckDB release) through the header generation mechanism.
+Additionally, this PR solves a few small issues encountered along the way.
+
+## Notes to reviewers
+In the current draft state, i'm particularly looking for feedback on the following:
+
+We need to thoroughly review which functions are going to end up in the `v1.2.0` stable part and which functions go in the unstable part. Basically this PR is proposing to add all non-deprecated functions that pre-existed to the stable part of the API. The only functions that go into unstable are the deprecated ones and the ones that were very recently added.
+
+Then any feedback/ideas/potential issues with:
+- lifecycle of C API functions
+- testing mechanism using reference extension
+
+Only when this has been reviewed and approved a thorough code review is required
+
+## Background
+The C extension API is defined by the regular `duckdb.h` header combined with the `duckdb_extension.h` header. In `duckdb_extension.h` we define a struct of function pointers that is passed to an extension on load. Through this struct of function pointers, the extension will be able to call into DuckDB functionality without the dynamic loader needing to lookup the symbols on extension load. For more info, see https://github.com/duckdb/duckdb/pull/12682
+
+## This PR
+Before this PR, the version of the Extension C API was separate from the DuckDB one, being set to an arbitrary v0.0.1. With this PR, we bump this version to `v1.2.0`, which will be the next version of DuckDB. As part of this PR, we also slightly change the way versioning of the Extension C API works.
+
+## Extension ABI Types
+In this PR, extensions can be of 3 different ABI types.
+
+Firstly, `ExtensionABIType::CPP` type extensions are coded against C++ API. They are compiled for a single target version of DuckDB and will only work with that version. Most of the currently available DuckDB extensions are of this type.
+
+Secondly, we have the `ExtensionABIType::C_STRUCT` type extensions. These are currently produced by the C api based extension templates. These extensions use the C API by requesting the function pointer struct from `duckdb_extension.h`. These extensions specify a **minimum DuckDB version** in their metadata and because the function pointer struct is never modified but only appended to, these binaries are (API-)compatible with all duckdb release after its specified minimum version. (or till the point we decide to "restart" the struct, see step 4 of the lifecycle) 
+
+Finally, we have a the newly added `ExtensionABIType::C_STRUCT_UNSTABLE` type. Extensions of this type fall sort of in the middle of the first two: while they do use the C API, they rely on the unstable part of the function pointer struct. This means that the extension binaries of this type are actually strictly tied to a specific DuckDB version. This allows building extensions on functionality that we can not yet guarantee to be stable.
+
+## Life cycle of a C API function
+To understand the process of adding functionality to Extension C API, we will consider the lifecycle of a new C API function. Let's say we want to add a new function that looks like:
+
+```c++
+uint64_t duckdb_add_two_numbers(uint64_t a, uint64_t a);
+```
+
+### Step 1: adding the function to the C API
+To add `duckdb_add_two_numbers` to the C API, we first need to add its description to a (new or existing) json definition file in `src/include/duckdb/main/capi/header_generation/functions`. Next up we need to ensure that duckdb actually implements the `duckdb_add_two_numbers`, by adding its implementation, for example in `src/main/capi/duckdb-c.cpp`. Next, we add the `duckdb_add_two_numbers` function to the exclusion list in `src/include/duckdb/main/capi/header_generation/apis/v1/exclusion_list.json`, because we do not yet want to expose it to the function pointer struct. Finally, we run the `scripts/generate_c_api.py` code generation script to complete Step 1.
+
+With step 1 completed, DuckDB now has the `duckdb_add_two_numbers` exposed for linking, but C API extensions are not yet able to use it: because it's not in the function pointer struct. This could be a sensible first step for functionality that is added in a PR to DuckDB that may require several more PRs to be practically usable.
+
+### Step 2: adding the function to the unstable C API struct
+Let's say we now want to use the example `duckdb_add_two_numbers` function from an extension, but we are not yet ready to promise stability of the function. This is achieved by moving the function from the exclusion list to the unstable api struct defintion in `src/include/duckdb/main/capi/header_generation/apis/v1/unstable/*.json`. After moving and rerunning the codegen, our (simplified) function pointer struct could look like:
+
+```c++
+typedef struct {
+	// v1.2.0
+	duckdb_state (*duckdb_open)(const char *path, duckdb_database *out_database);
+	// ....
+
+// These functions have been recently added to DuckDB. They are candidate functions to be added to the stable API
+#ifdef DUCKDB_EXTENSION_API_VERSION_UNSTABLE
+	uint64_t (*duckdb_add_two_numbers)(uint64_t a, uint64_t a);
+#endif
+}  duckdb_ext_api_v1;
+```
+
+Note that the function was added all the way at the end, and is hidden behind the `DUCKDB_EXTENSION_API_VERSION_UNSTABLE` define. This means that `duckdb_add_two_numbers` can only be used by extensions of the `ExtensionABIType::C_STRUCT_UNSTABLE` type. 
+
+Also, it's important to understand that `C_STRUCT_UNSTABLE` extensions themselves are not necessarily "unstable" in the sense that there are not production quality: the only thing unstable means in this context is that it uses the unstable part of the function pointer struct, meaning that recompilation is required for every DuckDB version.
+
+Furthermore, **functions are alllowed to remain in the unstable part of the function pointer struct in stable releases of DuckDB**. 
+
+Finally, functions in the unstable part of the struct can be removed from the struct in future versions without any problems.
+
+### Step 3: stabilizing a function
+Now we are finally ready to stabilize `duckdb_add_two_numbers`.  To do so we move the function from `src/include/duckdb/main/capi/header_generation/apis/v1/unstable/*.json` to a newly created `src/include/duckdb/main/capi/header_generation/apis/v1/v1.x/v1.x.y.json` file, where `1.x.y` is the upcoming release. Rerunning the codegen will produce a function pointer struct like:
+
+```c++
+typedef struct {
+	// v1.2.0
+	duckdb_state (*duckdb_open)(const char *path, duckdb_database *out_database);
+	// ....
+	
+	// v1.x.y
+	uint64_t (*duckdb_add_two_numbers)(uint64_t a, uint64_t a);
+}  duckdb_ext_api_v1;
+```
+After the code moving `duckdb_add_two_numbers` to stable is in duckdb/duckdb, it is no longer allowed to change it, for this would break the forwards compatibility of the binaries targetting `v1.x.y` and up. This means that merging PRs that add to the stable part of the function pointer struct should always be review with utmost care. When in doubt, functionality should remain in the unstable part of the function pointer struct.
+
+Interestingly, in the run-up to duckdb release `v1.x.y`, it **is** allowed to add to `src/include/duckdb/main/capi/header_generation/apis/v1/v1.x/v1.x.y.json` in multiple PRs, as long as they are appended to the end.
+
+Also, this means that as soon as functions are added to the *unreleased* `v1.x.y` part of the struct, `ExtensionABIType::C_STRUCT` extensions relying on that function can already be compiled by targeting `v1.x.y` as minimum duckdb version.
+
+### Step 4: removal/modification of a function?
+Removal (or changing the signature) of a function that is part of the stable API is (by design) discouraged and not really possible. However if it turns out to be absolutely necessary to stop support for one of the functions in the stable function pointer struct, we have several options.
+
+The first option is to replace the function with a `NOP` operation. For example a function that returns a `duckdb_state` can simply always error. Extensions are expected to check the `duckdb_state` result from all c api calls, so they should gracefully handle the error, which will then partially or fully break functionality of the extension. Note that this solution is fairly fragile as it could break extensions relying on the function in unexpected ways without a good way to detect this.
+
+The second options is to do a complete regen of the function pointer struct. This will require DuckDB to do an additional check where it refuses to load `ExtensionABIType::C_STRUCT` type extensions with a minimum version from before the struct was regenerated. Note that the situation where DuckDB may need to refuse loading extensions with a too low minimum version might also be necessary for example if compatibility between extensions of certain versions and duckdb arise due to toolchain problems
+
+A third options is to add a new extension type such as `ExtensionABIType::C_STRUCT_V2` where a completely new struct is provided. This will allow supporting both the old and the new behaviour.
+
+To conclude, while ideally dropping support for any of the stable functions is not super pleasant, we do have options if the burden of supporting functions becomes too large.
+
+## Testing
+This PR updates the `demo_capi` extension so that it can produce both a `C_STRUCT` and a `C_STRUCT_UNSTABLE` extension. This was used to validate the code in this PR. However, proper testing is something that will be done in a follow up PR. The idea is that we are adding a so-called "reference extension" which now lives in `https://github.com/duckdb/reference-extension-c`. This extension will be able to produce extension of both the stable and the unstable api, with branches/tagged releases that target every DuckDB release. DuckDB's CI will then be able build/download these reference extensions and run the test suite to confirm that the whole extension API is working as expected and the API-compatibility is guaranteed.
+
+## TODOs after merge
+- update c-api/rust extension templates to support the unstable api builds
+- update the reference extension to support the unstable api builds
+- add CI to duckdb/duckdb that builds the reference extensions and runs its tests.
+
+
+
+
+
+
+
+

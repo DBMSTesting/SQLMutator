@@ -1,0 +1,246 @@
+ID: 38361
+Title: Wrong results and nonoptimal plan when datetime column comparing number constant
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+CREATE TABLE `tt` (
+  `CREATED_DATE` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY `ii` (`CREATED_DATE`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+-- 5 values on the day before yesterday
+insert into tt value
+(date_sub(curdate(), interval 2 day)),
+(date_add(date_sub(curdate(), interval 2 day), interval 1 minute)),
+(date_sub(date_sub(now(), interval 2 day), interval 1 hour)),
+(date_add(date_sub(now(), interval 2 day), interval 1 hour)),
+(date_sub(date_sub(curdate(), interval 1 day), interval 1 minute));
+-- 5 values on yesterday
+insert into tt value
+(date_sub(curdate(), interval 1 day)),
+(date_add(date_sub(curdate(), interval 1 day), interval 1 minute)),
+(date_sub(date_sub(now(), interval 1 day), interval 1 hour)),
+(date_add(date_sub(now(), interval 1 day), interval 1 hour)),
+(date_sub(curdate(), interval 1 minute));
+-- 5 values on today
+insert into tt value
+(curdate()),
+(date_add(curdate(), interval 1 minute)),
+(date_sub(now(), interval 1 hour)),
+(date_add(now(), interval 1 hour)),
+(date_sub(date_add(curdate(), interval 1 day), interval 1 minute));
+-- 5 values on tomorrow
+insert into tt value
+(date_add(curdate(), interval 1 day)),
+(date_add(date_add(curdate(), interval 1 day), interval 1 minute)),
+(date_sub(date_add(now(), interval 1 day), interval 1 hour)),
+(date_add(date_add(now(), interval 1 day), interval 1 hour)),
+(date_sub(date_add(curdate(), interval 2 day), interval 1 minute));
+
+insert into tt value ('2000-1-1'); -- an extra value
+select * from tt a where a.CREATED_DATE > curdate()-1;
+select * from tt a where a.CREATED_DATE > subdate(curdate(),1);
+```
+
+### 2. What did you expect to see? (Required)
+
+Result of MySQL 8.0.30:
+```
+127.0.0.1:3306[test]> select * from tt a where a.CREATED_DATE > curdate()-1;
++---------------------+
+| CREATED_DATE        |
++---------------------+
+| 2022-10-09 00:00:00 |
+| 2022-10-09 00:01:00 |
+| 2022-10-09 06:48:58 |
+| 2022-10-09 08:48:58 |
+| 2022-10-09 23:59:00 |
+| 2022-10-10 00:00:00 |
+| 2022-10-10 00:01:00 |
+| 2022-10-10 06:48:58 |
+| 2022-10-10 08:48:58 |
+| 2022-10-10 23:59:00 |
+| 2022-10-11 00:00:00 |
+| 2022-10-11 00:01:00 |
+| 2022-10-11 06:48:58 |
+| 2022-10-11 08:48:58 |
+| 2022-10-11 23:59:00 |
++---------------------+
+15 rows in set (0.000 sec)
+
+127.0.0.1:3306[test]> select * from tt a where a.CREATED_DATE > subdate(curdate(),1);
++---------------------+
+| CREATED_DATE        |
++---------------------+
+| 2022-10-09 00:01:00 |
+| 2022-10-09 06:48:58 |
+| 2022-10-09 08:48:58 |
+| 2022-10-09 23:59:00 |
+| 2022-10-10 00:00:00 |
+| 2022-10-10 00:01:00 |
+| 2022-10-10 06:48:58 |
+| 2022-10-10 08:48:58 |
+| 2022-10-10 23:59:00 |
+| 2022-10-11 00:00:00 |
+| 2022-10-11 00:01:00 |
+| 2022-10-11 06:48:58 |
+| 2022-10-11 08:48:58 |
+| 2022-10-11 23:59:00 |
++---------------------+
+14 rows in set (0.001 sec)
+
+```
+
+### 3. What did you see instead (Required)
+
+Result of tidb master (v6.4.0-alpha-nightly-20221009):
+```
+127.0.0.1:4000[test]> select * from tt a where a.CREATED_DATE > curdate()-1;
++---------------------+
+| CREATED_DATE        |
++---------------------+
+| 2022-10-08 00:00:00 |
+| 2022-10-08 00:01:00 |
+| 2022-10-08 14:49:41 |
+| 2022-10-08 16:49:41 |
+| 2022-10-08 23:59:00 |
+| 2022-10-09 00:00:00 |
+| 2022-10-09 00:01:00 |
+| 2022-10-09 14:49:41 |
+| 2022-10-09 16:49:41 |
+| 2022-10-09 23:59:00 |
+| 2022-10-10 00:00:00 |
+| 2022-10-10 00:01:00 |
+| 2022-10-10 14:49:41 |
+| 2022-10-10 16:49:41 |
+| 2022-10-10 23:59:00 |
+| 2022-10-11 00:00:00 |
+| 2022-10-11 00:01:00 |
+| 2022-10-11 14:49:41 |
+| 2022-10-11 16:49:41 |
+| 2022-10-11 23:59:00 |
+| 2000-01-01 00:00:00 |
++---------------------+
+21 rows in set (0.001 sec)
+
+127.0.0.1:4000[test]> select * from tt a where a.CREATED_DATE > subdate(curdate(),1);
++---------------------+
+| CREATED_DATE        |
++---------------------+
+| 2022-10-09 00:01:00 |
+| 2022-10-09 14:49:41 |
+| 2022-10-09 16:49:41 |
+| 2022-10-09 23:59:00 |
+| 2022-10-10 00:00:00 |
+| 2022-10-10 00:01:00 |
+| 2022-10-10 14:49:41 |
+| 2022-10-10 16:49:41 |
+| 2022-10-10 23:59:00 |
+| 2022-10-11 00:00:00 |
+| 2022-10-11 00:01:00 |
+| 2022-10-11 14:49:41 |
+| 2022-10-11 16:49:41 |
+| 2022-10-11 23:59:00 |
++---------------------+
+14 rows in set (0.004 sec)
+
+127.0.0.1:4000[test]> explain select * from tt a where a.CREATED_DATE > curdate()-1;
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| id                      | estRows | task      | access object | operator info                                                |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| TableReader_7           | 16.80   | root      |               | data:Selection_6                                             |
+| └─Selection_6           | 16.80   | cop[tikv] |               | gt(cast(test.tt.created_date, double BINARY), 2.0221009e+07) |
+|   └─TableFullScan_5     | 21.00   | cop[tikv] | table:a       | keep order:false, stats:pseudo                               |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+3 rows in set (0.002 sec)
+
+127.0.0.1:4000[test]> explain select * from tt a where a.CREATED_DATE > subdate(curdate(),1);
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+| id                     | estRows | task      | access object                   | operator info                                                    |
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+| IndexReader_6          | 7.00    | root      |                                 | index:IndexRangeScan_5                                           |
+| └─IndexRangeScan_5     | 7.00    | cop[tikv] | table:a, index:ii(CREATED_DATE) | range:(2022-10-09 00:00:00,+inf], keep order:false, stats:pseudo |
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+2 rows in set (0.002 sec)
+```
+
+Result of tidb v4.0.16:
+```
+127.0.0.1:4000[test]> select * from tt a where a.CREATED_DATE > curdate()-1;
++---------------------+
+| CREATED_DATE        |
++---------------------+
+| 2022-10-09 00:01:00 |
+| 2022-10-09 14:50:55 |
+| 2022-10-09 16:50:55 |
+| 2022-10-09 23:59:00 |
+| 2022-10-10 00:00:00 |
+| 2022-10-10 00:01:00 |
+| 2022-10-10 14:50:55 |
+| 2022-10-10 16:50:55 |
+| 2022-10-10 23:59:00 |
+| 2022-10-11 00:00:00 |
+| 2022-10-11 00:01:00 |
+| 2022-10-11 14:50:55 |
+| 2022-10-11 16:50:55 |
+| 2022-10-11 23:59:00 |
++---------------------+
+14 rows in set (0.001 sec)
+
+127.0.0.1:4000[test]> select * from tt a where a.CREATED_DATE > subdate(curdate(),1);
++---------------------+
+| CREATED_DATE        |
++---------------------+
+| 2022-10-09 00:01:00 |
+| 2022-10-09 14:50:55 |
+| 2022-10-09 16:50:55 |
+| 2022-10-09 23:59:00 |
+| 2022-10-10 00:00:00 |
+| 2022-10-10 00:01:00 |
+| 2022-10-10 14:50:55 |
+| 2022-10-10 16:50:55 |
+| 2022-10-10 23:59:00 |
+| 2022-10-11 00:00:00 |
+| 2022-10-11 00:01:00 |
+| 2022-10-11 14:50:55 |
+| 2022-10-11 16:50:55 |
+| 2022-10-11 23:59:00 |
++---------------------+
+14 rows in set (0.003 sec)
+
+127.0.0.1:4000[test]> explain select * from tt a where a.CREATED_DATE > curdate()-1;
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+| id                     | estRows | task      | access object                   | operator info                                                    |
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+| IndexReader_6          | 7.00    | root      |                                 | index:IndexRangeScan_5                                           |
+| └─IndexRangeScan_5     | 7.00    | cop[tikv] | table:a, index:ii(CREATED_DATE) | range:(2022-10-09 00:00:00,+inf], keep order:false, stats:pseudo |
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+2 rows in set (0.002 sec)
+
+127.0.0.1:4000[test]> explain select * from tt a where a.CREATED_DATE > subdate(curdate(),1);
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+| id                     | estRows | task      | access object                   | operator info                                                    |
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+| IndexReader_6          | 7.00    | root      |                                 | index:IndexRangeScan_5                                           |
+| └─IndexRangeScan_5     | 7.00    | cop[tikv] | table:a, index:ii(CREATED_DATE) | range:(2022-10-09 00:00:00,+inf], keep order:false, stats:pseudo |
++------------------------+---------+-----------+---------------------------------+------------------------------------------------------------------+
+2 rows in set (0.002 sec)
+```
+
+The difference between tidb v4.0.x and tidb v5.0+ is caused by #20961.
+
+We expect that (1) the results are correct (maybe we also need to make clear the behavior of MySQL) and (2) if possible, both queries could use range scan instead of full scan.
+
+The key problem here is how to handle the type incompatibility between a datetime column and a number.
+
+The simplest but not complete solution I can think of is to revert #20961 directly.
+
+### 4. What is your TiDB version? (Required)
+
+current master
+

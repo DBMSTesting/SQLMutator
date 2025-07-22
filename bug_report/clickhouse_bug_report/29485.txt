@@ -1,0 +1,179 @@
+ID: 29485
+Title: Deadlock with JOIN Engine
+Description:
+**Describe what's wrong**
+
+When executing simulatenously a read and a write query on a JOIN Engine table there is a change of deadlocking, where the read query is waiting for the write one and viceversa.
+
+
+**Does it reproduce on recent release?**
+
+Tested and reproduced under:
+* 20.7.2.30
+* 21.3.17.2
+* 21.8.7.22
+* 21.9.4.35
+* master
+
+
+**How to reproduce**
+
+The current way I have to reproduce it is to execute the 2 queries in a loop with a small sleep in between:
+
+```bash
+while true;
+do
+    clickhouse-client --query "
+        SELECT *
+        FROM
+        (
+            SELECT DISTINCT user AS user_id
+            FROM public.t_ff7df024062d4eaabe035d5f85719ab0
+        ) AS stats
+        LEFT JOIN
+        (
+            SELECT
+                *
+            FROM public.t_5046fa4dd1584fa4942423dfc4dde54d AS cs
+            ANY LEFT JOIN
+            (
+                SELECT *
+                FROM public.t_5046fa4dd1584fa4942423dfc4dde54d
+            ) AS w ON cs.owner_id = w.id
+        ) AS ws ON stats.user_id = ws.id
+    " &
+
+    sleep 0.1
+    cat ~/issues/t_5046.csv | clickhouse-client --query="INSERT INTO public.t_5046fa4dd1584fa4942423dfc4dde54d FORMAT CSVWithNames" &
+    sleep 0.1
+done
+```
+
+The read query takes around 0.45s and the import takes 0.2s.
+
+After a few loops (1-2 even) the lock happens and those 2 queries will be blocked forever. Killing the query doesn't work.
+
+The join table looks like this:
+
+```sql
+SHOW CREATE TABLE public.t_5046fa4dd1584fa4942423dfc4dde54d
+
+Query id: 4b31e3a5-feee-4e3a-96fd-3a09b6d5bb1e
+
+┌─statement───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE public.t_5046fa4dd1584fa4942423dfc4dde54d
+(
+    `id` String,
+    `email` String,
+    `name` String,
+    `database` String,
+    `database_server` String,
+    `owner_id` String,
+    `created_at` DateTime
+)
+ENGINE = Join(ANY, LEFT, id) │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.001 sec
+```
+
+The table has 884 rows that I'm inserting over an over (`~/issues/t_5046.csv` is a dump of the table) so it remains the same size.
+
+
+The read query is stuck waiting to get a read access lock on the shared mutex:
+
+```
+#0  0x00007f613f8518ca in __futex_abstimed_wait_common64 () from /usr/lib/libpthread.so.0
+#1  0x00007f613f84b270 in pthread_cond_wait@@GLIBC_2.3.2 () from /usr/lib/libpthread.so.0
+#2  0x00007f613f79e453 in std::__1::__libcpp_condvar_wait (__cv=0x7f6056181224, __m=0x189) at /mnt/ch/ClickHouse/contrib/libcxx/include/__threading_support:436
+#3  std::__1::condition_variable::wait (this=0x7f6056181224, lk=...) at /mnt/ch/ClickHouse/contrib/libcxx/src/condition_variable.cpp:44
+#4  0x00007f613f7fbc29 in std::__1::__shared_mutex_base::lock_shared (this=0x7f60561811d0) at /mnt/ch/ClickHouse/contrib/libcxx/src/shared_mutex.cpp:65
+#5  0x00007f6131b758c2 in std::__1::shared_mutex::lock_shared (this=0x7f60561811d0) at /mnt/ch/ClickHouse/contrib/libcxx/include/shared_mutex:196
+#6  std::__1::shared_lock<std::__1::shared_mutex>::shared_lock (this=<optimized out>, __m=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/shared_mutex:330
+#7  DB::JoinSource::JoinSource (this=this@entry=0x7f6029e01b18, join_=..., rwlock=..., max_block_size_=max_block_size_@entry=65505, sample_block_=...) at /mnt/ch/ClickHouse/src/Storages/StorageJoin.cpp:376
+#8  0x00007f6131b75496 in std::__1::allocator<DB::JoinSource>::construct<DB::JoinSource, std::__1::shared_ptr<DB::HashJoin>&, std::__1::shared_mutex&, unsigned long&, DB::Block&> (this=<optimized out>, __p=<optimized out>, __args=..., __args=..., __args--Type <RET> for more, q to quit, c to continue without paging--
+=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/memory:886
+#9  std::__1::allocator_traits<std::__1::allocator<DB::JoinSource> >::__construct<DB::JoinSource, std::__1::shared_ptr<DB::HashJoin>&, std::__1::shared_mutex&, unsigned long&, DB::Block&> (__a=..., __p=0x7f6056181224, __p@entry=0x7f6029e01b18, __args=..., __args=..., __args=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/__memory/allocator_traits.h:519
+#10 0x00007f6131b7160e in std::__1::allocator_traits<std::__1::allocator<DB::JoinSource> >::construct<DB::JoinSource, std::__1::shared_ptr<DB::HashJoin>&, std::__1::shared_mutex&, unsigned long&, DB::Block&> (__a=..., __p=0x7f6029e01b18, __args=..., __args=..., __args=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/__memory/allocator_traits.h:481
+#11 std::__1::__shared_ptr_emplace<DB::JoinSource, std::__1::allocator<DB::JoinSource> >::__shared_ptr_emplace<std::__1::shared_ptr<DB::HashJoin>&, std::__1::shared_mutex&, unsigned long&, DB::Block&> (this=0x7f6029e01b00, __args=..., __args=..., __args=..., __args=..., __a=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/memory:2594
+#12 std::__1::allocate_shared<DB::JoinSource, std::__1::allocator<DB::JoinSource>, std::__1::shared_ptr<DB::HashJoin>&, std::__1::shared_mutex&, unsigned long&, DB::Block&, void> (__a=..., __args=..., __args=..., __args=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/memory:3360
+#13 std::__1::make_shared<DB::JoinSource, std::__1::shared_ptr<DB::HashJoin>&, std::__1::shared_mutex&, unsigned long&, DB::Block&, void> (__args=..., __args=..., __args=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/memory:3369
+#14 DB::StorageJoin::read (this=<optimized out>, column_names=..., metadata_snapshot=..., max_block_size=65505) at /mnt/ch/ClickHouse/src/Storages/StorageJoin.cpp:579
+#15 0x00007f6131ab23b7 in DB::IStorage::read (this=0x7f6056181000, query_plan=..., column_names=..., metadata_snapshot=..., query_info=..., context=..., processed_stage=4294967295, max_block_size=65505, num_streams=16) at /mnt/ch/ClickHouse/src/Storages/IStorage.cpp:109
+#16 0x00007f6132ec24b9 in DB::InterpreterSelectQuery::executeFetchColumns (this=this@entry=0x7f6029f8ff00, processing_stage=DB::QueryProcessingStage::FetchColumns, query_plan=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:1984
+#17 0x00007f6132ebc9a9 in DB::InterpreterSelectQuery::executeImpl (this=this@entry=0x7f6029f8ff00, query_plan=..., prepared_input=..., prepared_pipe=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:1037
+#18 0x00007f6132ebc2cb in DB::InterpreterSelectQuery::buildQueryPlan (this=0x7f6029f8ff00, query_plan=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:580
+#19 0x00007f6132f0b1da in DB::InterpreterSelectWithUnionQuery::buildQueryPlan (this=0x7f605d074278, query_plan=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectWithUnionQuery.cpp:254
+#20 0x00007f6132c170b8 in DB::buildJoinedPlan (context=..., join_element=..., analyzed_join=..., query_options=...) at /mnt/ch/ClickHouse/src/Interpreters/ExpressionAnalyzer.cpp:898
+#21 DB::SelectQueryExpressionAnalyzer::makeTableJoin (this=<optimized out>, this@entry=0x7f605d0d8500, join_element=..., left_columns=..., left_convert_actions=...) at /mnt/ch/ClickHouse/src/Interpreters/ExpressionAnalyzer.cpp:944
+#22 0x00007f6132c160c4 in DB::SelectQueryExpressionAnalyzer::appendJoin (this=this@entry=0x7f605d0d8500, chain=..., converting_join_columns=...) at /mnt/ch/ClickHouse/src/Interpreters/ExpressionAnalyzer.cpp:839
+#23 0x00007f6132c1e2fe in DB::ExpressionAnalysisResult::ExpressionAnalysisResult (this=0x7f6048ce8db0, query_analyzer=..., metadata_snapshot=..., first_stage_=<optimized out>, second_stage_=<optimized out>, only_types=false, filter_info_=..., source_header=...) at /mnt/ch/ClickHouse/src/Interpreters/ExpressionAnalyzer.cpp:1551
+#24 0x00007f6132ebf07a in DB::InterpreterSelectQuery::getSampleBlockImpl (this=this@entry=0x7f6029f8f100) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:645
+#25 0x00007f6132eb9290 in DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context const>, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&)::$_1::operator()(bool) const (this=<optimized out>, this@entry=0x7f6048ce96a0, try_move_to_prewhere=true) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:510
+#26 0x00007f6132eb4ffb in DB::InterpreterSelectQuery::InterpreterSelectQuery (this=0x7f6029f8f100, query_ptr_=..., context_=..., input_=..., input_pipe_=..., storage_=..., options_=..., required_result_column_names=..., metadata_snapshot_=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:513
+#27 0x00007f6132eb37a5 in DB::InterpreterSelectQuery::InterpreterSelectQuery (this=0x7f6056181224, query_ptr_=..., context_=..., options_=..., required_result_column_names_=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectQuery.cpp:160
+#28 0x00007f6132f0a242 in std::__1::make_unique<DB::InterpreterSelectQuery, std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context>&, DB::SelectQueryOptions&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&> (__args=..., __args=..., __args=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/memory:2068
+#29 DB::InterpreterSelectWithUnionQuery::buildCurrentChildInterpreter (this=this@entry=0x7f605d073e00, ast_ptr_=..., current_required_result_column_names=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectWithUnionQuery.cpp:216
+#30 0x00007f6132f090d0 in DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery (this=<optimized out>, query_ptr_=..., context_=..., options_=..., required_result_column_names=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterSelectWithUnionQuery.cpp:138
+#31 0x00007f6132e9814a in std::__1::make_unique<DB::InterpreterSelectWithUnionQuery, std::__1::shared_ptr<DB::IAST>&, std::__1::shared_ptr<DB::Context>&, DB::SelectQueryOptions const&> (__args=..., __args=..., __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/memory:2068
+#32 0x00007f6132e97274 in DB::InterpreterFactory::get (query=..., context=..., options=...) at /mnt/ch/ClickHouse/src/Interpreters/InterpreterFactory.cpp:118
+#33 0x00007f61330d6829 in DB::executeQueryImpl (begin=<optimized out>, begin@entry=0x7f605d092000 "\n        SELECT *\n        FROM\n        (\n", ' ' <repeats 12 times>, "SELECT DISTINCT user AS user_id\n", ' ' <repeats 12 times>, "FROM public.t_ff7df024062d4eaabe035d5f85719ab0\n        ) AS stats\n        LEFT JOIN\n        (\n         "..., end=<optimized out>, context=..., internal=false, stage=DB::QueryProcessingStage::Complete, istr=0x0) at /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:605
+#34 0x00007f61330d5152 in DB::executeQuery (query=..., context=..., internal=false, stage=DB::QueryProcessingStage::Complete) at /mnt/ch/ClickHouse/src/Interpreters/executeQuery.cpp:950
+#35 0x00007f6130b0a7db in DB::TCPHandler::runImpl (this=0x7f605d1da300) at /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:292
+#36 0x00007f6130b16589 in DB::TCPHandler::run (this=0x7f605d1da300) at /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:1628
+#37 0x00007f613ff7a68c in Poco::Net::TCPServerConnection::start (this=0x7f6056181224) at /mnt/ch/ClickHouse/contrib/poco/Net/src/TCPServerConnection.cpp:43
+#38 0x00007f613ff7ab4e in Poco::Net::TCPServerDispatcher::run (this=0x7f60378c6f00) at /mnt/ch/ClickHouse/contrib/poco/Net/src/TCPServerDispatcher.cpp:115
+#39 0x00007f613fe13798 in Poco::PooledThread::run (this=0x7f612782e600) at /mnt/ch/ClickHouse/contrib/poco/Foundation/src/ThreadPool.cpp:199
+#40 0x00007f613fe10cdf in Poco::ThreadImpl::runnableEntry (pThread=0x7f612782e638) at /mnt/ch/ClickHouse/contrib/poco/Foundation/src/Thread_POSIX.cpp:345
+#41 0x00007f613f845259 in start_thread () from /usr/lib/libpthread.so.0
+#42 0x00007f613f61d5e3 in clone () from /usr/lib/libc.so.6
+```
+
+
+The write query is waiting to get access to write:
+
+```
+(gdb) bt
+#0  0x00007f27bb5ff8ca in __futex_abstimed_wait_common64 () from /usr/lib/libpthread.so.0
+#1  0x00007f27bb5f9270 in pthread_cond_wait@@GLIBC_2.3.2 () from /usr/lib/libpthread.so.0
+#2  0x00007f27bb54c453 in std::__1::__libcpp_condvar_wait (__cv=0x7f27a37c3a54, __m=0x189) at /mnt/ch/ClickHouse/contrib/libcxx/include/__threading_support:436
+#3  std::__1::condition_variable::wait (this=0x7f27a37c3a54, lk=...) at /mnt/ch/ClickHouse/contrib/libcxx/src/condition_variable.cpp:44
+#4  0x00007f27bb5a9af9 in std::__1::__shared_mutex_base::lock (this=0x7f27a37c39d0) at /mnt/ch/ClickHouse/contrib/libcxx/src/shared_mutex.cpp:35
+#5  0x00007f27ad91f0d3 in std::__1::shared_mutex::lock (this=0x7f27a37c3a54) at /mnt/ch/ClickHouse/contrib/libcxx/include/shared_mutex:191
+#6  std::__1::unique_lock<std::__1::shared_mutex>::unique_lock (this=0x7f2650f753a8, __m=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/__mutex_base:119
+#7  DB::StorageJoin::insertBlock (this=0x7f27a37c3800, block=...) at /mnt/ch/ClickHouse/src/Storages/StorageJoin.cpp:183
+#8  0x00007f27ada8682e in DB::SetOrJoinSink::consume (this=0x7f26ac757d18, chunk=...) at /mnt/ch/ClickHouse/src/Storages/StorageSet.cpp:87
+#9  0x00007f27abe72087 in DB::SinkToStorage::transform (this=0x7f26ac757d18, chunk=...) at /mnt/ch/ClickHouse/src/Processors/Sinks/SinkToStorage.cpp:18
+#10 0x00007f27ac0314a2 in std::__1::__function::__policy_func<void ()>::operator()() const (this=0x7f2650f75620) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2221
+#11 std::__1::function<void ()>::operator()() const (this=0x7f2650f75620) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2560
+#12 DB::runStep(std::__1::function<void ()>, DB::ThreadStatus*, std::__1::atomic<unsigned long>*) (step=..., thread_status=0x0, elapsed_ms=0x0) at /mnt/ch/ClickHouse/src/Processors/Transforms/ExceptionKeepingTransform.cpp:102
+#13 0x00007f27ac031131 in DB::ExceptionKeepingTransform::work (this=0x7f26ac757d18) at /mnt/ch/ClickHouse/src/Processors/Transforms/ExceptionKeepingTransform.cpp:135
+#14 0x00007f27ac42034c in DB::executeJob (processor=0x7f26ac757d18) at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:88
+#15 DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0::operator()() const (this=0x7f26666a8b30) at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:105
+#16 std::__1::__invoke<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&) (__f=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676
+#17 std::__1::__invoke_void_return_wrapper<void>::__call<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&) (__args=...)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/__functional_base:348
+#18 std::__1::__function::__default_alloc_func<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()>::operator()() (this=0x7f26666a8b30) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:1608
+#19 std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()> >(std::__1::__function::__policy_storage const*) (__buf=0x7f26666a8b30)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2089
+#20 0x00007f27ac41e787 in std::__1::__function::__policy_func<void ()>::operator()() const (this=0xfffffffffffffe70) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2221
+#21 std::__1::function<void ()>::operator()() const (this=0xfffffffffffffe70) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2560
+#22 DB::PipelineExecutor::executeStepImpl (this=this@entry=0x7f26aeff4bd8, thread_num=<optimized out>, thread_num@entry=0, num_threads=num_threads@entry=1, yield_flag=yield_flag@entry=0x0)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:599
+#23 0x00007f27ac41d779 in DB::PipelineExecutor::executeStep (this=0x7f26aeff4bd8, yield_flag=0x0) at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:440
+#24 0x00007f27ac8bd803 in DB::TCPHandler::processInsertQuery (this=this@entry=0x7f26ac770400) at /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:615
+#25 0x00007f27ac8b8871 in DB::TCPHandler::runImpl (this=0x7f26ac770400) at /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:301
+#26 0x00007f27ac8c4589 in DB::TCPHandler::run (this=0x7f26ac770400) at /mnt/ch/ClickHouse/src/Server/TCPHandler.cpp:1628
+#27 0x00007f27bbd2868c in Poco::Net::TCPServerConnection::start (this=0x7f27a37c3a54) at /mnt/ch/ClickHouse/contrib/poco/Net/src/TCPServerConnection.cpp:43
+#28 0x00007f27bbd28b4e in Poco::Net::TCPServerDispatcher::run (this=0x7f26a8ccd700) at /mnt/ch/ClickHouse/contrib/poco/Net/src/TCPServerDispatcher.cpp:115
+#29 0x00007f27bbbc1798 in Poco::PooledThread::run (this=0x7f26d46b5280) at /mnt/ch/ClickHouse/contrib/poco/Foundation/src/ThreadPool.cpp:199
+#30 0x00007f27bbbbecdf in Poco::ThreadImpl::runnableEntry (pThread=0x7f26d46b52b8) at /mnt/ch/ClickHouse/contrib/poco/Foundation/src/Thread_POSIX.cpp:345
+#31 0x00007f27bb5f3259 in start_thread () from /usr/lib/libpthread.so.0
+#32 0x00007f27bb3cb5e3 in clone () from /usr/lib/libc.so.6
+```
+
+
+This is an initial analysis: As far as I can see the issue is that `InterpreterSelectQuery` gets a read lock to avoid writes while it executes (as part of the table_join variable), then the write query comes and wants to write so it blocks there, and just later the read query tries to get a new read lock again (getSampleBlockImpl) which can't be adquired because there is a write pending.
+So, the problem is that the read query is getting a requesting a read lock twice (which is undefined behaviour to start with) and, if in between those there is a write lock request it will block both queries (and any successive ones that need access to that table).
+
+I'm working on confirming my suspicions and to provide a test without using sensitive information.

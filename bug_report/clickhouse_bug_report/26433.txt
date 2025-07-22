@@ -1,0 +1,146 @@
+ID: 26433
+Title: groupUniqArrayState(5000) returns datatype AggregateFunction(groupUniqArray, type) in version 21.7.3.14
+Description:
+groupUniqArrayState(5000) returns datatype AggregateFunction(groupUniqArray, type) in version 21.7.3.14.
+
+I had a materialized view created like:
+
+```
+CREATE MATERIALIZED VIEW blah_mv
+(
+    ...
+    `ips` AggregateFunction(groupUniqArray(5000), IPv6) CODEC(ZSTD),
+    ...
+)
+ENGINE = AggregatingMergeTree()
+AS SELECT
+    ...
+    groupUniqArrayState(5000)(remote_addr6) AS ips,
+    ...
+FROM blah_main
+```
+which worked pretty good on 21.6.5.37 version. But after upgrading to 21.7.3.14 insertion to `blah_main` crushes with message
+```
+Conversion from AggregateFunction(groupUniqArray, IPv6) to AggregateFunction(groupUniqArray(5000), IPv6) is not supported
+```
+
+**How to reproduce**
+* Which ClickHouse server versions are incompatible
+21.6.5.37 and 21.7.3.14
+* `CREATE TABLE` statements for all tables involved
+```
+CREATE DATABASE IF NOT EXISTS nginx;
+
+CREATE TABLE nginx.access_log_shard (
+  `agent_major` UInt32,
+  `agent_minor` UInt32,
+  `agent_name` LowCardinality(String),
+  `args` String,
+  `body_bytes_sent` UInt64,
+  `bytes_sent` UInt64,
+  `client_locality` Enum8('public' = 1, 'private' = 2, 'white_list' = 3) DEFAULT 'public',
+  `connection_requests` UInt64,
+  `connection` UInt64,
+  `content_length` UInt64,
+  `content_type` LowCardinality(String),
+  `device_brand` LowCardinality(String),
+  `device_family` LowCardinality(String),
+  `device_model` LowCardinality(String),
+  `host` LowCardinality(String),
+  `hostname` LowCardinality(String),
+  `http_referer` String,
+  `http_user_agent` LowCardinality(String),
+  `ip_geo_country` LowCardinality(String),
+  `is_args` LowCardinality(String),
+  `msec` Float64,
+  `os_major` LowCardinality(String),
+  `os_minor` UInt32,
+  `os_name` LowCardinality(String),
+  `proxy_addr6` Nullable(IPv6),
+  `proxy_port` UInt32,
+  `rating` UInt8,
+  `remote_addr6` IPv6,
+  `remote_port` UInt32,
+  `remote_user` String,
+  `request_completion` LowCardinality(String),
+  `request_id` String,
+  `request_length` Int64,
+  `request_method` LowCardinality(String),
+  `request_time` Float32,   
+  `request` String,
+  `response_code` UInt16,
+  `server_protocol` LowCardinality(String),
+  `timestamp` DateTime DEFAULT toDateTime(msec),
+  `upstream_addr` Array(LowCardinality(String)),
+  `upstream_response_time` Array(Float64),
+  `userid` String,
+  `sessionid` String,
+  `url` String
+) ENGINE = MergeTree()
+PARTITION BY toDate(timestamp)
+PRIMARY KEY (timestamp, client_locality, http_user_agent, remote_addr6, response_code)
+ORDER BY (timestamp, client_locality, http_user_agent, remote_addr6, response_code)
+
+CREATE MATERIALIZED VIEW nginx.userid_arr_shard
+(
+    `time_interval`  DateTime                                        CODEC(Delta, LZ4),
+    `userid`         String                                          CODEC(ZSTD(6)),
+    `ips`            AggregateFunction(groupUniqArray(5000), IPv6)   CODEC(ZSTD),
+    `user_agents`    AggregateFunction(groupUniqArray(1000), String) CODEC(ZSTD(6)),
+    `requests_count` AggregateFunction(count)                        CODEC(ZSTD(6))
+)
+ENGINE = AggregatingMergeTree()
+PARTITION BY toDate(time_interval)
+PRIMARY KEY (time_interval, userid)
+ORDER BY (time_interval, userid)
+AS
+SELECT
+    toStartOfTenMinutes(timestamp) AS time_interval,
+    userid,
+    groupUniqArrayState(5000)(remote_addr6) AS ips,
+    groupUniqArrayState(1000)(http_user_agent) AS user_agents,
+    countState() AS requests_count
+FROM nginx.access_log_shard
+    WHERE userid <> ''
+GROUP BY
+    toStartOfTenMinutes(timestamp),
+    userid;
+```
+* Sample data for all these tables
+```
+insert into nginx.access_log_shard  FORMAT JSONEachRow
+{"agent_major":0,"agent_minor":0,"agent_name":"","args":"","body_bytes_sent":"0","bytes_sent":"336","client_locality":"public","connection_requests":"6","connection":"51343401","content_length":"4345","content_type":"application\/json; charset=UTF-8","device_brand":"","device_family":"","device_model":"","host":"www.wildberries.ru","hostname":"ngx-site-r10-01.dp.wb.ru","http_referer":"https:\/\/www.wildberries.ru\/catalog\/16551765\/detail.aspx?targetUrl=SG","http_user_agent":"Mozilla\/5.0 (Windows NT 6.1) AppleWebKit\/537.36 (KHTML, like Gecko) Chrome\/91.0.4472.124 Safari\/537.36","ip_geo_country":"","is_args":"","msec":1626444451.471,"os_major":"","os_minor":0,"os_name":"","proxy_addr6":null,"proxy_port":0,"rating":0,"remote_addr6":"::ffff:95.179.127.71","remote_port":10322,"remote_user":"","request_completion":"OK","request_id":"305068ca05c20425bb8e2fe504df2ed2","request_length":"8531","request_method":"POST","request_time":0.294,"request":"\/stats\/events","response_code":200,"server_protocol":"HTTP\/2.0","timestamp":"2021-07-16 17:07:31","upstream_addr":["10.10.114.189:443"],"upstream_response_time":[0.008],"userid":"7a4a79fd-34be-42a4-8f59-36af0eb06b53.1596362625","sessionid":"7a3a9202-330a-4982-8e16-c1fc0f554bbc.1626440693","url":"\/stats\/events"}
+{"agent_major":0,"agent_minor":0,"agent_name":"","args":"","body_bytes_sent":"986","bytes_sent":"1432","client_locality":"public","connection_requests":"1","connection":"1160005870","content_length":"0","content_type":"","device_brand":"","device_family":"","device_model":"","host":"napi.wildberries.ru","hostname":"ngx-api-r06-03.dp.wb.ru","http_referer":"","http_user_agent":"okhttp\/4.9.0","ip_geo_country":"","is_args":"","msec":1626444451.471,"os_major":"","os_minor":0,"os_name":"","proxy_addr6":null,"proxy_port":0,"rating":0,"remote_addr6":"::ffff:185.210.142.174","remote_port":62408,"remote_user":"","request_completion":"OK","request_id":"32b20571ee7dafab6a83c90d772064d3","request_length":"3570","request_method":"GET","request_time":0.066,"request":"\/api\/shippings\/group","response_code":200,"server_protocol":"HTTP\/1.1","timestamp":"2021-07-16 17:07:31","upstream_addr":["10.10.123.17:80"],"upstream_response_time":[0.068],"userid":"68d8eb22-290a-4be1-b0e0-2c979553ec65.1607846020","sessionid":"d25dc257-c385-45f7-a13b-909ec2225134.1626441908","url":"\/api\/shippings\/group"}
+{"agent_major":0,"agent_minor":0,"agent_name":"","args":"id=G-aE5SSk68uWNE14uImTZw","body_bytes_sent":"0","bytes_sent":"254","client_locality":"private","connection_requests":"656","connection":"4480693","content_length":"0","content_type":"","device_brand":"","device_family":"","device_model":"","host":"servicedesk-processor.wildberries.ru","hostname":"ngx-satellite-r07-02.dp.wb.ru","http_referer":"https:\/\/servicedesk.wildberries.ru\/","http_user_agent":"Mozilla\/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit\/537.36 (KHTML, like Gecko) Chrome\/91.0.4472.114 YaBrowser\/21.6.1.274 Yowser\/2.5 Safari\/537.36","ip_geo_country":"","is_args":"?","msec":1626444451.471,"os_major":"","os_minor":0,"os_name":"","proxy_addr6":null,"proxy_port":0,"rating":0,"remote_addr6":"::ffff:10.10.44.148","remote_port":58744,"remote_user":"","request_completion":"OK","request_id":"d4e931033a2d24c30d3ec1608c5843c8","request_length":"52","request_method":"OPTIONS","request_time":0,"request":"\/mainHub\/?id=G-aE5SSk68uWNE14uImTZw","response_code":204,"server_protocol":"HTTP\/2.0","timestamp":"2021-07-16 17:07:31","upstream_addr":["10.10.112.152:80"],"upstream_response_time":[0],"userid":"","sessionid":"","url":"\/mainHub\/"}
+```
+
+**Error message and/or stacktrace**
+2021.07.16 16:16:17.909475 [ 30694 ] {094136dc-d60f-41a7-87cd-d1e4bc49fcc1} <Error> executeQuery: Code: 70, e.displayText() = DB::Exception: Conversion from AggregateFunction(groupUniqArray, IPv6) to AggregateFunction(groupUniqArray(5000), IPv6) is not supported: while converting source column ips to destination column ips: while pushing to view nginx.userid_arr_shard (version 21.7.3.14 (official build)) (from 127.0.0.1:54752) (in query: INSERT INTO nginx.access_log_buffer FORMAT JSONEachRow ), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x8d31b5a in /usr/bin/clickhouse
+1. DB::FunctionCast::createAggregateFunctionWrapper(std::__1::shared_ptr<DB::IDataType const> const&, DB::DataTypeAggregateFunction const*) const @ 0xabdf681 in /usr/bin/clickhouse
+2. DB::FunctionCast::prepareImpl(std::__1::shared_ptr<DB::IDataType const> const&, std::__1::shared_ptr<DB::IDataType const> const&, bool) const @ 0xabdcb64 in /usr/bin/clickhouse
+3. DB::FunctionCast::prepareRemoveNullable(std::__1::shared_ptr<DB::IDataType const> const&, std::__1::shared_ptr<DB::IDataType const> const&, bool) const @ 0xabdbf96 in /usr/bin/clickhouse
+4. DB::FunctionCast::prepareUnpackDictionaries(std::__1::shared_ptr<DB::IDataType const> const&, std::__1::shared_ptr<DB::IDataType const> const&) const @ 0xabda595 in /usr/bin/clickhouse
+5. DB::FunctionCast::prepare(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&) const @ 0xabd9f06 in /usr/bin/clickhouse
+6. DB::IFunctionBase::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0xa954247 in /usr/bin/clickhouse
+7. DB::castColumn(DB::ColumnWithTypeAndName const&, std::__1::shared_ptr<DB::IDataType const> const&) @ 0xfe04a91 in /usr/bin/clickhouse
+8. ? @ 0xf51b2dd in /usr/bin/clickhouse
+9. DB::ConvertingBlockInputStream::ConvertingBlockInputStream(std::__1::shared_ptr<DB::IBlockInputStream> const&, DB::Block const&, DB::ConvertingBlockInputStream::MatchColumnsMode) @ 0xf51ac82 in /usr/bin/clickhouse
+10. DB::PushingToViewsBlockOutputStream::process(DB::Block const&, DB::PushingToViewsBlockOutputStream::ViewInfo&) @ 0xfac929c in /usr/bin/clickhouse
+11. DB::PushingToViewsBlockOutputStream::write(DB::Block const&) @ 0xfac88ee in /usr/bin/clickhouse
+12. DB::AddingDefaultBlockOutputStream::write(DB::Block const&) @ 0xfad206b in /usr/bin/clickhouse
+13. DB::SquashingBlockOutputStream::finalize() @ 0xfad26ec in /usr/bin/clickhouse
+14. DB::SquashingBlockOutputStream::writeSuffix() @ 0xfad2789 in /usr/bin/clickhouse
+15. DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::__1::atomic<bool>*) @ 0xf53fbbd in /usr/bin/clickhouse
+16. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, std::__1::shared_ptr<DB::Context>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>) @ 0xfe25ec9 in /usr/bin/clickhouse
+17. DB::HTTPHandler::processQuery(std::__1::shared_ptr<DB::Context>, DB::HTTPServerRequest&, DB::HTMLForm&, DB::HTTPServerResponse&, DB::HTTPHandler::Output&, std::__1::optional<DB::CurrentThread::QueryScope>&) @ 0x10636a11 in /usr/bin/clickhouse
+18. DB::HTTPHandler::handleRequest(DB::HTTPServerRequest&, DB::HTTPServerResponse&) @ 0x1063a129 in /usr/bin/clickhouse
+19. DB::HTTPServerConnection::run() @ 0x106bb690 in /usr/bin/clickhouse
+20. Poco::Net::TCPServerConnection::start() @ 0x1338b30f in /usr/bin/clickhouse
+21. Poco::Net::TCPServerDispatcher::run() @ 0x1338cd9a in /usr/bin/clickhouse
+22. Poco::PooledThread::run() @ 0x134bfc19 in /usr/bin/clickhouse
+23. Poco::ThreadImpl::runnableEntry(void*) @ 0x134bbeaa in /usr/bin/clickhouse
+24. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+25. __clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+```

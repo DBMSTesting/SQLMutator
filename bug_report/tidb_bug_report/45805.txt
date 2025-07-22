@@ -1,0 +1,119 @@
+ID: 45805
+Title: merge join report runtime error index out of range [0] with length 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+CREATE TABLE `signed_estimate_volume` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT '',
+  `estimate_id` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `dealer_id` varchar(40) NOT NULL DEFAULT '' COMMENT '',
+  `broker_id` varchar(40) NOT NULL DEFAULT '' COMMENT '',
+  `real_t0_volume` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `real_t1_volume` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `manager_yid` varchar(32) NOT NULL DEFAULT '' COMMENT '',
+   `estimate_volume` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `estimate_year_month` varchar(8) NOT NULL DEFAULT '' COMMENT '',
+  `is_dropped` tinyint(1) NOT NULL DEFAULT '0' COMMENT '',
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+  UNIQUE KEY `UNIQ_ESTIMATE_ID` (`estimate_id`),
+  UNIQUE KEY `UNIQ_MONTH_YID_BROKER_DEALER_DROPPED` (`estimate_year_month`,`manager_yid`,`broker_id`,`dealer_id`,`is_dropped`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=630002 COMMENT='';
+
+ CREATE TABLE `unsigned_estimate_volume` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT '',
+  `estimate_id` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `estimate_year_month` varchar(8) NOT NULL DEFAULT '' COMMENT '',
+  `business_id` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `broker_id` varchar(40) NOT NULL DEFAULT '' COMMENT '',
+  `estimate_volume` bigint(20) NOT NULL DEFAULT '0' COMMENT '',
+  `manager_yid` varchar(32) NOT NULL DEFAULT '' COMMENT '',
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+  UNIQUE KEY `UNIQ_SIGNED_ESTIMATE_ID` (`estimate_id`),
+  UNIQUE KEY `UNIQ_BUSINESS_DEALER_MONTH_YID` (`estimate_year_month`,`manager_yid`,`broker_id`,`business_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=390525 COMMENT='待签约关系预估体量表';
+
+
+insert into signed_estimate_volume (id, estimate_volume, real_t1_volume) values (1, 100, 200);
+
+SELECT
+  `estimate_year_month`,
+  `a_manager_yid` AS `manager_yid`,
+  `real_t1_volume`,
+  `real_t0_volume`,
+  `a_estimate_volume` + IFNULL(`b_estimate_volume`, 0) AS `estimate_volume`,
+  IFNULL(`a`.`increase_sum`, 0) + IFNULL(`b`.`increase_sum`, 0) AS `increase_sum`,
+  IFNULL(`a`.`decrease_sum`, 0) + IFNULL(`b`.`decrease_sum`, 0) AS `decrease_sum`
+FROM
+  (
+    SELECT
+      `estimate_year_month`,
+      `manager_yid` AS `a_manager_yid`,
+      SUM(`real_t1_volume`) AS `real_t1_volume`,
+      SUM(`real_t0_volume`) AS `real_t0_volume`,
+      SUM(`estimate_volume`) AS `a_estimate_volume`,
+      SUM(
+        IF(
+          `estimate_volume` > `real_t1_volume`,
+          `estimate_volume` - `real_t1_volume`,
+          0
+        )
+      ) AS `increase_sum`,
+      SUM(
+        IF(
+          `estimate_volume` < `real_t1_volume`,
+          `estimate_volume` - `real_t1_volume`,
+          0
+        )
+      ) AS `decrease_sum`
+    FROM
+      `signed_estimate_volume`
+    GROUP BY
+      `manager_yid`
+  ) AS `a`
+  LEFT JOIN (
+    SELECT
+      `manager_yid` AS `b_manager_yid`,
+      SUM(`estimate_volume`) AS `b_estimate_volume`,
+      SUM(`estimate_volume`) AS `increase_sum`,
+      0 AS `decrease_sum`
+    FROM
+      `unsigned_estimate_volume`
+    GROUP BY
+      `manager_yid`
+  ) AS `b` ON a.`a_manager_yid` = b.`b_manager_yid`;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+query success
+### 3. What did you see instead (Required)
+return error:
+```sql
+(1105, 'runtime error: index out of range [0] with length 0')
++------------------------------+----------+-----------+--------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                           | estRows  | task      | access object                  | operator info                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++------------------------------+----------+-----------+--------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_10                | 1.00     | root      |                                | test.signed_estimate_volume.estimate_year_month, test.signed_estimate_volume.manager_yid, Column#11, Column#12, plus(Column#13, ifnull(Column#23, 0))->Column#25, plus(ifnull(Column#14, 0), ifnull(Column#23, 0))->Column#26, plus(ifnull(Column#15, 0), cast(ifnull(Column#24, 0), decimal(20,0) BINARY))->Column#27                                                                                                                                                                                               |
+| └─HashJoin_12                | 1.00     | root      |                                | left outer join, equal:[eq(test.signed_estimate_volume.manager_yid, test.unsigned_estimate_volume.manager_yid)]                                                                                                                                                                                                                                                                                                                                                                                                      |
+|   ├─HashAgg_15(Build)        | 1.00     | root      |                                | group by:Column#49, funcs:sum(Column#42)->Column#11, funcs:sum(Column#43)->Column#12, funcs:sum(Column#44)->Column#13, funcs:sum(Column#45)->Column#14, funcs:sum(Column#46)->Column#15, funcs:firstrow(Column#47)->test.signed_estimate_volume.manager_yid, funcs:firstrow(Column#48)->test.signed_estimate_volume.estimate_year_month                                                                                                                                                                              |
+|   │ └─Projection_30          | 1.00     | root      |                                | cast(test.signed_estimate_volume.real_t1_volume, decimal(20,0) BINARY)->Column#42, cast(test.signed_estimate_volume.real_t0_volume, decimal(20,0) BINARY)->Column#43, cast(test.signed_estimate_volume.estimate_volume, decimal(20,0) BINARY)->Column#44, cast(if(gt(test.signed_estimate_volume.estimate_volume, test.signed_estimate_volume.real_t1_volume), minus(test.signed_estimate_volume.estimate_volume, test.signed_estimate_volume.real_t1_volume), 0), decimal(20,0) BINARY)->Column#45, cast(if(lt(t... |
+|   │   └─TableReader_20       | 1.00     | root      |                                | data:TableFullScan_19                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|   │     └─TableFullScan_19   | 1.00     | cop[tikv] | table:signed_estimate_volume   | keep order:false                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+|   └─Projection_21(Probe)     | 8000.00  | root      |                                | test.unsigned_estimate_volume.manager_yid, Column#23, Column#23, 0->Column#24                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|     └─HashAgg_26             | 8000.00  | root      |                                | group by:test.unsigned_estimate_volume.manager_yid, funcs:sum(Column#40)->Column#23, funcs:firstrow(test.unsigned_estimate_volume.manager_yid)->test.unsigned_estimate_volume.manager_yid                                                                                                                                                                                                                                                                                                                            |
+|       └─TableReader_27       | 8000.00  | root      |                                | data:HashAgg_22                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|         └─HashAgg_22         | 8000.00  | cop[tikv] |                                | group by:test.unsigned_estimate_volume.manager_yid, funcs:sum(test.unsigned_estimate_volume.estimate_volume)->Column#40                                                                                                                                                                                                                                                                                                                                                                                              |
+|           └─TableFullScan_25 | 10000.00 | cop[tikv] | table:unsigned_estimate_volume | keep order:false, stats:pseudo                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
++------------------------------+----------+-----------+--------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+introduced by https://github.com/pingcap/tidb/pull/45158 
+related issue: https://github.com/pingcap/tidb/issues/45804
+### 4. What is your TiDB version? (Required)
+master(522a00840385dfa43509a3af2bc79e6ff50252a8), v7.1.1
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,124 @@
+ID: 27560
+Title: incorrect results for SHOW GRANTS FOR CURRENT_USER() USING x
+Description:
+## Bug Report
+
+The fix for https://github.com/pingcap/tidb/pull/27218 was incomplete. It does not account for CURRENT_USER() + USING syntax. It's not commonly used, but we should fix it.
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+DROP USER IF EXISTS joe, engineering, notgranted, otherrole, delete_stuff_privilege;
+
+CREATE USER joe;
+CREATE ROLE engineering;
+CREATE ROLE admins;
+CREATE ROLE notgranted;
+CREATE ROLE otherrole;
+
+GRANT INSERT ON test.* TO engineering;
+GRANT DELETE ON test.* TO admins;
+GRANT SELECT on test.* to joe;
+GRANT engineering TO joe;
+GRANT admins TO joe;
+SET DEFAULT ROLE admins TO joe;
+
+GRANT otherrole TO joe;
+GRANT UPDATE ON role.* TO otherrole;
+GRANT SELECT ON mysql.user TO otherrole;
+CREATE ROLE delete_stuff_privilege;
+GRANT DELETE ON mysql.user TO delete_stuff_privilege;
+GRANT delete_stuff_privilege TO otherrole;
+```
+Then run:
+```sql
+# mysql -ujoe
+
+SHOW GRANTS FOR CURRENT_USER() USING notgranted; -- incorrect; should be an error
+SHOW GRANTS FOR current_user() USING otherrole; -- incorrect (see below)
+SHOW GRANTS FOR joe USING otherrole; -- correct
+```
+
+### 2. What did you expect to see? (Required)
+
+```sql
+mysql [localhost:8024] {joe} ((none)) > SHOW GRANTS FOR CURRENT_USER() USING notgranted; -- incorrect; should be an error
+ERROR 3530 (HY000): `notgranted`@`%` is not granted to `joe`@`%`
+mysql [localhost:8024] {joe} ((none)) > SHOW GRANTS FOR current_user() USING otherrole; -- incorrect (see below)
++-------------------------------------------------------------------+
+| Grants for joe@%                                                  |
++-------------------------------------------------------------------+
+| GRANT USAGE ON *.* TO `joe`@`%`                                   |
+| GRANT UPDATE ON `role`.* TO `joe`@`%`                             |
+| GRANT SELECT ON `test`.* TO `joe`@`%`                             |
+| GRANT SELECT, DELETE ON `mysql`.`user` TO `joe`@`%`               |
+| GRANT `admins`@`%`,`engineering`@`%`,`otherrole`@`%` TO `joe`@`%` |
++-------------------------------------------------------------------+
+5 rows in set (0.00 sec)
+
+mysql [localhost:8024] {joe} ((none)) > SHOW GRANTS FOR joe USING otherrole; -- correct
++-------------------------------------------------------------------+
+| Grants for joe@%                                                  |
++-------------------------------------------------------------------+
+| GRANT USAGE ON *.* TO `joe`@`%`                                   |
+| GRANT UPDATE ON `role`.* TO `joe`@`%`                             |
+| GRANT SELECT ON `test`.* TO `joe`@`%`                             |
+| GRANT SELECT, DELETE ON `mysql`.`user` TO `joe`@`%`               |
+| GRANT `admins`@`%`,`engineering`@`%`,`otherrole`@`%` TO `joe`@`%` |
++-------------------------------------------------------------------+
+5 rows in set (0.00 sec)
+
+```
+
+### 3. What did you see instead (Required)
+
+```sql
+mysql> SHOW GRANTS FOR CURRENT_USER() USING notgranted; -- incorrect; should be an error
++---------------------------------------------------------------------+
+| Grants for joe@127.0.0.1                                            |
++---------------------------------------------------------------------+
+| GRANT USAGE ON *.* TO 'joe'@'%'                                     |
+| GRANT SELECT,DELETE ON test.* TO 'joe'@'%'                          |
+| GRANT 'admins'@'%', 'engineering'@'%', 'otherrole'@'%' TO 'joe'@'%' |
++---------------------------------------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql> SHOW GRANTS FOR current_user() USING otherrole; -- incorrect (see below)
++---------------------------------------------------------------------+
+| Grants for joe@127.0.0.1                                            |
++---------------------------------------------------------------------+
+| GRANT USAGE ON *.* TO 'joe'@'%'                                     |
+| GRANT SELECT,DELETE ON test.* TO 'joe'@'%'                          |
+| GRANT 'admins'@'%', 'engineering'@'%', 'otherrole'@'%' TO 'joe'@'%' |
++---------------------------------------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql> SHOW GRANTS FOR joe USING otherrole; -- correct
++---------------------------------------------------------------------+
+| Grants for joe@%                                                    |
++---------------------------------------------------------------------+
+| GRANT USAGE ON *.* TO 'joe'@'%'                                     |
+| GRANT UPDATE ON role.* TO 'joe'@'%'                                 |
+| GRANT SELECT ON test.* TO 'joe'@'%'                                 |
+| GRANT DELETE ON mysql.user TO 'joe'@'%'                             |
+| GRANT 'admins'@'%', 'engineering'@'%', 'otherrole'@'%' TO 'joe'@'%' |
++---------------------------------------------------------------------+
+5 rows in set (0.01 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v5.2.0-alpha-729-g684057f48
+Edition: Community
+Git Commit Hash: 684057f484d6b7a05fd5841b2183047948ce22d4
+Git Branch: master
+UTC Build Time: 2021-08-24 19:30:52
+GoVersion: go1.16.7
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+
+```

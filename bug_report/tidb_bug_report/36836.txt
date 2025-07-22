@@ -1,0 +1,105 @@
+ID: 36836
+Title: planner: tidb_shard does not work with mpp
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+CREATE TABLE `lineorder` (
+  `LO_ORDERKEY` int(11) NOT NULL,
+  `LO_LINENUMBER` int(11) NOT NULL,
+  `LO_CUSTKEY` int(11) DEFAULT NULL,
+  `LO_PARTKEY` int(11) DEFAULT NULL,
+  `LO_SUPPKEY` int(11) DEFAULT NULL,
+  `LO_ORDERDATE` int(11) DEFAULT NULL,
+  `LO_ORDPRIORITY` char(15) DEFAULT NULL,
+  `LO_SHIPPRIORITY` char(1) DEFAULT NULL,
+  `LO_QUANTITY` int(11) DEFAULT NULL,
+  `LO_EXTENDEDPRICE` decimal(10,0) DEFAULT NULL,
+  `LO_DISCOUNT` int(11) DEFAULT NULL,
+  `LO_REVENUE` decimal(10,0) DEFAULT NULL,
+  `LO_SUPPLYCOST` decimal(10,0) DEFAULT NULL,
+  `LO_TAX` int(11) DEFAULT NULL,
+  `LO_COMMITDATE` int(11) DEFAULT NULL,
+  `LO_SHIPMODE` char(10) DEFAULT NULL,
+  KEY `idx_lo_custkey` (`LO_CUSTKEY`),
+  UNIQUE KEY `UK_ORDR_LINE` ((tidb_shard(`LO_ORDERKEY`)),`LO_ORDERKEY`,`LO_LINENUMBER`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T! SHARD_ROW_ID_BITS=6 */;
+CREATE TABLE `date` (
+  `D_DATEKEY` int(11) NOT NULL,
+  `D_DATE` varchar(18) DEFAULT NULL,
+  `D_DATEOFWEEK` varchar(9) DEFAULT NULL,
+  `D_MONTH` varchar(9) DEFAULT NULL,
+  `D_YEAR` int(11) DEFAULT NULL,
+  `D_YEARMONTHNUM` int(11) DEFAULT NULL,
+  `D_YEARMONTH` char(7) DEFAULT NULL,
+  `D_DAYNUMINWEEK` int(11) DEFAULT NULL,
+  `D_DAYNUMINMONTH` int(11) DEFAULT NULL,
+  `D_DAYNUMINYEAR` int(11) DEFAULT NULL,
+  `D_MONTHNUMINYEAR` int(11) DEFAULT NULL,
+  `D_WEEKNUMINYEAR` int(11) DEFAULT NULL,
+  `D_SELLINGSEASON` char(15) DEFAULT NULL,
+  `D_LASTDAYINWEEKFL` tinyint(1) DEFAULT NULL,
+  `D_LASTDAYINMONTHFL` tinyint(1) DEFAULT NULL,
+  `D_HOLIDAYFL` tinyint(1) DEFAULT NULL,
+  `D_WEEKDAYFL` tinyint(1) DEFAULT NULL,
+  PRIMARY KEY (`D_DATEKEY`) /*T![clustered_index] CLUSTERED */,
+  KEY `idx_d_date` (`D_DATE`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+alter table `lineorder` set tiflash replica 1;
+alter table `date` set tiflash replica 1;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+explain SELECT SUM(LO_EXTENDEDPRICE*LO_DISCOUNT) AS REVENUE FROM `LINEORDER`, `DATE` WHERE LO_ORDERDATE = D_DATEKEY AND D_YEAR = 1993 AND LO_DISCOUNT BETWEEN 1 AND 3 AND LO_QUANTITY<25;
++------------------------------------------+--------------+--------------+-----------------+------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                       | estRows      | task         | access object   | operator info                                                                                                                                  |
++------------------------------------------+--------------+--------------+-----------------+------------------------------------------------------------------------------------------------------------------------------------------------+
+| HashAgg_36                               | 1.00         | root         |                 | funcs:sum(Column#37)->Column#36                                                                                                                |
+| └─TableReader_38                         | 1.00         | root         |                 | data:ExchangeSender_37                                                                                                                         |
+|   └─ExchangeSender_37                    | 1.00         | mpp[tiflash] |                 | ExchangeType: PassThrough                                                                                                                      |
+|     └─HashAgg_13                         | 1.00         | mpp[tiflash] |                 | funcs:sum(Column#38)->Column#37                                                                                                                |
+|       └─Projection_45                    | 766733.34    | mpp[tiflash] |                 | mul(hat.lineorder.lo_extendedprice, cast(hat.lineorder.lo_discount, decimal(20,0) BINARY))->Column#38                                          |
+|         └─Projection_34                  | 766733.34    | mpp[tiflash] |                 | hat.lineorder.lo_extendedprice, hat.lineorder.lo_discount                                                                                      |
+|           └─HashJoin_35                  | 766733.34    | mpp[tiflash] |                 | inner join, equal:[eq(hat.date.d_datekey, hat.lineorder.lo_orderdate)]                                                                         |
+|             ├─ExchangeReceiver_23(Build) | 2.56         | mpp[tiflash] |                 |                                                                                                                                                |
+|             │ └─ExchangeSender_22        | 2.56         | mpp[tiflash] |                 | ExchangeType: Broadcast                                                                                                                        |
+|             │   └─Selection_21           | 2.56         | mpp[tiflash] |                 | eq(hat.date.d_year, 1993)                                                                                                                      |
+|             │     └─TableFullScan_20     | 2557.00      | mpp[tiflash] | table:date      | keep order:false                                                                                                                               |
+|             └─Selection_25(Probe)        | 4992370.53   | mpp[tiflash] |                 | ge(hat.lineorder.lo_discount, 1), le(hat.lineorder.lo_discount, 3), lt(hat.lineorder.lo_quantity, 25), not(isnull(hat.lineorder.lo_orderdate)) |
+|               └─TableFullScan_24         | 601488614.00 | mpp[tiflash] | table:lineorder | keep order:false, stats:pseudo                                                                                                                 |
++------------------------------------------+--------------+--------------+-----------------+------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+### 3. What did you see instead (Required)
+
+tidb don't choose the mpp plan, causing AP QPS drops
+
+```
+explain SELECT SUM(LO_EXTENDEDPRICE*LO_DISCOUNT) AS REVENUE FROM `LINEORDER`, `DATE` WHERE LO_ORDERDATE = D_DATEKEY AND D_YEAR = 1993 AND LO_DISCOUNT BETWEEN 1 AND 3 AND LO_QUANTITY<25;
++------------------------------+--------------+--------------+-----------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                           | estRows      | task         | access object   | operator info                                                                                                                                           |
++------------------------------+--------------+--------------+-----------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+| HashAgg_12                   | 1.00         | root         |                 | funcs:sum(Column#37)->Column#36                                                                                                                         |
+| └─Projection_67              | 78524728.51  | root         |                 | mul(hat.lineorder.lo_extendedprice, cast(hat.lineorder.lo_discount, decimal(20,0) BINARY))->Column#37                                                   |
+|   └─HashJoin_30              | 78524728.51  | root         |                 | inner join, equal:[eq(hat.date.d_datekey, hat.lineorder.lo_orderdate)]                                                                                  |
+|     ├─TableReader_49(Build)  | 365.00       | root         |                 | data:Selection_48                                                                                                                                       |
+|     │ └─Selection_48         | 365.00       | cop[tiflash] |                 | eq(hat.date.d_year, 1993)                                                                                                                               |
+|     │   └─TableFullScan_47   | 2557.00      | cop[tiflash] | table:date      | keep order:false                                                                                                                                        |
+|     └─Projection_43(Probe)   | 600156011.00 | root         |                 | hat.lineorder.lo_orderdate, hat.lineorder.lo_quantity, hat.lineorder.lo_extendedprice, hat.lineorder.lo_discount, tidb_shard(hat.lineorder.lo_orderkey) |
+|       └─TableReader_42       | 78524728.51  | root         |                 | data:Selection_41                                                                                                                                       |
+|         └─Selection_41       | 78524728.51  | cop[tiflash] |                 | ge(hat.lineorder.lo_discount, 1), le(hat.lineorder.lo_discount, 3), lt(hat.lineorder.lo_quantity, 25), not(isnull(hat.lineorder.lo_orderdate))          |
+|           └─TableFullScan_40 | 600156011.00 | cop[tiflash] | table:lineorder | keep order:false                                                                                                                                        |
++------------------------------+--------------+--------------+-----------------+---------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+https://github.com/pingcap/tidb/commit/137041ac743c24e809e96ac5512dae429a02e7b1 @ release-6.2

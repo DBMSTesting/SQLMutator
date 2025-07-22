@@ -1,0 +1,84 @@
+ID: 2193
+Title: [Bug]: The behavior of using complex predicates and column storage hint differs from that in MySQL.
+Description:
+**Describe the bug**
+
+**Environment**
+
+- OS Version and CPU Arch(`uname -a`):
+
+```bash
+Linux 3.10.0-1160.102.1.el7.x86_64 #1 SMP Tue Oct 17 15:42:21 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux
+```
+
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+
+```bash
+select version();
+-- 5.7.25-OceanBase_CE-v4.3.4.0
+```
+
+**Fast Reproduce Steps(Required)**
+
+Steps to reproduce the behavior:
+
+```sql
+use test;
+
+drop table if exists t0;
+drop table if exists t1;
+CREATE TABLE IF NOT EXISTS t0(c0 FLOAT  PRIMARY KEY NOT NULL, c1 INT , c2 VARCHAR(111) ) WITH COLUMN GROUP (all columns, each column);
+CREATE TABLE IF NOT EXISTS t1 LIKE t0;
+INSERT INTO t1(c0, c2) VALUES(0.390985317943897, '0');
+INSERT INTO t0(c0, c2) VALUES(1.23141, '0');
+
+select FLOOR((- (t1.c2))) from t1; -- result: -0
+
+select (((+ 1)) AND (RTRIM(t0.c2))) IN (FLOOR((- (t1.c2)))) from t0, t1; -- result: 1
+SELECT /*+ USE_COLUMN_TABLE(t1) */  ALL 1 FROM t1, t0 WHERE (((+ 1)) AND (RTRIM(t0.c2))) IN (-0.0); -- result: 1
+SELECT /*+ USE_COLUMN_TABLE(t1) */  ALL 1 FROM t1, t0 WHERE (((+ 1)) AND ('0') IN (FLOOR((- (t1.c2))))); -- result: 1
+
+SELECT /*+ USE_COLUMN_TABLE(t1) */  ALL 1 FROM t1, t0 WHERE (((+ 1)) AND (RTRIM(t0.c2))) IN (FLOOR((- (t1.c2)))); -- result: empty
+
+```
+
+**Expected behavior**
+
+The query should return the value as follows (result from MySQL 8.4.1) 
+
+```sql
+mysql> SELECT ALL 1 FROM t1, t0 WHERE (((+ 1)) AND (RTRIM(t0.c2))) IN (FLOOR((- (t1.c2))));
++---+
+| 1 |
++---+
+| 1 |
++---+
+1 row in set (0.00 sec)
+
+mysql> select version();
++-----------+
+| version() |
++-----------+
+| 8.4.1     |
++-----------+
+1 row in set (0.01 sec)
+```
+
+**Actual Behavior**
+```sql
+mysql> SELECT /*+ USE_COLUMN_TABLE(t1) */  ALL 1 FROM t1, t0 WHERE (((+ 1)) AND (RTRIM(t0.c2))) IN (FLOOR((- (t1.c2))));
+
+Empty set (0.00 sec)
+
+mysql> select version();
++------------------------------+
+| version()                    |
++------------------------------+
+| 5.7.25-OceanBase_CE-v4.3.4.0 |
++------------------------------+
+1 row in set (0.01 sec)
+```
+**Additional context**
+
+The behavior of this query differs between TiDB 8.4, MySQL 8.4.1, and MariaDB 11.6.2.
+

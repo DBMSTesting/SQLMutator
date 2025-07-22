@@ -1,0 +1,126 @@
+ID: 55348
+Title: optimizer fail to choose index merge and causes full table scan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+mysql> drop table if exists tb1;
+Query OK, 0 rows affected (0.06 sec)
+
+mysql> create table tb1(
+    ->   id int primary key,
+    ->   a int,
+    ->   b int,
+    ->   c int,
+    ->   d int,
+    ->   key (a),
+    ->   key (b,c)
+    -> );
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> 
+mysql> explain select * from tb1 
+    -> where (a=1 or (b=1 and c=1)) and d > 1
+    -> order by d;
++----------------------------------+---------+-----------+--------------------------+-------------------------------------------------+
+| id                               | estRows | task      | access object            | operator info                                   |
++----------------------------------+---------+-----------+--------------------------+-------------------------------------------------+
+| Sort_5                           | 3.37    | root      |                          | test.tb1.d                                      |
+| └─IndexMerge_15                  | 3.37    | root      |                          | type: union                                     |
+|   ├─IndexRangeScan_11(Build)     | 10.00   | cop[tikv] | table:tb1, index:a(a)    | range:[1,1], keep order:false, stats:pseudo     |
+|   ├─IndexRangeScan_12(Build)     | 0.10    | cop[tikv] | table:tb1, index:b(b, c) | range:[1 1,1 1], keep order:false, stats:pseudo |
+|   └─Selection_14(Probe)          | 3.37    | cop[tikv] |                          | gt(test.tb1.d, 1)                               |
+|     └─TableRowIDScan_13          | 10.10   | cop[tikv] | table:tb1                | keep order:false, stats:pseudo                  |
++----------------------------------+---------+-----------+--------------------------+-------------------------------------------------+
+6 rows in set (0.00 sec)
+
+mysql> drop table if exists tb;
+Query OK, 0 rows affected (0.05 sec)
+
+mysql> CREATE TABLE `tb` (
+    ->   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+    ->   `a` varbinary(16) NOT NULL,
+    ->   `b` timestamp(6) NOT NULL,
+    ->   `c` binary(16) DEFAULT NULL,
+    ->   `d` binary(64) DEFAULT NULL,
+    ->   `e` varchar(32) DEFAULT NULL,
+    ->   `f` smallint(5) unsigned DEFAULT NULL,
+    ->   `g` binary(16) NOT NULL,
+    ->   `h` binary(12) DEFAULT NULL,
+    ->   `i` varchar(16) DEFAULT NULL,
+    ->   `j` binary(16) DEFAULT NULL,
+    ->   `k` varchar(1024) DEFAULT NULL,
+    ->   PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,
+    ->   UNIQUE KEY `b` (`b`,`a`),
+    ->   KEY `idx__c` (`c`),
+    ->   KEY `idx__e` (`e`),
+    ->   KEY `idx__h__d` (`h`,`d`),
+    ->   KEY `idx__g` (`g`),
+    ->   KEY `idx__j` (`j`)
+    -> ) ;
+Query OK, 0 rows affected (0.03 sec)
+
+mysql> 
+mysql> explain SELECT  * FROM   tb 
+    -> WHERE (     c =0xA    OR (       h =0xA      AND d =0xA     )   )   
+    -> AND (b >= now()) 
+    -> ORDER BY   b DESC,   a DESC;
++---------------------------+----------+-----------+---------------+------------------------------------------------------------------------------------------------------------------+
+| id                        | estRows  | task      | access object | operator info                                                                                                    |
++---------------------------+----------+-----------+---------------+------------------------------------------------------------------------------------------------------------------+
+| Sort_5                    | 3.37     | root      |               | test.tb.b:desc, test.tb.a:desc                                                                                   |
+| └─TableReader_10          | 3.37     | root      |               | data:Selection_9                                                                                                 |
+|   └─Selection_9           | 3.37     | cop[tikv] |               | ge(test.tb.b, 2024-08-11 21:50:20), or(eq(test.tb.c, "0x0a"), and(eq(test.tb.h, "0x0a"), eq(test.tb.d, "0x0a"))) |
+|     └─TableFullScan_8     | 10000.00 | cop[tikv] | table:tb      | keep order:false, stats:pseudo                                                                                   |
++---------------------------+----------+-----------+---------------+------------------------------------------------------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+
+```
+
+### 2. What did you expect to see? (Required)
+
+The 2nd query should use index merge same as the 1st query
+
+### 3. What did you see instead (Required)
+
+Optimizer choose full table scan. It's not that tidb does not have ability to use index merge, because *use_index_merge* hint can workaround this issue:
+
+```sql
+mysql> explain SELECT /*+ use_index_merge (tb) */ * FROM   tb 
+    -> WHERE (     c =0xA    OR (       h =0xA      AND d =0xA     )   )   
+    -> AND (b >= now()) 
+    -> ORDER BY   b DESC,   a DESC;
++---------------------------------+---------+-----------+---------------------------------+-------------------------------------------------------------+
+| id                              | estRows | task      | access object                   | operator info                                               |
++---------------------------------+---------+-----------+---------------------------------+-------------------------------------------------------------+
+| Sort_5                          | 3.37    | root      |                                 | test.tb.b:desc, test.tb.a:desc                              |
+| └─IndexMerge_12                 | 3.37    | root      |                                 | type: union                                                 |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:tb, index:idx__c(c)       | range:["\n","\n"], keep order:false, stats:pseudo           |
+|   ├─IndexRangeScan_9(Build)     | 0.10    | cop[tikv] | table:tb, index:idx__h__d(h, d) | range:["\n" "\n","\n" "\n"], keep order:false, stats:pseudo |
+|   └─Selection_11(Probe)         | 3.37    | cop[tikv] |                                 | ge(test.tb.b, 2024-08-11 21:56:20)                          |
+|     └─TableRowIDScan_10         | 10.10   | cop[tikv] | table:tb                        | keep order:false, stats:pseudo                              |
++---------------------------------+---------+-----------+---------------------------------+-------------------------------------------------------------+
+6 rows in set (0.01 sec)
+```
+
+This appears to be an issue in tidb optimizer's cost model.
+
+### 4. What is your TiDB version? (Required)
+
+mysql> select @@version;
++--------------------+
+| @@version          |
++--------------------+
+| 8.0.11-TiDB-v8.2.0 |
++--------------------+
+1 row in set (0.00 sec)
+
+
+
+
+
+

@@ -1,0 +1,193 @@
+ID: 14742
+Title: Reversed outer hash join may lost some null rows
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+   If possible, provide a recipe for reproducing the error.
+
+It's a bug found by the daily integration test https://internal.pingcap.net/idc-jenkins/blue/organizations/jenkins/stability_integration_common_test/detail/stability_integration_common_test/111/pipeline/533/
+
+i. delete this line, to make sure all the right outer hash joins use right input as hash table(REVERSED)
+
+https://github.com/pingcap/tidb/blob/c2da4eafd7c6b7165ed72c5890e18917cde8ffc9/planner/core/exhaust_physical_plans.go#L279
+
+ii. build and run
+
+```
+create table testjoin(int a);
+truncate testjoin;
+insert into testjoin values (NULL);
+insert into testjoin values (1);
+insert into testjoin values (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2), (2);
+
+
+set @@tidb_max_chunk_size=32;
+SELECT * FROM testjoin t1 RIGHT JOIN testjoin t2 ON t1.a > t2.a order by t1.a, t2.a;
+```
+
+2. What did you expect to see?
+
+```mysql
+mysql> SELECT * FROM testjoin t1 RIGHT JOIN testjoin t2 ON t1.a > t2.a order by t1.a, t2.a;
++------+------+
+| a    | a    |
++------+------+
+| NULL | NULL |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
++------+------+
+67 rows in set (0.00 sec)
+```
+
+3. What did you see instead?
+
+lost the first null row.
+
+```mysql
+mysql> SELECT * FROM testjoin t1 RIGHT JOIN testjoin t2 ON t1.a > t2.a order by t1.a, t2.a;
++------+------+
+| a    | a    |
++------+------+
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+| NULL |    2 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
+|    2 |    1 |
++------+------+
+66 rows in set (0.00 sec)
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+
+delete this line, to make sure all right outer hash join use right input as hash table(REVERSED)
+
+https://github.com/pingcap/tidb/blob/c2da4eafd7c6b7165ed72c5890e18917cde8ffc9/planner/core/exhaust_physical_plans.go#L279

@@ -1,0 +1,114 @@
+ID: 7535
+Title: A dictionary with an invalidate query cannot recover after an exception
+Description:
+ClickHouse version 19.15.3.6 (official build).
+ClickHouse version 19.11.8.46 (official build).
+
+A dictionary with an invalidate query cannot recover after an exception if there are no updates in the source.
+
+**How to reproduce**
+Create a table:
+```
+CREATE TABLE dict_invalidate
+ENGINE = Memory AS
+SELECT
+    dummy,
+    toDateTime('2019-10-29 18:51:35') AS last_time
+FROM system.one
+```
+Create a dictionary with an invalidate query that looks at this table:
+```
+<yandex>
+    <dictionary>
+        <name>invalidate</name>
+        <source>
+            <clickhouse>
+                <host>localhost</host>
+                <port>9000</port>
+                <user>default</user>
+                <password/>
+                <db>default</db>
+                <table>dict_invalidate</table>
+                <invalidate_query>select max(last_time) from dict_invalidate</invalidate_query>
+            </clickhouse>
+        </source>
+        <lifetime>60</lifetime>
+        <layout><flat/></layout>
+        <structure>
+            <id>
+                <name>dummy</name>
+            </id>
+            <attribute>
+                <name>two</name>
+                <expression>dummy</expression>
+                <type>UInt8</type>
+                <null_value>0</null_value>
+            </attribute>
+        </structure>
+    </dictionary>
+</yandex>
+
+system reload dictionary invalidate;
+```
+The dictionary checks for updates every minute:
+```
+2019.10.29 18:51:46.998773 [ 3 ] {} <Trace> ClickHouseDictionarySource: Performing invalidate query
+2019.10.29 18:51:46.999592 [ 3 ] {} <Trace> ClickHouseDictionarySource: Invalidate query has returned: '2019-10-29 18:51:35', previous value: '2019-10-29 18:51:35'
+
+2019.10.29 18:52:47.005796 [ 3 ] {} <Trace> ClickHouseDictionarySource: Performing invalidate query
+2019.10.29 18:52:47.006707 [ 3 ] {} <Trace> ClickHouseDictionarySource: Invalidate query has returned: '2019-10-29 18:51:35', previous value: '2019-10-29 18:51:35'
+```
+Drop the table:
+```
+drop table dict_invalidate;
+```
+The invalidate query fails:
+```
+2019.10.29 18:53:47.012529 [ 3 ] {} <Debug> executeQuery: (internal) select max(last_time) from dict_invalidate
+2019.10.29 18:53:47.012779 [ 3 ] {} <Error> ExternalDictionaries: Could not check if external dictionary 'invalidate' was modified: Code: 60, e.displayText() = DB::Exception: Table default.dict_invalidate doesn't exist., Stack trace:
+```
+CH tries to update the dictionary and this attempt also fails:
+```
+2019.10.29 18:53:47.013660 [ 65 ] {} <Debug> executeQuery: (internal) SELECT `dummy`, (dummy) AS `two` FROM `default`.`dict_invalidate`;
+2019.10.29 18:53:47.013940 [ 65 ] {} <Error> ExternalDictionaries: Could not update external dictionary 'invalidate', leaving the previous version, next update is scheduled at 2019-10-29 18:53:52: Code: 60, e.displayText() = DB::Exception: Table default.dict_invalidate doesn't exist., Stack trace:
+```
+Create the table back:
+```
+create table dict_invalidate engine=Memory as select dummy, toDateTime('2019-10-29 18:51:35') as last_time from system.one
+```
+The invalidate query now works fine:
+```
+2019.10.29 18:54:07.015614 [ 3 ] {} <Trace> ClickHouseDictionarySource: Performing invalidate query
+2019.10.29 18:54:07.016474 [ 3 ] {} <Trace> ClickHouseDictionarySource: Invalidate query has returned: '2019-10-29 18:51:35', previous value: '2019-10-29 18:51:35'
+```
+The dictionary does not require an update so not updated, and the exception is still there in system.dictionaries:
+```
+2019.10.29 19:01:53.830349 [ 79 ] {f0737276-855b-4afd-8d70-7c02891205c7} <Debug> executeQuery: (from [::1]:48844) SELECT status, loading_start_time, last_exception FROM system.dictionaries WHERE name = 'invalidate' FORMAT Vertical
+
+SELECT
+    status,
+    loading_start_time,
+    last_exception
+FROM system.dictionaries
+WHERE name = 'invalidate'
+FORMAT Vertical
+
+Row 1:
+──────
+status:             LOADED
+loading_start_time: 2019-10-29 18:53:57
+last_exception:     Code: 60, e.displayText() = DB::Exception: Table default.dict_invalidate doesn't exist. (version 19.15.3.6 (official build))
+```
+Now the dictionary checks for updates every 10 seconds:
+```
+2019.10.29 19:06:07.158829 [ 3 ] {} <Trace> ClickHouseDictionarySource: Performing invalidate query
+2019.10.29 19:06:07.159686 [ 3 ] {} <Trace> ClickHouseDictionarySource: Invalidate query has returned: '2019-10-29 18:51:35', previous value: '2019-10-29 18:51:35'
+
+2019.10.29 19:06:17.160730 [ 3 ] {} <Trace> ClickHouseDictionarySource: Performing invalidate query
+2019.10.29 19:06:17.161554 [ 3 ] {} <Trace> ClickHouseDictionarySource: Invalidate query has returned: '2019-10-29 18:51:35', previous value: '2019-10-29 18:51:35'
+
+2019.10.29 19:06:27.162692 [ 3 ] {} <Trace> ClickHouseDictionarySource: Performing invalidate query
+2019.10.29 19:06:27.163663 [ 3 ] {} <Trace> ClickHouseDictionarySource: Invalidate query has returned: '2019-10-29 18:51:35', previous value: '2019-10-29 18:51:35'
+```
+Queries to the dictionary work fine because the previous version was preserved.
+The problem is that the dictionary gets updated every 10 seconds, and there is an exception in system.dictionaries.

@@ -1,0 +1,111 @@
+ID: 22098
+Title: expression: a case that cause TiDB-server panic when `prepared-plan-cache` is enabled.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+CREATE TABLE `tb` (
+  `k` varchar(32) NOT NULL DEFAULT ' ',
+  `e` int(11) NOT NULL DEFAULT '0',
+  `i` int(11) NOT NULL DEFAULT '0',
+  `s` varchar(1) NOT NULL DEFAULT ' ',
+  `c` varchar(50) NOT NULL DEFAULT ' ',
+  PRIMARY KEY (`k`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `ta` (
+  `k` varchar(32) NOT NULL DEFAULT ' ',
+  `c0` varchar(32) NOT NULL DEFAULT ' ',
+  `c` varchar(18) NOT NULL DEFAULT ' ',
+  `e0` varchar(1) NOT NULL DEFAULT ' ',
+  PRIMARY KEY (`k`,`c0`,`c`),
+  KEY `idx` (`c`,`e0`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+prepare stmt from "select a.* from ta a left join tb b on a.k = b.k where (a.k <> '000000' and ((b.s = ? and i = ? ) or (b.s = ? and e = ?) or (b.s not in(?, ?))) and b.c like '%1%') or (a.c <> '000000' and a.k = '000000')";
+set @a=3;set @b=20200414;set @c='a';set @d=20200414;set @e=3;set @f='a';
+execute stmt using @a,@b,@c,@d,@e,@f;
+```
+Make sure that the 'prepared plan cache' is enabled:
+```
+tidb> select * from information_schema.CLUSTER_CONFIG where `KEY` like '%plan-cache%enable%';
++------+----------------------+-----------------------------+-------+
+| TYPE | INSTANCE             | KEY                         | VALUE |
++------+----------------------+-----------------------------+-------+
+| tidb | 192.168.197.193:4000 | prepared-plan-cache.enabled | true  |
++------+----------------------+-----------------------------+-------+
+1 row in set, 1 warning (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+The query run successfully.
+
+### 3. What did you see instead (Required)
+TiDB panic with the following stack:
+```
+[2020/12/30 15:23:39.762 +08:00] [ERROR] [conn.go:733] ["connection running loop panic"] [conn=13] [lastSQL="execute stmt using @a,@b,@c,@d,@e,@f"] [err="runtime error: invalid memory address or nil pointer dereference"] [stack="goroutine 17095 [running]:
+github.com/pingcap/tidb/server.(*clientConn).Run.func1(0x3df9a40, 0xc011839320, 0xc010e00600)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/server/conn.go:731 +0xf5
+panic(0x353b4a0, 0x50e9140)
+	/home/bb7133/Softwares/go/src/runtime/panic.go:969 +0x175
+github.com/pingcap/tidb/util/chunk.Row.IsNull(...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/util/chunk/row.go:209
+github.com/pingcap/tidb/expression.(*Column).EvalString(0xc0117963c0, 0x3e3c5c0, 0xc010e00700, 0x0, 0x0, 0xc0117360c0, 0x0, 0x0, 0x0, 0x0)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/column.go:380 +0x43
+github.com/pingcap/tidb/expression.CompareStringWithCollationInfo(0x3e3c5c0, 0xc010e00700, 0x3e68480, 0xc0117963c0, 0x3e685c0, 0xc010f96f00, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/builtin_compare.go:2629 +0x6c
+github.com/pingcap/tidb/expression.(*builtinNEStringSig).evalInt(0xc011686420, 0x0, 0x0, 0x0, 0x0, 0x0, 0x12a5a7f)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/builtin_compare.go:2210 +0xd0
+github.com/pingcap/tidb/expression.(*ScalarFunction).EvalInt(0xc0116538b0, 0x3e3c5c0, 0xc010e00700, 0x0, 0x0, 0x12a6f2a, 0x356bbe0, 0x38d8bc0, 0x1)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:377 +0xf3
+github.com/pingcap/tidb/expression.(*builtinLogicAndSig).evalInt(0xc011686c60, 0x0, 0x0, 0x0, 0x0, 0x0, 0xb8)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/builtin_op.go:100 +0x6e
+github.com/pingcap/tidb/expression.(*ScalarFunction).EvalInt(0xc011653cc0, 0x3e3c5c0, 0xc010e00700, 0x0, 0x0, 0x7fe33c5287c8, 0xc00fee6698, 0x12a99d8, 0xc0)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:377 +0xf3
+github.com/pingcap/tidb/expression.(*ScalarFunction).Eval(0xc011653cc0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:344 +0x2a6
+github.com/pingcap/tidb/expression.(*Constant).getLazyDatum(0xc010ae3bc0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/constant.go:180 +0xaa
+github.com/pingcap/tidb/expression.(*Constant).EvalInt(0xc010ae3bc0, 0x3e3c5c0, 0xc010e00700, 0x0, 0x0, 0x12a6f2a, 0x356bbe0, 0x38d8bc0, 0x1)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/constant.go:213 +0x5a
+github.com/pingcap/tidb/expression.(*builtinLogicAndSig).evalInt(0xc011686e70, 0x0, 0x0, 0x0, 0x0, 0x0, 0xb8)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/builtin_op.go:100 +0x6e
+github.com/pingcap/tidb/expression.(*ScalarFunction).EvalInt(0xc011653e00, 0x3e3c5c0, 0xc010e00700, 0x0, 0x0, 0xc011686dc0, 0xc00fee6a08, 0x12a99d8, 0xc0)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:377 +0xf3
+github.com/pingcap/tidb/expression.(*ScalarFunction).Eval(0xc011653e00, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, ...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:344 +0x2a6
+github.com/pingcap/tidb/expression.foldConstant(0x3e68840, 0xc011653e00, 0x12a99d8, 0x50, 0x36d7b80)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/constant_fold.go:207 +0x9f7
+github.com/pingcap/tidb/expression.FoldConstant(0x3e68840, 0xc011653e00, 0x3928f72, 0x3)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/constant_fold.go:38 +0x39
+github.com/pingcap/tidb/expression.newFunctionImpl(0x3e3c5c0, 0xc010e00700, 0x1, 0x3928f72, 0x3, 0xc011736240, 0xc011732d40, 0x2, 0x2, 0x3, ...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:226 +0x4a5
+github.com/pingcap/tidb/expression.NewFunction(...)
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/expression/scalar_function.go:244
+github.com/pingcap/tidb/expression.NewFunctionInternal(0x3e3c5c0, 0xc010e00700, 0x3928f72, 0x3, 0xc0117347e0, 0xc011732d40, 0x2, 0x2, 0x2, 0x0)
+	/h"]
+```
+
+### 4. What is your TiDB version? (Required)
+```
+tidb> select tidb_version();
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                                                        |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v4.0.0-beta.2-1932-g0bb89a941
+Edition: Community
+Git Commit Hash: 0bb89a9413e72687bc3583168a6d0fbcb2f31706
+Git Branch: bb7133/enhance_limit_pushdown
+UTC Build Time: 2020-12-29 13:08:43
+GoVersion: go1.15beta1
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+It can also be reproduced in v4.0.8, v4.0.9, and the latest release-5.0-rc branch. 

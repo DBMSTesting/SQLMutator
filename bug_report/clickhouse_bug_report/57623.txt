@@ -1,0 +1,72 @@
+ID: 57623
+Title: Materialized view extractAll (and other string function) regression since CH 23.9
+Description:
+**Describe the unexpected behaviour**
+
+Function `extractAll` expects a const String as second parameters. When executing a query like this one, the output of the CTE is considered constant and everything works fine. But if that query is turned out into a MV the CTE's output is no considered constant anymore.
+
+```sql
+WITH coalesce((
+        SELECT reg
+        FROM extract_all.regex
+    ), '') AS val
+SELECT
+    extractAll(concat(toString(number), 'a'), assumeNotNull(val))
+FROM extract_all.ds;
+```
+
+**How to reproduce**
+
+This is the full reproducer:
+
+```sql
+DROP DATABASE IF EXISTS extract_all;
+CREATE DATABASE extract_all;
+
+CREATE TABLE extract_all.ds (
+    number UInt32
+)
+ENGINE=MergeTree
+ORDER BY number AS
+SELECT 1;
+
+CREATE TABLE extract_all.ds_2 (
+    arr Array(String)
+)
+ENGINE=MergeTree
+ORDER BY tuple();
+
+CREATE TABLE extract_all.regex
+(
+    `reg` String
+)
+ENGINE = MergeTree
+ORDER BY tuple() AS
+SELECT '\d[a-z]';
+
+SELECT '-- Query by itself';
+WITH coalesce((
+        SELECT reg
+        FROM extract_all.regex
+    ), '') AS val
+SELECT
+    extractAll(concat(toString(number), 'a'), assumeNotNull(val))
+FROM extract_all.ds;
+
+SELECT '-- MV';
+CREATE MATERIALIZED VIEW extract_all.mv TO extract_all.ds_2
+AS
+WITH coalesce((
+        SELECT reg
+        FROM extract_all.regex
+    ), '') AS val
+SELECT
+    extractAll(concat(toString(number), 'a'), assumeNotNull(val)) AS arr
+FROM extract_all.ds;
+```
+
+Everything works fine when using CH 23.8 and starts failing from 23.9 onwards.
+
+**Expected behavior**
+
+The MV should work the same as in version 23.8, interpreting CTE's output as constant.

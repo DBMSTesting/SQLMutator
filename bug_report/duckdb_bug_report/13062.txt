@@ -1,0 +1,72 @@
+ID: 13062
+Title: Add support for overloading to macros
+Description:
+
+This PR adds support for overloads to scalar and table macros. Since macro arguments are not typed, overloads are exclusively possible on the number of positional parameters, i.e. after this PR it is possible to create macros that accept a variable number of positional arguments through overloading.
+
+It is currently only possible to define all overloads when creating a macro - i.e. there is no support for adding overloads to existing macros. Example syntax:
+
+```sql
+CREATE MACRO variable_addition
+	(a) AS a,
+	(a, b) AS a + b,
+	(a, b, c) AS a + b + c;
+
+SELECT variable_addition(42) AS single_arg, variable_addition(42, 84) AS two_args;
+┌────────────┬──────────┐
+│ single_arg │ two_args │
+│   int32    │  int32   │
+├────────────┼──────────┤
+│         42 │      126 │
+└────────────┴──────────┘
+```
+
+If an overload is not present, the error message prints all possible overloads:
+
+```sql
+D SELECT variable_addition();
+-- Binder Error: Macro "variable_addition" does not support 0 parameters.
+-- Candidate macros:
+-- 	variable_addition(a)
+-- 	variable_addition(a, b)
+-- 	variable_addition(a, b, c)
+```
+
+Similarly, table functions support this behavior as well:
+
+```sql
+CREATE MACRO variable_addition_range
+	(a) AS TABLE (FROM range(a)),
+	(a, b) AS TABLE (FROM range(a + b)),
+	(a, b, c) AS TABLE (FROM range(a + b + c));
+
+SELECT COUNT(*) FROM variable_addition_range(42, 84);
+┌──────────────┐
+│ count_star() │
+│    int64     │
+├──────────────┤
+│          126 │
+└──────────────┘
+```
+
+##### Serialization
+
+In order to preserve backwards compatibility, serialization is done in two parts. The first function is serialized in the old manner (as a single `function`). Any extra overloads, if present, are serialized in a new field `extra_functions`. As such, macros without overloads are fully backwards and forwards compatible. Macros with overloads cannot be deserialized by older versions of DuckDB and lead to a serialization error. 
+
+##### Postgres Privilege Functions
+
+The macro overloads are used to add support for Postgres privilege functions that we have as part of the Postgres compatibility layer. 
+
+```sql
+select has_table_privilege('table', 'privilege') AS two_args, has_table_privilege(current_user, 'table', 'privilege') AS three_args;
+┌──────────┬────────────┐
+│ two_args │ three_args │
+│ boolean  │  boolean   │
+├──────────┼────────────┤
+│ true     │ true       │
+└──────────┴────────────┘
+```
+
+##### array_ptr
+
+This PR also adds the `array_ptr` class. The `array_ptr` is a non-owning pointer to an array of objects with a count. It is by default bounds-checked, and can be iterated over similar to a vector. There is also an `unsafe_array_ptr` that is not bounds checked. The idea is that this pointer class can be used instead of raw pointers to represent arrays in a safer manner throughout the system.

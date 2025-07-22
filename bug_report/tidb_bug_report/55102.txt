@@ -1,0 +1,95 @@
+ID: 55102
+Title: potential deadlock
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+POTENTIAL DEADLOCK:
+Previous place where the lock was grabbed
+goroutine 48 lock 0x10a14b600
+~/go/pkg/mod/github.com/sasha-s/go-deadlock@v0.3.1/deadlock.go:85 go-deadlock.(*Mutex).Lock { lock(m.mu.Lock, m) } <<<<<
+[2024/07/31 17:05:48.507 +08:00] [WARN] [expensivequery.go:146] [expensive_query] [cost_time=61.546272709s] [conn=2097154] [user=root] [database=test] [txn_start_ts=0] [mem_max="0 Bytes (0 Bytes)"] [sql="select t2.a from t1 join t2 using (a) right join t3 on (t1.a = t3.a)"] [session_alias=] ["affected rows"=0]
+pkg/session/tidb.go:63 session.(*domainMap).Get { dm.mu.Lock() }
+pkg/session/session.go:3746 session.createSessionWithOpt { func createSessionWithOpt(store kv.Storage, opt *Opt) (*session, error) { }
+pkg/session/session.go:3738 session.createSession { func createSession(store kv.Storage) (*session, error) { }
+pkg/session/session.go:1176 session.createSessionFunc.func1 { return func() (pools.Resource, error) { }
+pkg/domain/domain.go:1743 domain.(*sessionPool).Get { default: }
+pkg/bindinfo/global_handle.go:648 bindinfo.(*globalBindingHandle).callWithSCtx { func (h *globalBindingHandle) callWithSCtx(wrapTxn bool, f func(sctx sessionctx.Context) error) (err error) { }
+pkg/bindinfo/global_handle.go:204 bindinfo.(*globalBindingHandle).LoadFromStorageToCache {  }
+pkg/domain/domain.go:2061 domain.(*Domain).globalBindHandleWorkerLoop.func1 { bindHandle := do.BindHandle() }
+pkg/util/wait_group_wrapper.go:99 util.(*WaitGroupEnhancedWrapper).Run.func1 { exec() }
+
+Have been trying to lock it again for more than 20s
+goroutine 1783 lock 0x10a14b600
+~/go/pkg/mod/github.com/sasha-s/go-deadlock@v0.3.1/deadlock.go:85 go-deadlock.(*Mutex).Lock { lock(m.mu.Lock, m) } <<<<<
+pkg/session/tidb.go:63 session.(*domainMap).Get { dm.mu.Lock() }
+pkg/session/session.go:3746 session.createSessionWithOpt { func createSessionWithOpt(store kv.Storage, opt *Opt) (*session, error) { }
+pkg/session/session.go:3738 session.createSession { func createSession(store kv.Storage) (*session, error) { }
+pkg/session/session.go:1176 session.createSessionFunc.func1 { return func() (pools.Resource, error) { }
+pkg/domain/domain.go:1743 domain.(*sessionPool).Get { default: }
+pkg/disttask/framework/storage/task_table.go:141 storage.(*TaskManager).WithNewSession { func (mgr *TaskManager) WithNewSession(fn func(se sessionctx.Context) error) error { }
+pkg/disttask/framework/storage/task_table.go:181 storage.(*TaskManager).ExecuteSQLWithNewSession { func (mgr *TaskManager) ExecuteSQLWithNewSession(ctx context.Context, sql string, args ...any) (rs []chunk.Row, err error) { }
+pkg/disttask/framework/storage/task_table.go:785 storage.(*TaskManager).GetAllSubtasks { func (mgr *TaskManager) GetAllSubtasks(ctx context.Context) ([]*proto.SubtaskBase, error) { }
+pkg/disttask/framework/scheduler/scheduler_manager.go:467 scheduler.(*Manager).collect { func (sm *Manager) collect() { }
+pkg/disttask/framework/scheduler/scheduler_manager.go:460 scheduler.(*Manager).collectLoop { return }
+pkg/util/wait_group_wrapper.go:157 util.(*WaitGroupWrapper).Run.func1 { exec() }
+
+Here is what goroutine 48 doing now
+goroutine 48 [sync.Mutex.Lock]:
+sync.runtime_SemacquireMutex(0x14000942dc8?, 0x1?, 0x14012a0f0a8?)
+        /opt/homebrew/opt/go/libexec/src/runtime/sema.go:77 +0x28
+sync.(*Mutex).lockSlow(0x14000942dc8)
+        /opt/homebrew/opt/go/libexec/src/sync/mutex.go:171 +0x330
+sync.(*Mutex).Lock(0x14000942dc8)
+        /opt/homebrew/opt/go/libexec/src/sync/mutex.go:90 +0x94
+github.com/sasha-s/go-deadlock.(*lockOrder).postUnlock(0x14000942dc8, {0x10690b760, 0x10a14b600})
+        /Users/arenatlx/go/pkg/mod/github.com/sasha-s/go-deadlock@v0.3.1/deadlock.go:330 +0x30
+github.com/sasha-s/go-deadlock.postUnlock({0x10690b760, 0x10a14b600})
+        /Users/arenatlx/go/pkg/mod/github.com/sasha-s/go-deadlock@v0.3.1/deadlock.go:167 +0x38
+github.com/sasha-s/go-deadlock.(*Mutex).Unlock(0x10a14b600)
+        /Users/arenatlx/go/pkg/mod/github.com/sasha-s/go-deadlock@v0.3.1/deadlock.go:97 +0x4c
+github.com/pingcap/tidb/pkg/session.(*domainMap).Get(0x10a14b600, {0x107050648, 0x140018e9680})
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/session/tidb.go:78 +0x118
+github.com/pingcap/tidb/pkg/session.createSessionWithOpt({0x107050648, 0x140018e9680}, 0x0)
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/session/session.go:3747 +0x50
+github.com/pingcap/tidb/pkg/session.createSession({0x107050648, 0x140018e9680})
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/session/session.go:3739 +0x40
+github.com/pingcap/tidb/pkg/session.createSessionFunc.func1()
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/session/session.go:1177 +0x48
+github.com/pingcap/tidb/pkg/domain.(*sessionPool).Get(0x14001329770)
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/domain/domain.go:1744 +0xd8
+github.com/pingcap/tidb/pkg/bindinfo.(*globalBindingHandle).callWithSCtx(0x140000daaf0, 0x0, 0x14012a0fb60)
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/bindinfo/global_handle.go:649 +0x54
+github.com/pingcap/tidb/pkg/bindinfo.(*globalBindingHandle).LoadFromStorageToCache(0x140000daaf0, 0x0)
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/bindinfo/global_handle.go:205 +0x3b4
+github.com/pingcap/tidb/pkg/domain.(*Domain).globalBindHandleWorkerLoop.func1()
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/domain/domain.go:2062 +0x3cc
+github.com/pingcap/tidb/pkg/util.(*WaitGroupEnhancedWrapper).Run.func1()
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/util/wait_group_wrapper.go:99 +0xf4
+created by github.com/pingcap/tidb/pkg/util.(*WaitGroupEnhancedWrapper).Run in goroutine 1
+        /Users/arenatlx/go/src/github.com/pingcap/tidb/pkg/util/wait_group_wrapper.go:94 +0x11c
+
+Exiting.
+
+Debugger finished with the exit code 0
+```
+
+build bin with `--tags intest,deadlock,integrationtest`
+then just normal debug steps over
+
+### 2. What did you expect to see? (Required)
+no deadlock risk
+
+### 3. What did you see instead (Required)
+deadlock risk
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master
+

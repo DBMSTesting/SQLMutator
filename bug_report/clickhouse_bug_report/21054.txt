@@ -1,0 +1,114 @@
+ID: 21054
+Title: Creating and dropping replicated tables often leaves data in ZK
+Description:
+**Describe the bug**
+Creating and dropping replicated tables doesn't always remove data from ZooKeeper, making it a time bomb.
+
+**Does it reproduce on recent release?**
+21.1.3.32 is quite recent
+
+**How to reproduce**
+* Which ClickHouse server version to use
+21.1.3.32
+
+0. There is a main replicated table on the host:
+```
+CREATE TABLE database_20201117.table_local (
+...
+`timestamp` DateTime CODEC(ZSTD(9)),
+...
+)
+PARTITION BY toYear(timestamp)
+ENGINE ReplicatedReplacingMergeTree(
+  'zoo000:/clickhouse/tables/database_20201117/table/0-0', '1'
+)
+ORDER BY ...
+SETTINGS storage_policy = 'jbod_policy_1'
+...
+```
+
+1. A temporary table is created via HTTP interface:
+```
+CREATE TABLE database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 (
+...
+`timestamp` DateTime CODEC(ZSTD(9)),
+...
+)
+PARTITION BY toYear(timestamp)
+ENGINE ReplicatedReplacingMergeTree(
+  'zoo000:/clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1', '0'
+)
+ORDER BY ...
+SETTINGS storage_policy = 'jbod_policy_1'
+...
+```
+
+2. Data is inserted with `clickhouse-client`:
+```
+clickhouse-client -q 'INSERT INTO database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 FORMAT TSV' <</dataN/data.tsv
+```
+
+3. Temp table's parts are moved to the main table (HTTP):
+```
+ALTER TABLE database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 MOVE PARTITION 2021 TO TABLE database_20201117.table_local
+```
+
+4. Temp table is dropped (HTTP):
+```
+DROP TABLE IF EXISTS database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1
+```
+
+Steps 1-4 are continuously repeated. As a result, some of the temporary tables' data remains in ZK.
+
+**Expected behavior**
+When a replicated table is removed, its data must always be deleted from ZooKeeper.
+
+**Error message and/or stacktrace**
+clickhouse server log:
+```
+2021.02.20 19:28:03.348455 [ 97436 ] {} <Information> database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 (c9d988f5-47ee-4c18-94c9-c38693a8f5ff): Became leader
+2021.02.20 19:28:05.995884 [ 207712 ] {13617:tool@host000_1177} <Information> database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 (c9d988f5-47ee-4c18-94c9-c38693a8f5ff): Stopped being leader
+2021.02.20 19:36:05.313773 [ 97365 ] {} <Information> DatabaseCatalog: Have 12 tables in drop queue (0 of them are in use), will try drop database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 (c9d988f5-47ee-4c18-94c9-c38693a8f5ff)
+2021.02.20 19:36:05.313877 [ 97365 ] {} <Information> database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 (c9d988f5-47ee-4c18-94c9-c38693a8f5ff): Removing replica /clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0, marking it as lost
+2021.02.20 19:36:05.316467 [ 97365 ] {} <Information> DatabaseCatalog: Removing metadata /disk1/clickhouse/metadata_dropped/database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1.c9d988f5-47ee-4c18-94c9-c38693a8f5ff.sql of dropped table database_20201117.tmp_tool_database_20201117_table_13617_0_100_1613848127_1 (c9d988f5-47ee-4c18-94c9-c38693a8f5ff)
+```
+
+data still present in ZooKeeper:
+```
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/block_numbers
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/block_numbers/2021
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/blocks
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/blocks/2021_124828523911
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/columns
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/leader_election
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/log
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/log/log-0000000000
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/log/log-0000000001
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/metadata
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/mutations
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/nonincrement_block_numbe
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/quorum
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/quorum/failed_parts
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/quorum/last_part
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/quorum/parallel
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/columns
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/flags
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/host
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/is_lost
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/log_pointer
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/max_processed
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/metadata
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/metadata_vers
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/min_unprocess
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/mutation_poin
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/parts
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/queue
+clickhouse/tables/tool/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/temp
+```
+
+`/clickhouse/tables/ch_buffers/host000/database_20201117/tmp_tool_database_20201117_table_13617_0_100_1613848127_1/replicas/0/is_lost` = 0
+
+**Additional context**
+n/a

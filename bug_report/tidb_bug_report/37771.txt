@@ -1,0 +1,57 @@
+ID: 37771
+Title: Duplicated entry in DATA_LOCK_WAITS table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Make some lock waiting of pessimistic transactions and then query `INFORMATION_SCHEMA.DATA_LOCK_WAITS` table for the lock waiting information:
+
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t (id int primary key, v int);
+/* init */ insert into t values (1, 1), (2, 2);
+
+/* t1 */ begin;
+/* t1 */ update t set v = 2 where id = 1;
+/* t2 */ begin;
+/* t2 */ update t set v = 3 where id = 1; -- blocked
+
+/* t3 */ select * from information_schema.data_lock_waits;
+```
+
+### 2. What did you expect to see? (Required)
+
+A single lock-waiting entry is shown in the table like following:
+
+```sql
+-- t3 >> +----------------------------------------+----------------------------------------------------------------------------------------------------+--------------------+------------------------+------------------------------------------------------------------+-----------------------------------------+
+-- t3    |                  KEY                   |                                              KEY_INFO                                              |       TRX_ID       | CURRENT_HOLDING_TRX_ID |                            SQL_DIGEST                            |             SQL_DIGEST_TEXT             |
+-- t3    +----------------------------------------+----------------------------------------------------------------------------------------------------+--------------------+------------------------+------------------------------------------------------------------+-----------------------------------------+
+-- t3    | 74800000000000004D5F728000000000000001 | {"db_name":"test","table_name":"t","handle_type":"int","handle_value":"1","db_id":2,"table_id":77} | 435955806052810758 |     435955806052810757 | 22230766411edb40f27a68dadefc63c6c6970d5827f1e5e22fc97be2c4d8350d | update `t` set `v` = ? where `id` = ? ; |
+-- t3    +----------------------------------------+----------------------------------------------------------------------------------------------------+--------------------+------------------------+------------------------------------------------------------------+-----------------------------------------+
+```
+
+### 3. What did you see instead (Required)
+
+Two duplicated rows showing the same lock waiting, one of which doesn't have the SQL_DIGEST information:
+
+```sql
+-- t3 >> +----------------------------------------+----------------------------------------------------------------------------------------------------+--------------------+------------------------+------------------------------------------------------------------+-----------------------------------------+
+-- t3    |                  KEY                   |                                              KEY_INFO                                              |       TRX_ID       | CURRENT_HOLDING_TRX_ID |                            SQL_DIGEST                            |             SQL_DIGEST_TEXT             |
+-- t3    +----------------------------------------+----------------------------------------------------------------------------------------------------+--------------------+------------------------+------------------------------------------------------------------+-----------------------------------------+
+-- t3    | 74800000000000004D5F728000000000000001 | {"db_name":"test","table_name":"t","handle_type":"int","handle_value":"1","db_id":2,"table_id":77} | 435955806052810758 |     435955806052810757 | 22230766411edb40f27a68dadefc63c6c6970d5827f1e5e22fc97be2c4d8350d | update `t` set `v` = ? where `id` = ? ; |
+-- t3    | 74800000000000004D5F728000000000000001 | {"db_name":"test","table_name":"t","handle_type":"int","handle_value":"1","db_id":2,"table_id":77} | 435955806052810758 |     435955806052810757 | NULL                                                             | NULL                                    |
+-- t3    +----------------------------------------+----------------------------------------------------------------------------------------------------+--------------------+------------------------+------------------------------------------------------------------+-----------------------------------------+
+```
+
+This strange behavior is also noticed in https://github.com/pingcap/automated-tests/pull/1114#issuecomment-1182746279
+
+It's suspected to be introduced when supporting getting lock waiting state from resolving-lock info (which is useful for providing lock-waiting information about optimistic transactions), without deduping with the entries of pessimistic lock-waiting.
+
+### 4. What is your TiDB version? (Required)
+
+Current master (12ae85f32b11ba4ed5ed9ec111cb6777d860e3ac)
+

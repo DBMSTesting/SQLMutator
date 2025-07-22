@@ -1,0 +1,174 @@
+ID: 7817
+Title: Float values are sometimes altered
+Description:
+When inserting Float32 or Float64 values over HTTP, I noticed that **_sometimes_** their decimal part is missing, or divided by 10000 or 100000, or the float becames `inf`. This is not systematic and happens only for a few rows (11 out of 500000 in the example below).
+The same thing doesn't happen when inserting the same data from a CSV file. 
+
+ClickHouse server version : 19.16.2.2, also reproduced with 19.17.3.7.
+
+**To reproduce:**
+- Create Tables
+```sql
+DROP TABLE IF EXISTS strange_bug_http;
+CREATE TABLE strange_bug_http
+(
+    `row_id` Int32, 
+    `longitude` Float32 CODEC(Gorilla, ZSTD), 
+    `latitude` Float32 CODEC(Gorilla, ZSTD), 
+    `geohash` FixedString(3) CODEC(ZSTD)
+)
+ENGINE = MergeTree()
+ORDER BY row_id;
+
+// for comparison
+DROP TABLE IF EXISTS strange_bug_csv;
+CREATE TABLE strange_bug_csv
+(
+    `row_id` Int32, 
+    `longitude` Float32 CODEC(Gorilla, ZSTD), 
+    `latitude` Float32 CODEC(Gorilla, ZSTD), 
+    `geohash` FixedString(3) CODEC(ZSTD)
+)
+ENGINE = MergeTree()
+ORDER BY row_id;
+```
+- Generate data :
+
+You can download the generated files from [here](https://github.com/yamrzou/playground/tree/master/ClickHouse/7817).
+```python
+# pip install python-geohash
+# pip install numpy
+import numpy as np
+import geohash
+
+NUM_POINTS = 500_000
+
+longitude = np.random.rand(NUM_POINTS) * 360 - 180
+latitude = np.random.rand(NUM_POINTS) * 180 - 90
+@np.vectorize 
+def geohashEncode(longitude, latitude, precision=3):
+    return geohash.encode(latitude, longitude, precision)
+geohash = geohashEncode(longitude, latitude)
+
+data = b','.join([b'(' + b','.join(map(lambda x: repr(x).encode(),(i,)+tup)) + b')' for i,tup in enumerate(zip(longitude, latitude, geohash))])
+
+with open('floats.bin', 'wb') as f: 
+    f.write(data)
+
+csv = '\n'.join([','.join(map(lambda x: repr(x),(i,)+tup)) for i,tup in enumerate(zip(longitude, latitude, geohash))])
+with open('floats.csv', 'w') as f: 
+    f.write(csv)
+```
+- Insert over HTTP:
+
+```python
+# pip install uvloop
+# pip install aiohttp
+import asyncio
+import uvloop
+import aiohttp
+
+with open('floats.bin', 'rb')  as f: 
+    data = f.read()
+
+uvloop.install()
+loop = asyncio.get_event_loop()
+
+params = {"database":"default", "query": "INSERT INTO strange_bug_http VALUES"}
+async def main(data, params, url="http://localhost:8123/"):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url=url, params=params, data=data) as resp:
+            return await resp.read()
+
+loop.run_until_complete(main(data, params))
+```
+- Insert from CSV:
+```bash
+cat floats.csv | clickhouse-client --query="INSERT INTO strange_bug_csv FORMAT CSV"
+```
+- Perform the following query on both tables 
+```sql
+SELECT 
+    row_id + 1, 
+    longitude, 
+    latitude, 
+    geohashEncode(longitude, latitude, 3) AS computed_geohash, 
+    geohash
+FROM [strange_bug_csv/strange_bug_http]
+WHERE computed_geohash != geohash;
+```
+On the table filled from CSV, it retrurns one row, which is probably due to geohash miscalculation/float precision :
+```
+┌─plus(row_id, 1)─┬─longitude─┬──latitude─┬─computed_geohash─┬─geohash─┐
+│          360307 │ -171.5625 │ -81.95313 │ 01q              │ 01m     │
+└─────────────────┴───────────┴───────────┴──────────────────┴─────────┘
+```
+On the table filled via HTTP, it retrurns the following :
+```
+─plus(row_id, 1)─┬──longitude─┬───latitude─┬─computed_geohash─┬─geohash─┐
+│          201272 │ -95.921555 │         52 │ cc5              │ cc7     │
+│          241104 │ -14.000025 │  35.987846 │ ewq              │ ewm     │
+│          261022 │   7.000061 │ -69.146805 │ h5s              │ h5t     │
+└─────────────────┴────────────┴────────────┴──────────────────┴─────────┘
+┌─plus(row_id, 1)─┬──longitude─┬───latitude─┬─computed_geohash─┬─geohash─┐
+│           81429 │  174.77354 │  49.000008 │ zbs              │ zbu     │
+│          101695 │   35.81316 │        inf │ uzc              │ uu9     │
+│          121610 │ -109.74762 │ -28.000027 │ 3e1              │ 3dc     │
+└─────────────────┴────────────┴────────────┴──────────────────┴─────────┘
+┌─plus(row_id, 1)─┬─longitude─┬──latitude─┬─computed_geohash─┬─geohash─┐
+│          300857 │ 157.00002 │ -69.10218 │ p7x              │ pe8     │
+└─────────────────┴───────────┴───────────┴──────────────────┴─────────┘
+┌─plus(row_id, 1)─┬─longitude─┬──latitude─┬─computed_geohash─┬─geohash─┐
+│          360307 │ -171.5625 │ -81.95313 │ 01q              │ 01m     │
+└─────────────────┴───────────┴───────────┴──────────────────┴─────────┘
+┌─plus(row_id, 1)─┬─longitude─┬───latitude─┬─computed_geohash─┬─geohash─┐
+│          360603 │      -171 │ -56.861885 │ 0jy              │ 0jv     │
+│          380518 │ 119.77515 │ -46.000004 │ nxv              │ nxt     │
+└─────────────────┴───────────┴────────────┴──────────────────┴─────────┘
+┌─plus(row_id, 1)─┬──longitude─┬───latitude─┬─computed_geohash─┬─geohash─┐
+│          420349 │ -113.02339 │ -11.000004 │ 3qp              │ 3mz     │
+└─────────────────┴────────────┴────────────┴──────────────────┴─────────┘
+┌─plus(row_id, 1)─┬─longitude─┬───latitude─┬─computed_geohash─┬─geohash─┐
+│          480089 │ -177.2999 │ -42.000057 │ 209              │ 203     │
+└─────────────────┴───────────┴────────────┴──────────────────┴─────────┘
+```
+For instance, the second and third rows in the results have as longitude `-14.000025` and `7.000061` respectively, which is different from the inserted values `-14.250967871479986` and `7.608598672771308`.
+
+Checking the CSV data :
+```shell
+$ sed -n 241104p floats.csv
+241103, -14.250967871479986, 35.98784501339779, 'ewm'
+
+$ sed -n 261022p floats.csv
+261021, 7.608598672771308, -69.14680134387808, 'h5t'
+```
+Checking the CSV table :
+```sql
+SELECT 
+    row_id + 1, 
+    longitude, 
+    latitude, 
+    geohashEncode(longitude, latitude, 3) AS computed_geohash, 
+    geohash
+FROM strange_bug_csv
+WHERE (row_id + 1) IN (241104, 261022);
+
+┌─plus(row_id, 1)─┬──longitude─┬───latitude─┬─computed_geohash─┬─geohash─┐
+│          241104 │ -14.250968 │  35.987846 │ ewm              │ ewm     │
+│          261022 │  7.6085987 │ -69.146805 │ h5t              │ h5t     │
+└─────────────────┴────────────┴────────────┴──────────────────┴─────────┘
+```
+Checking the binary data :
+```python
+def get_binary_row(row_id, data):
+    p = data.find("({}".format(row_id).encode())
+    return data[p : p + data[p:].find(b')') + 1]
+
+>>> get_binary_row(241104-1, data)
+b"(241103,-14.250967871479986,35.98784501339779,'ewm')"
+>>> get_binary_row(261022-1, data)
+b"(261021,7.608598672771308,-69.14680134387808,'h5t')"
+```
+
+Any workaround is much appreciated.
+Thank you.

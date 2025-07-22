@@ -1,0 +1,32 @@
+ID: 12998
+Title: [Python] Fix lifetime issue with MaterializedRelation
+Description:
+This PR fixes #12987 
+
+The ColumnDataCollection (CDC) was stored in the MaterializedRelation, and the produced ColumnDataRef has a reference to this CDC.
+
+We previously blocked creating views from MaterializedRelations (#12163) but this did not take into account nested relations, such as `ProjectionRelation`, which is the case here.
+```py
+import duckdb
+
+rel = duckdb.sql("select * from (values ($1, $2))", params=[
+    (2,),
+    ("Alice",)
+])
+
+rel = rel.project("col0, col1")
+
+rel.create_view("test", True)
+rel = duckdb.sql("select * from test")
+rel.show()
+```
+
+I've changed the ownership semantics here to fix the issue and removed the previously put in limitation.
+The MaterializedRelation no longer owns the CDC, instead it is stored in the ExternalDependency, as a MaterializedDependency.
+
+We recently made it so that TableRefs can have an ExternalDependency.
+Because of this, the created VIEW will contain the ColumnDataRef that will keep the CDC alive through its ExternalDependency.
+
+----------------------
+
+This could also be achieved through a regular shared_ptr I think, which might be cleaner than involving the ExternalDependency mechanism into this

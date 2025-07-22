@@ -1,0 +1,182 @@
+ID: 57261
+Title: Partition Pruning gives wrong partition for RANGE COLUMNS with multiple columns and utf8mb4_0900_ai_ci collation
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```mysql
+CREATE TABLE `t` (
+ `a` varchar(255) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+ `b` varchar(255) COLLATE utf8mb4_0900_ai_ci NOT NULL
+)
+PARTITION BY RANGE COLUMNS(`a`,`b`)
+(PARTITION `pLTi` VALUES LESS THAN ('i',''),
+ PARTITION `pMax` VALUES LESS THAN (MAXVALUE,''));
+
+insert into t values ("Q","Q");
+
+-- Wrong partition, pLTi instead of pMax
+explain select * from t where a like 'Q%';
+select * from t where a like 'Q%';
+-- Wrong partition, pLTi instead of pMax
+explain select * from t where a = 'Q';
+select * from t where a = 'Q';
+-- OK, but with partition:all !
+explain select * from t where a >= 'Q';
+select * from t where a >= 'Q';
+
+-- Wrong partition, pLTi instead of pMax
+explain select * from t where a like 'q%';
+select * from t where a like 'q%';
+-- Wrong partition, pLTi instead of pMax
+explain select * from t where a = 'q';
+select * from t where a = 'q';
+-- OK, but with partition:all !
+explain select * from t where a >= 'q';
+select * from t where a >= 'q';
+```
+
+### 2. What did you expect to see? (Required)
+Use of partition `pMax` instead of `pLTi`
+
+### 3. What did you see instead (Required)
+```mysql
+tidb> CREATE TABLE `t` (
+    ->  `a` varchar(255) COLLATE utf8mb4_0900_ai_ci NOT NULL,
+    ->  `b` varchar(255) COLLATE utf8mb4_0900_ai_ci NOT NULL
+    -> )
+    -> PARTITION BY RANGE COLUMNS(`a`,`b`)
+    -> (PARTITION `pLTi` VALUES LESS THAN ('i',''),
+    ->  PARTITION `pMax` VALUES LESS THAN (MAXVALUE,''));
+Query OK, 0 rows affected (0.03 sec)
+
+tidb> 
+tidb> insert into t values ("Q","Q");
+Query OK, 1 row affected (0.03 sec)
+
+tidb> 
+tidb> -- Wrong partition, pLTi instead of pMax
+Query OK, 1 row affected (0.00 sec)
+
+tidb> explain select * from t where a like 'Q%';
++-------------------------+----------+-----------+----------------+--------------------------------+
+| id                      | estRows  | task      | access object  | operator info                  |
++-------------------------+----------+-----------+----------------+--------------------------------+
+| TableReader_7           | 250.00   | root      | partition:pLTi | data:Selection_6               |
+| └─Selection_6       | 250.00   | cop[tikv] |                | like(test.t.a, "Q%", 92)       |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t        | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+----------------+--------------------------------+
+3 rows in set (0.00 sec)
+
+tidb> select * from t where a like 'Q%';
+Empty set (0.00 sec)
+
+tidb> -- Wrong partition, pLTi instead of pMax
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> explain select * from t where a = 'Q';
++-------------------------+----------+-----------+----------------+--------------------------------+
+| id                      | estRows  | task      | access object  | operator info                  |
++-------------------------+----------+-----------+----------------+--------------------------------+
+| TableReader_7           | 10.00    | root      | partition:pLTi | data:Selection_6               |
+| └─Selection_6       | 10.00    | cop[tikv] |                | eq(test.t.a, "Q")              |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t        | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+----------------+--------------------------------+
+3 rows in set (0.00 sec)
+
+tidb> select * from t where a = 'Q';
+Empty set (0.00 sec)
+
+tidb> -- OK, but with partition:all !
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> explain select * from t where a >= 'Q';
++-------------------------+----------+-----------+---------------+--------------------------------+
+| id                      | estRows  | task      | access object | operator info                  |
++-------------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_7           | 3333.33  | root      | partition:all | data:Selection_6               |
+| └─Selection_6       | 3333.33  | cop[tikv] |               | ge(test.t.a, "Q")              |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+---------------+--------------------------------+
+3 rows in set (0.00 sec)
+
+tidb> select * from t where a >= 'Q';
++---+---+
+| a | b |
++---+---+
+| Q | Q |
++---+---+
+1 row in set (0.00 sec)
+
+tidb> 
+tidb> -- Wrong partition, pLTi instead of pMax
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> explain select * from t where a like 'q%';
++-------------------------+----------+-----------+----------------+--------------------------------+
+| id                      | estRows  | task      | access object  | operator info                  |
++-------------------------+----------+-----------+----------------+--------------------------------+
+| TableReader_7           | 250.00   | root      | partition:pLTi | data:Selection_6               |
+| └─Selection_6       | 250.00   | cop[tikv] |                | like(test.t.a, "q%", 92)       |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t        | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+----------------+--------------------------------+
+3 rows in set (0.00 sec)
+
+tidb> select * from t where a like 'q%';
+Empty set (0.00 sec)
+
+tidb> -- Wrong partition, pLTi instead of pMax
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> explain select * from t where a = 'q';
++-------------------------+----------+-----------+----------------+--------------------------------+
+| id                      | estRows  | task      | access object  | operator info                  |
++-------------------------+----------+-----------+----------------+--------------------------------+
+| TableReader_7           | 10.00    | root      | partition:pLTi | data:Selection_6               |
+| └─Selection_6       | 10.00    | cop[tikv] |                | eq(test.t.a, "q")              |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t        | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+----------------+--------------------------------+
+3 rows in set (0.00 sec)
+
+tidb> select * from t where a = 'q';
+Empty set (0.00 sec)
+
+tidb> -- OK, but with partition:all !
+Query OK, 0 rows affected (0.00 sec)
+
+tidb> explain select * from t where a >= 'q';
++-------------------------+----------+-----------+---------------+--------------------------------+
+| id                      | estRows  | task      | access object | operator info                  |
++-------------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_7           | 3333.33  | root      | partition:all | data:Selection_6               |
+| └─Selection_6       | 3333.33  | cop[tikv] |               | ge(test.t.a, "q")              |
+|   └─TableFullScan_5 | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo |
++-------------------------+----------+-----------+---------------+--------------------------------+
+3 rows in set (0.00 sec)
+
+tidb> select * from t where a >= 'q';
++---+---+
+| a | b |
++---+---+
+| Q | Q |
++---+---+
+1 row in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v8.5.0-alpha-60-gb522e98080
+Edition: Community
+Git Commit Hash: b522e98080057cbaa451b207d42a8f37399082d7
+Git Branch: HEAD
+UTC Build Time: 2024-11-06 16:17:23
+GoVersion: go1.23.2
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+```

@@ -1,0 +1,26 @@
+ID: 23676
+Title: TiDB wrongly uses PD client's GetStore which may result in dead loops
+Description:
+## Bug Report
+
+When TiDB meets the `StoreNotMatch` error, it will resolve the store through PD client's `GetStore()`:
+- If the store is deleted or a tombstone, regions on this store are all invalidated. 
+
+However, TiDB wrongly uses the PD client's `GetStore()`:
+https://github.com/pingcap/tidb/blob/a8a52c0175b91ffab369ddeb1c6b642ce1b76cf2/store/tikv/region_cache.go#L1775-L1793
+
+TiDB assumes it returns nil if the store is not found. In fact, if the store is a tombstone, it returns nil; if the store is not found, it returns an error. https://github.com/tikv/pd/blob/bc63de897afa69cfcc5828f45431fe3999fed4b3/client/client.go#L1159-L1168
+```go
+func handleStoreResponse(resp *pdpb.GetStoreResponse) (*metapb.Store, error) {
+	store := resp.GetStore()
+	if store == nil {
+		return nil, errors.New("[pd] store field in rpc response not set")
+	}
+	if store.GetState() == metapb.StoreState_Tombstone {
+		return nil, nil
+	}
+	return store, nil
+}
+```
+
+So https://github.com/pingcap/tidb/issues/22907 is not resolved.

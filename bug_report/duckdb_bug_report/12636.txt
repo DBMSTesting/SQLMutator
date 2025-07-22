@@ -1,0 +1,46 @@
+ID: 12636
+Title: [Dev] StreamQueryResult internals cleanup
+Description:
+This PR fixes https://github.com/duckdblabs/duckdb-internal/issues/2258
+
+Previously we introduced `PendingExecutionResult::BLOCKED` to signal that the StreamQueryResult was ready.
+This couldn't use `PendingExecutionResult::RESULT_READY` because that was synonymous with "execution finished".
+
+Using `BLOCKED` for this is a bit of a misnomer and definitely confusing, so I went back and took a different route.
+I separate RESULT_READY from EXECUTION_FINISHED, now RESULT_READY can also be used for the StreamQueryResult.
+
+### PendingExecutionResult changes
+
+- `PendingExecutionResult::BLOCKED`
+This is now returned when no task is available and there are one or more blocked tasks waiting to be rescheduled.
+
+- `PendingExecutionResult::RESULT_READY`
+This has been untangled from "execution finished", for the MaterializedResult these are still synonymous, `PendingQueryResult::IsResultReady` also checks for `EXECUTION_FINISHED`
+
+- `PendingExecutionResult::EXECUTION_FINISHED`
+This is returned when `completed_pipelines >= total_pipelines` and no error occurred.
+Previously this returned `RESULT_READY`
+
+### Changes for users of `PendingQueryResult::ExecuteTask`
+
+Before:
+```c++
+PendingExecutionResult execution_result;
+auto is_finished = pending_query.AllowStreamResult() ? PendingQueryResult::IsFinishedOrBlocked : PendingQueryResult::IsFinished;
+while (!is_finished(execution_result = pending_query.ExecuteTask())) {
+	...
+}
+```
+
+After:
+```c++
+PendingExecutionResult execution_result;
+auto is_finished = PendingQueryResult::IsResultReady;
+while (!is_finished(execution_result = pending_query.ExecuteTask())) {
+	...
+}
+```
+
+### Other changes
+
+WaitForTask is now used in the stream query result to avoid busy-spinning in `QueryResult::Fetch` while the worker threads are working on producing a chunk to return.

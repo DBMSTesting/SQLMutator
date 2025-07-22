@@ -1,0 +1,80 @@
+ID: 24858
+Title: Some tables in information_schema doesn't present times in correct timezone.
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+* Start some transaction, or construct some deadlock errors
+* `select * from information_schema.tidb_trx` or `select * from information_schema.deadlocks`
+
+### 2. What did you expect to see? (Required)
+
+For the Timestamp typed fields, it shows the time according to the timezone in the current session.
+
+### 3. What did you see instead (Required)
+
+It always shows a fixed timezone.
+
+### 4. What is your TiDB version? (Required)
+
+master
+
+
+This issue is initially found in [Lock View](https://github.com/pingcap/tidb/issues/24199) while it's in development.  But later it's found that this issue also exists in some other system tables.
+
+Example (`statements_summary`):
+```
+mysql> select SUMMARY_BEGIN_TIME, DIGEST from information_schema.statements_summary where DIGEST = "e5796985ccafe2f71126ed6c
+0ac939ffa015a8c0744a24b7aee6d587103fd2f7";                                                                                  
++---------------------+------------------------------------------------------------------+                                  
+| SUMMARY_BEGIN_TIME  | DIGEST                                                           |                                  
++---------------------+------------------------------------------------------------------+                                  
+| 2021-05-28 05:30:00 | e5796985ccafe2f71126ed6c0ac939ffa015a8c0744a24b7aee6d587103fd2f7 |                                  
++---------------------+------------------------------------------------------------------+                                  
+1 row in set (0.01 sec)                                                                                                     
+                                                                                                                            
+mysql> set @@time_zone = "+08:00";                                                                                          
+Query OK, 0 rows affected (0.01 sec)                                                                                        
+                                                                                                                            
+mysql> select SUMMARY_BEGIN_TIME, DIGEST from information_schema.statements_summary where DIGEST = "e5796985ccafe2f71126ed6c
+0ac939ffa015a8c0744a24b7aee6d587103fd2f7";                                                                                  
++---------------------+------------------------------------------------------------------+                                  
+| SUMMARY_BEGIN_TIME  | DIGEST                                                           |                                  
++---------------------+------------------------------------------------------------------+                                  
+| 2021-05-28 05:30:00 | e5796985ccafe2f71126ed6c0ac939ffa015a8c0744a24b7aee6d587103fd2f7 |                                  
++---------------------+------------------------------------------------------------------+                                  
+1 row in set (0.00 sec)                                                                                                     
+```
+
+In normal user-created tables (`create table t (id int primary key, t timestamp)`):
+
+```
+mysql> set @@time_zone = "+00:00";       
+Query OK, 0 rows affected (0.00 sec)     
+                                         
+mysql> select * from t;                  
++----+---------------------+             
+| id | t                   |             
++----+---------------------+             
+|  1 | 2021-05-28 05:38:59 |             
++----+---------------------+             
+1 row in set (0.00 sec)                  
+                                         
+mysql> set @@time_zone = "+08:00";       
+Query OK, 0 rows affected (0.01 sec)     
+                                         
+mysql> select * from t;                  
++----+---------------------+             
+| id | t                   |             
++----+---------------------+             
+|  1 | 2021-05-28 13:38:59 |             
++----+---------------------+             
+1 row in set (0.01 sec)                                                        
+```
+
+It's also found that the implementation of `statements_summary` uses `time.Unix` directly without any timezone conversion:
+
+https://github.com/pingcap/tidb/blob/348abf01f90eb19db09d72261cd83c37e563a813/util/stmtsummary/statement_summary.go#L871-L873
+
+As I understood it, it will cause the query result depends on the system timezone of the host of that TiDB process.

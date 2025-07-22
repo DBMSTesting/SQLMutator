@@ -1,0 +1,84 @@
+ID: 10083
+Title: Table corruption Could not find a column of minimum size in MergeTree, after alter delete
+Description:
+**Describe the bug**
+After successfully done alter delete mutation table became corrupted
+
+mutation:
+`alter table user_behavior_events delete where ts > 1576762967041 and ts < 1576799999503 and length(`headers.key`) = 0;
+` 
+
+`select * from user_behavior_events limit 100;`
+leads to exception:
+`DB::Exception: Could not find a column of minimum size in MergeTree, part /var/lib/clickhouse/data/mx_master/user_behavior_events/201912_0_0_0_229/ (version 19.17.6.36 (official build))`
+
+Table definition:
+```
+ATTACH TABLE user_behavior_events
+(
+    `ts` UInt64, 
+    `sessionId` String, 
+    `registrationId` String, 
+    `step` String, 
+    `userId` Nullable(String), 
+    `url` String, 
+    `eventType` Nullable(String), 
+    `eventName` Nullable(String), 
+    `eventId` Nullable(String), 
+    `eventValue` Nullable(String), 
+    `deviceOS` String, 
+    `deviceOSVersion` String, 
+    `browser` String, 
+    `browserVersion` String, 
+    `formFactor` String, 
+    `deviceId` String, 
+    `countryCode` Nullable(String), 
+    `countryName` Nullable(String), 
+    `regionCode` Nullable(String), 
+    `regionName` Nullable(String), 
+    `city` Nullable(String), 
+    `timeZone` Nullable(String), 
+    `latitude` Nullable(Float64), 
+    `longitude` Nullable(Float64), 
+    `ip` String, 
+    `headers.key` Array(String), 
+    `headers.value` Array(Nullable(String)), 
+    `cookies.key` Array(String), 
+    `cookies.value` Array(Nullable(String)), 
+    `queryParams.key` Array(String), 
+    `queryParams.value` Array(Nullable(String))
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}/mx_master.user_behavior_events', '{replica}')
+PARTITION BY toYYYYMM(toDateTime(ts / 1000))
+ORDER BY (ts, registrationId, sessionId)
+SETTINGS index_granularity = 8192
+```
+
+columns with `.mrk` and `.mrk2` exists in different parts. 
+In clickhouse config `enable_mixed_granularity_parts` is enabled :
+
+```
+<merge_tree>
+        <max_suspicious_broken_parts>5</max_suspicious_broken_parts>
+        <enable_mixed_granularity_parts>1</enable_mixed_granularity_parts>
+    </merge_tree>
+```
+
+
+logs: 
+
+```
+root@gl-prod-warehouse-sel:~# grep 201912_0_0_0_229 /var/log/clickhouse-server/clickhouse-server.log
+2020.04.07 09:16:55.903543 [ 11 ] {} <Trace> mx_master.user_behavior_events: Executing log entry to mutate part 201912_0_0_0 to 201912_0_0_0_229
+2020.04.07 09:19:58.101158 [ 11 ] {} <Trace> mx_master.user_behavior_events: Renaming temporary part tmp_mut_201912_0_0_0_229 to 201912_0_0_0_229.
+2020.04.07 09:22:03.257359 [ 234 ] {90354f57-9aa1-453f-b74b-63813ea2b2f1} <Error> executeQuery: Code: 49, e.displayText() = DB::Exception: Could not find a column of minimum size in MergeTree, part /var/lib/clickhouse/data/mx_master/user_behavior_events/201912_0_0_0_229/ (version 19.17.6.36 (official build)) (from 172.19.0.1:39297) (in query: select toStartOfHour(toDateTime(ts / 1000)) p, count(), min(ts), max(ts), min(toDateTime(ts / 1000)), max(toDateTime(ts / 1000)) from user_behavior_events where length(`headers.key`) > 0   and toDateTime(ts / 1000) between '2019-12-19 12:47:47' and now()   and ts > 1576762595598 group by p order by p limit 10000 FORMAT TabSeparatedWithNamesAndTypes;), Stack trace:
+2020.04.07 09:22:03.257658 [ 234 ] {90354f57-9aa1-453f-b74b-63813ea2b2f1} <Error> HTTPHandler: Code: 49, e.displayText() = DB::Exception: Could not find a column of minimum size in MergeTree, part /var/lib/clickhouse/data/mx_master/user_behavior_events/201912_0_0_0_229/, Stack trace:
+2020.04.07 09:22:08.983450 [ 234 ] {d73ad518-739a-4a8a-9d3c-a06bbb3edd91} <Error> executeQuery: Code: 49, e.displayText() = DB::Exception: Could not find a column of minimum size in MergeTree, part 
+```
+
+Alexander Sapin helped me to fix this issue and simple attach/detach table fix the issue and table start work correct:
+```
+
+detach table mx_master.user_behavior_events;
+attach table mx_master.user_behavior_events;
+```

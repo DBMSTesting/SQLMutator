@@ -1,0 +1,77 @@
+ID: 11791
+Title: Segmentation Fault when using join_algorithm='partial_merge'
+Description:
+**Describe the bug**
+Segmentation fault when using join_algorithm='partial_merge'
+
+**How to reproduce**
+Trying to merge large tables using merge join. 
+Problem does NOT happen when limits are applied on the "right" table. 
+Could not understand specific threshold on when it start to appear. 
+Right table is heavy and has long strings of 50-400 char wide. 
+Version: 20.3.11.97
+
+```
+(select from fact group by) -- uses two-stage grouping due to memory peakmem 2GB 
+join 
+(select from bigdimension) — ~67 mln + fat strings, peakmem 6GB
+```
+
+UPD:
+Problem is happening when using LowCardinality on the right side table. 
+Query to reproduce (although depending on conditions it may fail with failure to allocate memory):
+```
+select 
+attr.k1,
+attr.dim1,
+fact.k1,
+fact.gk1val,
+fact.gk2val,
+fact.gk3val from
+(
+select k1, k2,
+(groupArrayInsertAt(Null, 3)(tuple(toNullable(val)), toUInt32(indexOf(range(3), gk) - 1)).1 as arr)[1] gk1val,
+arr[2] gk2val,arr[3] gk3val
+from (
+select cityHash64(number) as k1, toString(cityHash64(number,2)) as k2, toString(cityHash64(number,gk)) as val, gk from numbers(1000000)
+array join range(3) as gk
+) group by k1, k2 
+) as fact
+JOIN 
+(
+	select cityHash64(number) as k1, toLowCardinality(arrayStringConcat(arrayMap(x-> toString(x),range(cityHash64(number)%100)),'-')) dim1 from numbers(10000000)
+)
+as attr using k1
+SETTINGS max_bytes_before_external_group_by='500M',join_algorithm='partial_merge'
+Format Null;
+```
+Same query works correctly without having "toLowCardinality" (but too slow), and does not utilize much memory. 
+
+**Expected behavior**
+clickhouse query shall not result in segmentation faults and query shall be completed successfully. 
+
+**Error message and/or stacktrace**
+```
+2020.06.19 15:13:30.829653 [ 14927 ] {} <Fatal> BaseDaemon: (version 20.3.11.97 (official build)) (from thread 14872) (query_id: 864f09d2-8cc0-44df-8a44-72fc974269e8) Received signal Segmentation fault (11).
+2020.06.19 15:13:30.829695 [ 14927 ] {} <Fatal> BaseDaemon: Address: 0x1 Access: read. Address not mapped to object.
+2020.06.19 15:13:30.829718 [ 14927 ] {} <Fatal> BaseDaemon: Stack trace: 0xd5c7718 0xd445dbe 0xd446c24 0xd4540a0 0xd0c8f83 0xd0ccc7e 0xde3f812 0xde428c2 0xdb75075 0xdbb9581 0xdbbd70d 0xdbbe0d2 0x8f757e7 0x8f73c33 0x7fdf6df78ea5 0x7fdf6e7958dd
+2020.06.19 15:13:30.879340 [ 14927 ] {} <Fatal> BaseDaemon: 3. DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long) @ 0xd5c7718 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879432 [ 14927 ] {} <Fatal> BaseDaemon: 4. ? @ 0xd445dbe in /usr/bin/clickhouse
+2020.06.19 15:13:30.879490 [ 14927 ] {} <Fatal> BaseDaemon: 5. DB::MergeJoin::allInnerJoin(DB::MergeJoinCursor&, DB::Block const&, DB::Block const&, std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, unsigned long&, unsigned long&) @ 0xd446c24 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879541 [ 14927 ] {} <Fatal> BaseDaemon: 6. void DB::MergeJoin::joinSortedBlock<false, true>(DB::Block&, std::__1::shared_ptr<DB::ExtraBlock>&) @ 0xd4540a0 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879577 [ 14927 ] {} <Fatal> BaseDaemon: 7. DB::ExpressionAction::execute(DB::Block&, bool, std::__1::shared_ptr<DB::ExtraBlock>&) const @ 0xd0c8f83 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879606 [ 14927 ] {} <Fatal> BaseDaemon: 8. DB::ExpressionActions::execute(DB::Block&, std::__1::shared_ptr<DB::ExtraBlock>&, unsigned long&) const @ 0xd0ccc7e in /usr/bin/clickhouse
+2020.06.19 15:13:30.879639 [ 14927 ] {} <Fatal> BaseDaemon: 9. DB::InflatingExpressionTransform::readExecute(DB::Chunk&) @ 0xde3f812 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879664 [ 14927 ] {} <Fatal> BaseDaemon: 10. DB::InflatingExpressionTransform::transform(DB::Chunk&) @ 0xde428c2 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879727 [ 14927 ] {} <Fatal> BaseDaemon: 11. DB::ISimpleTransform::work() @ 0xdb75075 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879751 [ 14927 ] {} <Fatal> BaseDaemon: 12. ? @ 0xdbb9581 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879782 [ 14927 ] {} <Fatal> BaseDaemon: 13. DB::PipelineExecutor::executeSingleThread(unsigned long, unsigned long) @ 0xdbbd70d in /usr/bin/clickhouse
+2020.06.19 15:13:30.879805 [ 14927 ] {} <Fatal> BaseDaemon: 14. ? @ 0xdbbe0d2 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879834 [ 14927 ] {} <Fatal> BaseDaemon: 15. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8f757e7 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879866 [ 14927 ] {} <Fatal> BaseDaemon: 16. ? @ 0x8f73c33 in /usr/bin/clickhouse
+2020.06.19 15:13:30.879914 [ 14927 ] {} <Fatal> BaseDaemon: 17. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2020.06.19 15:13:30.879959 [ 14927 ] {} <Fatal> BaseDaemon: 18. __clone @ 0xfe8dd in /usr/lib64/libc-2.17.so
+```
+
+**Additional context**
+partial_merge was tried to workaround out of memory problem when right table is too big. Seems bad luck...

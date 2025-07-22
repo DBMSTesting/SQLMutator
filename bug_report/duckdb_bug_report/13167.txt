@@ -1,0 +1,79 @@
+ID: 13167
+Title: Secret settings cascade
+Description:
+This PR reworks the way secrets and settings interact.
+
+Currently, we use Secrets for various types of settings that are too sensitive to be stored in regular settings. These secrets are now generally implemented as KeyValueSecrets meaning they are a map of `string -> Value` for each of the parameters. Whenever a piece of code in DuckDB requires a setting that lives in a secret, it will call into the SecretManager fetching a secret by its type and a path that can be used for scoping.
+
+## The problem
+The problem arises when a field of a KeyValueSecret also exists as a setting. Currently for S3, the code doing S3 requests will look for authentication credentials (and other settings such as `region`, `use_ssl`, etc.) **either** in a secret **or** in the duckdb settings.
+
+This is not really what we want. It means that in the follwing example:
+
+```
+SET s3_region='the-moon-7'
+CREATE SECRET s1 (
+    TYPE S3,
+    KEY_ID 'bla',
+    SECRET 'blabla',
+    SCOPE 's3://bucket2/'
+)
+SELECT * FROM 's3://bucket1/file.parquet'
+SELECT * FROM 's3://bucket1/file.parquet'
+```
+
+The first query to `s3://bucket1` will use the region specified in s3_region, whereas the second query to `s3://bucket2` matches the scope of the `s1` secret and will confusingly use the default region.
+
+What we want instead is that secret parameters like region are paired with their corresponding setting and retrieved in a cascading manner: automatically fetching the setting if the secret param is not present.
+
+## The fix
+The fix is to refactor the API with which secret consumers interact with KeyValueSecrets. I've achieved this by adding a `KeyValueSecretReader` class which should become the standard way of interacting with a secret. This is handles the cascading mechanism and also throws some nicely formatted errors when keys are not found, further simplifying usage (while also allowing throwing custom errors which will probably still be a good idea in many cases)
+
+The API is basically this:
+
+```C++
+void Demo(FileOpener &opener) {
+	//! Demo opener info
+	FileOpenerInfo info;
+	info.file_path = "s3://some_bucket/file.parquet";
+
+	//! Initialize secret reader uses the fileopenerinfo file_path as scope
+	KeyValueSecretReader secret_reader(opener, info, "s3");
+
+	//! Lookup region in secret, then setting. Use a default if both not found
+	Value region = secret_reader.GetSecretKeyOrSettingOrDefault("region", "s3_region", Value("default-region"));
+
+	//! Lookup use_ssl in secret, then setting. Use custom handling on the result.
+	Value use_ssl;
+	SettingLookupResult res = secret_reader.TryGetSecretKeyOrSetting("use_ssl", "s3_use_ssl", use_ssl);
+	if (!res) {
+		// neither secret nor setting found: we can construct our own error here
+	} else if (res.GetScope() == SettingScope::SECRET) {
+		// setting was fetched from secret
+	}
+
+	//! Lookup non-existent foo in secret. Let DuckDB throw a nice error
+	secret_reader.GetSecretKey("foo");
+	// THROWS one of:
+	//  - Invalid Configuration Error: Failed to fetch required secret key 'foo' from secret '<secret_name>'.
+	//  - Invalid Configuration Error: Failed to fetch required secret key 'foo' from secret, because no secret was found for 's3://some_bucket/file.parquet'.
+
+	//! Lookup non-existent foo in secret, then the bar setting. Let DuckDB throw a nice error
+	secret_reader.GetSecretKeyOrSetting("foo", "bar");
+	// THROWS one of:
+	//  - Invalid Configuration Error: Failed to fetch a parameter from either the secret key 'foo' or the setting 'bar': no secret was found for 's3://some_bucket/file.parquet'.
+	//  - Invalid Configuration Error: Failed to fetch a parameter from either the secret key 'foo' or the setting 'bar': secret '<secret_name>' did not contain the key, also the setting was not found.
+}
+
+```
+
+The API basically abstracts away the secret manager in most cases when consuming a KeyValueSecret. It also ties settings and secret params more tightly allowing a more natural way to use secrets.  
+
+## Discussion
+Currently the settings and secret params are really tied to eachother but it would be nice for users to understand that if a secret type `X` has a param `Y`, its corresponding setting will be called `x_y` so the `S3` secret type param `region` is called `s3_region`. This is already not always the case, but probably something we should keep as a convention somehow? We could technically also enforce it by making the API prefer this pattern by implementing a: `SettingLookupResult TryGetSecretKeyOrSetting(const string &key, Value &result);` where we use the `key` param to both derive the secret key and the setting name from the secret type? I think this would be pretty clean but maybe its a little too much automagic?  
+
+Happy to take some feedback here or on the PR in general.
+
+## TODOs
+- This now requires a FileOpener and a FileOpenerInfo. We could also add a constructor to create this from a context
+- Add some CPP tests to confirm the error messages work in all cases

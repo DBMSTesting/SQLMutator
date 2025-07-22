@@ -1,0 +1,46 @@
+ID: 55888
+Title: DROP PARTITION has an anomaly during DELETE ONLY state, which looks like PK violation.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Repeatable test case [here](https://github.com/mjonss/tidb/blob/b8a37f29bdfd215656e3917a62177b669c947b1f/pkg/ddl/tests/partition/multi_domain_test.go#L42-L48). Check out the branch, `make failpoint-enable` then run the test TestMultiSchemaDropPartition.
+
+It looks like this in a multi domain (tidb node) scenario:
+```sql
+-- DDL Owner node
+create table t (a int primary key, b varchar(255)) partition by range (a) (partition p0 values less than (100), partition p1 values less than (200));
+insert into t values (1,1);
+-- Schema version v0
+alter table t drop partition p0;
+-- new client1 seeing v0+1 StateDeleteOnly, most likely in the DDL Owner domain/node
+-- valid, since the table does no longer contain partition p0
+insert into t values (1,1);
+-- in the other domain, client 2, still in v0, still seeing partition p0
+-- looks like PK violation!!!
+select * from t; -- "1 1", "1 1"
+-- Original row
+select * from t partition (p0); -- "1 1"
+-- This is not consistent with the view of the partition definitions!
+-- sees new row from client1
+select * from t partition (p1); -- "1 1"
+```
+
+### 2. What did you expect to see? (Required)
+This is not completely well defined with TiDB's DDL model, since it allows two schema versions with the same data.
+But the most consistent view would probably be to not allow duplicate keys when the dropping partitions still can be used.
+How to handle the anomaly that rows can exists in an overlapping partition (this case p1, when p0 is being dropped) is harder to define, since it would also be strange to not allow inserts/updates in p1 (that may match dropped p0) by client1 during StateDeleteOnly just because it may overlap with possible sessions seeing v0 schema versions
+
+### 3. What did you see instead (Required)
+See repeatable test case.
+Duplicate rows and rows in p1 that matches the partition definition of p0 in client2.
+
+### 4. What is your TiDB version? (Required)
+b8a37f29bdfd215656e3917a62177b669c947b1f based on current master 9c7f4eb455a4e781e05da4f4125c49fda29a74f5
+i.e. v8.4.0-alpha something
+<!-- Paste the output of SELECT tidb_version() -->
+

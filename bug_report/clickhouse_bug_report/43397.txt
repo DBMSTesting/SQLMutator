@@ -1,0 +1,179 @@
+ID: 43397
+Title: NOT_FOUND_COLUMN_IN_BLOCK when grouping by ALIAS column in Distributed table
+Description:
+On a distributed table with columns `timestamp DateTime, day ALIAS toYYYYMMDD(timestamp)`, grouping by **both** columns results in a `DB::Exception: Not found column toYYYYMMDD(timestamp) in block. (NOT_FOUND_COLUMN_IN_BLOCK)`
+
+Could this be related to https://github.com/ClickHouse/ClickHouse/issues/37032 ?
+
+**How to reproduce**
+
+I was only able to reproduce this on distributed table in a real cluster with remote shards.
+Here is a minimal reproducer, I used '{cluster}' as a placeholder:
+
+```sql
+CREATE DATABASE test ON cluster '{cluster}';
+
+CREATE TABLE test.t ON cluster '{cluster}' (
+    `timestamp` DateTime NOT NULL,
+    `day` ALIAS toYYYYMMDD(`timestamp`)
+) Engine = MergeTree
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY `timestamp`;
+
+CREATE TABLE test.d ON CLUSTER '{cluster}'
+(
+    `timestamp` DateTime NOT NULL,
+    `day` ALIAS toYYYYMMDD(timestamp)
+)
+ENGINE = Distributed('{cluster}', 'test', 't', rand());
+
+INSERT INTO test.d (timestamp) VALUES (now()), (now() - INTERVAL 1 DAY), (now() + INTERVAL 1 DAY), (now() - INTERVAL 2 DAY), (now() + INTERVAL 2 DAY);
+
+INSERT INTO test.d (timestamp) VALUES (now()), (now() - INTERVAL 1 DAY), (now() + INTERVAL 1 DAY), (now() - INTERVAL 2 DAY), (now() + INTERVAL 2 DAY);
+
+INSERT INTO test.d (timestamp) VALUES (now()), (now() - INTERVAL 1 DAY), (now() + INTERVAL 1 DAY), (now() - INTERVAL 2 DAY), (now() + INTERVAL 2 DAY);
+
+
+SELECT day, timestamp FROM test.d GROUP BY day, timestamp;
+
+-- Code: 10. DB::Exception: Received from clickhouse-0:9440. DB::Exception: Not found column toYYYYMMDD(timestamp) in block. (NOT_FOUND_COLUMN_IN_BLOCK)
+```
+
+**Error message**
+```
+2022.11.19 14:26:09.333361 [ 288 ] {ae8c95e8-9bc9-4b75-87b5-238d5e3cbe2a} <Debug> executeQuery: (from [::ffff:10.10.20.173]:58860, user: admin) SELECT `day`, `timestamp` FROM test.d GROUP BY `day`, `timestamp`; (stage: Complete)
+2022.11.19 14:26:09.334235 [ 288 ] {ae8c95e8-9bc9-4b75-87b5-238d5e3cbe2a} <Error> executeQuery: Code: 10. DB::Exception: Not found column toYYYYMMDD(timestamp) in block. (NOT_FOUND_COLUMN_IN_BLOCK) (version 22.8.7.34 (official build)) (from [::ffff:10.10.20.173]:58860) (in query: SELECT `day`, `timestamp` FROM test.d GROUP BY `day`, `timestamp`;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xa3ebcda in /usr/bin/clickhouse
+1. DB::Exception::Exception<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&>(int, fmt::v8::basic_format_string<char, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&>::type>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0xa425cd8 in /usr/bin/clickhouse
+2. DB::ActionsDAG::updateHeader(DB::Block) const @ 0x146054f5 in /usr/bin/clickhouse
+3. DB::ExpressionTransform::transformHeader(DB::Block, DB::ActionsDAG const&) @ 0x15e9ad05 in /usr/bin/clickhouse
+4. DB::ExpressionStep::ExpressionStep(DB::DataStream const&, std::__1::shared_ptr<DB::ActionsDAG> const&) @ 0x15fca2ff in /usr/bin/clickhouse
+5. DB::InterpreterSelectQuery::executeProjection(DB::QueryPlan&, std::__1::shared_ptr<DB::ActionsDAG> const&) @ 0x14e3c985 in /usr/bin/clickhouse
+6. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::optional<DB::Pipe>) @ 0x14e2be79 in /usr/bin/clickhouse
+7. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0x14e28032 in /usr/bin/clickhouse
+8. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0x14e6e4f4 in /usr/bin/clickhouse
+9. DB::InterpreterSelectWithUnionQuery::execute() @ 0x14e6f4ad in /usr/bin/clickhouse
+10. ? @ 0x15160189 in /usr/bin/clickhouse
+11. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x1515d6b7 in /usr/bin/clickhouse
+12. DB::TCPHandler::runImpl() @ 0x15c5552c in /usr/bin/clickhouse
+13. DB::TCPHandler::run() @ 0x15c69b39 in /usr/bin/clickhouse
+14. Poco::Net::TCPServerConnection::start() @ 0x189d3673 in /usr/bin/clickhouse
+15. Poco::Net::TCPServerDispatcher::run() @ 0x189d49cd in /usr/bin/clickhouse
+16. Poco::PooledThread::run() @ 0x18b97329 in /usr/bin/clickhouse
+17. Poco::ThreadImpl::runnableEntry(void*) @ 0x18b94be2 in /usr/bin/clickhouse
+18. ? @ 0x7f86015ed609 in ?
+19. clone @ 0x7f8601512133 in ?
+```
+
+**Does it reproduce on recent release?**
+
+I was able to reproduce on 22.3.9.19 and 22.8.7.34
+
+**Expected behavior**
+
+The query should run and return something like
+```
+┌──────day─┬───────────timestamp─┐
+│ 20221117 │ 2022-11-17 11:08:32 │
+│ 20221117 │ 2022-11-17 11:08:33 │
+│ 20221117 │ 2022-11-17 11:08:42 │
+│ 20221118 │ 2022-11-18 11:08:42 │
+│ 20221119 │ 2022-11-19 11:07:05 │
+│ 20221119 │ 2022-11-19 11:08:42 │
+│ 20221120 │ 2022-11-20 11:08:32 │
+│ 20221120 │ 2022-11-20 11:08:42 │
+│ 20221121 │ 2022-11-21 11:08:30 │
+│ 20221121 │ 2022-11-21 11:08:42 │
+└──────────┴─────────────────────┘
+```
+
+**Additional context**
+
+I was wondering if the expected practice was to have `day` not an ALIAS in the Distributed table:
+
+```sql
+DROP TABLE test.d ON cluster '{cluster}';
+
+CREATE TABLE test.d ON CLUSTER '{cluster}'
+(
+    `timestamp` DateTime NOT NULL,
+    `day` UInt32 -- not an ALIAS
+)
+ENGINE = Distributed('{cluster}', 'test', 't', rand())
+
+SELECT `day`, `timestamp` FROM test.d GROUP BY `day`, `timestamp`
+```
+this query returns the result, but weirdly enough, if I add a WHERE clause on `day`, partition pruning does not work correctly in child queries:
+
+```sql
+-- check that we have multiple partitions in shards
+SELECT _shard_num, partition, rows FROM cluster('{cluster}', 'system', 'parts') WHERE database = 'test' and active
+
+┌─_shard_num─┬─partition─┬─rows─┐
+│          1 │ 20221117  │    3 │
+│          1 │ 20221118  │    1 │
+│          1 │ 20221120  │    1 │
+│          1 │ 20221121  │    1 │
+│          2 │ 20221118  │    2 │
+│          2 │ 20221119  │    1 │
+│          2 │ 20221121  │    1 │
+│          3 │ 20221117  │    1 │
+│          3 │ 20221118  │    1 │
+│          3 │ 20221119  │    2 │
+│          3 │ 20221120  │    2 │
+│          3 │ 20221121  │    1 │
+└────────────┴───────────┴──────┘
+
+SELECT `day`, `timestamp` FROM test.d WHERE `day` = toYYYYMMDD(now()) GROUP BY `day`, `timestamp`
+-- does not prune partitions
+
+-- executeQuery: (from 10.3.99.139:38996, initial_query_id: 20482271-a023-4546-bcb8-9fb350f01ac7) SELECT `day`, `timestamp` FROM `test`.`t` WHERE `day` = toYYYYMMDD(now()) GROUP BY `day`, `timestamp`
+
+-- (SelectExecutor): Key condition: (toYYYYMMDD(column 0) in [20221119, 20221119])
+-- (SelectExecutor): MinMax index condition: unknown
+-- (SelectExecutor): Selected 1/1 parts by partition key, 1 parts by primary key, 1/1 marks by primary key, 1 marks to read from 1 ranges
+
+-- (SelectExecutor): Key condition: (toYYYYMMDD(column 0) in [20221119, 20221119])
+-- (SelectExecutor): MinMax index condition: unknown
+-- (SelectExecutor): Selected 1/1 parts by partition key, 1 parts by primary key, 1/1 marks by primary key, 1 marks to read from 1 ranges
+
+-- (SelectExecutor): Key condition: (toYYYYMMDD(column 0) in [20221119, 20221119])
+-- (SelectExecutor): MinMax index condition: unknown
+-- (SelectExecutor): Selected 5/5 parts by partition key, 5 parts by primary key, 5/5 marks by primary key, 5 marks to read from 5 ranges
+```
+
+is this expected? The same query run only on the local table, excludes non-matching partitions as expected:
+```sql
+SELECT `day`, `timestamp` FROM test.t WHERE `day` = toYYYYMMDD(now()) GROUP BY `day`, `timestamp`
+-- executeQuery: (from [::ffff:10.10.20.173]:46654, user: admin) SELECT `day`, `timestamp` FROM test.t WHERE `day` = toYYYYMMDD(now()) GROUP BY `day`, `timestamp` (stage: Complete)
+-- Key condition: (toYYYYMMDD(column 0) in [20221119, 20221119])
+-- MinMax index condition: (toYYYYMMDD(column 0) in [20221119, 20221119])
+-- Selected 0/4 parts by partition key, 0 parts by primary key, 0/0 marks by primary key, 0 marks to read from 0 ranges
+```
+I found a workaround for both issues, which is using an Int32 ALIAS day column:
+
+```sql
+DROP TABLE test.d ON cluster '{cluster}';
+
+CREATE TABLE test.d ON CLUSTER '{cluster}'
+(
+    `timestamp` DateTime NOT NULL,
+    `day` Int32 ALIAS toYYYYMMDD(timestamp)
+)
+ENGINE = Distributed('{cluster}', 'test', 't', rand())
+
+SELECT `day`, `timestamp` FROM test.d WHERE `day` = toYYYYMMDD(now()) GROUP BY `day`, `timestamp`
+-- this one makes weird child queries, but runs and filters partitions correctly
+
+-- executeQuery: (from [::ffff:10.10.7.137]:55406, initial_query_id: 72a997a0-edd5-4e37-b76c-bd8c31590778) SELECT _CAST(toYYYYMMDD(`timestamp`), 'Int32') AS `day`, `timestamp` FROM `test`.`t` WHERE `day` = toYYYYMMDD(now()) GROUP BY `day`, `timestamp` (stage: WithMergeableState)
+-- Key condition: (_CAST(toYYYYMMDD(column 0)) in [20221119, 20221119])
+-- MinMax index condition: (_CAST(toYYYYMMDD(column 0)) in [20221119, 20221119])
+-- Selected 1/5 parts by partition key, 1 parts by primary key, 1/1 marks by primary key, 1 marks to read from 1 ranges
+
+┌──────day─┬───────────timestamp─┐
+│ 20221119 │ 2022-11-19 11:08:30 │
+│ 20221119 │ 2022-11-19 11:08:32 │
+│ 20221119 │ 2022-11-19 11:08:42 │
+└──────────┴─────────────────────┘
+```

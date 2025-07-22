@@ -1,0 +1,96 @@
+ID: 4560
+Title: Broken DateTime column values when replicating over different TZ
+Description:
+**Describe the bug**
+Incorrect DateTime values on replica with different `timezone` setting.
+
+This behaviour are not expected because:
+
+- CH doesn't stores TZ
+- Any TZ changes occur explicitly only in functions like `toString`, `toDateTime` and `now`
+
+**How to reproduce**
+* reproduced in 18.16.1 on CentOS and in 19.3.5, 18.16.1 on docker
+* with clickhouse-client 
+
+1. Setup 1st replica with completely default config  <br /> + no `timezone` setting (UTC by default)<br />+ [`zookeeper-servers.xml`](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-zookeeper-servers-single-xml)
+2. Setup 2nd replica with completely default config  <br /> + `<timezone>Europe/Moscow</timezone>` <br /> + [`zookeeper-servers.xml`](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-zookeeper-servers-single-xml)
+3. [Create `ReplicatedMergeTree` on both replicas](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-setup-sh-L16-L28)
+
+4. On 1st replica:
+```sql
+INSERT INTO tz_sensetive SELECT '2019-01-01' AS date, '2019-01-01 00:00:00' AS datetime FROM system.numbers LIMIT 1;
+```
+
+5. 
+On 1st replica:
+
+```sql
+SELECT date, datetime, toString(datetime, 'Europe/Moscow') FROM tz_sensetive
+
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃       date ┃            datetime ┃ toString(datetime, 'Europe/Moscow') ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 2019-01-01 │ 2019-01-01 00:00:00 │ 2019-01-01 03:00:00                 │
+└────────────┴─────────────────────┴─────────────────────────────────────┘
+```
+On 2nd replica: (Broken datetime)
+```sql
+SELECT date, datetime, toString(datetime, 'Europe/Moscow') FROM tz_sensetive
+
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃       date ┃            datetime ┃ toString(datetime, 'Europe/Moscow') ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 2019-01-01 │ 2019-01-01 03:00:00 │ 2019-01-01 03:00:00                 │
+└────────────┴─────────────────────┴─────────────────────────────────────┘
+```
+
+**Expected behavior**
+
+- Equal datetime values on both replicas
+- Different `toDateTime(datetime, 'Europe/Moscow')` values 
+
+Expected on 1st replica:
+
+```sql
+SELECT date, datetime, toString(datetime, 'Europe/Moscow') FROM tz_sensetive
+
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃       date ┃            datetime ┃ toString(datetime, 'Europe/Moscow') ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 2019-01-01 │ 2019-01-01 00:00:00 │ 2019-01-01 03:00:00                 │
+└────────────┴─────────────────────┴─────────────────────────────────────┘
+```
+Expected on 2nd replica
+```sql
+SELECT date, datetime, toString(datetime, 'Europe/Moscow') FROM tz_sensetive
+
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃       date ┃            datetime ┃ toString(datetime, 'Europe/Moscow') ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 2019-01-01 │ 2019-01-01 00:00:00 │ 2019-01-01 00:00:00                 │
+└────────────┴─────────────────────┴─────────────────────────────────────┘
+```
+
+
+
+
+**Please check:**
+
+- [Complete reproducing script with docker](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-setup-sh)
+- [Actual script output](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-actual-output-txt)
+- [Expected script output](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-expected-output-txt)
+
+**Important:**
+datetime always have same values if both replicas set to equal timezone 
+
+- [Same setup with equal timezones](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-replicating-same-tz-works-fine-sh)
+- [And it's actual and expected output](https://gist.github.com/nezed/78bc357335b970901bb8a98b117704ee#file-replicating-same-tz-output-txt)
+
+**Additional**:
+I've found two ways to fix this:
+1. Set `timezone` for all replicas to value of first replica (in example above set all replicas to UTC)
+2.
+    - Drop all replicated tables and ZK node
+    - Set all replicas timezone to `Europe/Moscow`
+    - Create replicated tables again

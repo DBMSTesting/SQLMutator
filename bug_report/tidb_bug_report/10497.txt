@@ -1,0 +1,79 @@
+ID: 10497
+Title: Literal overflow in where clause is not compatible with MySQL
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+When a literal in the where clause overflows, TiDB can generate weird execution plan and get different result with MySQL. For example, the first query below will return results whose col_uint > 9223372036854775808.
+
+Interestingly, for uint, there is a upper limit 18446744073709553664 (2^64 + 2048) it will generate a coprocessor task. The second query below will return **all records**.
+
+```
+MySQL [coprocessor]> explain select * from t1 where col_uint > 18446744073709553664 order by id;
++----------------------+----------+------+------------------------------------------------------------+
+| id                   | count    | task | operator info                                              |
++----------------------+----------+------+------------------------------------------------------------+
+| TableReader_14       | 3333.33  | root | data:Selection_13                                          |
+| └─Selection_13       | 3333.33  | cop  | gt(coprocessor.t1.col_uint, 9223372036854775808)           |
+|   └─TableScan_12     | 10000.00 | cop  | table:t1, range:[-inf,+inf], keep order:true, stats:pseudo |
++----------------------+----------+------+------------------------------------------------------------+
+3 rows in set (0.048 sec)
+
+MySQL [coprocessor]> explain select * from t1 where col_uint > 18446744073709553665 order by id;
++--------------------+----------+------+------------------------------------------------------------+
+| id                 | count    | task | operator info                                              |
++--------------------+----------+------+------------------------------------------------------------+
+| TableReader_12     | 10000.00 | root | data:TableScan_11                                          |
+| └─TableScan_11     | 10000.00 | cop  | table:t1, range:[-inf,+inf], keep order:true, stats:pseudo |
++--------------------+----------+------+------------------------------------------------------------+
+2 rows in set (0.048 sec)
+```
+
+Table schema:
+
+```
+MySQL [coprocessor]> describe t1;
++--------------+---------------------+------+------+-------------------+----------------+
+| Field        | Type                | Null | Key  | Default           | Extra          |
++--------------+---------------------+------+------+-------------------+----------------+
+| id           | bigint(20)          | NO   | PRI  | NULL              | auto_increment |
+| str_idx1_1   | varchar(255)        | NO   | MUL  | NULL              |                |
+| str_idx1_2   | varchar(255)        | YES  |      | NULL              |                |
+| int_idx      | int(11)             | YES  | MUL  | NULL              |                |
+| str_unq_idx  | varchar(255)        | YES  | UNI  | NULL              |                |
+| col_real     | double              | YES  |      | NULL              |                |
+| col_dec      | decimal(40,10)      | YES  |      | NULL              |                |
+| col_duration | time(4)             | YES  |      | NULL              |                |
+| col_date     | date                | YES  |      | NULL              |                |
+| col_datetime | datetime            | YES  |      | CURRENT_TIMESTAMP |                |
+| col_ts       | timestamp(4)        | YES  |      | NULL              |                |
+| col_int      | bigint(20)          | YES  |      | 0                 |                |
+| col_uint     | bigint(20) UNSIGNED | YES  |      | NULL              |                |
++--------------+---------------------+------+------+-------------------+----------------+
+```
+
+2. What did you expect to see?
+
+I don't know if it's undefined behavior. But in MySQL, both queries above return empty and are reasonable to me.
+
+3. What did you see instead?
+
+Described in the first section.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+Release Version: v3.0.0-beta-284-g83ff58c
+Git Commit Hash: 83ff58cd91768e2f44f498370ffac0f758cdda5c
+Git Branch: master
+UTC Build Time: 2019-03-27 12:40:59
+GoVersion: go version go1.12.1 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false
+```
+
+Maybe related to: https://github.com/pingcap/tidb/issues/10450

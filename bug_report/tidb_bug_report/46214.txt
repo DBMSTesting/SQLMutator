@@ -1,0 +1,82 @@
+ID: 46214
+Title: recover sys var `tidb_enforce_mpp` fails in some cases
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Some times `set session_states` will fail for variable `tidb_enforce_mpp` if we:
+
+```sql 
+--- in session 1
+> set @@global.tidb_allow_mpp=0
+> set @@tidb_allow_mpp=1
+> set @@tidb_enforce_mpp=1
+> show session_states
+
+--- then open a new session session 2, and recover the states using the data dumped from session 1
+> set session_states 'session1data....'
+> select @@tidb_enforce_mpp -- this will return 0 but we expect 1
+```
+We can modify test `TestSystemVars` to add a case to reproduce it:
+
+```diff
+--- a/sessionctx/sessionstates/session_states_test.go
++++ b/sessionctx/sessionstates/session_states_test.go
+@@ -99,6 +99,16 @@ func TestSystemVars(t *testing.T) {
+                checkStmt       string
+                expectedValue   string
+        }{
++               {
++                       stmts: []string{
++                               "set @@global.tidb_allow_mpp=0",
++                               "set @@tidb_allow_mpp=1",
++                               "set @@tidb_enforce_mpp=1",
++                       },
++                       inSessionStates: true,
++                       varName:         "tidb_enforce_mpp",
++                       expectedValue:   "1",
++               },
+                {
+                        // normal variable
+                        inSessionStates: true,
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The test will success
+
+### 3. What did you see instead (Required)
+
+sometimes, the test will fail:
+
+```
+[2023/08/18 10:59:18.122 +08:00] [WARN] [session.go:4347] ["set session variable during decoding session states error"] [name=tidb_enforce_mpp] [value=ON] [error="[variable:1231]Variable 'tidb_enforce_mpp' can't be set to the value of '1' but tidb_allow_mpp is 0, please activate tidb_allow_mpp at first.'"] [errorVerbose="[variable:1231]Variable 'tidb_enforce_mpp' can't be set to the value of '1' but tidb_allow_mpp is 0, please activate tidb_allow_mpp at first.'\ngithub.com/pingcap/errors.AddStack\n\t/Users/wangchao/.gvm/pkgsets/go1.21.0/global/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/errors.go:174\ngithub.com/pingcap/errors.(*Error).GenWithStackByArgs\n\t/Users/wangchao/.gvm/pkgsets/go1.21.0/global/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/normalize.go:164\ngithub.com/pingcap/tidb/sessionctx/variable.glob..func23\n\t/Users/wangchao/Code/pingcap/tidb/sessionctx/variable/sysvar.go:152\ngithub.com/pingcap/tidb/sessionctx/variable.(*SysVar).Validate\n\t/Users/wangchao/Code/pingcap/tidb/sessionctx/variable/variable.go:301\ngithub.com/pingcap/tidb/sessionctx/variable.(*SessionVars).SetSystemVar\n\t/Users/wangchao/Code/pingcap/tidb/sessionctx/variable/session.go:2517\ngithub.com/pingcap/tidb/session.(*session).DecodeSessionStates\n\t/Users/wangchao/Code/pingcap/tidb/session/session.go:4346\ngithub.com/pingcap/tidb/executor.(*SimpleExec).executeSetSessionStates\n\t/Users/wangchao/Code/pingcap/tidb/executor/simple.go:2776\ngithub.com/pingcap/tidb/executor.(*SimpleExec).Next\n\t/Users/wangchao/Code/pingcap/tidb/executor/simple.go:174\ngithub.com/pingcap/tidb/executor.Next\n\t/Users/wangchao/Code/pingcap/tidb/executor/executor.go:253\ngithub.com/pingcap/tidb/executor.(*ExecStmt).next\n\t/Users/wangchao/Code/pingcap/tidb/executor/adapter.go:1223\ngithub.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor\n\t/Users/wangchao/Code/pingcap/tidb/executor/adapter.go:968\ngithub.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay\n\t/Users/wangchao/Code/pingcap/tidb/executor/adapter.go:794\ngithub.com/pingcap/tidb/executor.(*ExecStmt).Exec\n\t/Users/wangchao/Code/pingcap/tidb/executor/adapter.go:575\ngithub.com/pingcap/tidb/session.runStmt\n\t/Users/wangchao/Code/pingcap/tidb/session/session.go:2435\ngithub.com/pingcap/tidb/session.(*session).ExecuteStmt\n\t/Users/wangchao/Code/pingcap/tidb/session/session.go:2285\ngithub.com/pingcap/tidb/testkit.(*TestKit).ExecWithContext\n\t/Users/wangchao/Code/pingcap/tidb/testkit/testkit.go:340\ngithub.com/pingcap/tidb/testkit.(*TestKit).MustExecWithContext\n\t/Users/wangchao/Code/pingcap/tidb/testkit/testkit.go:132\ngithub.com/pingcap/tidb/testkit.(*TestKit).MustExec\n\t/Users/wangchao/Code/pingcap/tidb/testkit/testkit.go:127\ngithub.com/pingcap/tidb/sessionctx/sessionstates_test.TestSystemVars\n\t/Users/wangchao/Code/pingcap/tidb/sessionctx/sessionstates/session_states_test.go:206\ntesting.tRunner\n\t/Users/wangchao/.gvm/gos/go1.21.0/src/testing/testing.go:1595\nruntime.goexit\n\t/Users/wangchao/.gvm/gos/go1.21.0/src/runtime/asm_arm64.s:1197"]
+    result.go:49: 
+        	Error Trace:	/Users/wangchao/Code/pingcap/tidb/testkit/result.go:49
+        	            				/Users/wangchao/Code/pingcap/tidb/sessionctx/sessionstates/session_states_test.go:212
+        	Error:      	Not equal: 
+        	            	expected: "[1]\n"
+        	            	actual  : "[0]\n"
+        	            	
+        	            	Diff:
+        	            	--- Expected
+        	            	+++ Actual
+        	            	@@ -1,2 +1,2 @@
+        	            	-[1]
+        	            	+[0]
+        	            	 
+        	Test:       	TestSystemVars
+        	Messages:   	sql:select @@tidb_enforce_mpp, args:[]
+```
+
+This test fails occasionally
+
+### 4. What is your TiDB version? (Required)
+
+master
+

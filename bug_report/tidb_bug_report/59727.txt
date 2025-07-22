@@ -1,0 +1,209 @@
+ID: 59727
+Title: index return wrong result after inject network delay chaos
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Deploy 5 tikv nodes, 3 pd nodes and 1 tidb node in K8S.
+
+1. running transaction workload and some ddl sequences.
+2. Inject network delay between tikv nodes: network delay 50ms between tikv-0, tikv-3, tikv-4
+3. Recovery before the transaction workload finish.
+4. index return wrong result.
+
+
+
+more details can get from the following files.
+
+[common_index_inconsistency.zip](https://github.com/user-attachments/files/18952544/common_index_inconsistency.zip)
+
+in zip:
+
+> - schema_and_init_data: initial schema, state and data. 
+> - logs: tidb and tikv logs.
+
+
+
+Here are all the executed DDL statements.
+
+```sql
+alter table table1 modify commonAttr2_0 decimal(12, 3) null;
+-- ok
+alter table table1 change commonAttr4_0 commonAttr4_0 double(22, 8);
+-- ok
+alter table table1 add FULLTEXT index table1index_commAttr1(commonAttr1_0);
+-- ok
+alter table table1 change commonAttr4_0 commonAttr4_0 double(12, 3);
+-- ok
+alter table table1 modify commonAttr2_0 decimal(10, 2) null;
+-- ok
+alter table table1 modify commonAttr0_0 integer null;
+-- ok
+alter table table1 modify commonAttr3_0 decimal(12, 3) null;
+-- ok
+```
+
+
+
+All workload finished, show create table1:
+
+```sql
+Mysql > show create table table1;
+CREATE TABLE `table1` (
+  `pkId` int(11) DEFAULT NULL,
+  `pkAttr0` int(11) NOT NULL,
+  `commonAttr0_0` int(11) DEFAULT NULL,
+  `commonAttr1_0` decimal(10,2) DEFAULT NULL,
+  `commonAttr2_0` decimal(12,3) DEFAULT NULL,
+  `commonAttr3_0` decimal(12,3) DEFAULT NULL,
+  `commonAttr4_0` double(22,8) DEFAULT NULL,
+  PRIMARY KEY (`pkAttr0`) /*T![clustered_index] NONCLUSTERED */,
+  KEY `table1index_pk` (`pkAttr0`),
+  KEY `table1index_commAttr3` (`commonAttr3_0`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+```
+
+
+
+### 2. What did you expect to see? (Required)
+
+After all workloads:
+
+```sql
+mysql> select count(*) from table1;
++----------+
+| count(*) |
++----------+
+|       30 |
++----------+
+1 row in set (0.01 sec)
+
+
+mysql> select /*+USE_INDEX(table1, table1index_commAttr3)*/ count(*) from table1;
++----------+
+| count(*) |
++----------+
+|       30 |
++----------+
+1 row in set (0.01 sec)
+
+mysql> select * from table1 order by pkId limit 10;
+-- 10 rows
+
+mysql> select /*+USE_INDEX(table1, table1index_commAttr3)*/ * from table1 order by pkId limit 10;
+-- 10rows, same as the above.
+
+
+mysql> admin check table table1;
+-- ok
+```
+
+
+
+### 3. What did you see instead (Required)
+
+After all workloads:
+
+```sql
+mysql> select count(*) from table1;
++----------+
+| count(*) |
++----------+
+|       30 |
++----------+
+1 row in set (0.01 sec)
+
+
+mysql> select /*+USE_INDEX(table1, table1index_commAttr3)*/ count(*) from table1;
++----------+
+| count(*) |
++----------+
+|       31 |
++----------+
+1 row in set (0.01 sec)
+
+
+
+mysql> select * from table1 order by pkId limit 10;
++------+---------+---------------+---------------+---------------+---------------+---------------+
+| pkId | pkAttr0 | commonAttr0_0 | commonAttr1_0 | commonAttr2_0 | commonAttr3_0 | commonAttr4_0 |
++------+---------+---------------+---------------+---------------+---------------+---------------+
+|    0 |       3 |            80 |      11297.00 |     67450.000 |     22108.000 |         19970 |
+|    1 |      13 |            12 |      39764.00 |     21682.000 |     86308.000 |         75448 |
+|    2 |      18 |            12 |      11086.00 |     79024.000 |     63989.000 |         59266 |
+|    3 |      30 |            64 |      64257.00 |     86308.000 |     55704.000 |         53153 |
+|    4 |      38 |            44 |      11086.00 |     43150.000 |     46425.000 |         14793 |
+|    5 |      42 |            13 |      67450.00 |      4621.000 |     53799.000 |         14793 |
+|    6 |      55 |             3 |      47439.00 |     14426.000 |     24916.000 |         19970 |
+|    7 |      63 |            79 |      54716.00 |     63989.000 |     89022.000 |         15704 |
+|    8 |      70 |            92 |      94351.00 |     13877.000 |     74510.000 |         94882 |
+|    9 |      74 |            43 |      68504.00 |     23798.000 |     67450.000 |         53153 |
++------+---------+---------------+---------------+---------------+---------------+---------------+
+10 rows in set (0.00 sec)
+
+
+mysql> select /*+USE_INDEX(table1, table1index_commAttr3)*/ * from table1 order by pkId limit 10;
++------+---------+---------------+---------------+---------------+---------------+---------------+
+| pkId | pkAttr0 | commonAttr0_0 | commonAttr1_0 | commonAttr2_0 | commonAttr3_0 | commonAttr4_0 |
++------+---------+---------------+---------------+---------------+---------------+---------------+
+|    0 |       3 |            80 |      11297.00 |     67450.000 |     22108.000 |         19970 |
+|    1 |      13 |            12 |      39764.00 |     21682.000 |     86308.000 |         75448 |
+|    2 |      18 |            12 |      11086.00 |     79024.000 |     63989.000 |         59266 |
+|    3 |      30 |            64 |      64257.00 |     86308.000 |     55704.000 |         53153 |
+|    4 |      38 |            44 |      11086.00 |     43150.000 |     46425.000 |         14793 |
+|    5 |      42 |            13 |      67450.00 |      4621.000 |     53799.000 |         14793 |
+|    6 |      55 |             3 |      47439.00 |     14426.000 |     24916.000 |         19970 |
+|    6 |      55 |             3 |      47439.00 |     14426.000 |     24916.000 |         19970 |
+|    7 |      63 |            79 |      54716.00 |     63989.000 |     89022.000 |         15704 |
+|    8 |      70 |            92 |      94351.00 |     13877.000 |     74510.000 |         94882 |
++------+---------+---------------+---------------+---------------+---------------+---------------+
+10 rows in set (0.00 sec)
+
+
+mysql> admin check table table1;
+-- ERROR 8134 (HY000): data inconsistency in table: table1, index: table1index_commAttr3, col: commonAttr3_0, handle: "7", index-values:"KindMysqlDecimal 21509.000" != record-values:"KindMysqlDecimal 24916.000", compare err:<nil>
+```
+
+
+
+
+
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+TiDB v6.5.0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

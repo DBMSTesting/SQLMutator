@@ -1,0 +1,81 @@
+ID: 15794
+Title: Add `STORAGE_VERSION` option that allows you to specify the target storage version when serializing a database
+Description:
+Follow-up from https://github.com/duckdb/duckdb/pull/15702
+Supersedes/builds on top of https://github.com/duckdb/duckdb/pull/14981
+
+This PR change the `storage_compatibility_version` from being a setting set on every session to be written in the database file. 
+
+Previously we would set this setting at run-time, and it would be shared across all database instances:
+
+```sql
+ATTACH 'file1.db';
+-- write something, to be serialized targeting version v0.10.0
+SET storage_compatibility_version = 'v1.0.0';
+ATTACH 'file2.db';
+-- write something, to be serialized targeting v1.0.0
+```
+
+This has a number of issues:
+
+* The storage compatibility version is shared across all attached databases
+* When restarting the system, the `storage_compatibility_version` would revert back towards the default setting (currently `v0.10.0`)
+* When reading a database, we did not know which storage compatibility version was used, which could lead to hard to understand errors when reading databases with an older version
+
+### STORAGE_VERSION parameter
+
+This PR reworks this so that the storage version is instead specified on `ATTACH`. When none is specified:
+
+* The version set in the `storage_compatibility_version` is used when creating a new database
+* The version stored within the database is used when loading an existing database
+
+As a result, we can target the storage version towards the desired supported version when creating a new database. When opening an existing database, we will keep on writing targeting the same DuckDB version (i.e. we never automatically "upgrade" the file to a newer DuckDB version). The user can *manually* upgrade a file by opening an older file while targeting a later storage version.
+
+For example:
+
+```sql
+-- use default `storage_compatibility_version`
+ATTACH 'new_file.db';
+-- explicitly target versions >= v1.2.0
+ATTACH 'new_file.db' (STORAGE_VERSION 'v1.2.0');
+
+-- use the storage version stored within the file
+ATTACH 'existing_file.db';
+-- use storage version v1.2.0 - if the file uses an older storage version, this upgrades the file
+ATTACH 'existing_file.db' (STORAGE_VERSION 'v1.2.0');
+```
+
+Note that we cannot *downgrade* a file. If we try to open a file that targets e.g. version v1.2.0 with an explicit storage version of v1.0.0, we get an error:
+
+```sql
+ATTACH 'database_file.db' (STORAGE_VERSION 'v1.2.0');
+DETACH database_file;
+
+ATTACH 'database_file.db' (STORAGE_VERSION 'v1.0.0');
+-- Error opening "database_file.db": cannot initialize database with storage version 2 - which is lower than what the database itself uses (4). The storage version of an existing database cannot be lowered.
+```
+
+### Opening with DuckDB < v1.1.3
+
+When opening a file that targets `v1.2.0` in an older DuckDB version, we now get a storage incompatibility error:
+
+```sql
+duckdb database_file.db
+```
+
+```
+Error: unable to open database "database_file.db": IO Error: Trying to read a database file with version number 65, but we can only read version 64.
+The database file was created with an newer version of DuckDB.
+
+The storage of DuckDB is not yet stable; newer versions of DuckDB cannot read old database files and vice versa.
+The storage will be stabilized when version 1.0 releases.
+
+For now, we recommend that you load the database file in a supported version of DuckDB, and use the EXPORT DATABASE command followed by IMPORT DATABASE on the current version of DuckDB.
+
+See the storage page for more information: https://duckdb.org/internals/storage
+```
+
+The description in the error is not entirely correct - but the error is a lot more descriptive than the previous error that would be thrown in this scenario (which was `INTERNAL Error: Unsupported compression function type`).
+
+The error message has also been improved in https://github.com/duckdb/duckdb/pull/15702 already.
+

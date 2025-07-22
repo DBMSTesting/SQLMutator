@@ -1,0 +1,70 @@
+ID: 56582
+Title: The CTE inside of view can't determine whether it can be inlined
+Description:
+## Bug Report
+
+If the CTE is inside of view, optimizer can't determine whether it can be inlined by rule "The CTE is consumed only once. It can be inlined by default."
+
+### 1. Minimal reproduce step (Required)
+
+1. create view with cte1, cte2, cte3. The consumer count of CTE1  is 2, So it could not be inlined.
+```
+create view test_multi_consumer_cte as 
+with cte1 as (select a from test), 
+cte2 as (select a from cte1 where a=1), 
+cte3 as (select cte1.a from cte1 join cte2 where cte1.a=2) 
+select * from cte3;
+```
+
+2. query table
+```
+mysql> explain select * from test_multi_consumer_cte;
++------------------------------+----------+-----------+---------------+--------------------------------+
+| id                           | estRows  | task      | access object | operator info                  |
++------------------------------+----------+-----------+---------------+--------------------------------+
+| HashJoin_38                  | 100.00   | root      |               | CARTESIAN inner join           |
+| ├─TableReader_45(Build)      | 10.00    | root      |               | data:Selection_44              |
+| │ └─Selection_44             | 10.00    | cop[tikv] |               | eq(test.test.a, 1)             |
+| │   └─TableFullScan_43       | 10000.00 | cop[tikv] | table:test    | keep order:false, stats:pseudo |
+| └─TableReader_42(Probe)      | 10.00    | root      |               | data:Selection_41              |
+|   └─Selection_41             | 10.00    | cop[tikv] |               | eq(test.test.a, 2)             |
+|     └─TableFullScan_40       | 10000.00 | cop[tikv] | table:test    | keep order:false, stats:pseudo |
++------------------------------+----------+-----------+---------------+--------------------------------+
+7 rows in set (0.00 sec)
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The behavior should be seem as the query view **directly**
+
+```
++---------------------------------+----------+-----------+---------------+--------------------------------------------+
+| id                              | estRows  | task      | access object | operator info                              |
++---------------------------------+----------+-----------+---------------+--------------------------------------------+
+| HashJoin_32                     | 256.00   | root      |               | CARTESIAN inner join                       |
+| ├─Selection_36(Build)           | 16.00    | root      |               | eq(test.test.a, 1)                         |
+| │ └─CTEFullScan_37              | 20.00    | root      | CTE:cte1      | data:CTE_0                                 |
+| └─Selection_34(Probe)           | 16.00    | root      |               | eq(test.test.a, 2)                         |
+|   └─CTEFullScan_35              | 20.00    | root      | CTE:cte1      | data:CTE_0                                 |
+| CTE_0                           | 20.00    | root      |               | Non-Recursive CTE                          |
+| └─TableReader_29(Seed Part)     | 20.00    | root      |               | data:Selection_28                          |
+|   └─Selection_28                | 20.00    | cop[tikv] |               | or(eq(test.test.a, 2), eq(test.test.a, 1)) |
+|     └─TableFullScan_27          | 10000.00 | cop[tikv] | table:test    | keep order:false, stats:pseudo             |
++---------------------------------+----------+-----------+---------------+--------------------------------------------+
+9 rows in set (0.01 sec)
+```
+
+
+### 3. What did you see instead (Required)
+
+The CTE1 is inlined which is incorrect , because it is consumed by CTE2 and CTE3. 
+The consumer count of CTE1 should be 2 more than 1. So it could not be inlined be default.
+
+### 4. What is your TiDB version? (Required)
+
+v8.1
+
+<!-- Paste the output of SELECT tidb_version() -->
+

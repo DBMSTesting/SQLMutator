@@ -1,0 +1,37 @@
+ID: 65638
+Title: Alias column in subquery for `IN` is not expanded before skip index analysis
+Description:
+```sql
+CREATE TABLE t
+(
+    `tenant` String,
+    `recordTimestamp` Int64,
+    `responseBody` String,
+    `colAlias` String ALIAS responseBody || 'something else',
+    INDEX ngrams colAlias TYPE ngrambf_v1(3, 2097152, 3, 0) GRANULARITY 10,
+)
+ENGINE = MergeTree
+PARTITION BY (tenant, toDate(recordTimestamp))
+ORDER BY recordTimestamp;
+
+CREATE OR REPLACE TABLE dist AS t
+ENGINE = Distributed('parallel_replicas','default','t');
+
+INSERT INTO t SELECT * FROM generateRandom('tenant String, recordTimestamp Int64, responseBody String') LIMIT 100;
+```
+
+Simple query, index is used
+```
+-- Read 0 rows
+select tenant,recordTimestamp from dist where colAlias like '%abcd%'
+```
+https://fiddle.clickhouse.com/2d6c90ea-a0d7-4908-a3c2-e99eb46e4075
+
+Query with `IN` subquery, index not used
+```sql
+-- Reading approx. 100 rows with 24 streams
+select * from dist where (tenant,recordTimestamp) IN (
+    select tenant,recordTimestamp from dist where colAlias like '%abcd%'
+)
+```
+https://fiddle.clickhouse.com/4c22889c-2837-48f8-891e-4bf22c8dc3e4

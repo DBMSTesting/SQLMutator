@@ -1,0 +1,114 @@
+ID: 29734
+Title: Unexpected results in query with multiple joins
+Description:
+
+**Describe what's wrong**
+
+Query with multiple joins uses non existent column, but it runs without runtime exception.
+
+**Does it reproduce on recent release?**
+Yes
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+21.10
+
+* Queries to run that lead to unexpected result
+This query throws proper exception, because there are no column y in first table expression:
+```sql
+:) select * from (select 1 as x) as a join (select 1 as x, 2 as y) as b on a.x = b.x and a.y=b.y 
+
+SELECT *
+FROM
+(
+    SELECT 1 AS x
+) AS a
+INNER JOIN
+(
+    SELECT
+        1 AS x,
+        2 AS y
+) AS b ON (a.x = b.x) AND (a.y = b.y)
+
+Query id: 21fbf396-74ee-4cbf-a3e6-7b38ac6b1a20
+
+
+0 rows in set. Elapsed: 0.006 sec. 
+
+Received exception from server (version 21.10.2):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: There's no column 'a.y' in table 'a': While processing a.y: While processing  INNER JOIN ...  ON (x = b.x) AND (a.y = b.y). (UNKNOWN_IDENTIFIER)
+
+```
+But when there is second join, it runs without any exceptions:
+```sql
+:) select * from (select 1 as x) as a join (select 1 as x, 2 as y) as b on a.x = b.x and a.y=b.y join (select 3 as x) as c on a.x=c.x
+
+SELECT *
+FROM
+(
+    SELECT 1 AS x
+) AS a
+INNER JOIN
+(
+    SELECT
+        1 AS x,
+        2 AS y
+) AS b ON (a.x = b.x) AND (a.y = b.y)
+INNER JOIN
+(
+    SELECT 3 AS x
+) AS c ON a.x = c.x
+
+Query id: fa395c0a-fc4f-4035-b4bc-d1cc1603c230
+
+Ok.
+
+0 rows in set. Elapsed: 0.026 sec. 
+```
+Another example with `numbers()`:
+```sql
+:) select * from (select number as x from numbers(10)) as a join (select number as x, number as y from numbers(10)) as b on a.x = b.x and a.y=b.y joinx(select number as x from numbers(10)) as c on a.x=c.x
+
+SELECT *
+FROM
+(
+    SELECT number AS x
+    FROM numbers(10)
+) AS a
+INNER JOIN
+(
+    SELECT
+        number AS x,
+        number AS y
+    FROM numbers(10)
+) AS b ON (a.x = b.x) AND (a.y = b.y)
+INNER JOIN
+(
+    SELECT number AS x
+    FROM numbers(10)
+) AS c ON a.x = c.x
+
+Query id: 3bf707e2-dc45-43b3-a80f-ee422d773ef3
+
+┌─a.x─┬─b.x─┬─b.y─┬─c.x─┐
+│   0 │   0 │   0 │   0 │
+│   1 │   1 │   1 │   1 │
+│   2 │   2 │   2 │   2 │
+│   3 │   3 │   3 │   3 │
+│   4 │   4 │   4 │   4 │
+│   5 │   5 │   5 │   5 │
+│   6 │   6 │   6 │   6 │
+│   7 │   7 │   7 │   7 │
+│   8 │   8 │   8 │   8 │
+│   9 │   9 │   9 │   9 │
+└─────┴─────┴─────┴─────┘
+
+10 rows in set. Elapsed: 0.027 sec. 
+```
+**Expected behavior**
+All queries should be terminated with error.
+
+**Additional context**
+It also terminates with `DB::Exception: Not found column model_id in block.` sometimes in our installation of CH, but I could not reproduce it with small and simple queries
+

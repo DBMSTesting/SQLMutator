@@ -1,0 +1,89 @@
+ID: 14718
+Title: When querying pyarrow dataset, all columns are retrieved when no columns are needed
+Description:
+### What happens?
+
+If I issue the query `SELECT COUNT(1) FROM my_dataset` then all columns will be loaded from disk.
+
+This is because duckdb does not set the `columns` property when calling `Dataset.scanner` which pyarrow interprets as "load all columns".  It would be more efficient to pass in `columns=[]`.
+
+### To Reproduce
+
+```python
+import pyarrow as pa
+import pyarrow.dataset as ds
+
+import duckdb
+
+# Flimsy dataset wrapper to tell us how DuckDb is using the pyarrow dataset                                                                                                                                        
+class DuckDataset(ds.Dataset):
+    def __init__(self, ds):
+        self._ds = ds
+
+    @property
+    def schema(self):
+        return self._ds.schema
+
+    def scanner(self, *args, **kwargs):
+        if "columns" in kwargs:
+            print(f"columns={kwargs['columns']}")
+            return self._ds.scanner(*args, **kwargs)
+        else:
+            print("columns not set")
+            return self._ds.scanner(*args, **kwargs)
+
+tab = pa.table({"x": [1, 2, 3, 4, 5], "y": [1, 2, 3, 4, 5]})
+ds = DuckDataset(ds.dataset(tab))
+
+conn = duckdb.connect()
+# Fetches all columns (bad)                                                                                                                                                                                        
+print(conn.sql("SELECT COUNT(1) FROM ds").fetchall())
+# Only fetches column x (good)                                                                                                                                                                                     
+print(conn.sql("SELECT COUNT(x) FROM ds").fetchall())
+
+# A more efficient way to calculate the number of rows                                                                                                                                                             
+num_rows = 0
+for batch in ds.scanner(columns=[]).to_batches():
+    num_rows += batch.num_rows
+print(f"Total num rows: {num_rows}")
+```
+
+### OS:
+
+Ubuntu
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+N/A
+
+### Full Name:
+
+Weston Pace
+
+### Affiliation:
+
+LanceDB
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

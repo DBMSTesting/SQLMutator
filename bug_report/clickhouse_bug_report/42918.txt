@@ -1,0 +1,101 @@
+ID: 42918
+Title: Segfault after alter table on target of nullable materialized column
+Description:
+**Describe what's wrong**
+
+Clickhouse will (eventually) segfault after an alter statement that results in a change in a Nullable materialized column.
+
+**Does it reproduce on recent release?**
+
+Yes. 22.10.2.11
+
+**How to reproduce**
+(note: I have not tried to reproduce this outside of docker.)
+
+* Which ClickHouse server version to use:  22.10.2.11
+* Which interface to use, if matters: docker image default
+* Non-default settings, if any: docker image default
+
+Create a database and table and insert a value.
+```sql
+DROP DATABASE IF EXISTS test;
+CREATE DATABASE test;
+CREATE TABLE test.crash (
+    b Int64,
+    c Nullable(Int64) MATERIALIZED b
+    -- Note: if c is not defined as Nullable, the crash doesn't occur
+    --c Int64 MATERIALIZED b
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+INSERT INTO test.crash VALUES (1);
+```
+
+Issue an update to change the value of `b`.
+```sql
+ALTER TABLE test.crash UPDATE b = 0 WHERE 1=1;
+```
+
+This will not immediately crash. But after a few seconds the database server will no longer be running and there will be a stacktrace in the error log (see below). Restarting ClickHouse results in it crashing again.
+
+---
+Here are the commands to reproduce using docker.
+```bash
+docker run -it -d --name ch --cap-add=SYS_NICE --ulimit nofile=262144:262144 clickhouse/clickhouse-server:22.10.2.11 clickhouse server
+
+cat <<EOF | docker exec -i ch clickhouse-client --queries-file /dev/stdin
+DROP DATABASE IF EXISTS test;
+CREATE DATABASE test;
+CREATE TABLE test.crash (
+    b Int64,
+    c Nullable(Int64) MATERIALIZED b
+    -- Note: if c is not defined as Nullable, the crash doesn't occur
+    --c Int64 MATERIALIZED b
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+INSERT INTO test.crash VALUES (1);
+
+ALTER TABLE test.crash UPDATE b = 0 WHERE 1=1;
+EOF
+```
+
+Wait until running `docker exec -i ch clickhouse-client -q 'SELECT b, c FROM test.crash'` returns `Error response from daemon: Container ... is not running` and then access the logs using `docker logs ch`.
+
+---
+
+**Expected behavior**
+
+- ClickHouse should not crash nor leave the database in a state where the server cannot start. (I was able to recover by removing the mutation files manually.)
+- In this case, both `b` and `c` should be eventually consistent and set to 0 after the `ALTER` statement. (`c` could potentially be `NULL` though not in my example.)
+
+**Error message and/or stacktrace**
+
+```
+2022.11.02 21:35:11.119508 [ 247 ] {} <Fatal> BaseDaemon: ########################################
+2022.11.02 21:35:11.119584 [ 247 ] {} <Fatal> BaseDaemon: (version 22.10.2.11 (official build), build id: 980C6F4C7EC4672BA0D63DCE7EA99C43523A5A7E) (from thread 69) (query_id: 016998e9-c6a3-4572-a083-ecb877737695::all_1_1_0_2) (query: ) Received signal Segmentation fault (11)
+2022.11.02 21:35:11.119644 [ 247 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+2022.11.02 21:35:11.119691 [ 247 ] {} <Fatal> BaseDaemon: Stack trace: 0x12aa6532 0x119f2e32 0x131775ef 0x13176d06 0x131781f1 0x13178bfc 0x13271b76 0x132949e4 0x133b975f 0x7c0e58b 0x7c0dfd0 0xcefdf4c 0xcf00cd7 0xcefa46c 0xceffbde 0x7f683c7c7609 0x7f683c6ec133
+2022.11.02 21:35:11.119795 [ 247 ] {} <Fatal> BaseDaemon: 2. DB::ColumnNullable::checkConsistency() const @ 0x12aa6532 in /usr/bin/clickhouse
+2022.11.02 21:35:11.119863 [ 247 ] {} <Fatal> BaseDaemon: 3. DB::SerializationNullable::serializeBinaryBulkWithMultipleStreams(DB::IColumn const&, unsigned long, unsigned long, DB::ISerialization::SerializeBinaryBulkSettings&, std::__1::shared_ptr<DB::ISerialization::SerializeBinaryBulkState>&) const @ 0x119f2e32 in /usr/bin/clickhouse
+2022.11.02 21:35:11.119910 [ 247 ] {} <Fatal> BaseDaemon: 4. DB::MergeTreeDataPartWriterCompact::writeDataBlock(DB::Block const&, std::__1::vector<DB::Granule, std::__1::allocator<DB::Granule> > const&) @ 0x131775ef in /usr/bin/clickhouse
+2022.11.02 21:35:11.119954 [ 247 ] {} <Fatal> BaseDaemon: 5. DB::MergeTreeDataPartWriterCompact::writeDataBlockPrimaryIndexAndSkipIndices(DB::Block const&, std::__1::vector<DB::Granule, std::__1::allocator<DB::Granule> > const&) @ 0x13176d06 in /usr/bin/clickhouse
+2022.11.02 21:35:11.120007 [ 247 ] {} <Fatal> BaseDaemon: 6. DB::MergeTreeDataPartWriterCompact::fillDataChecksums(DB::MergeTreeDataPartChecksums&) @ 0x131781f1 in /usr/bin/clickhouse
+2022.11.02 21:35:11.120048 [ 247 ] {} <Fatal> BaseDaemon: 7. DB::MergeTreeDataPartWriterCompact::fillChecksums(DB::MergeTreeDataPartChecksums&) @ 0x13178bfc in /usr/bin/clickhouse
+2022.11.02 21:35:11.120093 [ 247 ] {} <Fatal> BaseDaemon: 8. DB::MergedBlockOutputStream::finalizePartAsync(std::__1::shared_ptr<DB::IMergeTreeDataPart>&, bool, DB::NamesAndTypesList const*, DB::MergeTreeDataPartChecksums*) @ 0x13271b76 in /usr/bin/clickhouse
+2022.11.02 21:35:11.120127 [ 247 ] {} <Fatal> BaseDaemon: 9. ? @ 0x132949e4 in /usr/bin/clickhouse
+2022.11.02 21:35:11.120165 [ 247 ] {} <Fatal> BaseDaemon: 10. DB::MutatePlainMergeTreeTask::executeStep() @ 0x133b975f in /usr/bin/clickhouse
+2022.11.02 21:35:11.120224 [ 247 ] {} <Fatal> BaseDaemon: 11. DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::routine(std::__1::shared_ptr<DB::TaskRuntimeData>) @ 0x7c0e58b in /usr/bin/clickhouse
+2022.11.02 21:35:11.120268 [ 247 ] {} <Fatal> BaseDaemon: 12. DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::threadFunction() @ 0x7c0dfd0 in /usr/bin/clickhouse
+2022.11.02 21:35:11.120313 [ 247 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false> >::worker(std::__1::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0xcefdf4c in /usr/bin/clickhouse
+2022.11.02 21:35:11.120392 [ 247 ] {} <Fatal> BaseDaemon: 14. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<false>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false> >::scheduleImpl<void>(std::__1::function<void ()>, long, std::__1::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0xcf00cd7 in /usr/bin/clickhouse
+2022.11.02 21:35:11.120440 [ 247 ] {} <Fatal> BaseDaemon: 15. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xcefa46c in /usr/bin/clickhouse
+2022.11.02 21:35:11.120474 [ 247 ] {} <Fatal> BaseDaemon: 16. ? @ 0xceffbde in /usr/bin/clickhouse
+2022.11.02 21:35:11.120496 [ 247 ] {} <Fatal> BaseDaemon: 17. ? @ 0x7f683c7c7609 in ?
+2022.11.02 21:35:11.120518 [ 247 ] {} <Fatal> BaseDaemon: 18. __clone @ 0x7f683c6ec133 in ?
+2022.11.02 21:35:11.273975 [ 247 ] {} <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 61AFDDE9B58A440D85A27CF2CFCBED9D)
+2022.11.02 21:35:31.266267 [ 1 ] {} <Fatal> Application: Child process was terminated by signal 11.
+```
+

@@ -1,0 +1,71 @@
+ID: 14448
+Title: SQL_CALC_FOUND_ROWS behavior leads to data truncation
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+There is an open bug on SQL_CALC_FOUND_ROWS: https://github.com/pingcap/tidb/issues/8235
+
+I am not sure if it is well understood how serious this is. Here is a small test case:
+
+```
+CREATE TABLE t1 (a INT);
+INSERT INTO t1 VALUES (1),(2),(3);
+SELECT SQL_CALC_FOUND_ROWS * FROM t1 LIMIT 1;
+SELECT FOUND_ROWS();
+```
+
+2. What did you expect to see?
+
+In MySQL:
+```
+mysql> SELECT FOUND_ROWS();
++--------------+
+| FOUND_ROWS() |
++--------------+
+|            3 |
++--------------+
+1 row in set, 1 warning (0.00 sec)
+```
+
+3. What did you see instead?
+
+In TiDB:
+```
+mysql> SELECT FOUND_ROWS();
++--------------+
+| FOUND_ROWS() |
++--------------+
+|            1 |
++--------------+
+1 row in set (0.00 sec)
+```
+
+The most common use-case for this feature is that applications show the first few results (lets say LIMIT 100 rows) and then paginate to show a count of total results. Because the TiDB behavior is to return the same number of rows as the LIMIT, the application will incorrectly think that there is only one page of results.
+
+This query is used in Wordpress, Drupal, and all number of MySQL applications. It is deprecated in MySQL 8.0, but I suspect based on popularity will not be removed for some time.
+
+Assuming that https://github.com/pingcap/tidb/issues/8235 is not fixed, I would like to instead propose similar handling to https://github.com/pingcap/tidb/pull/10065 where it is an error by default when attempting to execute this query, with an option to skip the error and downgrade to a warning.
+
+It is not safe to just return a warning for two reasons:
+
+1) You can't trust that an application won't just discard the warning, and this is a potential data loss issue.
+2) MySQL 8.0 already returns a warning here (for deprecation!). Can't trust that an application will check the warning error code, and understand TiDB is warning for a more serious issue.
+
+What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+```
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-alpha-1334-g07e642c92
+Git Commit Hash: 07e642c9230ccb7c1537b27442f1fe8433e65f8a
+Git Branch: master
+UTC Build Time: 2020-01-08 08:32:04
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.01 sec)
+```

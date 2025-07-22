@@ -1,0 +1,125 @@
+ID: 33509
+Title: execute prepared statement with binary protocol will panic when table schema changed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+
+```
+import (
+	"context"
+	"database/sql"
+	"testing"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/require"
+)
+
+func TestPrepareExecute(t *testing.T) {
+	ctx := context.TODO()
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:4000)/test")
+	require.NoError(t, err)
+
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, "drop table if exists t1")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, "create table t1 (id int primary key, v int)")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(ctx, "insert into t1 values(1, 10)")
+	require.NoError(t, err)
+
+	stmt, err := conn.PrepareContext(context.TODO(), "select * from t1")
+	require.NoError(t, err)
+
+	require.Equal(t, []int{1, 10}, executePreparedStmtResult(t, stmt, 2))
+
+	// drop one column
+	_, err = conn.ExecContext(ctx, "alter table t1 drop column v")
+	require.NoError(t, err)
+
+	// the below will fail when get next row
+	require.Equal(t, []int{1}, executePreparedStmtResult(t, stmt, 1))
+}
+
+func executePreparedStmtResult(t *testing.T, stmt *sql.Stmt, columns int) []int {
+	rows, err := stmt.Query()
+	require.NoError(t, err)
+	if ok := rows.Next(); !ok {
+		// fail here for the third execute
+		require.Fail(t, rows.Err().Error())
+	}
+	row := make([]int, columns)
+	scan := make([]interface{}, columns)
+	for i := range row {
+		scan[i] = &row[i]
+	}
+
+	require.NoError(t, rows.Scan(scan...))
+	require.NoError(t, rows.Close())
+	return row
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+no error
+
+### 3. What did you see instead (Required)
+
+```
+=== RUN   TestPrepareExecute
+    staleread_test.go:91: 
+        	Error Trace:	staleread_test.go:91
+        	            				staleread_test.go:84
+        	Error:      	Error 1105: runtime error: index out of range [1] with length 1
+        	Test:       	TestPrepareExecute
+--- FAIL: TestPrepareExecute (0.30s)
+
+FAIL
+```
+
+Got a panic in tidb side:
+
+```
+[2022/03/28 17:45:17.492 +08:00] [ERROR] [conn.go:1031] ["connection running loop panic"] [conn=4089] [lastSQL="select * from t1"] [err="runtime error: index out of range [1] with length 1"] [stack="goroutine 380115 [running]:
+github.com/pingcap/tidb/server.(*clientConn).Run.func1()
+	/Users/wangchao/Code/pingcap/tidb/server/conn.go:1029 +0x88
+panic({0x10738fac0, 0x14001f98510})
+	/usr/local/go/src/runtime/panic.go:844 +0x26c
+github.com/pingcap/tidb/server.(*clientConn).writeResultset.func1()
+	/Users/wangchao/Code/pingcap/tidb/server/conn.go:2119 +0x3d4
+panic({0x10738fac0, 0x14001f98510})
+	/usr/local/go/src/runtime/panic.go:844 +0x26c
+github.com/pingcap/tidb/util/chunk.Row.IsNull({0x140096b60a0, 0x0}, 0x1)
+	/Users/wangchao/Code/pingcap/tidb/util/chunk/row.go:206 +0x74
+github.com/pingcap/tidb/server.dumpBinaryRow({0x14001c26000, 0xa, 0x400}, {0x140051f81e0, 0x2, 0x2}, {0x140096b60a0, 0x0}, 0x140056a0780)
+	/Users/wangchao/Code/pingcap/tidb/server/util.go:248 +0x1b0
+github.com/pingcap/tidb/server.(*clientConn).writeChunks(0x140020ef400, {0x1075a5f10, 0x14003af06c0}, {0x1075ae598, 0x140096b6050}, 0x1, 0x0)
+	/Users/wangchao/Code/pingcap/tidb/server/conn.go:2208 +0x390
+github.com/pingcap/tidb/server.(*clientConn).writeResultset(0x140020ef400, {0x1075a5f10, 0x14003af06c0}, {0x1075ae598, 0x140096b6050}, 0x1, 0x0, 0x0)
+	/Users/wangchao/Code/pingcap/tidb/server/conn.go:2136 +0x23c
+github.com/pingcap/tidb/server.(*clientConn).executePreparedStmtAndWriteResult(0x140020ef400, {0x1075a5f10, 0x14003af06c0}, {0x1075bc220, 0x1400d01eaf0}, {0x1090cd0b8, 0x0, 0x0}, 0x0)
+	/Users/wangchao/Code/pingcap/tidb/server/conn_stmt.go:263 +0x410
+github.com/pingcap/tidb/server.(*clientConn).handleStmtExecute(0x140020ef400, {0x1075a5f10, 0x14003af06c0}, {0x14004c56205, 0x9, 0x9})
+	/Users/wangchao/Code/pingcap/tidb/server/conn_stmt.go:209 +0x7c4
+github.com/pingcap/tidb/server.(*clientConn).dispatch(0x140020ef400, {0x1075a5e68, 0x140056a0380}, {0x14004c56205, 0x9, 0x9})
+	/Users/wangchao/Code/pingcap/tidb/server/conn.go:1367 +0xfd8
+github.com/pingcap/tidb/server.(*clientConn).Run(0x140020ef400, {0x1075a5f10, 0x1401408c0c0})
+	/Users/wangchao/Code/pingcap/tidb/server/conn.go:1095 +0x7b4
+github.com/pingcap/tidb/server.(*Server).onConn(0x140077d00d0, 0x140020ef400)
+	/Users/wangchao/Code/pingcap/tidb/server/server.go:551 +0xa64
+created by github.com/pingcap/tidb/server.(*Server).startNetworkListener
+	/Users/wangchao/Code/pingcap/tidb/server/server.go:448 +0x7a4
+"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+master
+
+<!-- Paste the output of SELECT tidb_version() -->
+

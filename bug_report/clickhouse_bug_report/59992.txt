@@ -1,0 +1,81 @@
+ID: 59992
+Title: Request WHERE toHour(stamp, 'America/NewYork')  is not consistent with the result of toHour(stamp) 
+Description:
+Hello guys,
+
+Using CH (23.9.2.56)
+
+I have a really weird behavior on my ReplicatedMergeTree table (requested through a distributed table).
+So I have a table like Table (stamp DateTime('UTC'), clicks UInt64),
+And when I :
+```
+SELECT toHour(stamp, 'America/New_York'), sum(clicks)
+FROM mytable
+WHERE toDate(stamp, 'America/New_York') = '2024-02-01'
+GROUP BY ALL;
+```
+I get something like (the numbers are made up, but it is a huge traffic table)
+
+|  stamp(America/NewYork) | clicks  |
+|---|---|
+|  0 |  34   |
+|  1 |   45  |
+|  2 |  60  |
+|  ... |   ... |
+|  7 |   207 |
+|  8 |   213 |
+
+At 7AM (NY time) for example I get : sum(clicks) => 207.
+
+But when I do a more precise request like just adding  AND toHour(stamp, 'America/NewYork') = 7:
+```
+SELECT toHour(stamp, 'America/New_York'), sum(clicks)
+FROM mytable
+WHERE toDate(stamp, 'America/New_York') = '2024-02-01'
+AND toHour(stamp, 'America/New_York') = 7 
+GROUP BY ALL;
+```
+
+I Have a different result like sum(clicks) => 93 :
+
+|  stamp(America/NewYork) | clicks  |
+|---|---|
+|  7 |  93   |
+
+But If I remove the 'America/New_York' and do the request in UTC time (7AM = 12 PM) the result stay consistent.
+
+```
+SELECT toHour(stamp, 'America/New_York'), sum(clicks)
+FROM mytable
+WHERE toDate(stamp, 'America/New_York') = '2024-02-01'
+AND toHour(stamp) = 12 
+GROUP BY ALL;
+```
+
+**How to reproduce**
+
+Using Using CH (23.9.2.56)
+
+- CREATE TABLE db.table_local ON CLUSTER '{cluster}'
+(
+    `stamp` DateTime('UTC'),
+    ..... a lot of others column ....
+    `clicks` UInt64 
+)
+ENGINE = ReplicatedMergeTree
+PARTITION BY toDate(stamp)
+
+-  CREATE TABLE db.table_local ON CLUSTER '{cluster}'
+(
+    `stamp` DateTime('UTC'),
+    ..... a lot of others column ....
+    `clicks` UInt64 
+)
+ENGINE = Distributed('db', 'db', 'table', rand())
+
+- send a lot of request (some millions)
+- then request playing on the where with the toHour function
+
+**Expected behavior**
+
+The data should be consistent using toHour(stamp, 'someplace') and without the someplace

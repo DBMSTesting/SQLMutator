@@ -1,0 +1,170 @@
+ID: 16029
+Title: Parser error when using named parameters in python
+Description:
+### What happens?
+
+Note the query works if I try it without named parameters. However when using named parameters it throws a parser exception. 
+
+
+```SQL
+COPY(
+        SELECT
+            h3 AS hex,
+            SUM(count)::int AS c
+        FROM read_parquet('az://ais/parquet-stats/*/*/*.parquet', hive_partitioning = true)
+        WHERE day BETWEEN DATE $start_date AND DATE $end_date
+        AND vessel_type IN ($vessel_types)
+        AND year IN ($years_csv) and month IN ($months_csv)
+        GROUP BY h3
+        ORDER BY c DESC
+    )
+    TO
+        $path (ARRAY);
+```
+Produces the following error:
+
+```
+Traceback (most recent call last):
+  File "/Users/shaunak/code/ais/tiledb/src/scratchpad.py", line 3, in <module>
+    res = fetch_vessel_stats(
+          ^^^^^^^^^^^^^^^^^^^
+  File "/Users/shaunak/code/ais/tiledb/src/helpers/query.py", line 42, in fetch_vessel_stats
+    result = db.get_connection().execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+duckdb.duckdb.ParserException: Parser Error: syntax error at or near "$"
+```
+
+
+### To Reproduce
+
+Python code that produces this error
+
+(DOESN'T WORK)
+```python
+# Gets stats for a vessel type in a given date range and writes a gzipped JSON file to the given path
+# parameters
+# start_date:   '2023-01-01'            The start date of the date range
+# end_date:     '2023-02-28'            The end date of the date range
+# vessel_types: ["all"] or ["35", "31"] A list of vessel types to filter by
+# path:         data/output/res.json.gz The path to write the gzipped JSON file to
+#
+def fetch_vessel_stats(start_date, end_date, vessel_types, path):
+    sdate = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    edate = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+
+    years = [year for year in range(sdate.year, edate.year + 1)]
+    months = [month for month in range(sdate.month, edate.month + 1)]
+
+    years_csv = ",".join([f"'{year}'" for year in years])
+    months_csv = ",".join([f"'{month}'" for month in months])
+    vessel_types_csv = ",".join([f"'{vessel_type}'" for vessel_type in vessel_types])
+
+    query = """
+    COPY(
+        SELECT
+            h3 AS hex,
+            SUM(count)::int AS c
+        FROM read_parquet('az://ais/parquet-stats/*/*/*.parquet', hive_partitioning = true)
+        WHERE day BETWEEN DATE $start_date AND DATE $end_date
+        AND vessel_type IN ($vessel_types_csv)
+        AND year IN ($years_csv) and month IN ($months_csv)
+        GROUP BY h3
+        ORDER BY c DESC
+    ) 
+    TO 
+        $path (ARRAY);
+    """
+
+    print(query)
+
+    result = db.get_connection().execute(
+        query,
+        {
+            "start_date": start_date,
+            "end_date": end_date,
+            "vessel_types_csv": vessel_types_csv,
+            "years_csv": years_csv,
+            "months_csv": months_csv,
+            "path": path,
+        },
+    )
+    return result
+```
+
+
+However following version of the function without named parameters works just fine
+
+(WORKS)
+```python
+def fetch_vessel_stats(start_date, end_date, vessel_types, path):
+    sdate = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+    edate = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+
+    years = [year for year in range(sdate.year, edate.year + 1)]
+    months = [month for month in range(sdate.month, edate.month + 1)]
+
+    years_csv = ",".join([f"'{year}'" for year in years])
+    months_csv = ",".join([f"'{month}'" for month in months])
+    vessel_types_csv = ",".join([f"'{vessel_type}'" for vessel_type in vessel_types])
+
+    query = f"""
+    COPY(
+        SELECT
+            h3 AS hex,
+            SUM(count)::int AS c
+        FROM read_parquet('az://ais/parquet-stats/*/*/*.parquet', hive_partitioning = true)
+        WHERE day BETWEEN DATE '{start_date}' AND DATE '{end_date}'
+        AND vessel_type IN ({vessel_types_csv})
+        AND year IN ({years_csv}) and month IN ({months_csv})
+        GROUP BY h3
+        ORDER BY c DESC
+    ) 
+    TO 
+        '{path}' (ARRAY);
+    """
+
+    print(query)
+
+    result = db.get_connection().sql(query)
+    return result
+```
+
+### OS:
+
+MacOS Sequoia 15.1.1
+
+### DuckDB Version:
+
+v1.1.3 19864453f7
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+M1 Max
+
+### Full Name:
+
+Shaunak Vairagare
+
+### Affiliation:
+
+NOAA OCM
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

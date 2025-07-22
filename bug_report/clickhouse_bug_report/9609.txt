@@ -1,0 +1,58 @@
+ID: 9609
+Title: Remote JDBC bridge connection issue (timeout)
+Description:
+**Describe the bug or unexpected behaviour**
+Trying to access JDBC bridge deployed on a remote host almost always produces the following error:
+
+```Code: 410, e.displayText() = DB::Exception: jdbc-bridge is not running. Please, start it manually```
+
+Could be related to #8723
+
+
+**The reason**
+Communication with JDBC bridge is implemented using ```ReadWriteBufferFromHTTP``` class without providing HTTP timeouts from configuration, e.g.:
+
+```ReadWriteBufferFromHTTP buf(uri, Poco::Net::HTTPRequest::HTTP_POST, nullptr);```
+
+In such case class'es constructor automatically provides default value for timeouts parameter with all values equal to zero and these values are passed to Poco HTTPSession, replacing Poco's default values.
+This leads to ```TimeoutException``` in ```SocketImpl::connect``` method:
+
+```
+  if (!poll(timeout, SELECT_READ | SELECT_WRITE | SELECT_ERROR))
+    throw Poco::TimeoutException("connect timed out", address.toString());
+```
+
+
+**The proposition**
+Provide timeouts to all JDBC bridge related usages.
+
+XDBCBridgeHelper.h - getIdentifierQuotingStyle
+```
+ReadWriteBufferFromHTTP buf(uri, Poco::Net::HTTPRequest::HTTP_POST, nullptr, ConnectionTimeouts::getHTTPTimeouts(context));
+```
+
+XDBCBridgeHelper.h - checkBridgeIsRunning
+```
+ReadWriteBufferFromHTTP buf(ping_url, Poco::Net::HTTPRequest::HTTP_GET, nullptr, ConnectionTimeouts::getHTTPTimeouts(context));
+```
+
+ITableFunctionXDBC.cpp - ITableFunctionXDBC::executeImpl
+```
+ReadWriteBufferFromHTTP buf(columns_info_uri, Poco::Net::HTTPRequest::HTTP_POST, nullptr, ConnectionTimeouts::getHTTPTimeouts(context));
+```
+
+**Nice to have**
+Exception logging in XDBCBridgeHelper.h - checkBridgeIsRunning
+```
+        try
+        {
+            ReadWriteBufferFromHTTP buf(ping_url, Poco::Net::HTTPRequest::HTTP_GET, nullptr);
+            return checkString(XDBCBridgeHelper::PING_OK_ANSWER, buf);
+        }
+        catch (...)
+        {
+---> logging here could save a lot of time in some cases
+            return false;
+        }
+```
+

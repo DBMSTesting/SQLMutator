@@ -1,0 +1,358 @@
+ID: 13476
+Title: Clean up rendered text trees
+Description:
+This PR cleans up the rendering of text trees in explain/explain analyze in a few ways:
+
+* Remove the `Stringified:` label, instead add a new `__text__` label that shows text without a header
+* Move `Extra Cardinality` to `__extra_cardinality__`, and align rendering of extra cardinality across boxes horizontally
+* Only use line separators between the operator name and the extra info, use spaces otherwise
+* Inline short headers and avoid spaces between short headers
+
+
+Here's the explain output of TPC-H Q09 with `PRAGMA disabled_optimizers='compressed_materialization'` (which adds a lot of noisy functions): 
+
+#### New Tree
+```
+┌───────────────────────────┐
+│          ORDER_BY         │
+│    ────────────────────   │
+│     profit.nation ASC     │
+│     profit.o_year DESC    │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│          Groups:          │
+│             #0            │
+│             #1            │
+│                           │
+│    Aggregates: sum(#2)    │
+│                           │
+│           EC: 25          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│           nation          │
+│           o_year          │
+│           amount          │
+│                           │
+│        EC: 13950920       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│           nation          │
+│    "year"(o_orderdate)    │
+│           amount          │
+│                           │
+│        EC: 13950920       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: INNER     │
+│                           │
+│        Conditions:        ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  l_orderkey = o_orderkey  │                                                                                                                                  │
+│                           │                                                                                                                                  │
+│        EC: 13950920       │                                                                                                                                  │
+└─────────────┬─────────────┘                                                                                                                                  │
+┌─────────────┴─────────────┐                                                                                                                    ┌─────────────┴─────────────┐
+│         HASH_JOIN         │                                                                                                                    │         SEQ_SCAN          │
+│    ────────────────────   │                                                                                                                    │    ────────────────────   │
+│      Join Type: INNER     │                                                                                                                    │           orders          │
+│                           │                                                                                                                    │                           │
+│        Conditions:        ├──────────────┐                                                                                                     │        Projections:       │
+│   l_suppkey = s_suppkey   │              │                                                                                                     │         o_orderkey        │
+│   l_partkey = ps_partkey  │              │                                                                                                     │        o_orderdate        │
+│                           │              │                                                                                                     │                           │
+│        EC: 12708070       │              │                                                                                                     │        EC: 15000000       │
+└─────────────┬─────────────┘              │                                                                                                     └───────────────────────────┘
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         SEQ_SCAN          ││         HASH_JOIN         │
+│    ────────────────────   ││    ────────────────────   │
+│          lineitem         ││      Join Type: INNER     │
+│                           ││                           │
+│        Projections:       ││        Conditions:        │
+│         l_suppkey         ││   ps_suppkey = s_suppkey  │
+│         l_partkey         ││                           ├───────────────────────────────────────────┐
+│         l_orderkey        ││        Build Min: 1       │                                           │
+│      l_extendedprice      ││     Build Max: 100000     │                                           │
+│         l_discount        ││                           │                                           │
+│         l_quantity        ││                           │                                           │
+│                           ││                           │                                           │
+│        EC: 59986052       ││         EC: 772956        │                                           │
+└───────────────────────────┘└─────────────┬─────────────┘                                           │
+                             ┌─────────────┴─────────────┐                             ┌─────────────┴─────────────┐
+                             │         HASH_JOIN         │                             │         HASH_JOIN         │
+                             │    ────────────────────   │                             │    ────────────────────   │
+                             │      Join Type: INNER     │                             │      Join Type: INNER     │
+                             │                           │                             │                           │
+                             │        Conditions:        │                             │        Conditions:        │
+                             │   ps_partkey = p_partkey  ├──────────────┐              │ s_nationkey = n_nationkey ├──────────────┐
+                             │                           │              │              │                           │              │
+                             │                           │              │              │        Build Min: 0       │              │
+                             │                           │              │              │       Build Max: 24       │              │
+                             │                           │              │              │                           │              │
+                             │         EC: 877050        │              │              │         EC: 100000        │              │
+                             └─────────────┬─────────────┘              │              └─────────────┬─────────────┘              │
+                             ┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+                             │         SEQ_SCAN          ││           FILTER          ││         SEQ_SCAN          ││         SEQ_SCAN          │
+                             │    ────────────────────   ││    ────────────────────   ││    ────────────────────   ││    ────────────────────   │
+                             │          partsupp         ││ contains(p_name, 'green') ││          supplier         ││           nation          │
+                             │                           ││                           ││                           ││                           │
+                             │        Projections:       ││                           ││        Projections:       ││        Projections:       │
+                             │         ps_suppkey        ││                           ││         s_suppkey         ││        n_nationkey        │
+                             │         ps_partkey        ││                           ││        s_nationkey        ││           n_name          │
+                             │       ps_supplycost       ││                           ││                           ││                           │
+                             │                           ││                           ││                           ││                           │
+                             │        EC: 8000000        ││         EC: 400000        ││         EC: 100000        ││           EC: 25          │
+                             └───────────────────────────┘└─────────────┬─────────────┘└───────────────────────────┘└───────────────────────────┘
+                                                          ┌─────────────┴─────────────┐
+                                                          │         SEQ_SCAN          │
+                                                          │    ────────────────────   │
+                                                          │            part           │
+                                                          │                           │
+                                                          │        Projections:       │
+                                                          │         p_partkey         │
+                                                          │           p_name          │
+                                                          │                           │
+                                                          │         EC: 400000        │
+                                                          └───────────────────────────┘
+
+```
+
+#### Previous Tree (main)
+```
+┌───────────────────────────┐
+│          ORDER_BY         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         Order By:         │
+│     profit.nation ASC     │
+│     profit.o_year DESC    │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          Groups:          │
+│             #0            │
+│             #1            │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Aggregates:        │
+│          sum(#2)          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│   Estimated Cardinality:  │
+│             25            │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Projections:       │
+│           nation          │
+│           o_year          │
+│           amount          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│   Estimated Cardinality:  │
+│          13950920         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Projections:       │
+│           nation          │
+│    "year"(o_orderdate)    │
+│           amount          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│   Estimated Cardinality:  │
+│          13950920         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         Join Type:        │
+│           INNER           │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Conditions:        ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  l_orderkey = o_orderkey  │                                                                                                                                  │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                                  │
+│   Estimated Cardinality:  │                                                                                                                                  │
+│          13950920         │                                                                                                                                  │
+└─────────────┬─────────────┘                                                                                                                                  │
+┌─────────────┴─────────────┐                                                                                                                    ┌─────────────┴─────────────┐
+│         HASH_JOIN         │                                                                                                                    │         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                    │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         Join Type:        │                                                                                                                    │        Stringified:       │
+│           INNER           │                                                                                                                    │           orders          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                    │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Conditions:        ├──────────────┐                                                                                                     │        Projections:       │
+│   l_suppkey = s_suppkey   │              │                                                                                                     │         o_orderkey        │
+│   l_partkey = ps_partkey  │              │                                                                                                     │        o_orderdate        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │                                                                                                     │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│   Estimated Cardinality:  │              │                                                                                                     │   Estimated Cardinality:  │
+│          12708070         │              │                                                                                                     │          15000000         │
+└─────────────┬─────────────┘              │                                                                                                     └───────────────────────────┘
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         SEQ_SCAN          ││         HASH_JOIN         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Stringified:       ││         Join Type:        │
+│          lineitem         ││           INNER           │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│        Projections:       ││        Conditions:        │
+│         l_suppkey         ││   ps_suppkey = s_suppkey  │
+│         l_partkey         ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         l_orderkey        ││         Build Min:        ├───────────────────────────────────────────┐
+│      l_extendedprice      ││             1             │                                           │
+│         l_discount        ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                           │
+│         l_quantity        ││         Build Max:        │                                           │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││           100000          │                                           │
+│   Estimated Cardinality:  ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                           │
+│          59986052         ││   Estimated Cardinality:  │                                           │
+│                           ││           772956          │                                           │
+└───────────────────────────┘└─────────────┬─────────────┘                                           │
+                             ┌─────────────┴─────────────┐                             ┌─────────────┴─────────────┐
+                             │         HASH_JOIN         │                             │         HASH_JOIN         │
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                             │         Join Type:        │                             │         Join Type:        │
+                             │           INNER           │                             │           INNER           │
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                             │        Conditions:        │                             │        Conditions:        │
+                             │   ps_partkey = p_partkey  │                             │ s_nationkey = n_nationkey │
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                             │   Estimated Cardinality:  ├──────────────┐              │         Build Min:        ├──────────────┐
+                             │           877050          │              │              │             0             │              │
+                             │                           │              │              │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │
+                             │                           │              │              │         Build Max:        │              │
+                             │                           │              │              │             24            │              │
+                             │                           │              │              │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │
+                             │                           │              │              │   Estimated Cardinality:  │              │
+                             │                           │              │              │           100000          │              │
+                             └─────────────┬─────────────┘              │              └─────────────┬─────────────┘              │
+                             ┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+                             │         SEQ_SCAN          ││           FILTER          ││         SEQ_SCAN          ││         SEQ_SCAN          │
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                             │        Stringified:       ││           Name:           ││        Stringified:       ││        Stringified:       │
+                             │          partsupp         ││ contains(p_name, 'green') ││          supplier         ││           nation          │
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                             │        Projections:       ││   Estimated Cardinality:  ││        Projections:       ││        Projections:       │
+                             │         ps_suppkey        ││           400000          ││         s_suppkey         ││        n_nationkey        │
+                             │         ps_partkey        ││                           ││        s_nationkey        ││           n_name          │
+                             │       ps_supplycost       ││                           ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││                           ││   Estimated Cardinality:  ││   Estimated Cardinality:  │
+                             │   Estimated Cardinality:  ││                           ││           100000          ││             25            │
+                             │          8000000          ││                           ││                           ││                           │
+                             └───────────────────────────┘└─────────────┬─────────────┘└───────────────────────────┘└───────────────────────────┘
+                                                          ┌─────────────┴─────────────┐
+                                                          │         SEQ_SCAN          │
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                                                          │        Stringified:       │
+                                                          │            part           │
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                                                          │        Projections:       │
+                                                          │         p_partkey         │
+                                                          │           p_name          │
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                                                          │   Estimated Cardinality:  │
+                                                          │           400000          │
+                                                          └───────────────────────────┘
+
+```
+
+
+#### v1.0
+
+```
+┌───────────────────────────┐                                                                                                                                                 
+│          ORDER_BY         │                                                                                                                                                 
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                                                 
+│          ORDERS:          │                                                                                                                                                 
+│     profit.nation ASC     │                                                                                                                                                 
+│     profit.o_year DESC    │                                                                                                                                                 
+└─────────────┬─────────────┘                                                                                                                                                                              
+┌─────────────┴─────────────┐                                                                                                                                                 
+│       HASH_GROUP_BY       │                                                                                                                                                 
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                                                 
+│             #0            │                                                                                                                                                 
+│             #1            │                                                                                                                                                 
+│          sum(#2)          │                                                                                                                                                 
+└─────────────┬─────────────┘                                                                                                                                                                              
+┌─────────────┴─────────────┐                                                                                                                                                 
+│         PROJECTION        │                                                                                                                                                 
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                                                 
+│           nation          │                                                                                                                                                 
+│           o_year          │                                                                                                                                                 
+│           amount          │                                                                                                                                                 
+└─────────────┬─────────────┘                                                                                                                                                                              
+┌─────────────┴─────────────┐                                                                                                                                                 
+│         PROJECTION        │                                                                                                                                                 
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                                                 
+│           nation          │                                                                                                                                                 
+│     year(o_orderdate)     │                                                                                                                                                 
+│           amount          │                                                                                                                                                 
+└─────────────┬─────────────┘                                                                                                                                                                              
+┌─────────────┴─────────────┐                                                                                                                                                 
+│         HASH_JOIN         │                                                                                                                                                 
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                                                 
+│           INNER           │                                                                                                                                                 
+│  o_orderkey = l_orderkey  ├──────────────┐                                                                                                                                  
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │                                                                                                                                  
+│        EC: 13950920       │              │                                                                                                                                  
+└─────────────┬─────────────┘              │                                                                                                                                                               
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐                                                                                                                    
+│         SEQ_SCAN          ││         HASH_JOIN         │                                                                                                                    
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                                                    
+│           orders          ││           INNER           │                                                                                                                    
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   l_suppkey = ps_suppkey  │                                                                                                                    
+│         o_orderkey        ││   l_partkey = ps_partkey  ├──────────────┐                                                                                                     
+│        o_orderdate        ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │                                                                                                     
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││        EC: 12708070       │              │                                                                                                     
+│        EC: 15000000       ││                           │              │                                                                                                     
+└───────────────────────────┘└─────────────┬─────────────┘              │                                                                                                                                  
+                             ┌─────────────┴─────────────┐┌─────────────┴─────────────┐                                                                                       
+                             │         SEQ_SCAN          ││         HASH_JOIN         │                                                                                       
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                       
+                             │          lineitem         ││           INNER           │                                                                                       
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ps_suppkey = s_suppkey  │                                                                                       
+                             │         l_suppkey         ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                                                       
+                             │         l_partkey         ││        Build Min: 1       │                                                                                       
+                             │         l_orderkey        ││     Build Max: 100000     ├───────────────────────────────────────────┐                                           
+                             │      l_extendedprice      ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                           │                                           
+                             │         l_discount        ││         EC: 772956        │                                           │                                           
+                             │         l_quantity        ││                           │                                           │                                           
+                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││                           │                                           │                                           
+                             │        EC: 59986052       ││                           │                                           │                                           
+                             └───────────────────────────┘└─────────────┬─────────────┘                                           │                                                                        
+                                                          ┌─────────────┴─────────────┐                             ┌─────────────┴─────────────┐                             
+                                                          │         HASH_JOIN         │                             │         HASH_JOIN         │                             
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                             
+                                                          │           INNER           │                             │           INNER           │                             
+                                                          │   ps_partkey = p_partkey  │                             │ s_nationkey = n_nationkey │                             
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ├──────────────┐              │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ├──────────────┐              
+                                                          │         EC: 877050        │              │              │        Build Min: 0       │              │              
+                                                          │                           │              │              │       Build Max: 24       │              │              
+                                                          │                           │              │              │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │              │              
+                                                          │                           │              │              │         EC: 100000        │              │              
+                                                          └─────────────┬─────────────┘              │              └─────────────┬─────────────┘              │                                           
+                                                          ┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+                                                          │         SEQ_SCAN          ││           FILTER          ││         SEQ_SCAN          ││         SEQ_SCAN          │
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                                                          │          partsupp         ││ contains(p_name, 'green') ││          supplier         ││           nation          │
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                                                          │         ps_suppkey        ││         EC: 400000        ││         s_suppkey         ││        n_nationkey        │
+                                                          │         ps_partkey        ││                           ││        s_nationkey        ││           n_name          │
+                                                          │       ps_supplycost       ││                           ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+                                                          │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   ││                           ││         EC: 100000        ││           EC: 25          │
+                                                          │        EC: 8000000        ││                           ││                           ││                           │
+                                                          └───────────────────────────┘└─────────────┬─────────────┘└───────────────────────────┘└───────────────────────────┘                             
+                                                                                       ┌─────────────┴─────────────┐                                                          
+                                                                                       │         SEQ_SCAN          │                                                          
+                                                                                       │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                          
+                                                                                       │            part           │                                                          
+                                                                                       │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                          
+                                                                                       │         p_partkey         │                                                          
+                                                                                       │           p_name          │                                                          
+                                                                                       │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │                                                          
+                                                                                       │         EC: 400000        │                                                          
+                                                                                       └───────────────────────────┘                                                                                       
+
+```

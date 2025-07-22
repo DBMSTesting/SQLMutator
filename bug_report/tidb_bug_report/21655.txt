@@ -1,0 +1,54 @@
+ID: 21655
+Title: Pessimistic transactions may see inconsistent data while doing partitioning DDLs concurrently
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Similar to #21498, partitioning DDLs may also cause inconsistent read.
+
+Case 1
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t (id int primary key, v int) partition by range (id) (partition p0 values less than (4), partition p_rest values less than maxvalue);
+/* init */ insert into t values (1, 10);
+
+/* txn */ begin;
+/* txn */ insert into t values (1, 11) on duplicate key update id = values(id), v = values(v);
+/* ddl */ alter table t drop partition p0;
+/* ddl */ insert into t values (1, 12) on duplicate key update id = values(id), v = values(v);
+/* txn */ select * from t for update; -- (1, 11), (1, 12)
+/* txn */ commit; -- OK
+```
+
+Case 2
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t (id int primary key, v int) partition by range (id) (partition p0 values less than (4), partition p1 values less than (6));
+/* init */ insert into t values (1, 10), (3, 30), (5, 50);
+
+/* txn */ begin;
+/* ddl */ alter table t add partition (partition p2 values less than (8));
+/* ddl */ insert into t values (6, 60);
+/* ddl */ insert into t values (4, 40);
+/* txn */ select * from t for update; -- can see (4, 40) but cannot see (6, 60)
+/* txn */ commit; -- E8028
+```
+
+### 2. What did you expect to see? (Required)
+
+For case 1, it should be only 1 row returned.
+
+For case 2, if we see (4, 40) in txn, we should also see (6, 60) because insert(6, 60) happened before insert(4, 40).
+
+### 3. What did you see instead (Required)
+
+As described in reproduce steps
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+release-4.0 (2862cd727b4a29c5623f99453fb8d6e7b448004d)

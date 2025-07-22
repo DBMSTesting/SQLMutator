@@ -1,0 +1,95 @@
+ID: 15127
+Title: Report total time on final progress bar and add metric on progress bar accuracy
+Description:
+This builds on top of https://github.com/duckdb/duckdb/pull/15084 infrastructure, now merged, and introduces a way to pass down information from duckdb to implementation of the ProgressBarDisplay class:
+```c++
+	virtual void AddInfo(const char *name, double value) {
+        }
+```
+By default this is implemented as a NOP, but can be override to save / display relevant information.
+
+There are currently 2 information propagated, but more can be added with the same infrastructure, if there are easy to compute / valuable metrics:
+```
+                         // This is passed always
+			display->AddInfo("query_time", elapsed_time);
+			if (squared_distance_accumulator) {
+                                 // This is passed only on completion
+				const double mean_squared_diff = squared_distance_accumulator->GetResult(elapsed_time);
+				display->AddInfo("progress_bar_error", mean_squared_diff);
+			}
+```
+
+Both are currently handled only by the TerminalProgressBarDisplay, changing (improving) the CLI in two different ways:
+
+### Print time with completed progress bar
+Make so that on the final print of the progress bar (if printed), the total time is printed instead of `100%`
+
+Current:
+```
+carlo@ScroogeMcDuck duckdb % ./build/release/duckdb tpc10
+v1.1.4-dev3249 9489881191
+Enter ".help" for usage hints.
+D SELECT * from lineitem LIMIT 5 OFFSET 52312300;
+100% ▕████████████████████████████████████████████████████████████▏ 
+┌────────────┬───────────┬───────────┬──────────────┬───────────────┬───┬──────────────┬───────────────┬───────────────────┬────────────┬──────────────────────┐
+│ l_orderkey │ l_partkey │ l_suppkey │ l_linenumber │  l_quantity   │ … │ l_commitdate │ l_receiptdate │  l_shipinstruct   │ l_shipmode │      l_comment       │
+│   int64    │   int64   │   int64   │    int64     │ decimal(15,2) │   │     date     │     date      │      varchar      │  varchar   │       varchar        │
+├────────────┼───────────┼───────────┼──────────────┼───────────────┼───┼──────────────┼───────────────┼───────────────────┼────────────┼──────────────────────┤
+│   52324486 │   1606739 │     31756 │            3 │         12.00 │ … │ 1998-01-17   │ 1998-04-03    │ TAKE BACK RETURN  │ FOB        │ ngside of the quie…  │
+│   52324487 │   1487635 │     12650 │            1 │         19.00 │ … │ 1996-01-04   │ 1995-12-23    │ COLLECT COD       │ TRUCK      │ ctions cajole furi…  │
+│   52324487 │    673500 │     98507 │            2 │         28.00 │ … │ 1996-02-13   │ 1996-03-26    │ NONE              │ REG AIR    │ s. bold instructio…  │
+│   52324487 │   1508316 │     33332 │            3 │         33.00 │ … │ 1996-01-19   │ 1996-01-16    │ DELIVER IN PERSON │ REG AIR    │ ial, regul           │
+│   52324487 │    253171 │     78174 │            4 │          1.00 │ … │ 1996-02-03   │ 1996-03-30    │ COLLECT COD       │ MAIL       │ the blithely bold …  │
+├────────────┴───────────┴───────────┴──────────────┴───────────────┴───┴──────────────┴───────────────┴───────────────────┴────────────┴──────────────────────┤
+│ 5 rows                                                                                                                                 16 columns (10 shown) │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+After:
+```
+D SELECT * from lineitem LIMIT 5 OFFSET 52312300;
+2.774s▕████████████████████████████████████████████████████████████▏ 
+┌────────────┬───────────┬───────────┬──────────────┬───────────────┬───┬──────────────┬───────────────┬───────────────────┬────────────┬──────────────────────┐
+│ l_orderkey │ l_partkey │ l_suppkey │ l_linenumber │  l_quantity   │ … │ l_commitdate │ l_receiptdate │  l_shipinstruct   │ l_shipmode │      l_comment       │
+│   int64    │   int64   │   int64   │    int64     │ decimal(15,2) │   │     date     │     date      │      varchar      │  varchar   │       varchar        │
+├────────────┼───────────┼───────────┼──────────────┼───────────────┼───┼──────────────┼───────────────┼───────────────────┼────────────┼──────────────────────┤
+│   52324486 │   1606739 │     31756 │            3 │         12.00 │ … │ 1998-01-17   │ 1998-04-03    │ TAKE BACK RETURN  │ FOB        │ ngside of the quie…  │
+│   52324487 │   1487635 │     12650 │            1 │         19.00 │ … │ 1996-01-04   │ 1995-12-23    │ COLLECT COD       │ TRUCK      │ ctions cajole furi…  │
+│   52324487 │    673500 │     98507 │            2 │         28.00 │ … │ 1996-02-13   │ 1996-03-26    │ NONE              │ REG AIR    │ s. bold instructio…  │
+│   52324487 │   1508316 │     33332 │            3 │         33.00 │ … │ 1996-01-19   │ 1996-01-16    │ DELIVER IN PERSON │ REG AIR    │ ial, regul           │
+│   52324487 │    253171 │     78174 │            4 │          1.00 │ … │ 1996-02-03   │ 1996-03-30    │ COLLECT COD       │ MAIL       │ the blithely bold …  │
+├────────────┴───────────┴───────────┴──────────────┴───────────────┴───┴──────────────┴───────────────┴───────────────────┴────────────┴──────────────────────┤
+│ 5 rows                                                                                                                                 16 columns (10 shown) │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Note that other implementation of the progress bar (python, soon Wasm), are still passed the elapsed query time, and can decide how to visualize it.
+
+### Add a way to debug progress bar progress
+Adds a setting `enable_progress_bar_debug` that when enabled turns on progress bar (instead of only for queries longer than 2 seconds), and print an estimated error (averaged squared error) between progress bar and ideal progress bar (that is linear increase between 0 and 100%).
+```
+D SET enable_progress_bar_debug = true;
+D FROM lineitem;
+2.440s▕████████████████████████████████████████████████████████████▏ progress_bar_error:0.152083
+```
+
+Examples:
+```
+D PRAGMA tpch(1);
+0.228s▕████████████████████████████████████████████████████████████▏ progress_bar_error:0.029191
+D PRAGMA tpch(2);
+0.114s▕████████████████████████████████████████████████████████████▏ progress_bar_error:0.372035
+D PRAGMA tpch(3);
+0.220s▕████████████████████████████████████████████████████████████▏ progress_bar_error:0.236498
+D PRAGMA tpch(4);
+0.112s▕████████████████████████████████████████████████████████████▏ progress_bar_error:0.179028
+D PRAGMA tpch(5);
+0.117s▕████████████████████████████████████████████████████████████▏ progress_bar_error:0.196575
+```
+To interpret the result:
+ - `0` is the best possible score (that is increasing linearly over time)
+ - `<0.05` is great (given there are threads / timing issues some noise it's unavoidable)
+ - `<0.10` is good
+ - `>0.20` points to some operator being used that do not propagate correctly GetProgress from upstream operators or itself do not make available an estimate.
+ - `0.50` is the result you would get for returning always 0% progress up to the end (I think, might be also be `1.0` but too lazy to check)
+
+Idea here is being able to measure and giving visibility to improvements in this areas. It's fine if estimates are off, this is in the "nice to have" category, but stuff works independently of the reported progress. I think it's handy to have a measure for when someone wants to implement those in operators / extensions and confirm the improvement is not only perceived.

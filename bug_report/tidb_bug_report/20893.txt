@@ -1,0 +1,93 @@
+ID: 20893
+Title: `explain format='hint'`'s ouput is not recoverable.
+Description:
+## Description
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+Create a cluster that contains one `TiFlash` node.
+
+```sql
+> create table t(a int, index idx(a))
+> ALTER TABLE t SET TIFLASH REPLICA 1
+
+> explain select /*+ read_from_storage(tiflash[t]) */ * from t;
++-------------------+----------+--------------+---------------+--------------------------------+
+| id                | estRows  | task         | access object | operator info                  |
++-------------------+----------+--------------+---------------+--------------------------------+
+| TableReader_5     | 10000.00 | root         |               | data:TableFullScan_4           |
+| └─TableFullScan_4 | 10000.00 | cop[tiflash] | table:t       | keep order:false, stats:pseudo |
++-------------------+----------+--------------+---------------+--------------------------------+
+
+
+> explain format='hint' select /*+ read_from_storage(tiflash[t]) */ * from t;
++-------------------------------------------------------------------------------------------------------------------+
+| hint                                                                                                              |
++-------------------------------------------------------------------------------------------------------------------+
+| use_index(@`sel_1` `test`.`t` ), read_from_storage(@`sel_1` tiflash[`test`.`t`]), read_from_storage(tiflash[`t`]) |
++-------------------------------------------------------------------------------------------------------------------+
+
+> /* use this output hint to construct another hint */
+
+> explain select /*+ use_index(@`sel_1` `test`.`t` ), read_from_storage(@`sel_1` tiflash[`test`.`t`]), read_from_storage(tiflash[`t`]) */ * from t;
+
++-------------------+----------+-----------+---------------+--------------------------------+
+| id                | estRows  | task      | access object | operator info                  |
++-------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_5     | 10000.00 | root      |               | data:TableFullScan_4           |
+| └─TableFullScan_4 | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo |
++-------------------+----------+-----------+---------------+--------------------------------+
+```
+
+And here is the warnings:
+```sql
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                                                                                                                                  |
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Warning | 1815 | No available path for table test.t with the store type tiflash of the hint /*+ read_from_storage */, please check the status of the table replica and variable value of tidb_isolation_read_engines(map[0:{} 1:{} 2:{}]) |
+| Warning | 1815 | There are no matching table names for (t) in optimizer hint /*+ READ_FROM_STORAGE(tiflash[t, t]) */. Maybe you can use the table alias name                                                                              |
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+```
+
+### 2. What did you expect to see? (Required)
+
+```sql
+> explain select /*+ use_index(@`sel_1` `test`.`t` ), read_from_storage(@`sel_1` tiflash[`test`.`t`]), read_from_storage(tiflash[`t`]) */ * from t;
++-------------------+----------+--------------+---------------+--------------------------------+
+| id                | estRows  | task         | access object | operator info                  |
++-------------------+----------+--------------+---------------+--------------------------------+
+| TableReader_5     | 10000.00 | root         |               | data:TableFullScan_4           |
+| └─TableFullScan_4 | 10000.00 | cop[tiflash] | table:t       | keep order:false, stats:pseudo |
++-------------------+----------+--------------+---------------+--------------------------------+
+```
+
+### 3. What did you see instead (Required)
+
+```sql
+> explain select /*+ use_index(@`sel_1` `test`.`t` ), read_from_storage(@`sel_1` tiflash[`test`.`t`]), read_from_storage(tiflash[`t`]) */ * from t;
+
++-------------------+----------+-----------+---------------+--------------------------------+
+| id                | estRows  | task      | access object | operator info                  |
++-------------------+----------+-----------+---------------+--------------------------------+
+| TableReader_5     | 10000.00 | root      |               | data:TableFullScan_4           |
+| └─TableFullScan_4 | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo |
++-------------------+----------+-----------+---------------+--------------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+`Master`
+
+## SIG slack channel
+
+[#sig-planner](https://slack.tidb.io/invite?team=tidb-community&channel=sig-planner&ref=high-performance)
+
+## Score
+
+- 300
+
+## Mentor
+
+* @lzmhhh123

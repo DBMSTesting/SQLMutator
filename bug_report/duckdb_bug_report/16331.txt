@@ -1,0 +1,175 @@
+ID: 16331
+Title: Bug: InternalException: INTERNAL Error: Could not find node in column segment tree!
+Description:
+### What happens?
+
+DuckDB Python.
+
+When issuing a bulk upsert (`INSERT INTO ... ON CONFLICT ... DO UPDATE SET`) which contains multiple rows which conflict (eg. same primary key), I get an error: `InternalException: INTERNAL Error: Could not find node in column segment tree!`
+
+This error does not occur, and the code works as expected, if I issue the same bulk upsert operation with no duplicates in the same statement (ie. the record with the duplicate primary key is commented out).
+
+The error also does not occur, and the code works as expected, if I move the duplicate into a separate bulk upsert statement (ie. issue 2x bulk upserts, where each bulk upsert contains no primary key duplicates).
+
+This issue seems similar to:
+- https://github.com/duckdb/duckdb/issues/3789
+- https://github.com/duckdb/duckdb/issues/11924
+
+However, these issues are both resolved via https://github.com/duckdb/duckdb/pull/12084 - but I am able to reproduce this issue on the latest stable build (1.2.0) and on the latest available nightly (1.2.1.dev345). See reproduction below.
+
+### To Reproduce
+
+This Python reproduction makes use of [SQLModel](https://sqlmodel.tiangolo.com/) - SQLModel depends on [SQLAlchemy](https://www.sqlalchemy.org/), and uses the [DuckDB Engine for SQLAlchemy](https://github.com/Mause/duckdb_engine).
+
+This example is a modified version of the [SQLModel tutorial](https://sqlmodel.tiangolo.com/tutorial/one/#read-the-first-row) where instead of using SQLite I use DuckDB, and instead of using one-at-a-time inserts I'm using a bulk-insert.
+
+However, I would assume you could also reproduce by running the raw SQL (see the output below the code).
+
+Versions:
+
+- python = "3.12.9"
+- duckdb = "1.2.0"
+- duckdb-engine = "0.15.0"
+- sqlmodel = "0.0.22"
+- pydantic = "2.10.6"
+
+I've also tested this with the nightly build `1.2.1.dev345` which exhibits the same behaviour.
+
+```
+from duckdb_engine import insert
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+
+
+class Hero(SQLModel, table=True):
+    name: str = Field(primary_key=True)
+    secret_name: str
+    age: int | None = Field(default=None, index=True)
+
+
+db_url = "duckdb:///:memory:"
+
+engine = create_engine(db_url, echo=True)
+
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+
+def create_heroes():
+    heroes = [
+        Hero(name="Captain North America", secret_name="Esteban Rogelios", age=93),
+        Hero(name="Rusty-Man", secret_name="Tommy Sharp", age=48),
+        Hero(name="Tarantula", secret_name="Natalia Roman-on", age=32),
+        Hero(name="Spider-Boy", secret_name="Pedro Parqueador", age=17),
+        Hero(name="Captain North America", secret_name="Samuel Milton", age=35),    # This row causes the issue, as it's a duplicate PK
+    ]
+
+    with Session(engine) as session:
+        stmt = insert(Hero).values([h.model_dump() for h in heroes])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[Hero.name],
+            set_={
+                col: stmt.excluded[col]
+                for col in Hero.model_fields.keys()
+                if col not in [Hero.name.name]
+            },
+        )
+        session.exec(stmt)
+        session.commit()
+
+
+def select_heroes():
+    with Session(engine) as session:
+        statement = select(Hero).where(Hero.age <= 35)
+        results = session.exec(statement)
+        for hero in results:
+            print(hero)
+
+
+def main():
+    create_db_and_tables()
+    create_heroes()
+    select_heroes()
+
+
+if __name__ == "__main__":
+    main()
+
+```
+
+Running this causes the following output (I've dropped lines deemed to be irrelevant):
+
+```
+INFO sqlalchemy.engine.Engine BEGIN (implicit)
+INFO sqlalchemy.engine.Engine 
+CREATE TABLE hero (
+        name VARCHAR NOT NULL, 
+        secret_name VARCHAR NOT NULL, 
+        age INTEGER, 
+        PRIMARY KEY (name)
+)
+
+INFO sqlalchemy.engine.Engine CREATE INDEX ix_hero_age ON hero (age)
+INFO sqlalchemy.engine.Engine COMMIT
+INFO sqlalchemy.engine.Engine BEGIN (implicit)
+
+INFO sqlalchemy.engine.Engine INSERT INTO hero (name, secret_name, age) VALUES ($1, $2, $3), ($4, $5, $6), ($7, $8, $9), ($10, $11, $12), ($13, $14, $15) ON CONFLICT (name) DO UPDATE SET secret_name = excluded.secret_name, age = excluded.age
+2025-02-20 14:30:50,247 INFO sqlalchemy.engine.Engine [dialect duckdb+duckdb_engine does not support caching 0.00012s] ('Captain North America', 'Esteban Rogelios', 93, 'Rusty-Man', 'Tommy Sharp', 48, 'Tarantula', 'Natalia Roman-on', 32, 'Spider-Boy', 'Pedro Parqueador', 17, 'Captain North America', 'Samuel Milton', 35)
+INFO sqlalchemy.engine.Engine ROLLBACK
+Traceback (most recent call last):
+  File "/.venv/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1964, in _exec_single_context
+    self.dialect.do_execute(
+  File "/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 942, in do_execute
+    cursor.execute(statement, parameters)
+  File "/.venv/lib/python3.12/site-packages/duckdb_engine/__init__.py", line 150, in execute
+    self.__c.execute(statement, parameters)
+duckdb.duckdb.InternalException: INTERNAL Error: Could not find node in column segment tree!
+```
+
+I would expect the SQL to execute, and set the value of the conflicting record (`name='Captain North America'`) to whichever record is executed last (presumably it'd be the order of the arguments given, meaning I'd _assume_ it would take the value `name='Captain North America', secret_name='Samuel Milton', age=35`)
+
+SQL generated:
+```
+INSERT INTO hero (name, secret_name, age) VALUES ($1, $2, $3), ($4, $5, $6), ($7, $8, $9), ($10, $11, $12), ($13, $14, $15) ON CONFLICT (name) DO UPDATE SET secret_name = excluded.secret_name, age = excluded.age
+('Captain North America', 'Esteban Rogelios', 93, 'Rusty-Man', 'Tommy Sharp', 48, 'Tarantula', 'Natalia Roman-on', 32, 'Spider-Boy', 'Pedro Parqueador', 17, 'Captain North America', 'Samuel Milton', 35)
+```
+
+### OS:
+
+Apple M1
+
+### DuckDB Version:
+
+1.2.0
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Andrew Sibley
+
+### Affiliation:
+
+Field
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

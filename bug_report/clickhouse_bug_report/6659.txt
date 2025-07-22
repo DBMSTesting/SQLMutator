@@ -1,0 +1,114 @@
+ID: 6659
+Title: Intermediate aggregation states are not supported for in the conditional filter within distributed queries
+Description:
+This happened due to tracking issue [6575](https://github.com/yandex/ClickHouse/issues/6575), where after a tiny [fix](https://github.com/yandex/ClickHouse/issues/6575#issuecomment-524638741) has been applied.
+
+Steps to reproduce:
+Suppose table `dist_trips2` has two shards with following schema:
+```
+DESCRIBE TABLE dist_trips2
+
+┌─name────────────┬─type─────┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┬─ttl_expression─┐
+│ id              │ UInt64   │              │                    │         │                  │                │
+│ cab_type_id     │ UInt32   │              │                    │         │                  │                │
+│ pickup_datetime │ DateTime │              │                    │         │                  │                │
+└─────────────────┴──────────┴──────────────┴────────────────────┴─────────┴──────────────────┴────────────────┘
+```
+Only 3 records exists in each shard of this distributed table:
+```
+SELECT *
+FROM dist_trips2
+
+┌─id─┬─cab_type_id─┬─────pickup_datetime─┐
+│  1 │           1 │ 2018-01-01 09:00:00 │
+│  2 │           1 │ 2018-01-02 09:00:00 │
+│  3 │           2 │ 2018-01-03 09:00:00 │
+└────┴─────────────┴─────────────────────┘
+┌─id─┬─cab_type_id─┬─────pickup_datetime─┐
+│  1 │           1 │ 2018-01-01 09:00:00 │
+│  2 │           1 │ 2018-01-02 09:00:00 │
+│  3 │           2 │ 2018-01-03 09:00:00 │
+└────┴─────────────┴─────────────────────┘
+
+6 rows in set. Elapsed: 0.016 sec.
+```
+
+After [fix](https://github.com/yandex/ClickHouse/issues/6575#issuecomment-524638741) has been applied, we could see the exception:
+
+```
+SELECT *
+FROM dist_trips2
+WHERE bitmapContains(
+(
+    SELECT groupBitmapState(id)
+    FROM trips2
+), toUInt32(id))
+
+┌─id─┬─cab_type_id─┬─────pickup_datetime─┐
+│  1 │           1 │ 2018-01-01 09:00:00 │
+│  2 │           1 │ 2018-01-02 09:00:00 │
+│  3 │           2 │ 2018-01-03 09:00:00 │
+└────┴─────────────┴─────────────────────┘
+← Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) Received exception from server (version 19.13.2):
+Code: 70. DB::Exception: Received from localhost:9000. DB::Exception: Received from 172.19.0.14:9000. DB::Exception: Conversion from String to AggregateFunction(groupBitmap, UInt64) is not supported.
+```
+
+Corresponding exception stacks:
+```
+2019.08.26 00:44:17.083722 [ 58 ] {087c40b6-1dd8-45b9-9e94-df6099b3544b} <Trace> Connection (172.19.0.14:9000): Connecting. Database: (not specified). User: default
+2019.08.26 00:44:17.090321 [ 58 ] {087c40b6-1dd8-45b9-9e94-df6099b3544b} <Trace> Connection (172.19.0.14:9000): Connected to ClickHouse server version 19.13.2.
+2019.08.26 00:44:17.283904 [ 47 ] {087c40b6-1dd8-45b9-9e94-df6099b3544b} <Error> executeQuery: Code: 70, e.displayText() = DB::Exception: Received from 172.19.0.14:9000. DB::Exception: Conversion from String to AggregateFunction(groupBitmap, UInt64) is not supported. Stack trace:
+
+0. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(StackTrace::StackTrace()+0x30) [0x7800150]
+1. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x25) [0x360c2a5]
+2. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::FunctionCast::prepareImpl(std::shared_ptr<DB::IDataType const> const&, std::shared_ptr<DB::IDataType const> const&, bool) const+0x51f) [0x39e68af]
+3. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::FunctionCast::prepareUnpackDictionaries(std::shared_ptr<DB::IDataType const> const&, std::shared_ptr<DB::IDataType const> const&) const+0x19a) [0x39e6d3a]
+4. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::FunctionCast::prepare(DB::Block const&, std::vector<unsigned long, std::allocator<unsigned long> > const&, unsigned long) const+0x36) [0x39e71b6]
+5. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ExpressionAction::prepare(DB::Block&, DB::Settings const&)+0x695) [0x6d2e9b5]
+6. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ExpressionActions::addImpl(DB::ExpressionAction, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >&)+0x85) [0x6d2f7d5]
+7. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ExpressionActions::add(DB::ExpressionAction const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > >&)+0x43) [0x6d2fc03]
+8. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ScopeStack::addAction(DB::ExpressionAction const&)+0xd2) [0x6e779b2]
+9. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ActionsVisitor::visit(std::shared_ptr<DB::IAST> const&)+0x190c) [0x6e7c47c]
+10. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ActionsVisitor::visit(std::shared_ptr<DB::IAST> const&)+0x11a4) [0x6e7bd14]
+11. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ActionsVisitor::visit(std::shared_ptr<DB::IAST> const&)+0xcc6) [0x6e7b836]
+12. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ExpressionAnalyzer::getRootActions(std::shared_ptr<DB::IAST> const&, bool, std::shared_ptr<DB::ExpressionActions>&, bool)+0xe9) [0x6d41ec9]
+13. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::ExpressionAnalyzer::getConstActions()+0xbf) [0x6d429af]
+14. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::KeyCondition::getBlockWithConstants(std::shared_ptr<DB::IAST> const&, std::shared_ptr<DB::SyntaxAnalyzerResult const> const&, DB::Context const&)+0x37a) [0x68d7a1a]
+15. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::MergeTreeWhereOptimizer::MergeTreeWhereOptimizer(DB::SelectQueryInfo&, DB::Context const&, DB::MergeTreeData const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, Poco::Logger*)+0x696) [0x6979d66]
+16. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(auto DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuery::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, bool)::{lambda(auto:1&)#1}::operator()<DB::MergeTreeData const>(DB::InterpreterSelectQuery::Pipeline&) const+0x743) [0x660fdd3]
+17. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(void DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuery::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, bool)+0x3b7) [0x6626cd7]
+18. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, std::shared_ptr<DB::IBlockInputStream> const&, std::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x10d1) [0x6601981]
+19. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x37) [0x66027a7]
+20. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x798) [0x662ef48]
+21. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::InterpreterFactory::get(std::shared_ptr<DB::IAST>&, DB::Context&, DB::QueryProcessingStage::Enum)+0x1b8) [0x65e1b48]
+22. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server() [0x673c936]
+23. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool)+0xfc) [0x673ccac]
+24. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::TCPHandler::runImpl()+0x9fa) [0x364da6a]
+25. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x364e32b]
+26. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(Poco::Net::TCPServerConnection::start()+0x10) [0x71d3fe0]
+27. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0xed) [0x71d46fd]
+28. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(Poco::PooledThread::run()+0x81) [0x78ff041]
+29. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x3c) [0x78fcdec]
+30. /bigdata/ClickHouse/build/dbms/programs/clickhouse-server() [0x7f0c800]
+31. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f1165b086db]
+ (version 19.13.2.19) (from [::1]:57568) (in query: SELECT * FROM dist_trips2 WHERE bitmapContains((SELECT groupBitmapState(id) FROM trips2), toUInt32(id))), Stack trace:
+
+0. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(StackTrace::StackTrace()+0x30) [0x7800150]
+1. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::readException(DB::Exception&, DB::ReadBuffer&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)+0xa8e) [0x362643e]
+2. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::Connection::receiveException()+0xf6) [0x69d9e66]
+3. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::Connection::receivePacket()+0x8c5) [0x69e2415]
+4. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::MultiplexedConnections::receivePacket()+0x7e) [0x69f2d8e]
+5. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::RemoteBlockInputStream::readImpl()+0x66) [0x64bb306]
+6. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x64a8b27]
+7. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2f) [0x6bce60f]
+8. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::IBlockInputStream::read()+0x187) [0x64a8b27]
+9. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::loop(unsigned long)+0x16c) [0x661517c]
+10. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::thread(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long)+0x245) [0x66158c5]
+11. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*, std::shared_ptr<DB::ThreadGroupStatus>, unsigned long&>(void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*&&)(std::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*&&, std::shared_ptr<DB::ThreadGroupStatus>&&, unsigned long&)::{lambda()#1}::operator()() const+0x7d) [0x661623d]
+12. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1a6) [0x363bb26]
+13. /bigdata/zhichyu/ClickHouse/build/dbms/programs/clickhouse-server() [0x7f0c800]
+14. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7fc8ba4156db]
+15. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7fc8b9da088f]
+```
+
+From the exception stack above could we see that the intermediate aggregation states are not supported for in the conditional filter for distributed queries right now. Since bitmap functions are the major family supporting using intermediate aggregation state as the parameter in the conditional filters(other functions such as Array, do not support this, while other functions as uniq/sum, have a much simpler form). 

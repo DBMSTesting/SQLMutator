@@ -1,0 +1,183 @@
+ID: 14728
+Title: INTERNAL error on attempting to access ENUM's value
+Description:
+### What happens?
+
+I have a table function that takes an enum type named parameter. I need to access the integer value of the enum that is received by the `bind` function. However, I get an INTERNAL error.
+
+```
+Query failed: INTERNAL Error: Calling GetValueInternal on a value that is NULL
+This error signals an assertion failure within DuckDB. This usually occurs due to unexpected conditions or errors in the program's logic.
+For more information, see https://duckdb.org/docs/dev/internal_errors
+```
+
+### To Reproduce
+
+```c
+#include <duckdb.h>
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+duckdb_logical_type myenum;
+
+static void tfn_bind(duckdb_bind_info info)
+{
+    duckdb_value fruit =
+        duckdb_bind_get_named_parameter(info, "fruit");
+    duckdb_logical_type fruit_ltype =
+        duckdb_get_value_type(fruit);
+    duckdb_type fruit_internal_type =
+        duckdb_enum_internal_type(fruit_ltype);
+
+    uint32_t v;
+    switch (fruit_internal_type)
+    {
+    case DUCKDB_TYPE_UTINYINT:
+        printf("HERE: 1\n");
+        v = (uint32_t)duckdb_get_uint8(fruit);
+        printf("HERE: 2\n");
+        break;
+
+    case DUCKDB_TYPE_USMALLINT:
+        v = (uint16_t)duckdb_get_uint16(fruit);
+
+    case DUCKDB_TYPE_UINTEGER:
+        v = (uint32_t)duckdb_get_uint32(fruit);
+
+    default:
+        assert(0);
+    }
+    duckdb_destroy_value(&fruit);
+
+    printf("Value = %u\n", v);
+
+    duckdb_logical_type t =
+        duckdb_create_logical_type(DUCKDB_TYPE_UINTEGER);
+    duckdb_bind_add_result_column(info, "data", t);
+    duckdb_destroy_logical_type(&t);
+}
+
+static void tfn_init(duckdb_init_info info)
+{
+}
+
+static void tfn_fn(duckdb_function_info info, duckdb_data_chunk output)
+{
+}
+
+int main()
+{
+    // Create Enum type
+    const char *mnames[2] = {"apple", "orange"};
+    myenum = duckdb_create_enum_type(mnames, 2);
+    duckdb_logical_type_set_alias(myenum, "fruit");
+    assert(myenum);
+
+    // Create in-mem database
+    duckdb_state s;
+    duckdb_database db;
+    s = duckdb_open(NULL, &db);
+    assert(s == DuckDBSuccess);
+
+    duckdb_connection conn;
+    s = duckdb_connect(db, &conn);
+    assert(s == DuckDBSuccess);
+
+    // Register enum type
+    duckdb_create_type_info info;
+    s = duckdb_register_logical_type(conn, myenum, info);
+    assert(s == DuckDBSuccess);
+
+    // Register table function
+    {
+        duckdb_table_function tfn = duckdb_create_table_function();
+        duckdb_table_function_set_name(tfn, "myfn");
+        duckdb_table_function_supports_projection_pushdown(tfn, false);
+
+        duckdb_table_function_set_function(tfn, tfn_fn);
+        duckdb_table_function_set_bind(tfn, tfn_bind);
+        duckdb_table_function_set_init(tfn, tfn_init);
+
+        duckdb_table_function_add_named_parameter(
+            tfn, "fruit", myenum);
+
+        if (duckdb_register_table_function(conn, tfn) != DuckDBSuccess)
+            printf("Failed to register table function\n");
+
+        duckdb_destroy_table_function(&tfn);
+    }
+
+    // Query
+    duckdb_result res;
+    s = duckdb_query(
+        conn,
+        "SELECT * FROM myfn(fruit='apple')",
+        &res);
+    const char *err = duckdb_result_error(&res);
+    if (s != DuckDBSuccess)
+    {
+        printf("Query failed: %s\n", err);
+        return 1;
+    }
+    duckdb_destroy_result(&res);
+
+    // Disconnect and close the database
+    duckdb_disconnect(&conn);
+    duckdb_close(&db);
+}
+```
+
+Compile
+```bash
+gcc -g -o /tmp/test_ddb_enum test_ddb_enum.c -lduckdb
+```
+
+Output
+```
+HERE: 1
+Query failed: INTERNAL Error: Calling GetValueInternal on a value that is NULL
+This error signals an assertion failure within DuckDB. This usually occurs due to unexpected conditions or errors in the program's logic.
+For more information, see https://duckdb.org/docs/dev/internal_errors
+```
+
+
+### OS:
+
+Ubuntu 24.04.1 LTS x86_64
+
+### DuckDB Version:
+
+v1.1.3
+
+### DuckDB Client:
+
+C
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Prashanth Ellina
+
+### Affiliation:
+
+None
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

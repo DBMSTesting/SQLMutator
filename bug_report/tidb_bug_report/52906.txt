@@ -1,0 +1,62 @@
+ID: 52906
+Title: `json_array_append` pushdown to tikv led tikv crash
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+drop table if exists t;
+create table t(a json, index idx((cast(json_array_append(a, '$.a', 1) as char(300)))));
+insert into t (a) values ('{\"a\": 1}');
+insert into t (a) values ('{\"b\": 1}');
+insert into t (a) values ('{\"a\": {\"b\": 1}}');
+insert into t (a) values ('{\"a\": {\"b\": [1,2,3]}}');
+insert into t (a) values ('[1,2,3]');
+insert into t (a) values ('[\"a\",\"b\"]');
+insert into t (a) values ('\"abc\"');
+insert into t (a) values ('123');
+insert into t (a) values ('true');
+insert into t (a) values ('false');
+insert into t (a) values (NULL);
+select * from t ignore index(idx) where cast(json_array_append(a, '$.a', 1) as char(300)) = '{"a": [1, 1]}';
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+[14:28:42]TiDB root:test> select * from t ignore index(idx) where cast(json_array_append(a, '$.a', 1) as char(300)) = '{"a": [1, 1]}';
++----------+
+| a        |
++----------+
+| {"a": 1} |
++----------+
+1 row in set
+```
+### 3. What did you see instead (Required)
+introduced by #50602 
+tikv crash
+```log
+[2024/04/26 14:23:23.682 +08:00] [INFO] [endpoint.rs:358] ["Resolver initialized"] [pending_data_index=0] [snapshot_index=85] [observe_id=ObserveId(117)] [region=14] [thread_id=67]
+[2024/04/26 14:23:23.682 +08:00] [INFO] [pd.rs:1705] ["succeed to update max timestamp"] [region_id=123] [thread_id=30]
+[2024/04/26 14:23:23.682 +08:00] [INFO] [endpoint.rs:701] ["register observe region"] [region="id: 123 start_key: 7480000000000000FF6600000000000000F8 end_key: 7480000000000000FF6800000000000000F8 region_epoch { conf_ver: 1 version: 57 } peers { id: 124 store_id: 1 }"] [thread_id=67]
+[2024/04/26 14:23:23.682 +08:00] [INFO] [scheduler.rs:769] ["get snapshot failed"] [err="Error(Request(message: \"EpochNotMatch current epoch of region 14 is conf_ver: 1 version: 57, but you sent conf_ver: 1 version: 56\" epoch_not_match { current_regions { id: 14 start_key: 7480000000000000FF6800000000000000F8 end_key: 748000FFFFFFFFFFFFF900000000000000F8 region_epoch { conf_ver: 1 version: 57 } peers { id: 15 store_id: 1 } } current_regions { id: 123 start_key: 7480000000000000FF6600000000000000F8 end_key: 7480000000000000FF6800000000000000F8 region_epoch { conf_ver: 1 version: 57 } peers { id: 124 store_id: 1 } } }))"] [cid=1431] [thread_id=44]
+[2024/04/26 14:23:23.682 +08:00] [INFO] [endpoint.rs:358] ["Resolver initialized"] [pending_data_index=0] [snapshot_index=6] [observe_id=ObserveId(118)] [region=123] [thread_id=67]
+[2024/04/26 14:23:23.697 +08:00] [FATAL] [lib.rs:477] ["called `Option::unwrap()` on a `None` value"] [backtrace="   0: backtrace::capture::Backtrace::new\n   1: tikv_util::set_panic_hook::{{closure}}\n   2: std::panicking::rust_panic_with_hook\n   3: std::panicking::begin_panic_handler::{{closure}}\n   4: std::sys_common::backtrace::__rust_end_short_backtrace\n   5: _rust_begin_unwind\n   6: core::panicking::panic_fmt\n   7: core::panicking::panic\n   8: tidb_query_expr::impl_json::json_array_append_fn_meta::run\n   9: tidb_query_expr::types::expr_eval::<impl tidb_query_expr::types::expr::RpnExpression>::eval_decoded\n  10: <tidb_query_executors::selection_executor::BatchSelectionExecutor<Src> as tidb_query_executors::interface::BatchExecutor>::next_batch::{{closure}}\n  11: <tidb_query_common::execute_stats::WithSummaryCollector<C,T> as tidb_query_executors::interface::BatchExecutor>::next_batch::{{closure}}\n  12: <alloc::boxed::Box<T> as tidb_query_executors::interface::BatchExecutor>::next_batch::{{closure}}\n  13: tidb_query_executors::runner::BatchExecutorsRunner<SS>::internal_handle_request::{{closure}}\n  14: <tikv::coprocessor::dag::BatchDagHandler as tikv::coprocessor::RequestHandler>::handle_request::{{closure}}\n  15: <tikv::coprocessor::interceptors::tracker::Tracker<F,E> as core::future::future::Future>::poll\n  16: <futures_util::future::future::Map<Fut,F> as core::future::future::Future>::poll\n  17: <resource_control::future::ControlledFuture<F> as core::future::future::Future>::poll\n  18: yatp::task::future::RawTask<F>::poll\n  19: <yatp::task::future::Runner as yatp::pool::runner::Runner>::handle\n  20: <yatp::queue::multilevel::TrackedRunner<R> as yatp::pool::runner::Runner>::handle\n  21: std::sys_common::backtrace::__rust_begin_short_backtrace\n  22: core::ops::function::FnOnce::call_once{{vtable.shim}}\n  23: std::sys::unix::thread::Thread::new::thread_start\n  24: __pthread_joiner_wake\n"] [location=components/tidb_query_expr/src/impl_json.rs:98] [thread_name=unified-read-pool-4] [thread_id=35]
+```
+### 4. What is your TiDB version? (Required)
+```sql
+[14:30:02]TiDB root:(none)> select * from information_schema.cluster_info;
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------+------------+-----------+
+| TYPE    | INSTANCE        | STATUS_ADDRESS  | VERSION                    | GIT_HASH                                 | START_TIME          | UPTIME     | SERVER_ID |
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------+------------+-----------+
+| tidb    | 127.0.0.1:4000  | 127.0.0.1:10080 | 8.2.0-alpha-46-g4cd8e94516 | 4cd8e94516e711d956f3c1e710bd9e01d27c130b | 2024-04-26 14:29:56 | 6.747455s  | 826       |
+| pd      | 127.0.0.1:2379  | 127.0.0.1:2379  | 8.2.0-alpha-10-g50c80407c  | 50c80407cd57e96a85452dd1601fcb41c1f263cf | 2024-04-26 14:29:47 | 15.747457s | 0         |
+| tikv    | 127.0.0.1:20160 | 127.0.0.1:20180 | 8.2.0-alpha                | 2118288ceb3f52a4a8431acba4fc2c560def0732 | 2024-04-26 14:29:50 | 12.747457s | 0         |
+| tiflash | 127.0.0.1:3930  | 127.0.0.1:20292 | 8.2.0-alpha-10-g89d1d7388  | 89d1d73883dfddda63e658bc115f8dfc8a19055f | 2024-04-26 14:29:58 | 4.747458s  | 0         |
++---------+-----------------+-----------------+----------------------------+------------------------------------------+---------------------+------------+-----------+
+4 rows in set
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

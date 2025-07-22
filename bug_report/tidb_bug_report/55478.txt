@@ -1,0 +1,130 @@
+ID: 55478
+Title: flaky deadlock with go1.23
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+run any test in the tidb with testkit
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+no deadlock report
+### 3. What did you see instead (Required)
+
+```
+POTENTIAL DEADLOCK: Inconsistent locking. saw this ordering in one goroutine:
+happened before
+../../session/txn.go:346 session.(*LazyTxn).changeToInvalid { txn.mu.Lock() } <<<<<
+../../session/txn.go:345 session.(*LazyTxn).changeToInvalid {  }
+../../session/session.go:497 session.(*session).doCommit.func1 { s.txn.changeToInvalid() }
+../../session/session.go:502 session.(*session).doCommit { if s.txn.IsReadOnly() { }
+../../session/session.go:790 session.(*session).doCommitWithRetry { err = s.doCommit(ctx) }
+../../session/session.go:919 session.(*session).CommitTxn { ctx = context.WithValue(ctx, tikvutil.CommitDetailCtxKey, &commitDetail) }
+../../session/tidb.go:287 session.autoCommitAfterStmt { if !sessVars.InTxn() { }
+../../session/tidb.go:249 session.finishStmt { } }
+../../session/session.go:2314 session.runStmt {  }
+../../session/session.go:2154 session.(*session).ExecuteStmt {  }
+../../session/session.go:1517 session.(*session).ExecuteInternal {  }
+../../session/bootstrap.go:3350 session.mustExecute { ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBootstrap) }
+../../session/bootstrap.go:3148 session.doDDLWorks { // Create stats_meta table. }
+../../session/bootstrap.go:742 session.bootstrap { doDDLWorks(s) }
+../../session/session.go:3688 session.runInBootstrapSession { bootstrap(s) }
+../../session/session.go:3438 session.bootstrapSessionImpl { if ver == notBootstrapped { }
+../../session/session.go:3388 session.BootstrapSession { func BootstrapSession(store kv.Storage) (*domain.Domain, error) { }
+../../testkit/mockstore.go:253 testkit.bootstrap { domain.DisableDumpHistoricalStats4Test() }
+../../testkit/mockstore.go:224 testkit.CreateMockStoreAndDomain { require.NoError(t, err) }
+../../testkit/mockstore.go:70 testkit.CreateMockStore { store, _ := CreateMockStoreAndDomain(t, opts...) }
+ranger_test.go:2204 ranger_test.TestPrefixIndexRange { store := testkit.CreateMockStore(t) }
+
+happened after
+../../session/txn.go:377 session.(*LazyTxn).onStmtEnd { txn.mu.Lock() } <<<<<
+../../session/txn.go:376 session.(*LazyTxn).onStmtEnd { func (txn *LazyTxn) onStmtEnd() { }
+../../session/session.go:2163 session.(*session).ExecuteStmt { } }
+../../session/session.go:1517 session.(*session).ExecuteInternal {  }
+../../ddl/session/session.go:84 session.(*Session).Execute { } }
+../../ddl/job_scheduler.go:373 ddl.(*jobScheduler).loadAndDeliverJobs { rows, err := se.Execute(context.Background(), sql, "load_ddl_jobs") }
+../../ddl/job_scheduler.go:316 ddl.(*jobScheduler).schedule { failpoint.InjectCall("beforeLoadAndDeliverJobs") }
+../../ddl/job_scheduler.go:251 ddl.(*jobScheduler).scheduleLoop { for { }
+../wait_group_wrapper.go:171 util.(*WaitGroupWrapper).RunWithLog.func1 { exec() }
+
+in another goroutine: happened before
+../../session/txn.go:314 session.(*LazyTxn).changePendingToValid { txn.mu.Lock() } <<<<<
+../../session/txn.go:313 session.(*LazyTxn).changePendingToValid { // The txnInfo may already recorded the first statement (usually "begin") when it's pending, so keep them. }
+../../session/txn.go:614 session.(*LazyTxn).Wait { // If Txn() is called later, wait for the future to get a valid txn. }
+../../sessiontxn/isolation/base.go:289 isolation.(*baseTxnContextProvider).ActivateTxn { txn, err := txnFuture.Wait(p.ctx, p.sctx) }
+../../sessiontxn/isolation/base.go:184 isolation.(*baseTxnContextProvider).GetStmtReadTS { func (p *baseTxnContextProvider) GetStmtReadTS() (uint64, error) { }
+../../sessiontxn/isolation/optimistic.go:99 isolation.(*OptimisticTxnContextProvider).GetStmtReadTS { } }
+../../session/txnmanager.go:97 session.(*txnManager).GetStmtReadTS { } }
+../../executor/builder.go:2066 executor.(*executorBuilder).getSnapshotTS { } }
+../../executor/builder.go:3476 executor.buildNoRangeTableReader { startTS, err := b.getSnapshotTS() }
+../../executor/builder.go:3623 executor.(*executorBuilder).buildTableReader { ret, err := buildNoRangeTableReader(b, v) }
+../../executor/builder.go:288 executor.(*executorBuilder).build { case *plannercore.PhysicalTableReader: }
+../../executor/builder.go:2014 executor.(*executorBuilder).buildProjection { func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) exec.Executor { }
+../../executor/builder.go:276 executor.(*executorBuilder).build { case *plannercore.PhysicalProjection: }
+../../executor/adapter.go:1212 executor.(*ExecStmt).buildExecutor { b := newExecutorBuilder(ctx, a.InfoSchema) }
+../../executor/adapter.go:555 executor.(*ExecStmt).Exec {  }
+../../session/session.go:2283 session.runStmt {  }
+../../session/session.go:2154 session.(*session).ExecuteStmt {  }
+../../session/session.go:1517 session.(*session).ExecuteInternal {  }
+../../ddl/session/session.go:84 session.(*Session).Execute { } }
+../../ddl/job_scheduler.go:373 ddl.(*jobScheduler).loadAndDeliverJobs { rows, err := se.Execute(context.Background(), sql, "load_ddl_jobs") }
+../../ddl/job_scheduler.go:316 ddl.(*jobScheduler).schedule { failpoint.InjectCall("beforeLoadAndDeliverJobs") }
+../../ddl/job_scheduler.go:251 ddl.(*jobScheduler).scheduleLoop { for { }
+../wait_group_wrapper.go:171 util.(*WaitGroupWrapper).RunWithLog.func1 { exec() }
+
+happened after
+../../session/txn.go:160 session.(*LazyTxn).cleanupStmtBuf { txn.mu.Lock() } <<<<<
+../../session/txn.go:159 session.(*LazyTxn).cleanupStmtBuf {  }
+../../session/txn.go:578 session.(*LazyTxn).cleanup { txn.cleanupStmtBuf() }
+../../session/txn.go:742 session.(*session).StmtCommit.func1 { s.txn.cleanup() }
+../../session/txn.go:758 session.(*session).StmtCommit { } }
+../../session/tidb.go:249 session.finishStmt { } }
+../../session/session.go:2314 session.runStmt {  }
+../../session/session.go:2154 session.(*session).ExecuteStmt {  }
+../../session/session.go:1517 session.(*session).ExecuteInternal {  }
+../../session/bootstrap.go:3350 session.mustExecute { ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBootstrap) }
+../../session/bootstrap.go:3159 session.doDDLWorks { // NOTE: Feedback is deprecated, but we still need to create this table for compatibility. }
+../../session/bootstrap.go:742 session.bootstrap { doDDLWorks(s) }
+../../session/session.go:3688 session.runInBootstrapSession { bootstrap(s) }
+../../session/session.go:3438 session.bootstrapSessionImpl { if ver == notBootstrapped { }
+../../session/session.go:3388 session.BootstrapSession { func BootstrapSession(store kv.Storage) (*domain.Domain, error) { }
+../../testkit/mockstore.go:253 testkit.bootstrap { domain.DisableDumpHistoricalStats4Test() }
+../../testkit/mockstore.go:224 testkit.CreateMockStoreAndDomain { require.NoError(t, err) }
+../../testkit/mockstore.go:70 testkit.CreateMockStore { store, _ := CreateMockStoreAndDomain(t, opts...) }
+ranger_test.go:2204 ranger_test.TestPrefixIndexRange { store := testkit.CreateMockStore(t) }
+
+Other goroutines holding locks:
+goroutine 2 lock 0xc0059982f8
+../../session/txn.go:314 session.(*LazyTxn).changePendingToValid { txn.mu.Lock() } <<<<<
+../../session/txn.go:313 session.(*LazyTxn).changePendingToValid { // The txnInfo may already recorded the first statement (usually "begin") when it's pending, so keep them. }
+../../session/txn.go:614 session.(*LazyTxn).Wait { // If Txn() is called later, wait for the future to get a valid txn. }
+../../sessiontxn/isolation/base.go:289 isolation.(*baseTxnContextProvider).ActivateTxn { txn, err := txnFuture.Wait(p.ctx, p.sctx) }
+../../sessiontxn/isolation/base.go:184 isolation.(*baseTxnContextProvider).GetStmtReadTS { func (p *baseTxnContextProvider) GetStmtReadTS() (uint64, error) { }
+../../sessiontxn/isolation/optimistic.go:99 isolation.(*OptimisticTxnContextProvider).GetStmtReadTS { } }
+../../session/txnmanager.go:97 session.(*txnManager).GetStmtReadTS { } }
+../../executor/builder.go:2066 executor.(*executorBuilder).getSnapshotTS { } }
+../../executor/builder.go:3476 executor.buildNoRangeTableReader { startTS, err := b.getSnapshotTS() }
+../../executor/builder.go:3623 executor.(*executorBuilder).buildTableReader { ret, err := buildNoRangeTableReader(b, v) }
+../../executor/builder.go:288 executor.(*executorBuilder).build { case *plannercore.PhysicalTableReader: }
+../../executor/builder.go:2014 executor.(*executorBuilder).buildProjection { func (b *executorBuilder) buildProjection(v *plannercore.PhysicalProjection) exec.Executor { }
+../../executor/builder.go:276 executor.(*executorBuilder).build { case *plannercore.PhysicalProjection: }
+../../executor/adapter.go:1212 executor.(*ExecStmt).buildExecutor { b := newExecutorBuilder(ctx, a.InfoSchema) }
+../../executor/adapter.go:555 executor.(*ExecStmt).Exec {  }
+../../session/session.go:2283 session.runStmt {  }
+../../session/session.go:2154 session.(*session).ExecuteStmt {  }
+../../session/session.go:1517 session.(*session).ExecuteInternal {  }
+../../ddl/session/session.go:84 session.(*Session).Execute { } }
+../../ddl/job_scheduler.go:373 ddl.(*jobScheduler).loadAndDeliverJobs { rows, err := se.Execute(context.Background(), sql, "load_ddl_jobs") }
+../../ddl/job_scheduler.go:316 ddl.(*jobScheduler).schedule { failpoint.InjectCall("beforeLoadAndDeliverJobs") }
+../../ddl/job_scheduler.go:251 ddl.(*jobScheduler).scheduleLoop { for { }
+../wait_group_wrapper.go:171 util.(*WaitGroupWrapper).RunWithLog.func1 { exec() }
+
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

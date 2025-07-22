@@ -1,0 +1,72 @@
+ID: 17930
+Title: tiflash epochNotMatch make tiflash as region leader forever
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+access tiflash and trigger EpochNotMatch error on it
+
+use leader read by Point-get to access that region
+
+### 2. What did you expect to see? (Required)
+
+point-get success
+
+### 3. What did you see instead (Required)
+
+query fail with time out
+
+```
+func (s *testRegionCacheSuite) TestRegionEpochOnTiFlash(c *C) {
+	// add store3 as tiflash
+	store3 := s.cluster.AllocID()
+	peer3 := s.cluster.AllocID()
+	s.cluster.AddStore(store3, s.storeAddr(store3))
+	s.cluster.UpdateStoreAddr(store3, s.storeAddr(store3), &metapb.StoreLabel{Key: "engine", Value: "tiflash"})
+	s.cluster.AddPeer(s.region1, store3, peer3)
+	s.cluster.ChangeLeader(s.region1, s.peer1)
+
+	// pre-load region cache
+	loc1, err := s.cache.LocateKey(s.bo, []byte("a"))
+	c.Assert(err, IsNil)
+	c.Assert(loc1.Region.id, Equals, s.region1)
+	lctx, err := s.cache.GetTiKVRPCContext(s.bo, loc1.Region, kv.ReplicaReadLeader, 0)
+	c.Assert(err, IsNil)
+	c.Assert(lctx.Peer.Id, Not(Equals), peer3)
+
+	// epoch-not-match on tiflash
+	ctxTiFlash, err := s.cache.GetTiFlashRPCContext(s.bo, loc1.Region)
+	c.Assert(err, IsNil)
+	r := ctxTiFlash.Meta
+	reqSend := NewRegionRequestSender(s.cache, nil)
+	regionErr := &errorpb.Error{EpochNotMatch: &errorpb.EpochNotMatch{CurrentRegions: []*metapb.Region{r}}}
+	reqSend.onRegionError(s.bo, ctxTiFlash, nil, regionErr)
+
+	// check leader read should not go to tiflash
+	lctx, err = s.cache.GetTiKVRPCContext(s.bo, loc1.Region, kv.ReplicaReadLeader, 0)
+	c.Assert(err, IsNil)
+	c.Assert(lctx.Peer.Id, Not(Equals), peer3)
+}
+```
+
+this test case always fail in current tidb.
+
+
+### 4. Affected version (Required)
+
+<!-- v3.0.0, v4.0.0, etc -->
+
+4.0
+
+### 5. Root Cause Analysis
+
+tidb refill region cache when meet epoch not match error.
+
+but it choose current store as leader, it's true for tikv but make region stuck when error comes from tiflash
+
+<!-- should be filled by the investigator before it's closed -->

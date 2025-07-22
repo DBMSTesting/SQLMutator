@@ -1,0 +1,257 @@
+ID: 24647
+Title: Protobuf exception "Multiple columns ... cannot be serialized to a single protobuf field" in 21.3
+Description:
+Got exceptions `DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2': ` for table with engine Kafka. 
+
+Why has been this error occurred and what does it mean? Why it tries to serialize columns to a single protobuf field and not vice versa?  And as you can observe later, we have no field `sub_2_rando`, we only have `sub_2_random_name`.
+
+This table works fine on clickhouse 20.11.4.13, latest clickhouse version without such exceptions in error log is 21.2.10.48. This situation reproduces on 21.3, 21.4 and 21.5. 
+
+`show create table` for involved tables:
+
+kafka
+```
+ CREATE TABLE random_db.kafka_table_0
+(
+    `a` String,
+    `b` Int64,
+    `c` Int32,
+    `d` Int32,
+    `e` String,
+    `f` String,
+    `g` String,
+    `h` String,
+    `i` Int32,
+    `j` Int32,
+    `k` Nullable(Int32),
+    `l` Nullable(Int32),
+    `m` String,
+    `sub_1_a` Nullable(Int32),
+    `sub_1_b` Nullable(Int32),
+    `sub_1_c` Nullable(String),
+    `sub_1_d` Nullable(String),
+    `sub_1_e` Nullable(String),
+    `sub_1_f` Nullable(String),
+    `sub_1_g` Nullable(String),
+    `sub_1_h` Nullable(String),
+    `sub_1_i` Nullable(String),
+    `sub_1_j` Nullable(String),
+    `sub_1_k` Nullable(String),
+    `sub_2_a` Nullable(Int32),
+    `sub_2_b` Nullable(String),
+    `sub_2_c` Nullable(Int32),
+    `sub_2_d` Nullable(Int32),
+    `sub_2_e` Nullable(Int32),
+    `sub_2_f` Nullable(Int32),
+    `sub_2_g` Nullable(String),
+    `sub_2_h` Nullable(String),
+    `sub_2_i` Nullable(String),
+    `sub_2_j` Nullable(String),
+    `sub_2_k` Nullable(Int64),
+    `sub_2_l` Nullable(Int64),
+    `n` Int32,
+    `sub_2_random_name` Nullable(String)
+)
+ENGINE = Kafka
+SETTINGS kafka_broker_list = 'kafka-broker-01:9092,kafka-broker-02:9092,kafka-broker-03:9092', 
+kafka_topic_list = 'first_topic,second_topic', kafka_group_name = 'clickhouse_0', 
+kafka_schema = 'smth.proto:Smth', 
+kafka_num_consumers = 16, 
+kafka_format = 'ProtobufSingle',
+kafka_thread_per_consumer = 0, 
+kafka_skip_broken_messages = 0 
+```
+
+view
+```
+CREATE MATERIALIZED VIEW some.some_last_replacing_mv_0 TO some.last_replacing_table
+(
+    `_topic` String,
+    `f` String,
+    `me` String,
+    `g` String,
+    `ka` Nullable(Int64),
+    `l` Nullable(Int64),
+    `i` String,
+    `j` String,
+    `sub_two_i` Nullable(String),
+    `sub_one_c` Nullable(String),
+    `last_timestamp` Int64,
+    `sub_one_a` Nullable(Int64),
+    `sub_one_b` Nullable(Int64),
+    `sub_two_a` Nullable(Int64),
+    `h` String,
+    `d` Int64,
+    `n` Int64,
+    `sub_2_random_name` Nullable(String)
+) AS
+SELECT
+    _topic,
+    f,
+    e AS me,
+    g,
+    l,
+    j,
+    k,
+    sub_2_i AS sub_two_i,
+    k AS ka,
+    sub_1_c AS sub_one_c,
+    b AS last_timestamp,
+    sub_1_a,
+    sub_1_b,
+    sub_2_a,
+    h,
+    d,
+    n,
+    sub_2_random_name
+FROM some.kafka_table_0
+WHERE isNotNull(l) AND ((f != '') OR (me != '') OR (g != '')) AND (last_timestamp > 0)
+```
+
+destination table
+
+```
+CREATE TABLE some.last_replacing_table
+(
+    `_topic` String,
+    `f` String,
+    `me` String,
+    `g` String,
+    `ka` Nullable(Int64),
+    `l` Nullable(Int64),
+    `i` String,
+    `j` String,
+    `sub_two_i` Nullable(String),
+    `sub_one_c` Nullable(String),
+    `last_timestamp` Int64,
+    `sub_1_a` Nullable(Int64),
+    `sub_1_b` Nullable(Int64),
+    `sub_2_a` Nullable(Int64),
+    `h` String,
+    `d` Int64,
+    `n` Int64,
+    `sub_2_random_name` Nullable(String)
+)
+ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/some/last_replacing_table', '{replica}', last_timestamp)
+PRIMARY KEY (f, me, g, _topic)
+ORDER BY (f, me, g, _topic)
+SETTINGS index_granularity = 8192
+```
+`.proto` file look like: 
+```
+syntax = "proto3";
+package some;
+
+option java_package = "qwerty.sink";
+option java_outer_classname = "SomeWrapper";
+
+message Some {
+  
+  enum n_enum {
+    A = 0; 
+    B = 1; 
+    C = 2; 
+  }
+  
+  enum d_enum {
+    D =  0; 
+    E =  1; 
+    F =  2; 
+    G =  3; 
+    H =  4; 
+    I =  9; 
+    K = 10; 
+  }
+  string a = 1;
+  int64 b = 2;
+  int32 c  = 3;
+  n_enum n = 4;
+  d_enum  d  = 5;
+  string e = 6;
+  string f = 7;
+  string g = 8;
+  string h = 9;
+  int32 i  = 10;
+  int32 j  = 11;
+  int32 k = 12;
+  int32 l = 13;
+  string m = 14;
+  
+  oneof sub {
+    SubOne sub_1 = 100;
+    SubTwo sub_2 = 101;
+  }
+}
+
+message SubOne {
+  int32 a = 1;
+  int32 b = 2;
+  string c = 3;
+  string d = 4;
+  string e = 5;
+  string f = 6;
+  string g = 7;
+  string h = 8;
+  string i   = 9; 
+  string j  = 10;
+  string k = 11;
+}
+
+message SubTwo {
+  reserved 2,12;
+
+  int32  a = 1;
+  string b = 3;
+  int32 c  = 4;
+  int32 d = 5;
+  int32 e = 6;
+  int32 f = 7;
+  bytes g = 8;
+  string h = 9; 
+  string i = 10;
+  string j = 11;
+  int64 k = 13;
+  int64 l = 14;
+  bytes random_name = 15;
+}
+```
+
+Log messages example:
+```
+2021.05.28 10:24:50.045643 [ 1269 ] {} <Error> virtual DB::UnionBlockInputStream::~UnionBlockInputStream(): Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2': 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)): 
+Code: 569, e.displayText() = DB::Exception: Multiple columns (`sub_2_rando`, `sub_2_random_name`) cannot be serialized to a single protobuf field 'smth.Smth.sub_2' (version 21.5.5.12 (official build)), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x879d83a in /usr/bin/clickhouse
+1. ? @ 0xfeb66ca in /usr/bin/clickhouse
+2. ? @ 0xfeaa5e6 in /usr/bin/clickhouse
+3. ? @ 0xfea93ba in /usr/bin/clickhouse
+4. DB::ProtobufRowInputFormat::ProtobufRowInputFormat(DB::ReadBuffer&, DB::Block const&, DB::RowInputFormatParams const&, DB::FormatSchemaInfo const&, bool) @ 0xfea85d8 in /usr/bin/clickhouse
+5. ? @ 0xfea9127 in /usr/bin/clickhouse
+6. DB::FormatFactory::getInputFormat(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ReadBuffer&, DB::Block const&, std::__1::shared_ptr<DB::Context const>, unsigned long, std::__1::optional<DB::FormatSettings> const&) const @ 0xfdb5283 in /usr/bin/clickhouse
+7. DB::KafkaBlockInputStream::readImpl() @ 0xf97e2da in /usr/bin/clickhouse
+8. DB::IBlockInputStream::read() @ 0xecc6c95 in /usr/bin/clickhouse
+9. DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::loop(unsigned long) @ 0xd59c8ab in /usr/bin/clickhouse
+10. DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::thread(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long) @ 0xd59b6eb in /usr/bin/clickhouse
+11. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*)(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*, std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long&>(void (DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>::*&&)(std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long), DB::ParallelInputsProcessor<DB::UnionBlockInputStream::Handler>*&&, std::__1::shared_ptr<DB::ThreadGroupStatus>&&, unsigned long&)::'lambda'()::operator()() @ 0xd59c326 in /usr/bin/clickhouse
+12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x87ddabf in /usr/bin/clickhouse
+13. ? @ 0x87e16c3 in /usr/bin/clickhouse
+14. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+15. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 21.5.5.12 (official build))
+
+```
+
+Additional kafka related config options:
+```
+    <kafka>
+        <partition_assignment_strategy>roundrobin</partition_assignment_strategy>
+        <auto_offset_reset>latest</auto_offset_reset>
+    </kafka>
+```

@@ -1,0 +1,146 @@
+ID: 14769
+Title: ClickHouse crashes when trying to update values in a relatively small table - DB::Exception: Too large size passed to allocator.
+Description:
+**Describe the bug**
+I have a table with three string columns and a million records. I am trying to update values in one column, but it fails.
+ClickHouse crashes and any further attempts to restart the database keep failing.
+I have provided the steps to reproduce and the error trace below.
+
+**How to reproduce**
+* Which ClickHouse server version to use
+ClickHouse server version 20.8.2 revision 54438
+
+* `CREATE TABLE` statements for all tables involved
+```sql
+CREATE TABLE demo (
+    col1 Nullable(String),
+    col2 String,
+    col3 String
+) ENGINE = MergeTree()
+PARTITION BY (col2)
+ORDER BY (col2)
+```
+
+* Sample data for all these tables.
+You could use this attached file - [data.json.gz](https://github.com/ClickHouse/ClickHouse/files/5212426/data.json.gz), or generate the data using this python code (requires pandas). It is in format JSONEachRow.
+```python
+import itertools
+import pandas as pd
+
+col1_values = [f"{ix+1:06d}" for ix in range(2000)]
+col2_values = ["col2_value1", "col2_value2", "col2_value3", "col2_value4", "col2_value5"]
+
+min_df = pd.DataFrame(itertools.product(col1_values, col2_values), columns=["col1", "col2"])
+min_df["col3"] = min_df["col2"].str.replace("col2", "col3")
+
+df = pd.concat([min_df] * 100, ignore_index=True)
+df.to_json("data.json.gz", orient="records", lines=True)
+```
+```
+gunzip -c /var/lib/clickhouse/user_files/data.json.gz | clickhouse-client --query="INSERT INTO demo FORMAT JSONEachRow"
+```
+
+* Queries to run that lead to unexpected result
+
+```sql
+ALTER TABLE demo UPDATE col1='new_value' WHERE col3='col3_value1'
+```
+
+**Expected behavior**
+The values to be updated without any errors or crashes.
+
+**Error message and/or stacktrace**
+```
+2020.09.12 08:14:12.979146 [ 51 ] {} <Error> void DB::BackgroundProcessingPool::workLoopFunc(): Code: 49, e.displayText() = DB::Exception: Too large size (18415937478669949940) passed to allocator. It indicates an error., Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1a80ae30 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xff9e75d in /usr/bin/clickhouse
+2. DB::Exception::Exception<char const (&) [64], unsigned long&>(int, char const (&) [64], unsigned long&) @ 0xffdb5ad in /usr/bin/clickhouse
+3. ? @ 0x17875856 in /usr/bin/clickhouse
+4. DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long) @ 0x178791ec in /usr/bin/clickhouse
+5. DB::FunctionIf::executeGeneric(DB::ColumnVector<char8_t> const*, DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) @ 0x13ac1577 in /usr/bin/clickhouse
+6. DB::FunctionIf::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13c7f741 in /usr/bin/clickhouse
+7. DB::FunctionIf::executeForNullableThenElse(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13ac2013 in /usr/bin/clickhouse
+8. DB::FunctionIf::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13c7f1c4 in /usr/bin/clickhouse
+9. DB::ExecutableFunctionAdaptor::execute(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long, bool) @ 0x11368905 in /usr/bin/clickhouse
+10. DB::ExpressionAction::execute(DB::Block&, bool) const @ 0x17461ed3 in /usr/bin/clickhouse
+11. DB::ExpressionActions::execute(DB::Block&, bool) const @ 0x1746309d in /usr/bin/clickhouse
+12. DB::ExpressionBlockInputStream::readImpl() @ 0x176cd3bf in /usr/bin/clickhouse
+13. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+14. DB::ExpressionBlockInputStream::readImpl() @ 0x176cd39f in /usr/bin/clickhouse
+15. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+16. DB::MaterializingBlockInputStream::readImpl() @ 0x1745801f in /usr/bin/clickhouse
+17. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+18. DB::MergeTreeDataMergerMutator::mutateSomePartColumns(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, std::__1::set<std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::less<std::__1::shared_ptr<DB::IMergeTreeIndex const> >, std::__1::allocator<std::__1::shared_ptr<DB::IMergeTreeIndex const> > > const&, DB::Block const&, std::__1::shared_ptr<DB::IMergeTreeDataPart>, std::__1::shared_ptr<DB::IBlockInputStream>, long, std::__1::shared_ptr<DB::ICompressionCodec> const&, DB::MergeListEntry&, bool) const @ 0x17c17aac in /usr/bin/clickhouse
+19. DB::MergeTreeDataMergerMutator::mutatePartToTemporaryPart(DB::FutureMergedMutatedPart const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::MutationCommands const&, DB::MergeListEntry&, long, DB::Context const&, std::__1::unique_ptr<DB::IReservation, std::__1::default_delete<DB::IReservation> > const&, std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>&) @ 0x17c196f0 in /usr/bin/clickhouse
+20. DB::StorageMergeTree::tryMutatePart() @ 0x179eb8ae in /usr/bin/clickhouse
+21. DB::StorageMergeTree::mergeMutateTask() @ 0x179ec78a in /usr/bin/clickhouse
+22. DB::BackgroundProcessingPool::workLoopFunc() @ 0x17b7efd3 in /usr/bin/clickhouse
+23. ? @ 0x17b7f902 in /usr/bin/clickhouse
+24. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xffce517 in /usr/bin/clickhouse
+25. ? @ 0xffccb53 in /usr/bin/clickhouse
+26. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+27. clone @ 0x122103 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 20.8.2.3 (official build))
+2020.09.12 08:14:23.196776 [ 115 ] {} <Fatal> BaseDaemon: ########################################
+2020.09.12 08:14:23.196824 [ 115 ] {} <Fatal> BaseDaemon: (version 20.8.2.3 (official build), build id: BD0C7BF89EB5671F) (from thread 54) (no query) Received signal Segmentation fault (11)
+2020.09.12 08:14:23.196854 [ 115 ] {} <Fatal> BaseDaemon: Address: 0x7ff179600000 Access: read. Address not mapped to object.
+2020.09.12 08:14:23.196884 [ 115 ] {} <Fatal> BaseDaemon: Stack trace: 0x178791a8 0x13ac1577 0x13c7f741 0x13ac2013 0x13c7f1c4 0x11368905 0x17461ed3 0x1746309d 0x176cd3bf 0x170282dd 0x176cd39f 0x170282dd 0x1745801f 0x170282dd 0x17c17aac 0x17c196f0 0x179eb8ae 0x179ec78a 0x17b7efd3 0x17b7f902 0xffce517 0xffccb53 0x7ff1a3700609 0x7ff1a3616103
+2020.09.12 08:14:23.196946 [ 115 ] {} <Fatal> BaseDaemon: 3. DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long) @ 0x178791a8 in /usr/bin/clickhouse
+2020.09.12 08:14:23.196987 [ 115 ] {} <Fatal> BaseDaemon: 4. DB::FunctionIf::executeGeneric(DB::ColumnVector<char8_t> const*, DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) @ 0x13ac1577 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197011 [ 115 ] {} <Fatal> BaseDaemon: 5. DB::FunctionIf::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13c7f741 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197037 [ 115 ] {} <Fatal> BaseDaemon: 6. DB::FunctionIf::executeForNullableThenElse(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13ac2013 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197058 [ 115 ] {} <Fatal> BaseDaemon: 7. DB::FunctionIf::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13c7f1c4 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197079 [ 115 ] {} <Fatal> BaseDaemon: 8. DB::ExecutableFunctionAdaptor::execute(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long, bool) @ 0x11368905 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197100 [ 115 ] {} <Fatal> BaseDaemon: 9. DB::ExpressionAction::execute(DB::Block&, bool) const @ 0x17461ed3 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197119 [ 115 ] {} <Fatal> BaseDaemon: 10. DB::ExpressionActions::execute(DB::Block&, bool) const @ 0x1746309d in /usr/bin/clickhouse
+2020.09.12 08:14:23.197137 [ 115 ] {} <Fatal> BaseDaemon: 11. DB::ExpressionBlockInputStream::readImpl() @ 0x176cd3bf in /usr/bin/clickhouse
+2020.09.12 08:14:23.197161 [ 115 ] {} <Fatal> BaseDaemon: 12. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+2020.09.12 08:14:23.197179 [ 115 ] {} <Fatal> BaseDaemon: 13. DB::ExpressionBlockInputStream::readImpl() @ 0x176cd39f in /usr/bin/clickhouse
+2020.09.12 08:14:23.197197 [ 115 ] {} <Fatal> BaseDaemon: 14. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+2020.09.12 08:14:23.197214 [ 115 ] {} <Fatal> BaseDaemon: 15. DB::MaterializingBlockInputStream::readImpl() @ 0x1745801f in /usr/bin/clickhouse
+2020.09.12 08:14:23.197237 [ 115 ] {} <Fatal> BaseDaemon: 16. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+2020.09.12 08:14:23.197272 [ 115 ] {} <Fatal> BaseDaemon: 17. DB::MergeTreeDataMergerMutator::mutateSomePartColumns(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, std::__1::set<std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::less<std::__1::shared_ptr<DB::IMergeTreeIndex const> >, std::__1::allocator<std::__1::shared_ptr<DB::IMergeTreeIndex const> > > const&, DB::Block const&, std::__1::shared_ptr<DB::IMergeTreeDataPart>, std::__1::shared_ptr<DB::IBlockInputStream>, long, std::__1::shared_ptr<DB::ICompressionCodec> const&, DB::MergeListEntry&, bool) const @ 0x17c17aac in /usr/bin/clickhouse
+2020.09.12 08:14:23.197309 [ 115 ] {} <Fatal> BaseDaemon: 18. DB::MergeTreeDataMergerMutator::mutatePartToTemporaryPart(DB::FutureMergedMutatedPart const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::MutationCommands const&, DB::MergeListEntry&, long, DB::Context const&, std::__1::unique_ptr<DB::IReservation, std::__1::default_delete<DB::IReservation> > const&, std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>&) @ 0x17c196f0 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197329 [ 115 ] {} <Fatal> BaseDaemon: 19. DB::StorageMergeTree::tryMutatePart() @ 0x179eb8ae in /usr/bin/clickhouse
+2020.09.12 08:14:23.197346 [ 115 ] {} <Fatal> BaseDaemon: 20. DB::StorageMergeTree::mergeMutateTask() @ 0x179ec78a in /usr/bin/clickhouse
+2020.09.12 08:14:23.197364 [ 115 ] {} <Fatal> BaseDaemon: 21. DB::BackgroundProcessingPool::workLoopFunc() @ 0x17b7efd3 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197385 [ 115 ] {} <Fatal> BaseDaemon: 22. ? @ 0x17b7f902 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197406 [ 115 ] {} <Fatal> BaseDaemon: 23. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xffce517 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197423 [ 115 ] {} <Fatal> BaseDaemon: 24. ? @ 0xffccb53 in /usr/bin/clickhouse
+2020.09.12 08:14:23.197444 [ 115 ] {} <Fatal> BaseDaemon: 25. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+2020.09.12 08:14:23.197466 [ 115 ] {} <Fatal> BaseDaemon: 26. clone @ 0x122103 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+2020.09.12 08:14:41.121749 [ 70 ] {} <Warning> default.demo: Removing temporary directory /var/lib/clickhouse/data/default/demo/tmp_mut_8d1e1593e9e7f36daf42e5245b0b8a8b_1_1_0_6/
+2020.09.12 08:14:41.123563 [ 1 ] {} <Warning> Application: Listen [::]:8123 failed: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = DNS error: EAI: Address family for hostname not supported (version 20.8.2.3 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2020.09.12 08:14:41.123798 [ 1 ] {} <Warning> Application: Listen [::]:9000 failed: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = DNS error: EAI: Address family for hostname not supported (version 20.8.2.3 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2020.09.12 08:14:41.124002 [ 1 ] {} <Warning> Application: Listen [::]:9009 failed: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = DNS error: EAI: Address family for hostname not supported (version 20.8.2.3 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2020.09.12 08:14:41.124214 [ 1 ] {} <Warning> Application: Listen [::]:9004 failed: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = DNS error: EAI: Address family for hostname not supported (version 20.8.2.3 (official build)). If it is an IPv6 or IPv4 address and your host has disabled IPv6 or IPv4, then consider to specify not disabled IPv4 or IPv6 address to listen in <listen_host> element of configuration file. Example for disabled IPv6: <listen_host>0.0.0.0</listen_host> . Example for disabled IPv4: <listen_host>::</listen_host>
+2020.09.12 08:14:41.160967 [ 91 ] {} <Fatal> BaseDaemon: ########################################
+2020.09.12 08:14:41.160998 [ 91 ] {} <Fatal> BaseDaemon: (version 20.8.2.3 (official build), build id: BD0C7BF89EB5671F) (from thread 59) (no query) Received signal Segmentation fault (11)
+2020.09.12 08:14:41.161019 [ 91 ] {} <Fatal> BaseDaemon: Address: 0x200000001 Access: read. Address not mapped to object.
+2020.09.12 08:14:41.161040 [ 91 ] {} <Fatal> BaseDaemon: Stack trace: 0x178791a8 0x13ac1577 0x13c7f741 0x13ac2013 0x13c7f1c4 0x11368905 0x17461ed3 0x1746309d 0x176cd3bf 0x170282dd 0x176cd39f 0x170282dd 0x1745801f 0x170282dd 0x17c17aac 0x17c196f0 0x179eb8ae 0x179ec78a 0x17b7efd3 0x17b7f902 0xffce517 0xffccb53 0x7fe1c68bc609 0x7fe1c67d2103
+2020.09.12 08:14:41.161091 [ 91 ] {} <Fatal> BaseDaemon: 3. DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long) @ 0x178791a8 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161117 [ 91 ] {} <Fatal> BaseDaemon: 4. DB::FunctionIf::executeGeneric(DB::ColumnVector<char8_t> const*, DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) @ 0x13ac1577 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161136 [ 91 ] {} <Fatal> BaseDaemon: 5. DB::FunctionIf::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13c7f741 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161156 [ 91 ] {} <Fatal> BaseDaemon: 6. DB::FunctionIf::executeForNullableThenElse(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13ac2013 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161170 [ 91 ] {} <Fatal> BaseDaemon: 7. DB::FunctionIf::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) const @ 0x13c7f1c4 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161188 [ 91 ] {} <Fatal> BaseDaemon: 8. DB::ExecutableFunctionAdaptor::execute(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long, bool) @ 0x11368905 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161203 [ 91 ] {} <Fatal> BaseDaemon: 9. DB::ExpressionAction::execute(DB::Block&, bool) const @ 0x17461ed3 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161216 [ 91 ] {} <Fatal> BaseDaemon: 10. DB::ExpressionActions::execute(DB::Block&, bool) const @ 0x1746309d in /usr/bin/clickhouse
+2020.09.12 08:14:41.161231 [ 91 ] {} <Fatal> BaseDaemon: 11. DB::ExpressionBlockInputStream::readImpl() @ 0x176cd3bf in /usr/bin/clickhouse
+2020.09.12 08:14:41.161246 [ 91 ] {} <Fatal> BaseDaemon: 12. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+2020.09.12 08:14:41.161258 [ 91 ] {} <Fatal> BaseDaemon: 13. DB::ExpressionBlockInputStream::readImpl() @ 0x176cd39f in /usr/bin/clickhouse
+2020.09.12 08:14:41.161270 [ 91 ] {} <Fatal> BaseDaemon: 14. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+2020.09.12 08:14:41.161283 [ 91 ] {} <Fatal> BaseDaemon: 15. DB::MaterializingBlockInputStream::readImpl() @ 0x1745801f in /usr/bin/clickhouse
+2020.09.12 08:14:41.161295 [ 91 ] {} <Fatal> BaseDaemon: 16. DB::IBlockInputStream::read() @ 0x170282dd in /usr/bin/clickhouse
+2020.09.12 08:14:41.161321 [ 91 ] {} <Fatal> BaseDaemon: 17. DB::MergeTreeDataMergerMutator::mutateSomePartColumns(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, std::__1::set<std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::less<std::__1::shared_ptr<DB::IMergeTreeIndex const> >, std::__1::allocator<std::__1::shared_ptr<DB::IMergeTreeIndex const> > > const&, DB::Block const&, std::__1::shared_ptr<DB::IMergeTreeDataPart>, std::__1::shared_ptr<DB::IBlockInputStream>, long, std::__1::shared_ptr<DB::ICompressionCodec> const&, DB::MergeListEntry&, bool) const @ 0x17c17aac in /usr/bin/clickhouse
+2020.09.12 08:14:41.161349 [ 91 ] {} <Fatal> BaseDaemon: 18. DB::MergeTreeDataMergerMutator::mutatePartToTemporaryPart(DB::FutureMergedMutatedPart const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::MutationCommands const&, DB::MergeListEntry&, long, DB::Context const&, std::__1::unique_ptr<DB::IReservation, std::__1::default_delete<DB::IReservation> > const&, std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>&) @ 0x17c196f0 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161363 [ 91 ] {} <Fatal> BaseDaemon: 19. DB::StorageMergeTree::tryMutatePart() @ 0x179eb8ae in /usr/bin/clickhouse
+2020.09.12 08:14:41.161375 [ 91 ] {} <Fatal> BaseDaemon: 20. DB::StorageMergeTree::mergeMutateTask() @ 0x179ec78a in /usr/bin/clickhouse
+2020.09.12 08:14:41.161390 [ 91 ] {} <Fatal> BaseDaemon: 21. DB::BackgroundProcessingPool::workLoopFunc() @ 0x17b7efd3 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161405 [ 91 ] {} <Fatal> BaseDaemon: 22. ? @ 0x17b7f902 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161420 [ 91 ] {} <Fatal> BaseDaemon: 23. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xffce517 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161432 [ 91 ] {} <Fatal> BaseDaemon: 24. ? @ 0xffccb53 in /usr/bin/clickhouse
+2020.09.12 08:14:41.161447 [ 91 ] {} <Fatal> BaseDaemon: 25. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+2020.09.12 08:14:41.161463 [ 91 ] {} <Fatal> BaseDaemon: 26. clone @ 0x122103 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```

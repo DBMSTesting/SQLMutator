@@ -1,0 +1,125 @@
+ID: 36146
+Title: Clickhouse crash/data inconsistency if column and nested table have same name
+Description:
+> You have to provide the following information whenever possible.
+
+**Describe what's wrong**
+If one create table containing column and nested table with *same* name unexpected thing will happened.
+
+**Does it reproduce on recent release?**
+Yes
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+starting from 21.9. Reproduces on 22.3.3.44
+* `CREATE TABLE` statements for all tables involved
+```sql 
+CREATE TABLE tst
+(   
+    `id` Int,
+    `col` Array(String),
+    `col.s` Array(LowCardinality(String)),
+    `col.u` Array(LowCardinality(String))
+)
+ENGINE = ReplacingMergeTree(id)
+PARTITION by tuple()
+ORDER BY id
+```
+
+
+* Queries to run that lead to unexpected result
+```sql
+-- populate data in compact format
+insert into tst (id, `col`, `col.s`, `col.u`) select number, ['a','b', 'c', 'd'],[],[] from system.numbers limit 1
+select * from tst limit 20
+-- so far all ok
+-- populate data in normal file format (> 10M) size
+insert into tst (id, `col`, `col.s`, `col.u`) select number, ['a','b', 'c', 'd'],[],[] from system.numbers limit 1000000
+select * from tst limit 20
+-- server will crash
+-- if not run
+OPTIMIZE TABLE tst
+
+```
+
+
+**Expected behavior**
+should not crash / should have consistent data
+
+
+**Error message and/or stacktrace**
+```bash
+SELECT *
+FROM tst
+LIMIT 20
+
+Query id: 5098c916-d295-4ac1-b275-c8088c2ba8bc
+
+┌─id─┬─col───────────────┬─col.s─┬─col.u─┐
+│  0 │ ['a','b','c','d'] │ []    │ []    │
+└────┴───────────────────┴───────┴───────┘
+[74acc568fb82] 2022.04.11 17:31:00.918886 [ 255 ] <Fatal> BaseDaemon: ########################################
+[74acc568fb82] 2022.04.11 17:31:00.918989 [ 255 ] <Fatal> BaseDaemon: (version 22.3.3.44 (official build), build id: F9D3C2B8666BEF5D) (from thread 251) (query_id: 5098c916-d295-4ac1-b275-c8088c2ba8bc) (query: select * from tst limit 20) Received signal Segmentation fault (11)
+[74acc568fb82] 2022.04.11 17:31:00.919052 [ 255 ] <Fatal> BaseDaemon: Address: 0x11 Access: read. Address not mapped to object.
+[74acc568fb82] 2022.04.11 17:31:00.919103 [ 255 ] <Fatal> BaseDaemon: Stack trace: 0x14c81fc2 0x7f6d89d163c0
+[74acc568fb82] 2022.04.11 17:31:00.919165 [ 255 ] <Fatal> BaseDaemon: 0. ? @ 0x14c81fc2 in /usr/bin/clickhouse
+[74acc568fb82] 2022.04.11 17:31:00.919234 [ 255 ] <Fatal> BaseDaemon: 1. ? @ 0x7f6d89d163c0 in ?
+[74acc568fb82] 2022.04.11 17:31:01.067559 [ 255 ] <Fatal> BaseDaemon: Calculated checksum of the binary: FD20C2FC24F8B8996C15BF97FA841B03. There is no information about the reference checksum.
+Exception on client:
+Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000. (ATTEMPT_TO_READ_AFTER_EOF)
+
+Connecting to localhost:9000 as user default.
+```
+
+**Additional context**
+
+This happened after upgrade from old version where those queries works fine. Behavior starts to reproduce from 21.9 (as far as I can debug it)
+
+other issue with same roots (data currupt/ reading outside of buffer?):
+```sql
+
+CREATE TABLE tst
+(
+    `id` Int,
+    `col` Array(String),
+    `col.s` Array(LowCardinality(String)),
+    `col.u` Array(LowCardinality(String))
+)
+ENGINE = ReplacingMergeTree(id)
+PARTITION BY tuple()
+ORDER BY id;
+
+insert into tst (id, `col`, `col.s`, `col.u`) select number, ['a','b', 'c', 'd'],[number],[number] from system.numbers limit 1
+
+insert into tst (id, `col`, `col.s`, `col.u`) select number, ['a','b', 'c', 'd'],[number],[number] from system.numbers limit 1000000
+select * from tst limit 3
+SELECT *
+FROM tst
+LIMIT 3
+
+Query id: 436ab97d-cdff-445a-9f91-2a76d09082b4
+
+┌─id─┬─col───────────────┬─col.s─┬─col.u─┐
+│  0 │ ['a','b','c','d'] │ ['0'] │ ['0'] │
+└────┴───────────────────┴───────┴───────┘
+┌─id─┬─col───────────────────────────────────────────────────────────────┬─col.s─────────────┬─col.u─────────────┐
+│  0 │ ['(\'0\',\'0\')','(\'1\',\'1\')','(\'2\',\'2\')','(\'3\',\'3\')'] │ ['0','1','2','3'] │ ['0','1','2','3'] │
+│  1 │ ['(\'4\',\'4\')','(\'5\',\'5\')','(\'6\',\'6\')','(\'7\',\'7\')'] │ ['4','5','6','7'] │ ['4','5','6','7'] │
+└────┴───────────────────────────────────────────────────────────────────┴───────────────────┴───────────────────┘
+
+3 rows in set. Elapsed: 0.006 sec. 
+
+optimize table tst
+
+OPTIMIZE TABLE tst
+
+Query id: 1ec099aa-9832-4836-b1b2-81cf15cd5702
+
+
+0 rows in set. Elapsed: 0.865 sec. 
+
+Received exception from server (version 22.3.3):
+Code: 33. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read all array values: read just 16960 of 32768: (while reading column col.s): (while reading from part /var/lib/clickhouse/store/0de/0de68989-9ddc-4c33-a925-65ca8f278f86/all_2_2_0/ from mark 15 with max_rows_to_read = 8192): While executing MergeTreeSequentialSource. (CANNOT_READ_ALL_DATA)
+
+```

@@ -1,0 +1,101 @@
+ID: 44822
+Title: Resolve lock may hang for a long time after clock skew
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```javascript
+test("ONCALL-6263", async () => {
+  const log = log4js.getLogger("ONCALL-6263");
+  const c = await mysql.createConnection(testkit.args.tidb || 'mysql://root@localhost:4000/test');
+  const tc = testkit.tidb.cluster(c);
+  try {
+    log.info("connect to", await tc.info());
+
+    log.info("enable pd failpoint");
+    await tc.failpoint('enable', 'pd', 'github.com/tikv/pd/pkg/tso/fallBackUpdate', 'return');
+
+    while (true) {
+      await c.query("begin");
+      const [[row]] = await c.query("select @@tidb_current_ts");
+      await c.query("rollback");
+      const ts = row['@@tidb_current_ts'];
+      const physical = BigInt(ts) >> 18n;
+      log.info("read tso", ts);
+      if (physical - BigInt(Date.now()) > 600000n) {
+        log.info("clock skew to", new Date(Number(physical)));
+        break;
+      }
+      await sync.sleep(1000);
+    }
+
+    log.info("init test data");
+    await c.query("drop table if exists t");
+    while (true) {
+      try {
+        await c.query("create table t (k int, c int)");
+        break;
+      } catch (e) {
+        assert.match(e.message, /Information schema is out of date/);
+        log.info("create table failed with information schema is out of date, retry...");
+        await sync.sleep(1000);
+      }
+    }
+    await c.query("insert into t values (1, 10), (2, 20)");
+    await c.query("split table t by (2)");
+    const mvccURL = `http://${(await tc.component('tidb')).STATUS_ADDRESS}/mvcc/key/test/t/2`;
+
+    await c.query("set @@tidb_general_log = 1");
+
+    log.info("enable tidb failpoints");
+    await tc.failpoint('enable', 'tidb', 'tikvclient/prewritePrimaryFail', 'return');
+    await tc.failpoint('enable', 'tidb', 'tikvclient/commitFailedSkipCleanup', 'return');
+
+    log.info("leave secondary locks");
+    await c.query("begin optimistic");
+    await c.query("update t set c = 11 where k = 1");
+    await c.query("update t set c = 22 where k = 2");
+    assert.rejects(c.query("commit"), /injected error/);
+    await sync.sleep(1000);
+    log.info("mvcc info", JSON.stringify((await axios.get(mvccURL)).data));
+
+    log.info("disable failpoints");
+    await tc.failpoint('disable', 'tidb', 'tikvclient/prewritePrimaryFail');
+    await tc.failpoint('disable', 'tidb', 'tikvclient/commitFailedSkipCleanup');
+    await tc.failpoint('disable', 'pd', 'github.com/tikv/pd/pkg/tso/fallBackUpdate');
+
+    log.info("resolve locks");
+    const { rejected, timedout } = await sync.wait(c.query("select * from t where k = 2"), 60000);
+    assert.ok(!timedout, "query should not be keep running for 60s");
+    assert.ok(rejected, "query should be rejected");
+    assert.match(rejected.message, /Resolve lock timeout/);
+    await c.query("set @@tidb_general_log = 0");
+
+  } finally {
+    log.info("teardown");
+    c.connection.stream.destroy();
+    await tc.failpoint('disable', 'tidb', 'tikvclient/prewritePrimaryFail');
+    await tc.failpoint('disable', 'tidb', 'tikvclient/commitFailedSkipCleanup');
+    await tc.failpoint('disable', 'pd', 'github.com/tikv/pd/pkg/tso/fallBackUpdate');
+  }
+});
+```
+
+### 2. What did you expect to see? (Required)
+
+The final query (`select * from t where k = 2`) should be timed out after 40s (the default timeout of the backoff).
+
+### 3. What did you see instead (Required)
+
+![2023-06-20_122725](https://github.com/pingcap/tidb/assets/6850317/44d94b50-43fb-4e59-aae5-aaedd48abac2)
+
+and tidb kept writing annoying `getTxnStatusFromLock backoff fail` logs after the backoff timed out. 
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master

@@ -1,0 +1,137 @@
+ID: 50519
+Title: autoid client reset connection operation is not concurrency-safe
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Original found in a customer's environment, the log message shows:
+
+> 2024-01-12 20:59:17 [2024/01/12 12:59:17.591 +00:00] [INFO] [autoid_service.go:173] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"]
+> 2024-01-12 20:59:17 [2024/01/12 12:59:17.618 +00:00] [INFO] [autoid_service.go:173] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"]
+> 2024-01-12 20:59:17 [2024/01/12 12:59:17.791 +00:00] [INFO] [autoid_service.go:173] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"]
+
+
+I can reproduce with the following test:
+
+```
+func TestXXX(t *testing.T) {
+	etcdLogCfg := zap.NewProductionConfig()
+	etcdLogCfg.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	etcdCli, err := clientv3.New(clientv3.Config{
+		LogConfig:        &etcdLogCfg,
+		Endpoints:        []string{"127.0.0.1:2379"},
+		AutoSyncInterval: 30 * time.Second,
+		DialTimeout:      5 * time.Second,
+		DialOptions: []grpc.DialOption{
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	var qps uint64
+	clidisc := autoid.NewClientDiscover(etcdCli)
+	for i:=0; i<7000; i++ {
+		go func() {
+			sp := autoid.NewSinglePointAlloc(&requirement{nil, clidisc}, 47, 32, false)
+			for {
+				_, _, err := sp.Alloc(context.Background(), 1, 1, 1)
+				if err != nil {
+					panic(err)
+				}
+				atomic.AddUint64(&qps, 1)
+			}
+		}()
+	}
+	for {
+		time.Sleep(time.Second)
+		fmt.Println("==== qps ====", atomic.LoadUint64(&qps))
+		atomic.StoreUint64(&qps, 0)
+	}
+}
+```
+
+With a modified tidb, mock error for 1/1000 percent of the requests:
+
+```
+git diff pkg/autoid_service/autoid.go
+
+@@ -409,6 +410,11 @@ func (s *Service) AllocAutoID(ctx context.Context, req *autoid.AutoIDRequest) (*
+                logutil.BgLogger().Info("Current service is not request keyspace leader.", zap.Uint32("req-keyspace-id", req.KeyspaceID), zap.Uint32("service-keyspace-id", serviceKeyspaceID))
+                return nil, errors.Trace(errors.New("not leader"))
+        }
++
++       if rand.Intn(1000) == 1 {
++               return nil, errors.New("mock error!!")
++       }
++
+```
+
+### 2. What did you expect to see? (Required)
+
+QPS is stable.
+
+### 3. What did you see instead (Required)
+
+A lot of error log:
+
+```
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error: code = Canceled desc = grpc: the client connection is closing"] [version=0]
+[2024/01/17 20:58:37.029 +08:00] [INFO] [autoid_service.go:202] ["reset grpc connection"] [category="autoid client"] [reason="rpc error:
+```
+
+QPS is unstable:
+
+```
+==== qps ==== 4557
+==== qps ==== 62
+==== qps ==== 1008
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 507
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 99
+==== qps ==== 1800
+==== qps ==== 3992
+==== qps ==== 6757
+==== qps ==== 9484
+==== qps ==== 9091
+==== qps ==== 10187
+==== qps ==== 81
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 0
+==== qps ==== 236
+==== qps ==== 112
+==== qps ==== 2441
+==== qps ==== 168
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master 245951f07d5767047b1b67cf2f9d1ef17003a84d

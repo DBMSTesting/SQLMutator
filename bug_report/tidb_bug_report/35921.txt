@@ -1,0 +1,89 @@
+ID: 35921
+Title: Redundant aggregation and exchange makes the query much slower
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+TPC-H lineitem table.
+``` SQL
+mysql> show create table lineitem;
++----------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table    | Create Table                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
++----------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| lineitem | CREATE TABLE `lineitem` (
+  `L_ORDERKEY` bigint(20) NOT NULL,
+  `L_PARTKEY` bigint(20) NOT NULL,
+  `L_SUPPKEY` bigint(20) NOT NULL,
+  `L_LINENUMBER` bigint(20) NOT NULL,
+  `L_QUANTITY` decimal(15,2) NOT NULL,
+  `L_EXTENDEDPRICE` decimal(15,2) NOT NULL,
+  `L_DISCOUNT` decimal(15,2) NOT NULL,
+  `L_TAX` decimal(15,2) NOT NULL,
+  `L_RETURNFLAG` char(1) NOT NULL,
+  `L_LINESTATUS` char(1) NOT NULL,
+  `L_SHIPDATE` date NOT NULL,
+  `L_COMMITDATE` date NOT NULL,
+  `L_RECEIPTDATE` date NOT NULL,
+  `L_SHIPINSTRUCT` char(25) NOT NULL,
+  `L_SHIPMODE` char(10) NOT NULL,
+  `L_COMMENT` varchar(44) NOT NULL,
+  PRIMARY KEY (`L_ORDERKEY`,`L_LINENUMBER`) /*T![clustered_index] NONCLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin |
++----------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> explain analyze select a.L_ORDERKEY, sum(a.L_PARTKEY) from lineitem a left join lineitem b on a.L_ORDERKEY = b.L_LINENUMBER group by a.L_ORDERKEY;
++----------------------------------------------------+--------------+-----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------+----------+------+
+| id                                                 | estRows      | actRows   | task         | access object | execution info                                                                                               | operator info                                                                                                                          | memory   | disk |
++----------------------------------------------------+--------------+-----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------+----------+------+
+| Projection_7                                       | 7623680.00   | 7500000   | root         |               | time:6.06s, loops:7427, Concurrency:5                                                                        | sf10.lineitem.l_orderkey, Column#35                                                                                                    | 485.4 KB | N/A  |
+| └─TableReader_48                                   | 7623680.00   | 7500000   | root         |               | time:6.01s, loops:7427, cop_task: {num: 261, max: 0s, min: 0s, avg: 0s, p95: 0s, copr_cache_hit_ratio: 0.00} | data:ExchangeSender_47                                                                                                                 | N/A      | N/A  |
+|   └─ExchangeSender_47                              | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:6s, min:5.72s, p80:6s, p95:6s, iters:768, tasks:3, threads:60}                        | ExchangeType: PassThrough                                                                                                              | N/A      | N/A  |
+|     └─Projection_43                                | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:5.86s, min:5.55s, p80:5.86s, p95:5.86s, iters:768, tasks:3, threads:60}               | Column#35, sf10.lineitem.l_orderkey                                                                                                    | N/A      | N/A  |
+|       └─HashAgg_44                                 | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:5.9s, min:5.58s, p80:5.9s, p95:5.9s, iters:768, tasks:3, threads:3}                   | group by:sf10.lineitem.l_orderkey, funcs:sum(Column#37)->Column#35, funcs:firstrow(sf10.lineitem.l_orderkey)->sf10.lineitem.l_orderkey | N/A      | N/A  |
+|         └─ExchangeReceiver_46                      | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:2.56s, min:2.53s, p80:2.56s, p95:2.56s, iters:258, tasks:3, threads:60}               |                                                                                                                                        | N/A      | N/A  |
+|           └─ExchangeSender_45                      | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:2.58s, min:0s, p80:2.58s, p95:2.58s, iters:768, tasks:3, threads:60}                  | ExchangeType: HashPartition, Hash Cols: [name: sf10.lineitem.l_orderkey, collate: binary]                                              | N/A      | N/A  |
+|             └─HashAgg_12                           | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:2.47s, min:0s, p80:2.47s, p95:2.47s, iters:768, tasks:3, threads:3}                   | group by:Column#42, funcs:sum(Column#41)->Column#37                                                                                    | N/A      | N/A  |
+|               └─Projection_52                      | 118051610.25 | 137138461 | mpp[tiflash] |               | tiflash_task:{proc max:653.5ms, min:0s, p80:653.5ms, p95:653.5ms, iters:2098, tasks:3, threads:60}           | cast(sf10.lineitem.l_partkey, decimal(20,0) BINARY)->Column#41, sf10.lineitem.l_orderkey                                               | N/A      | N/A  |
+|                 └─HashJoin_42                      | 118051610.25 | 137138461 | mpp[tiflash] |               | tiflash_task:{proc max:713.5ms, min:0s, p80:713.5ms, p95:713.5ms, iters:2098, tasks:3, threads:120}          | left outer join, equal:[eq(sf10.lineitem.l_orderkey, sf10.lineitem.l_linenumber)]                                                      | N/A      | N/A  |
+|                   ├─ExchangeReceiver_21(Build)     | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:84ms, min:0s, p80:84ms, p95:84ms, iters:1632, tasks:3, threads:60}                    |                                                                                                                                        | N/A      | N/A  |
+|                   │ └─ExchangeSender_20            | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:149ms, min:0s, p80:149ms, p95:149ms, iters:574, tasks:3, threads:60}                  | ExchangeType: HashPartition, Hash Cols: [name: sf10.lineitem.l_orderkey, collate: binary]                                              | N/A      | N/A  |
+|                   │   └─TableFullScan_19           | 29999795.00  | 29999795  | mpp[tiflash] | table:a       | tiflash_task:{proc max:70ms, min:0s, p80:70ms, p95:70ms, iters:574, tasks:3, threads:60}                     | keep order:false                                                                                                                       | N/A      | N/A  |
+|                   └─ExchangeReceiver_24(Probe)     | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:273ms, min:0s, p80:273ms, p95:273ms, iters:1618, tasks:3, threads:60}                 |                                                                                                                                        | N/A      | N/A  |
+|                     └─ExchangeSender_23            | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:379ms, min:0s, p80:379ms, p95:379ms, iters:568, tasks:3, threads:60}                  | ExchangeType: HashPartition, Hash Cols: [name: sf10.lineitem.l_linenumber, collate: binary]                                            | N/A      | N/A  |
+|                       └─TableFullScan_22           | 29999795.00  | 29999795  | mpp[tiflash] | table:b       | tiflash_task:{proc max:52ms, min:0s, p80:52ms, p95:52ms, iters:568, tasks:3, threads:60}                     | keep order:false                                                                                                                       | N/A      | N/A  |
++----------------------------------------------------+--------------+-----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------+----------+------+
+16 rows in set (8.07 sec)
+
+mysql> explain analyze select sum(a.L_PARTKEY) from lineitem a left join lineitem b on a.L_ORDERKEY = b.L_LINENUMBER group by a.L_ORDERKEY;
++--------------------------------------------+--------------+-----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------+--------+------+
+| id                                         | estRows      | actRows   | task         | access object | execution info                                                                                               | operator info                                                                               | memory | disk |
++--------------------------------------------+--------------+-----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------+--------+------+
+| TableReader_41                             | 7623680.00   | 7500000   | root         |               | time:3.03s, loops:7427, cop_task: {num: 261, max: 0s, min: 0s, avg: 0s, p95: 0s, copr_cache_hit_ratio: 0.00} | data:ExchangeSender_40                                                                      | N/A    | N/A  |
+| └─ExchangeSender_40                        | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:2.88s, min:2.42s, p80:2.88s, p95:2.88s, iters:768, tasks:3, threads:60}               | ExchangeType: PassThrough                                                                   | N/A    | N/A  |
+|   └─Projection_39                          | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:2.74s, min:2.31s, p80:2.74s, p95:2.74s, iters:768, tasks:3, threads:60}               | Column#35                                                                                   | N/A    | N/A  |
+|     └─HashAgg_11                           | 7623680.00   | 7500000   | mpp[tiflash] |               | tiflash_task:{proc max:2.85s, min:2.35s, p80:2.85s, p95:2.85s, iters:768, tasks:3, threads:3}                | group by:Column#40, funcs:sum(Column#39)->Column#35                                         | N/A    | N/A  |
+|       └─Projection_52                      | 118051610.25 | 137138461 | mpp[tiflash] |               | tiflash_task:{proc max:767.4ms, min:638.3ms, p80:767.4ms, p95:767.4ms, iters:2083, tasks:3, threads:60}      | cast(sf10.lineitem.l_partkey, decimal(20,0) BINARY)->Column#39, sf10.lineitem.l_orderkey    | N/A    | N/A  |
+|         └─HashJoin_37                      | 118051610.25 | 137138461 | mpp[tiflash] |               | tiflash_task:{proc max:823.4ms, min:644.4ms, p80:823.4ms, p95:823.4ms, iters:2083, tasks:3, threads:120}     | left outer join, equal:[eq(sf10.lineitem.l_orderkey, sf10.lineitem.l_linenumber)]           | N/A    | N/A  |
+|           ├─ExchangeReceiver_21(Build)     | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:73.3ms, min:62.4ms, p80:73.3ms, p95:73.3ms, iters:1639, tasks:3, threads:60}          |                                                                                             | N/A    | N/A  |
+|           │ └─ExchangeSender_20            | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:151.8ms, min:0s, p80:151.8ms, p95:151.8ms, iters:576, tasks:3, threads:60}            | ExchangeType: HashPartition, Hash Cols: [name: sf10.lineitem.l_orderkey, collate: binary]   | N/A    | N/A  |
+|           │   └─TableFullScan_19           | 29999795.00  | 29999795  | mpp[tiflash] | table:a       | tiflash_task:{proc max:59.8ms, min:0s, p80:59.8ms, p95:59.8ms, iters:576, tasks:3, threads:60}               | keep order:false                                                                            | N/A    | N/A  |
+|           └─ExchangeReceiver_24(Probe)     | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:215.4ms, min:67.4ms, p80:215.4ms, p95:215.4ms, iters:1603, tasks:3, threads:60}       |                                                                                             | N/A    | N/A  |
+|             └─ExchangeSender_23            | 29999795.00  | 29999795  | mpp[tiflash] |               | tiflash_task:{proc max:467.5ms, min:0s, p80:467.5ms, p95:467.5ms, iters:566, tasks:3, threads:60}            | ExchangeType: HashPartition, Hash Cols: [name: sf10.lineitem.l_linenumber, collate: binary] | N/A    | N/A  |
+|               └─TableFullScan_22           | 29999795.00  | 29999795  | mpp[tiflash] | table:b       | tiflash_task:{proc max:24.5ms, min:0s, p80:24.5ms, p95:24.5ms, iters:566, tasks:3, threads:60}               | keep order:false                                                                            | N/A    | N/A  |
++--------------------------------------------+--------------+-----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------+--------+------+
+12 rows in set (3.04 sec)
+```
+
+The difference between the two queries is the first query selects an extra `a.L_ORDERKEY`, an aggregate key. 
+The result is that a redundant aggregation and exchange are added in execution plan, which makes the first query two times slower than the second one(6s vs 3s in debug version).
+
+### 2. What did you expect to see? (Required)
+No redundant aggregation and exchange.
+
+### 3. What did you see instead (Required)
+Redundant aggregation and exchange.
+
+### 4. What is your TiDB version? (Required)
+v6.1.0
+

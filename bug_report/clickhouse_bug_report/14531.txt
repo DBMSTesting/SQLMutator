@@ -1,0 +1,83 @@
+ID: 14531
+Title: 'Missing columns' when column DEFAULT value refers to ALIAS columns
+Description:
+```sql
+CREATE TABLE test_new_col
+ (
+     `_csv` String,
+     `csv_as_array` Array(String) ALIAS splitByChar(';',_csv),
+     `csv_col1` String DEFAULT csv_as_array[1],
+     `csv_col2` String DEFAULT csv_as_array[2]
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+INSERT INTO test_new_col (_csv) values
+    ('a1;b1;c1;d1'), 
+    ('a2;b2;c2;d2'), 
+    ('a3;b3;c3;d3');
+
+SELECT csv_col1, csv_col2 FROM test_new_col;
+
+┌─csv_col1─┬─csv_col2─┐
+│ a1       │ b1       │
+│ a2       │ b2       │
+│ a3       │ b3       │
+└──────────┴──────────┘
+
+ALTER TABLE test_new_col ADD COLUMN `csv_col3` String DEFAULT csv_as_array[3];
+
+SELECT csv_col3 FROM test_new_col
+
+→ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) 
+Received exception from server (version 20.3.17):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: Missing columns: '_csv' while processing query: 'splitByChar(';', _csv) AS csv_as_array, CAST(csv_as_array[3], 'String') AS csv_col3', required columns: '_csv', source columns: 'csv_col1': (while reading from part /var/lib/clickhouse/data/default/test_new_col/all_1_1_0/): While executing MergeTreeThread. Stack trace:
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1059b460 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8f9972d in /usr/bin/clickhouse
+2. ? @ 0xd536aa8 in /usr/bin/clickhouse
+3. DB::SyntaxAnalyzer::analyze(std::__1::shared_ptr<DB::IAST>&, DB::NamesAndTypesList const&, std::__1::shared_ptr<DB::IStorage>) const @ 0xd5316c3 in /usr/bin/clickhouse
+4. ? @ 0xd5acb8b in /usr/bin/clickhouse
+5. DB::evaluateMissingDefaults(DB::Block&, DB::NamesAndTypesList const&, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, DB::ColumnDefault, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, DB::ColumnDefault> > > const&, DB::Context const&, bool) @ 0xd5ad69d in /usr/bin/clickhouse
+6. DB::IMergeTreeReader::evaluateMissingDefaults(DB::Block, std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >&) @ 0xda7e62e in /usr/bin/clickhouse
+7. DB::MergeTreeRangeReader::read(unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> >&) @ 0xdaaf969 in /usr/bin/clickhouse
+8. DB::MergeTreeBaseSelectProcessor::readFromPartImpl() @ 0xdaa6e8d in /usr/bin/clickhouse
+9. DB::MergeTreeBaseSelectProcessor::generate() @ 0xdaa79c7 in /usr/bin/clickhouse
+10. DB::ISource::work() @ 0xdbea94b in /usr/bin/clickhouse
+11. DB::SourceWithProgress::work() @ 0xdf43827 in /usr/bin/clickhouse
+12. ? @ 0xdc25a21 in /usr/bin/clickhouse
+13. DB::PipelineExecutor::executeSingleThread(unsigned long, unsigned long) @ 0xdc29bad in /usr/bin/clickhouse
+14. DB::PipelineExecutor::executeImpl(unsigned long) @ 0xdc2bc58 in /usr/bin/clickhouse
+15. DB::PipelineExecutor::execute(unsigned long) @ 0xdc2be25 in /usr/bin/clickhouse
+16. ? @ 0x9072357 in /usr/bin/clickhouse
+17. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x8fbde77 in /usr/bin/clickhouse
+18. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() const @ 0x8fbe4f8 in /usr/bin/clickhouse
+19. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8fbd387 in /usr/bin/clickhouse
+20. ? @ 0x8fbb7d3 in /usr/bin/clickhouse
+21. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+22. clone @ 0x121a3f in /lib/x86_64-linux-gnu/libc-2.27.so
+
+
+0 rows in set. Elapsed: 0.106 sec. 
+```
+
+But during merges, the default is calculated properly, and after the column is materialized it works properly:
+```sql
+OPTIMIZE TABLE test_new_col FINAL;
+SELECT csv_col3 FROM test_new_col
+
+┌─csv_col3─┐
+│ c1       │
+│ c2       │
+│ c3       │
+└──────────┘
+```
+
+
+But it doesn't work at all when one alias column refers to another:
+```sql
+ALTER TABLE test_new_col ADD COLUMN  `csv_col4` String ALIAS csv_as_array[4];
+SELECT csv_col4 FROM test_new_col;
+```
+
+/cc @alesapin 

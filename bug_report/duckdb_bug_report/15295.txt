@@ -1,0 +1,189 @@
+ID: 15295
+Title: CTE incorrect results
+Description:
+### What happens?
+
+A query with a CTE + nested subselects returns incorrect results. It's quite hard to repro, but I have a side by side difference.
+
+### To Reproduce
+
+Here is the closest I can show. If I run this query:
+
+```
+SELECT *,   FROM (
+WITH relevant_root_spans AS MATERIALIZED (
+  SELECT DISTINCT root_span_id FROM parquet_scan(['8c4b1377ab170708c5b04b14ff06603a2fdeb44e_buffer', 'c78476f37eb50b9278fcbf1b3a3e3a813cdc5bce_buffer', 'fd12688ca6b65b76497ecdcc8fbc550ebb73358e_buffer'])
+)
+
+SELECT * EXCLUDE ("_update_nonce")
+FROM (
+  SELECT DISTINCT ON (id)
+    * REPLACE (COALESCE("is_root", true) as "is_root"),
+    
+  FROM (
+      (
+        SELECT
+          "id",CAST("_xact_id" AS VARCHAR) AS "_xact_id","created","project_id","dataset_id","input","expected" AS "expected","metadata","tags",COALESCE("span_id", "id") AS "span_id",COALESCE("root_span_id", "id") AS "root_span_id","is_root","origin", NULL as _update_nonce
+        FROM parquet_scan(['8c4b1377ab170708c5b04b14ff06603a2fdeb44e_buffer', 'c78476f37eb50b9278fcbf1b3a3e3a813cdc5bce_buffer', 'fd12688ca6b65b76497ecdcc8fbc550ebb73358e_buffer'])
+        WHERE root_span_id = 'e4c6961b-6746-4180-9657-b93a01a2d18d'
+      )
+      
+          UNION ALL BY NAME
+          SELECT * FROM
+            (
+              SELECT * FROM "6788551061313c81e43dc7bf775a2f9af99370b4_log"
+              WHERE root_span_id IN (SELECT root_span_id FROM relevant_root_spans)
+            ) log
+          WHERE root_span_id = 'e4c6961b-6746-4180-9657-b93a01a2d18d'
+          
+  )
+  
+  -- This order by together with the DISTINCT ON above implements the equivalent of "row number" and picks
+  -- the first row for each id, much more efficiently than a window function.
+  ORDER BY id, _update_nonce DESC NULLS LAST, _xact_id DESC NULLS LAST
+  
+)
+   WHERE "_object_delete" IS NULL OR NOT "_object_delete"
+) t
+```
+
+I get two rows:
+
+```
+[
+    {
+        "id": "2b5834fa-afec-4226-9086-195220b33fe2",
+        "_xact_id": "1000194231093614116",
+        "created": 1733989315183,
+        "project_id": "97ab3349-5ccc-455e-9672-258d323f86f3",
+        "dataset_id": "899b1ada-ab0b-4d94-ba29-85df1e35c39a",
+        "input": "\"fooasdas\"",
+        "expected": "\"adsfas\"",
+        "metadata": null,
+        "tags": null,
+        "span_id": "e4c6961b-6746-4180-9657-b93a01a2d18d",
+        "root_span_id": "e4c6961b-6746-4180-9657-b93a01a2d18d",
+        "is_root": true,
+        "origin": null,
+        "_object_delete": null
+    },
+    {
+        "id": "e49936eb-eb37-4e1f-aedd-efa727bea938",
+        "_xact_id": "1000194231093417507",
+        "created": 1733989203119,
+        "project_id": "97ab3349-5ccc-455e-9672-258d323f86f3",
+        "dataset_id": "899b1ada-ab0b-4d94-ba29-85df1e35c39a",
+        "input": "\"foo\"",
+        "expected": "\"aasasdf\"",
+        "metadata": null,
+        "tags": null,
+        "span_id": "fd8fd227-e869-46b8-aafb-09657c9121dc",
+        "root_span_id": "fd8fd227-e869-46b8-aafb-09657c9121dc",
+        "is_root": true,
+        "origin": null,
+        "_object_delete": null
+    }
+]
+```
+
+but if i run a less restrictive query:
+
+```
+SELECT *,   FROM (
+WITH relevant_root_spans AS MATERIALIZED (
+  SELECT DISTINCT root_span_id FROM parquet_scan(['8c4b1377ab170708c5b04b14ff06603a2fdeb44e_buffer', 'c78476f37eb50b9278fcbf1b3a3e3a813cdc5bce_buffer', 'fd12688ca6b65b76497ecdcc8fbc550ebb73358e_buffer'])
+)
+
+SELECT * EXCLUDE ("_update_nonce")
+FROM (
+  SELECT DISTINCT ON (id)
+    * REPLACE (COALESCE("is_root", true) as "is_root"),
+    
+  FROM (
+      (
+        SELECT
+          "id",CAST("_xact_id" AS VARCHAR) AS "_xact_id","created","project_id","dataset_id","input","expected" AS "expected","metadata","tags",COALESCE("span_id", "id") AS "span_id",COALESCE("root_span_id", "id") AS "root_span_id","is_root","origin", NULL as _update_nonce
+        FROM parquet_scan(['8c4b1377ab170708c5b04b14ff06603a2fdeb44e_buffer', 'c78476f37eb50b9278fcbf1b3a3e3a813cdc5bce_buffer', 'fd12688ca6b65b76497ecdcc8fbc550ebb73358e_buffer'])
+        WHERE root_span_id = 'e4c6961b-6746-4180-9657-b93a01a2d18d'
+      )
+      
+          UNION ALL BY NAME
+          SELECT * FROM
+            (
+              SELECT * FROM "6788551061313c81e43dc7bf775a2f9af99370b4_log"
+            ) log
+          WHERE root_span_id = 'e4c6961b-6746-4180-9657-b93a01a2d18d'
+          
+  )
+  
+  -- This order by together with the DISTINCT ON above implements the equivalent of "row number" and picks
+  -- the first row for each id, much more efficiently than a window function.
+  ORDER BY id, _update_nonce DESC NULLS LAST, _xact_id DESC NULLS LAST
+  
+)
+   WHERE "_object_delete" IS NULL OR NOT "_object_delete"
+) t
+```
+
+i get one row:
+
+```
+[
+    {
+        "id": "2b5834fa-afec-4226-9086-195220b33fe2",
+        "_xact_id": "1000194231093614116",
+        "created": 1733989315183,
+        "project_id": "97ab3349-5ccc-455e-9672-258d323f86f3",
+        "dataset_id": "899b1ada-ab0b-4d94-ba29-85df1e35c39a",
+        "input": "\"fooasdas\"",
+        "expected": "\"adsfas\"",
+        "metadata": null,
+        "tags": null,
+        "span_id": "e4c6961b-6746-4180-9657-b93a01a2d18d",
+        "root_span_id": "e4c6961b-6746-4180-9657-b93a01a2d18d",
+        "is_root": true,
+        "origin": null,
+        "_object_delete": null
+    }
+]
+```
+
+### OS:
+
+wasm
+
+### DuckDB Version:
+
+wasm 1.29.0
+
+### DuckDB Client:
+
+wasm
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Ankur Goyal
+
+### Affiliation:
+
+ankur@braintrustdata.com
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

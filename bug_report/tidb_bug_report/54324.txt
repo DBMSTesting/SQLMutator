@@ -1,0 +1,92 @@
+ID: 54324
+Title: select from information_schema.CLUSTER_SLOW_QUERY panic
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+This is reported by one of our user:
+
+```
+mysql> select user,digest,count() as total_count,sum(Query_time) as total_time,sum(Query_time)/count() as avg_time,
+-> sum(process_keys) as Total_keys,
+-> sum(process_keys)/count as avg_keys,
+-> count(distinct plan_Digest),
+-> max(mem_max)
+-> from information_schema.cluster_SLOW_QUERY
+-> where time between '2024-06-24 10:20:00' and '2024-06-24 10:30:00'
+-> and is_internal=0
+-> and cop_proc_addr='30.xx.1.xxx:6525'
+-> group by user,digest order by Total_keys desc limit 10;
+ERROR 1105 (HY000): other error: panic when RPC server handing coprocessor, stack:runtime error: index out of range [8192] with length 8192
+```
+
+### 2. What did you expect to see? (Required)
+
+Query success
+
+### 3. What did you see instead (Required)
+
+Query failed
+
+The panic stack is this:
+
+```
+[2024/06/24 12:33:25.051 +08:00] [WARN] [coprocessor.go:1192] ["other error"] [conn=2960135990624852647] [txnStartTS=450678909839605766] [regionID=0] [bucketsVer=0] [latestBucketsVer=0] [rangeNums=1] [firstRangeStartKey="t\ufffd\u0000\u0000\u0000\u0000\u0000\u0000/_r\u0004\u0019\ufffd\ufffd%\u0000\u0000\u0000\u0000"] [lastRangeEndKey="t\ufffd\u0000\u0000\u0000\u0000\u0000\u0000/_r\u0004\u0019\ufffd\ufffd'\ufffd\u0000\u0000\u0001"] [storeAddr=30.88.5.223:12071] [error="other error: panic when RPC server handing coprocessor, stack:runtime error: index out of range [8192] with length 8192"]
+[2024/06/24 12:33:25.052 +08:00] [INFO] [conn.go:1181] ["command dispatched failed"] [conn=2960135990624852647] [connInfo="id:2960135990624852647, addr:30.18.25.23:40558 status:10, collation:utf8mb4_general_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql="select user,digest,count(*) as total_count,sum(Query_time) as total_time,sum(Query_time)/count(*) as avg_time,\nsum(process_keys) as Total_keys,\nsum(process_keys)/count(*) as avg_keys,\ncount(distinct plan_Digest),\nmax(mem_max)\nfrom information_schema.cluster_SLOW_QUERY\nwhere time between '2024-06-24 10:20:00' and '2024-06-24 10:30:00'\nand is_internal=0\ngroup by user,digest order by Total_keys desc limit 10"] [txn_mode=PESSIMISTIC] [timestamp=450678909839605766] [err="other error: panic when RPC server handing coprocessor, stack:runtime error: index out of range [8192] with length 8192\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopResponse\n\t/src/store/copr/coprocessor.go:1187\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTaskOnce\n\t/src/store/copr/coprocessor.go:1070\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask\n\t/src/store/copr/coprocessor.go:943\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).run\n\t/src/store/copr/coprocessor.go:653\nruntime.goexit\n\t/go/src/runtime/asm_amd64.s:1594"]
+```
+
+The real panic stack is this one:
+
+```
+[rpc_server.go:96] ["panic when RPC server handing coprocessor"] [r={}] ["stack trace"="github.com/pingcap/tidb/server.(*rpcServer).Coprocessor.func1
+	/src/server/rpc_server.go:97
+runtime.gopanic
+	/go/src/runtime/panic.go:884
+runtime.goPanicIndex
+	/go/src/runtime/panic.go:113
+github.com/pingcap/tidb/executor.readLastLines
+	/src/executor/slow_query.go:1122
+github.com/pingcap/tidb/executor.(*slowQueryRetriever).getFileEndTime
+	/src/executor/slow_query.go:1056
+github.com/pingcap/tidb/executor.(*slowQueryRetriever).getAllFiles.func3
+	/src/executor/slow_query.go:931
+github.com/pingcap/tidb/executor.(*slowQueryRetriever).getAllFiles
+	/src/executor/slow_query.go:959
+github.com/pingcap/tidb/executor.(*slowQueryRetriever).initialize
+	/src/executor/slow_query.go:137
+github.com/pingcap/tidb/executor.(*slowQueryRetriever).retrieve
+	/src/executor/slow_query.go:81
+github.com/pingcap/tidb/executor.(*MemTableReaderExec).Next
+	/src/executor/memtable_reader.go:118
+github.com/pingcap/tidb/executor.Next
+	/src/executor/executor.go:330
+github.com/pingcap/tidb/executor.(*SelectionExec).Next
+	/src/executor/executor.go:1598
+github.com/pingcap/tidb/executor.Next
+	/src/executor/executor.go:330
+github.com/pingcap/tidb/executor.(*CoprocessorDAGHandler).HandleRequest
+	/src/executor/coprocessor.go:68
+github.com/pingcap/tidb/server.(*rpcServer).handleCopRequest
+	/src/server/rpc_server.go:212
+github.com/pingcap/tidb/server.(*rpcServer).Coprocessor
+	/src/server/rpc_server.go:101
+github.com/pingcap/kvproto/pkg/tikvpb._Tikv_Coprocessor_Handler
+	/mod_cache/github.com/pingcap/kvproto@v0.0.0-20230524051921-3dc79e773139/pkg/tikvpb/tikvpb.pb.go:3104
+google.golang.org/grpc.(*Server).processUnaryRPC
+	/mod_cache/google.golang.org/grpc@v1.45.0/server.go:1282
+google.golang.org/grpc.(*Server).handleStream
+	/mod_cache/google.golang.org/grpc@v1.45.0/server.go:1619
+google.golang.org/grpc.(*Server).serveStreams.func1.2
+	/mod_cache/google.golang.org/grpc@v1.45.0/server.go:921"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v6.5.3

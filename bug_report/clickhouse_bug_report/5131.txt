@@ -1,0 +1,41 @@
+ID: 5131
+Title: Query with Date type against table partitioned by DateTime doesn't work
+Description:
+**Describe the bug**
+We are using the https://github.com/kshvakov/clickhouse library which automatically converts golang's `time.Time` format to either `toDate(...)` or `toDateTime(...)` expressions: https://github.com/kshvakov/clickhouse/blob/master/helpers.go#L108
+
+If we are querying a table that's partitioned by a DateTime column and the go library ends up sending a `toDate(...)` expression then ClickHouse tries to filter to the wrong partitions.
+
+**How to reproduce**
+* ClickHouse version 19.5.3.8
+* TCP interface
+* Tried with `optimize_move_to_prewhere=0` and `optimize_move_to_prewhere=1`
+```
+CREATE TABLE IF NOT EXISTS test_datetime (time DateTime) ENGINE=MergeTree PARTITION BY time ORDER BY time
+
+INSERT INTO test_datetime (time) VALUES (toDate(18012))
+
+SELECT * FROM test_datetime WHERE time=toDate(18012)
+```
+
+**Expected behavior**
+I expect the SELECT to return the single row.
+
+**Additional context**
+Here are the logs from the query:
+```
+2019.04.27 20:41:57.321591 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> executeQuery: (from 127.0.0.1:57186) SELECT * FROM test_datetime WHERE time=toDate(18012);
+2019.04.27 20:41:57.322246 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> visitor_api.test_datetime (SelectExecutor): Key condition: (column 0 in [18012, 18012])
+2019.04.27 20:41:57.322280 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> visitor_api.test_datetime (SelectExecutor): MinMax index condition: (column 0 in [18012, 18012])
+2019.04.27 20:41:57.322298 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> visitor_api.test_datetime (SelectExecutor): Selected 0 parts by date, 0 parts by key, 0 marks to read from 0 ranges
+2019.04.27 20:41:57.322325 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.27 20:41:57.322403 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> executeQuery: Query pipeline:
+Expression
+ Expression
+  Filter
+   Null
+
+2019.04.27 20:41:57.322874 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> MemoryTracker: Peak memory usage (for query): 1.00 MiB.
+2019.04.27 20:41:57.322956 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Debug> MemoryTracker: Peak memory usage (total): 1.00 MiB.
+2019.04.27 20:41:57.322997 [ 27 ] {90604b0a-7fd5-4497-a314-9f8a725edb3a} <Information> TCPHandler: Processed in 0.002 sec.
+```

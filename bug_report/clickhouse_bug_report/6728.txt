@@ -1,0 +1,99 @@
+ID: 6728
+Title: Mutations stuck for tables with indices
+Description:
+**Describe the bug**
+`ALTER TABLE UPDATE` queries hung when applied to tables with skip indices. Master version.
+
+**How to reproduce**
+```
+:) set allow_experimental_data_skipping_indices=1
+:) CREATE TABLE test.minmax_idx (     u64 UInt64,     i64 Int64,     i32 Int32,     INDEX idx (i64, u64 * i64) TYPE minmax GRANULARITY 1 ) ENGINE = MergeTree() ORDER BY u64 SETTINGS index_granularity = 2
+:) INSERT INTO test.minmax_idx VALUES (0, 1, 1), (1, 1, 2), (2, 1, 3), (3, 1, 4), (4, 1, 5), (5, 1, 6), (6, 1, 7), (7, 1, 8), (8, 1, 9), (9, 1, 10)
+
+:) ALTER TABLE test.minmax_idx UPDATE i64 = 1 WHERE i64 = 5 -- no such rows
+
+:) ALTER TABLE test.minmax_idx UPDATE i64 = 5 WHERE i64 = 1 -- all rows
+
+:) SELECT * FROM test.minmax_idx
+┌─u64─┬─i64─┬─i32─┐
+│   0 │   1 │   1 │
+│   1 │   1 │   2 │
+│   2 │   1 │   3 │
+│   3 │   1 │   4 │
+│   4 │   1 │   5 │
+│   5 │   1 │   6 │
+│   6 │   1 │   7 │
+│   7 │   1 │   8 │
+│   8 │   1 │   9 │
+│   9 │   1 │  10 
+└─────┴─────┴─────┘
+
+:) select * from system.mutations\G
+
+SELECT *
+FROM system.mutations
+
+Row 1:
+──────
+database:                   test
+table:                      minmax_idx
+mutation_id:                mutation_2.txt
+command:                    UPDATE i64 = 1 WHERE i64 = 5
+create_time:                2019-08-29 17:27:15
+block_numbers.partition_id: ['']
+block_numbers.number:       [2]
+parts_to_do:                0
+is_done:                    1
+latest_failed_part:         
+latest_fail_time:           0000-00-00 00:00:00
+latest_fail_reason:         
+
+Row 2:
+──────
+database:                   test
+table:                      minmax_idx
+mutation_id:                mutation_3.txt
+command:                    UPDATE i64 = 5 WHERE i64 = 1
+create_time:                2019-08-29 17:27:38
+block_numbers.partition_id: ['']
+block_numbers.number:       [3]
+parts_to_do:                1
+is_done:                    0
+latest_failed_part:         all_1_1_0_2
+latest_fail_time:           2019-08-29 17:28:27
+latest_fail_reason:         Code: 76, e.displayText() = DB::ErrnoException: Cannot open file /home/alesap/clickdb/data/test/minmax_idx/tmp_mut_all_1_1_0_3/skp_idx_idx.mrk2, errno: 13, strerror: Permission denied (version 19.13.2.19)
+
+2 rows in set. Elapsed: 0.002 sec. 
+```
+Server log:
+```
+2019.08.29 17:28:27.867234 [ 56 ] {} <Trace> test.minmax_idx (MergerMutator): Mutating part all_1_1_0_2 to mutation version 3                                                                                                                   
+2019.08.29 17:28:27.867688 [ 56 ] {} <Debug> test.minmax_idx (SelectExecutor): Key condition: unknown                                                                                                                                           
+2019.08.29 17:28:27.867713 [ 56 ] {} <Debug> test.minmax_idx (SelectExecutor): Selected 1 parts by date, 1 parts by key, 5 marks to read from 1 ranges                                                                                          
+2019.08.29 17:28:27.867727 [ 56 ] {} <Trace> MergeTreeSelectBlockInputStream: Reading 1 ranges from part all_1_1_0_2, approx. 10 rows starting from 0                                                                                           
+2019.08.29 17:28:27.867743 [ 56 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete                                                                                                                                                   
+2019.08.29 17:28:27.868440 [ 56 ] {} <Error> void DB::BackgroundProcessingPool::threadFunction(): Code: 76, e.displayText() = DB::ErrnoException: Cannot open file /home/alesap/clickdb/data/test/minmax_idx/tmp_mut_all_1_1_0_3/skp_idx_idx.mrk2, errno: 13, strerror: Permission denied, Stack trace:                                                                                                                                                                                         
+                                                                                                                                                                                                                                                0. 0x67f9c77 StackTrace::StackTrace() /home/alesap/code/cpp/ClickHouse/dbms/src/Common/StackTrace.cpp:227                                                                                                                                       
+1. 0x6815f48 DB::ErrnoException::ErrnoException(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int, int, std::optional<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > 
+> const&) /home/alesap/code/cpp/ClickHouse/dbms/src/Common/Exception.h:56                                                                                                                                                                       
+2. 0x6812981 DB::throwFromErrnoWithPath(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int, int) /home/alesap/c
+ode/cpp/ClickHouse/dbms/src/Common/Exception.cpp:0                                                                                                                                                                                              
+3. 0x68953bc DB::WriteBufferFromFile::WriteBufferFromFile(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, unsigned long, int, unsigned int, char*, unsigned long) /home/alesap/code/cpp/ClickHouse/dbms/
+src/IO/WriteBufferFromFile.cpp:0                                                                                                                                                                                                                
+4. 0xa563454 DB::IMergedBlockOutputStream::ColumnStream::ColumnStream(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > co
+nst&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, s
+td::allocator<char> > const&, std::shared_ptr<DB::ICompressionCodec> const&, unsigned long, unsigned long, unsigned long) /usr/bin/../lib/gcc/x86_64-linux-gnu/9/../../../../include/c++/9/bits/basic_string.h:187                              
+5. 0xa561f34 DB::IMergedBlockOutputStream::initSkipIndices() /usr/bin/../lib/gcc/x86_64-linux-gnu/9/../../../../include/c++/9/bits/unique_ptr.h:853                                                                                             
+6. 0xa567260 DB::MergedColumnOnlyOutputStream::write(DB::Block const&) /home/alesap/code/cpp/ClickHouse/dbms/src/Storages/MergeTree/MergedColumnOnlyOutputStream.cpp:49                                                                         
+7. 0xa4a2c70 DB::MergeTreeDataMergerMutator::mutatePartToTemporaryPart(DB::FutureMergedMutatedPart const&, std::vector<DB::MutationCommand, std::allocator<DB::MutationCommand> > const&, DB::MergeListEntry&, DB::Context const&, DB::TableStru
+ctureReadLockHolder&) /home/alesap/code/cpp/ClickHouse/dbms/src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp:1102
+8. 0xa326bc1 DB::StorageMergeTree::tryMutatePart() /usr/bin/../lib/gcc/x86_64-linux-gnu/9/../../../../include/c++/9/bits/shared_ptr_base.h:1177
+9. 0xa3286a6 DB::StorageMergeTree::backgroundTask() /home/alesap/code/cpp/ClickHouse/dbms/src/Storages/StorageMergeTree.cpp:0
+10. 0xa41bb3f DB::BackgroundProcessingPool::threadFunction() /home/alesap/code/cpp/ClickHouse/dbms/src/Storages/MergeTree/BackgroundProcessingPool.cpp:0
+11. 0xa41c6a4 std::_Function_handler<void (), ThreadFromGlobalPool::ThreadFromGlobalPool<DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::$_0>(DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::$_0&&)::{lambda()#1}>::_
+M_invoke(std::_Any_data const&) /home/alesap/code/cpp/ClickHouse/dbms/src/Storages/MergeTree/BackgroundProcessingPool.cpp:0
+12. 0x680de81 ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/bin/../lib/gcc/x86_64-linux-gnu/9/../../../../include/c++/9/bits/atomic_base.h:551
+13. 0xb6c6300 execute_native_thread_routine /home/alesap/code/cpp/BuildCH/dbms/programs/clickhouse
+14. 0x7fc452dc26db start_thread /lib/x86_64-linux-gnu/libpthread-2.27.so
+15. 0x7fc4526df88f clone /build/glibc-OTsEL5/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97
+```

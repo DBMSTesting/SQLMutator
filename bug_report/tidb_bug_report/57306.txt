@@ -1,0 +1,77 @@
+ID: 57306
+Title: TestColumnTable and TestIndexUsageTable are not resilient to information schema changes
+Description:
+## Bug Report
+
+These test cases assert that the number of rows in the `information_schema.columns` and `information_schema.tidb_index_usage` tables match certain hardcoded values. The number of rows reflect *all* columns and indexes in the database, not just those added by the test cases. Whenever any (unrelated) new column, table, or index is added to the information schema, these hardcoded values no longer match, causing the tests to fail spuriously.
+
+### 1. Minimal reproduce step (Required)
+
+Add a column to `information_schema.statements_summary` and run these test cases:
+```
+(cat << EOF
+diff --git a/pkg/infoschema/tables.go b/pkg/infoschema/tables.go
+index 12f295231d..5105aa27aa 100644
+--- a/pkg/infoschema/tables.go
++++ b/pkg/infoschema/tables.go
+@@ -1403,6 +1403,7 @@ var tableStatementsSummaryCols = []columnInfo{
+ 	{name: stmtsummary.ResourceGroupName, tp: mysql.TypeVarchar, size: 64, comment: "Bind resource group name"},
+ 	{name: stmtsummary.PlanCacheUnqualifiedStr, tp: mysql.TypeLonglong, size: 20, flag: mysql.NotNullFlag, comment: "The number of times that these statements are not supported by the plan cache"},
+ 	{name: stmtsummary.PlanCacheUnqualifiedLastReasonStr, tp: mysql.TypeBlob, size: types.UnspecifiedLength, comment: "The last reason why the statement is not supported by the plan cache"},
++	{name: "new_column", tp: mysql.TypeTiny, size: 1},
+ }
+
+ var tableStorageStatsCols = []columnInfo{
+EOF
+) | git apply -
+
+go test --tags=intest -run '^TestColumnTable|TestIndexUsageTable$' ./pkg/executor
+````
+
+### 2. What did you expect to see? (Required)
+
+```
+ok      github.com/pingcap/tidb/pkg/executor    1.852s
+```
+
+### 3. What did you see instead (Required)
+
+```
+--- FAIL: TestColumnTable (0.36s)
+    testkit.go:123: RefreshSession rand seed: 1731375243512205000
+    result.go:49:
+                Error Trace:    /Users/henry.babaweiss@pingcap.com/src/projects/tidb/pkg/testkit/result.go:49
+                                                        /Users/henry.babaweiss@pingcap.com/src/projects/tidb/pkg/executor/infoschema_reader_test.go:609
+                Error:          Not equal:
+                                expected: "[4983]\n"
+                                actual  : "[4987]\n"
+
+                                Diff:
+                                --- Expected
+                                +++ Actual
+                                @@ -1,2 +1,2 @@
+                                -[4983]
+                                +[4987]
+
+                Test:           TestColumnTable
+                Messages:       sql:select count(*) from information_schema.columns;, args:[]
+```
+### 4. What is your TiDB version? (Required)
+
+```
+mysql> select tidb_version();
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v8.5.0-alpha-91-g169210aaaa-dirty
+Edition: Community
+Git Commit Hash: 169210aaaaba599d555c689786305c4a297edd7c
+Git Branch: master
+UTC Build Time: 2024-11-12 01:46:59
+GoVersion: go1.23.2
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+

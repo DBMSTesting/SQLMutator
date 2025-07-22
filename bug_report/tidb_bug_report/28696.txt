@@ -1,0 +1,71 @@
+ID: 28696
+Title: set prepared-plan-cache.enabled=on, prefix index use prepare/execute stmt return wrong result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+[prepared-plan-cache]
+enabled：true
+capacity：100
+memory-guard-ratio：0.1
+
+/* s1 */ drop table if exists t1;
+/* s1 */ create table t1(a int primary key, b varchar(255), c int);
+/* s1 */ create unique index b on t1(b(3));
+/* s1 */ insert into t1 values(1,"abcdfsafd",1),(2,"addfdsafd",2),(3,"ddcdsaf",3),(4,"bbcsa",4);
+/* s1 */ prepare stmt from "select * from t1 where b = ?";
+/* s1 */ set @a="bbcsa";
+/* s1 */ execute stmt using @a;  ---check
+/* s1 */ select * from t1 where b = "bbcsa";
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++---+-------+------+
+| a | b     | c    |
++---+-------+------+
+| 4 | bbcsa |    4 |
++---+-------+------+
+1 row in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> /* s1 */ set @a="bbcsa";
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> /* s1 */ execute stmt using @a;
+Empty set (0.01 sec)
+
+mysql> explain for connection 46557;
++----------------------------+---------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------+--------+------+
+| id                         | estRows | actRows | task      | access object        | execution info                                                                                                                                                                                                                                                                                                                                               | operator info                                       | memory | disk |
++----------------------------+---------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------+--------+------+
+| IndexLookUp_9              | 1.00    | 0       | root      |                      | time:1.33ms, loops:1,                                                                                                                                                                                                                                                                                                                                        |                                                     | N/A    | N/A  |
+| ├─Selection_7(Build)       | 0.00    | 0       | cop[tikv] |                      | time:1.18ms, loops:1, cop_task: {num: 1, max: 990.9µs, proc_keys: 1, tot_proc: 1ms, rpc_num: 1, rpc_time: 956µs, copr_cache_hit_ratio: 0.00}, tikv_task:{time:1ms, loops:1}, scan_detail: {total_process_keys: 1, total_keys: 1, rocksdb: {delete_skipped_count: 0, key_skipped_count: 0, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}   | eq(test.t1.b, "bbcsa")                              | N/A    | N/A  |
+| │ └─IndexRangeScan_5       | 1.00    | 1       | cop[tikv] | table:t1, index:b(b) | tikv_task:{time:1ms, loops:1}                                                                                                                                                                                                                                                                                                                                | range:["bbc","bbc"], keep order:false, stats:pseudo | N/A    | N/A  |
+| └─Selection_8(Probe)       | 1.00    | 0       | cop[tikv] |                      |                                                                                                                                                                                                                                                                                                                                                              | eq(test.t1.b, "bbcsa")                              | N/A    | N/A  |
+|   └─TableRowIDScan_6       | 0.00    | 0       | cop[tikv] | table:t1             |                                                                                                                                                                                                                                                                                                                                                              | keep order:false, stats:pseudo                      | N/A    | N/A  |
++----------------------------+---------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------+--------+------+
+5 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.2.0-nightly
+Edition: Community
+Git Commit Hash: e3c7aab0015e206f8df8a632bf0b3e500ef7b7fa
+Git Branch: heads/refs/tags/v5.2.0-nightly
+UTC Build Time: 2021-10-08 05:40:47
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

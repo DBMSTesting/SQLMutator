@@ -1,0 +1,33 @@
+ID: 59494
+Title: PessimisticLock may not be able to resolve async commit locks
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Assume that there is an async commit txn T1 wants write K1(primary), K2, K3. K1 is on region R1, K2 and K3 are located on same region R2. There might be a chance that T1 fails unexpectedly and has been rollbacked but the lock on K3 is left. Now let another txn T2 start to acquire pessimitic lock on K3, then it can fall into the following logic:
+1. T2 sends PessimisticLock(K3) to R2 and the response says K3 is locked by T1, then tries to [resolve the lock](https://github.com/tikv/client-go/blob/7b4535c363177ba7c91364a99db0360eae5169b0/txnkv/transaction/pessimistic.go#L377).
+2. T2 checks the status of T1, finds that it has been committed or rollbacked (status.ttl = 0), then tries [`resolveAsyncCommitLock`](https://github.com/tikv/client-go/blob/7b4535c363177ba7c91364a99db0360eae5169b0/txnkv/txnlock/lock_resolver.go#L985).
+3. T2 sends CheckSecondaryLocks(K2,K3) to R2, and the response says only K3 is locked.
+4. K3 won't be added to `resolveData.keys` because [`len(locks)=1 < expected=2`](https://github.com/tikv/client-go/blob/7b4535c363177ba7c91364a99db0360eae5169b0/txnkv/txnlock/lock_resolver.go#L874), finally `resolveData.keys` only contains [K1(primary)](https://github.com/tikv/client-go/blob/7b4535c363177ba7c91364a99db0360eae5169b0/txnkv/txnlock/lock_resolver.go#L992).
+5. T2 sends ResolveLock(K1) to R1 and finds that it has been rollbacked, finally reaches [here](https://github.com/tikv/client-go/blob/7b4535c363177ba7c91364a99db0360eae5169b0/txnkv/transaction/pessimistic.go#L400), which causes the process goes back to step 1 repeatedly.
+
+
+### 2. What did you expect to see? (Required)
+
+All locks can be resolved in time.
+
+### 3. What did you see instead (Required)
+
+Some locks remained and PessimisticLock kept retrying.
+
+![Image](https://github.com/user-attachments/assets/e5e2fda7-9db2-4265-b543-a9fe2aec15a3)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+7b4535c363177ba7c91364a99db0360eae5169b0

@@ -1,0 +1,52 @@
+ID: 38205
+Title: IndexJoin validation check for Plan Cache is too strict
+Description:
+## Enhancement
+In the case below, the hint `TIDB_INLJ` can work for general statements but is inapplicable for prepared statements.
+```
+MySQL> CREATE TABLE `item` (
+  `id` int,
+  `vid` varbinary(16),
+  `sid` int
+);
+
+MySQL> CREATE TABLE `lv` (
+  `item_id` int,
+  `sid` int,
+KEY (`sid`,`item_id`)
+);
+
+MySQL> explain SELECT /*+ TIDB_INLJ(lv, item) */ *
+  FROM lv LEFT JOIN item ON lv.sid = item.sid AND lv.item_id = item.id
+  WHERE item.sid = 1 AND item.vid IN ("1", "3");
++------------------------------+----------+-----------+-----------------------------------+----------------------------------------------------------------------------------------------------------------------------------+
+| id                           | estRows  | task      | access object                     | operator info                                                                                                                    |
++------------------------------+----------+-----------+-----------------------------------+----------------------------------------------------------------------------------------------------------------------------------+
+| IndexJoin_10                 | 0.02     | root      |                                   | inner join, inner:IndexReader_9, outer key:test.item.id, inner key:test.lv.item_id, equal cond:eq(test.item.id, test.lv.item_id) |
+| ├─TableReader_19(Build)      | 0.02     | root      |                                   | data:Selection_18                                                                                                                |
+| │ └─Selection_18             | 0.02     | cop[tikv] |                                   | eq(test.item.sid, 1), in(test.item.vid, "1", "3"), not(isnull(test.item.id))                                                     |
+| │   └─TableFullScan_17       | 10000.00 | cop[tikv] | table:item                        | keep order:false, stats:pseudo                                                                                                   |
+| └─IndexReader_9(Probe)       | 1.25     | root      |                                   | index:Selection_8                                                                                                                |
+|   └─Selection_8              | 1.25     | cop[tikv] |                                   | not(isnull(test.lv.item_id))                                                                                                     |
+|     └─IndexRangeScan_7       | 1.25     | cop[tikv] | table:lv, index:sid(sid, item_id) | range: decided by [eq(test.lv.item_id, test.item.id) eq(test.lv.sid, 1)], keep order:false, stats:pseudo                         |
++------------------------------+----------+-----------+-----------------------------------+----------------------------------------------------------------------------------------------------------------------------------+
+
+MySQL> prepare stmt from 'SELECT /*+ TIDB_INLJ(lv, item) */ * 
+  FROM lv LEFT JOIN item ON lv.sid = item.sid AND lv.item_id = item.id
+  WHERE item.sid = ? AND item.vid IN (?, ?)';
+MySQL> set @a=1, @b='1', @c='3';
+MySQL> execute stmt using @a, @b, @c;
+MySQL> show warnings;
++---------+------+----------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                |
++---------+------+----------------------------------------------------------------------------------------+
+| Warning | 1815 | Optimizer Hint /*+ INL_JOIN(lv, item) */ or /*+ TIDB_INLJ(lv, item) */ is inapplicable |
++---------+------+----------------------------------------------------------------------------------------+
+```
+
+To use IndexJoin, the optimizer has to convert this `outer-join` to an `inner-join`. 
+But this conversion can fail since the validation check for prepared statements is too strict (it's for safety and introduced by https://github.com/pingcap/tidb/pull/22349 to fix another bug), which finally makes the `INLJ` hint inapplicable.
+
+We should do this check more detailedly for prepared statements, for example, implement different check rules for different expressions (`is null`, `in`, `eq` ...).
+
+<img width="847" alt="image" src="https://user-images.githubusercontent.com/7499936/192495932-da9210ec-6744-43a4-8315-93245bb2db97.png">

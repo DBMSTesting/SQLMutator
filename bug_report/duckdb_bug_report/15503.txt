@@ -1,0 +1,76 @@
+ID: 15503
+Title: json_serialize_sql produces dangerously large numbers for `query_location` without a FROM table
+Description:
+### What happens?
+
+Thanks to everyone working on this project.
+
+I've noticed that `json_serialize_sql` can includes values keyed against `query_location` for tables not in a query that are very large (specifically, equal to 2**64 - 1).
+
+This is usually harmless for roundtripping, because (I think?) query_location isn't used when converting json to SQL.
+
+But it can cause breaking errors when roundtripping JSON through javascript since javascript does not support integers larger than 2**55 or so. In that case it manifests with the error message `Error: Parser Error: property 'query_location' expected type 'uint64_t', but got type: 'real'`.
+
+I believe a workaround is to remove `query_location` from the serialized query representation before feeding it as JSON into duckdb. But it would be better if non-existent query locations were null or something.
+
+
+### To Reproduce
+
+The basic issue is in:
+
+```
+SELECT (json_serialize_sql('SELECT 1')).statements[0].node.from_table.query_location
+```
+
+Running that, I get a `query_location` of 18446744073709551615 (i.e. 2**64 - 1) in both the nightly build and v1.1.3. 
+
+
+With a duckdb-wasm connection at `conn`, this causes the following sequence to throw a breaking error because javascript rounds the location above 2**64.
+
+```
+await conn.query("SELECT json_serialize_sql('SELECT 1') v")
+   .then(d => d.get(0).v).then((v) => JSON.parse(v))
+   .then(d => JSON.stringify(d)) // <-- note -- at this point javascript has turned `query_location` to 18446744073709552000; i.e., 2**64 + 384 
+   .then(d => conn.query(`SELECT json_deserialize_sql('${d}') v`))
+```
+
+
+### OS:
+
+OS X
+
+### DuckDB Version:
+
+v1.1.3 19864453f7 / v1.1.4-dev3836 ec7be6f00e
+
+### DuckDB Client:
+
+CLI, WASM
+
+### Hardware:
+
+M1 Macbook Pro
+
+### Full Name:
+
+Ben Schmidt
+
+### Affiliation:
+
+Nomic AI
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

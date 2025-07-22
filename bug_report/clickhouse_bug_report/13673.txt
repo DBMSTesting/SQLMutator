@@ -1,0 +1,97 @@
+ID: 13673
+Title: Removing column comment from replicated materialized view isn't reflected in zookeeper.
+Description:
+We're trying to remove a comment from a column that we created on a materialized view a while ago.  Running this works:
+
+```
+counters.clickhouse.svc.cluster.local :) alter table r0.observability_hourly_counts comment column errClass '';
+
+ALTER TABLE r0.observability_hourly_counts
+    COMMENT COLUMN errClass ''
+```
+
+And is reflected in the local schema (notice `errClass`)
+
+```
+SHOW CREATE TABLE r0.observability_hourly_counts
+
+CREATE MATERIALIZED VIEW r0.observability_hourly_counts (`hour` DateTime, ... `errClass` String, `action` String, ... `type` String, `name` String, `sumState` AggregateFunction(sum, UInt64)) ENGINE = ReplicatedAggregatingMergeTree('/clickhouse/clusters/counters_cluster/observability/tables/{r0shard}/observability_hourly_counts', '{r0replica}') PARTITION BY toStartOfDay(minute) PRIMARY KEY (...) ORDER BY (...) SETTINGS index_granularity = 8192 AS SELECT (...select stmt...)
+```
+
+We discovered this when trying to bring up a new node without the comment, we received the exception:
+
+```
+DB::Exception: Table structure in ZooKeeper is too different from local table structure.
+```
+
+When looking in zookeeper, we noticed that none of the nodes had propagated the dropped comment to zookeeper, despite it being reflected locally on all nodes:
+
+```
+get /clickhouse/clusters/counters_cluster/observability/tables/02/observability_hourly_discards/columns
+columns format version: 1
+13 columns:
+`hour` DateTime
+...
+`errClass` String       COMMENT \'DEPRECATED. DO NOT USE\'
+`action` String
+...
+`type` String
+`name` String
+`sumState` AggregateFunction(sum, UInt64)
+```
+
+
+```
+get /clickhouse/clusters/counters_cluster/observability/tables/02/observability_hourly_discards/replicas/01/columns
+columns format version: 1
+13 columns:
+`hour` DateTime
+...
+`errClass` String       COMMENT \'DEPRECATED. DO NOT USE\'
+`action` String
+...
+`type` String
+`name` String
+`sumState` AggregateFunction(sum, UInt64)
+```
+
+```
+get /clickhouse/clusters/counters_cluster/observability/tables/00/observability_hourly_discards/columns
+columns format version: 1
+13 columns:
+`hour` DateTime
+...
+`errClass` String       COMMENT \'DEPRECATED. DO NOT USE\'
+`action` String
+...
+`type` String
+`name` String
+`sumState` AggregateFunction(sum, UInt64)
+```
+
+```
+get /clickhouse/clusters/counters_cluster/observability/tables/00/observability_hourly_discards/replicas/00/columns
+columns format version: 1
+13 columns:
+`hour` DateTime
+...
+`errClass` String       COMMENT \'DEPRECATED. DO NOT USE\'
+`action` String
+...
+`type` String
+`name` String
+`sumState` AggregateFunction(sum, UInt64)
+```
+
+**Expected behavior**
+We expected the comment deletion to be propagated to zookeeper.
+
+
+**Additional context**
+We're running on the following version, and discovered this while doing prerequisite work to upgrade clickhouse.
+
+```
+ClickHouse client version 19.9.2.4 (official build).
+Connecting to localhost:9000 as user chadmin.
+Connected to ClickHouse server version 19.9.2 revision 54421.
+```

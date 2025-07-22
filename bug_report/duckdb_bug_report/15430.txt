@@ -1,0 +1,51 @@
+ID: 15430
+Title: [Julia] Improves Julia support for scalar UDFs
+Description:
+This PR improves the Julia support for user defined UDFs.
+
+It adds the `ScalarFunction` type and the `@create_scalar_function` macro that automatically generates a DuckDB compatible wrapper. See also discussion #13176 for details.
+
+Numeric types, dates, strings, missing values and exceptions are supported. Composite types are not yet implemented.
+
+## Example Usage:
+
+```julia
+using DuckDB, DataFrames
+
+f_add = (a, b) -> a + b
+db = DuckDB.DB()
+con = DuckDB.connect(db)
+
+# Create the scalar function 
+# the second argument can be omitted if the function name is identical to a global symbol
+fun = DuckDB.@create_scalar_function f_add(a::Int, b::Int)::Int f_add
+DuckDB.register_scalar_function(con, fun)
+
+df = DataFrame(a = [1, 2, 3], b = [1, 2, 3])
+DuckDB.register_table(con, df, "test1")
+
+result = DuckDB.execute(con, "SELECT f_add(a, b) as result FROM test1") |> DataFrame
+```
+
+## Performance
+
+The performance of the auto-generated wrapper is comparable to pure DuckDB/Julia. I measured the elapsed time (in seconds) of adding 10 million numbers in a coarse benchmark:
+
+|               | Int         | Float       |
+| ------------- | ----------- | ----------- |
+| DataFrames.jl | 0.092947083 | 0.090409625 |
+| DuckDB        | 0.065306042 | 0.054156167 |
+| UDF           | 0.078665125 | 0.080781    |
+
+
+
+## Internals
+
+The scalar functions are tracked in a dictionary in the DuckDBHandle struct. Currently only registering scalar function is supported.
+
+The wrapper is generated via the macro and should be fully type stable. The wrapper is generated via the function `_udf_generate_wrapper()`.
+
+Because of limitations of the `@cfunction` macro in Julia, the wrapper needs to be globally accessible. I implemented this by introducing a global (constant) dictionary variable in DuckDB `_UDF_WRAPPER_CACHE` which is used to store the generated wrappers. This is defined in `_udf_register_wrapper()`. This is, in my opinion not ideal but works. I asked in Julia related forums for a better solution and will update the code, if something better is possible.
+
+
+This is an update to PR #14024

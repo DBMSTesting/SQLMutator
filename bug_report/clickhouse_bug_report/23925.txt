@@ -1,0 +1,84 @@
+ID: 23925
+Title: Syntax issue with nested columns
+Description:
+I have the following simple table:
+
+```sql
+CREATE TABLE IF NOT EXISTS testing.my_table ON CLUSTER clickhouse_cluster
+(
+    Id          UInt32,
+    Object      Nested
+                (
+                    Key     UInt8,
+                    Value   String
+                )
+)
+ENGINE = MergeTree
+ORDER BY (Id);
+```
+
+When I try to create the following VIEW over the table, I get the following exceptions:
+
+```sql
+CREATE VIEW IF NOT EXISTS testing.my_view ON CLUSTER clickhouse_cluster
+AS SELECT
+    *
+    REPLACE
+    (
+        arrayMap(x -> x + 1,`Object.Key`) AS `Object.Key`
+    )
+FROM testing.my_table;
+```
+```
+CREATE VIEW IF NOT EXISTS testing.my_view ON CLUSTER clickhouse_cluster AS
+SELECT * REPLACE arrayMap(x -> (x + 1), `Object.Key`) AS Object.Key
+FROM testing.my_table
+
+Query id: 32d08d9f-96ec-47d5-a8c6-8e333e83b144
+
+┌─host─────────────────────────────┬─port─┬─status─┬─error──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬─num_hosts_remaining─┬─num_hosts_active─┐
+│ ch-01-01-2 │ 9440 │     62 │ An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)) │                   5 │                0 │
+│ ch-01-01-3 │ 9440 │     62 │ An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)) │                   4 │                0 │
+│ ch-01-02-1 │ 9440 │     62 │ An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)) │                   3 │                0 │
+│ ch-01-02-2 │ 9440 │     62 │ An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)) │                   2 │                0 │
+│ ch-01-01-1 │ 9440 │     62 │ An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)) │                   1 │                0 │
+│ ch-01-02-3 │ 9440 │     62 │ An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)) │                   0 │                0 │
+└──────────────────────────────────┴──────┴────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────┴──────────────────┘
+↗ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.)  0%
+Received exception from server (version 21.1.2):
+Code: 62. DB::Exception: Received from localhost:9440. DB::Exception: There was an error on [ch-01-01-2:9440]: An error occurred before execution: Code: 62, e.displayText() = DB::Exception: Syntax error: failed at position 184 ('Key'): Key FROM testing.my_table. Expected unsigned integer (version 21.1.2.15 (official build)).
+```
+
+When I try to create the VIEW without using the `ON CLUSTER` clause, it gets created successfully. But when I try to run the following query, I get this error:
+
+```sql
+SHOW CREATE TABLE testing.my_view
+```
+
+```
+Received exception from server (version 21.1.2):
+Code: 62. DB::Exception: Received from localhost:9440. DB::Exception: Syntax error (in file /drives/ssd1/clickhouse/store/a33/a330d2ef-6e38-4918-a337-55cde9701509/my_view.sql): failed at position 212 ('Key') (line 7, col 65): Key
+FROM testing.my_table
+. Expected unsigned integer.
+```
+
+I feel the problem is caused as a result of removing the backticks in the parsing phase, because when I changed the schema as follows, things worked smoothly:
+
+```sql
+CREATE TABLE IF NOT EXISTS testing.my_table_2 ON CLUSTER clickhouse_cluster
+(
+    Id          UInt32,
+    Keys        Array(UInt8)
+)
+ENGINE = MergeTree
+ORDER BY (Id);
+
+CREATE OR REPLACE VIEW testing.my_view_2 ON CLUSTER clickhouse_cluster
+AS SELECT
+    *
+    REPLACE
+    (
+        arrayMap(x -> x + 1, Keys) AS Keys
+    )
+FROM testing.my_table_2;
+```

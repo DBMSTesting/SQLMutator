@@ -1,0 +1,293 @@
+ID: 50928
+Title: Column is not under aggregate function and not in GROUP BY in mat view in 23.5
+Description:
+Hi
+
+I have issue when upgrading from 23.4. to 23.5
+
+The error is
+
+```
+DB::Exception: Column `post_nat_source_ipv4` is not under aggregate function and not in GROUP BY
+```
+
+On previous versions the code below works fine. Please note that column post_nat_source_ipv4 is in  GROUP BY
+
+```
+create database if not exists qoestor engine = Ordinary;
+
+use qoestor;
+
+
+create table if not exists fullflow
+(
+    octet_delta_count           UInt64,
+    packet_delta_count          UInt64,
+    protocol_identifier         UInt8,
+    ip_class_of_service         UInt8,
+    source_port                 UInt16,
+    source_ipv4                 String,
+    source_ipv6                 String,
+    destination_port            UInt16,
+    destination_ipv4            String,
+    destination_ipv6            String,
+    bgp_source_as_number        UInt32,
+    bgp_destination_as_number   UInt32,
+    flow_start_date             Date,
+    flow_start_time             DateTime,
+    flow_start_millisecond      UInt64,
+    flow_end_date               Date,
+    flow_end_time               DateTime,
+    flow_end_millisecond        UInt64,
+    input_snmp                  UInt16,
+    output_snmp                 UInt16,
+    ip_version                  UInt8,
+    session_id                  UInt64,
+    host                        String,
+    protocol_code               UInt16,
+    login                       String,
+    post_nat_source_ipv4        String,
+    post_nat_source_port        UInt16,
+    frgmt_delta_packs           UInt16,
+    repeat_delta_pack           UInt16,
+    packet_deliver_time         UInt32,
+    dpi_id                      UInt8,
+    bridge_vchannel_num         UInt16
+
+) engine = MergeTree() partition by toStartOfHour(flow_start_time) order by (
+                                                                              flow_start_date,
+                                                                              flow_start_time,
+                                                                              flow_start_millisecond,
+                                                                              session_id,
+                                                                              host,
+                                                                              source_ipv4,
+                                                                              destination_ipv4,
+                                                                              source_ipv6,
+                                                                              destination_ipv6,
+                                                                              dpi_id,
+                                                                              bridge_vchannel_num
+                                                                              );
+
+alter table fullflow add column if not exists from_subscriber UInt8,
+                     add column if not exists source_ip String alias (source_ipv6 == '::' ? source_ipv4 : source_ipv6),
+                     add column if not exists destination_ip String alias (destination_ipv6 == '::' ? destination_ipv4 : destination_ipv6),
+                     add column if not exists source_asnum UInt32 alias (from_subscriber == 1 ? bgp_source_as_number : bgp_destination_as_number),
+                     add column if not exists destination_asnum UInt32 alias (from_subscriber == 0 ? bgp_source_as_number : bgp_destination_as_number),
+                     add column if not exists source_astitle String alias (dictHas('asnum_local_dic', toUInt64(source_asnum)) == 1 ? dictGetString('asnum_local_dic', 'description', toUInt64(source_asnum)) : dictGetString('asnum_dic', 'description', toUInt64(source_asnum))),
+                     add column if not exists destination_astitle String alias (dictHas('asnum_local_dic', toUInt64(destination_asnum)) == 1 ? dictGetString('asnum_local_dic', 'description', toUInt64(destination_asnum)) : dictGetString('asnum_dic', 'description', toUInt64(destination_asnum))),
+                     add column if not exists is_subscriber UInt8,
+                     add column if not exists is_excluded_subscriber UInt8,
+                     add column if not exists subscriber String alias (from_subscriber == 1 ? (source_ipv6 == '::' ? source_ipv4 : source_ipv6) : (destination_ipv6 == '::' ? destination_ipv4 : destination_ipv6)),
+                     add column if not exists subscriber_login String alias (empty(login) ? subscriber : login),
+                     add column if not exists host_ip String alias (from_subscriber == 0 ? (source_ipv6 == '::' ? source_ipv4 : source_ipv6) : (destination_ipv6 == '::' ? destination_ipv4 : destination_ipv6)),
+                     add column if not exists subscriber_port UInt16 alias (from_subscriber == 1 ? source_port : destination_port),
+                     add column if not exists host_port UInt16 alias (from_subscriber == 0 ? source_port : destination_port),
+                     add column if not exists bridge_vchannel_num UInt16 after dpi_id, modify order by (flow_start_date, flow_start_time, flow_start_millisecond, session_id, host, source_ipv4, destination_ipv4, source_ipv6, destination_ipv6, dpi_id, bridge_vchannel_num);
+
+alter table fullflow modify column if exists from_subscriber UInt8 default (input_snmp == 1 and output_snmp == 2 ? 1 : 0);
+
+alter table fullflow modify column if exists is_subscriber UInt8 default 1;
+
+alter table fullflow modify column if exists is_excluded_subscriber UInt8 default 0;
+
+
+
+create table if not exists `.inner.fullflow_agg`
+(
+    date                                            Date,
+    hour                                            DateTime,
+    time                                            DateTime,
+    from_subscriber                                 UInt8,
+    source_ip                                       String,
+    destination_ip                                  String,
+    source_asnum                                    UInt32,
+    destination_asnum                               UInt32,
+    source_astitle                                  String,
+    destination_astitle                             String,
+    is_subscriber                                   UInt8,
+    is_excluded_subscriber                          UInt8 default 0,
+    subscriber                                      String,
+    subscriber_login                                String,
+    login                                           String,
+    host_ip                                         String,
+    host                                            String,
+    protocol_code                                   UInt16,
+    protocol_identifier                             UInt8,
+    post_nat_source_ipv4                            String,
+    post_nat_source_port                            UInt16,
+    dpi_id                                          UInt8,
+    bridge_vchannel_num                             UInt16,
+    ip_class_of_service                             UInt8,
+    flow_start_millisecond_min                      AggregateFunction(min, UInt64),
+    flow_start_millisecond_from_subscriber_min_if   AggregateFunction(minIf, UInt64, UInt8),
+    flow_start_millisecond_to_subscriber_min_if     AggregateFunction(minIf, UInt64, UInt8),
+    flow_end_millisecond_max                        AggregateFunction(max, UInt64),
+    flow_end_millisecond_from_subscriber_max_if     AggregateFunction(maxIf, UInt64, UInt8),
+    flow_end_millisecond_to_subscriber_max_if       AggregateFunction(maxIf, UInt64, UInt8),
+    total_count                                     AggregateFunction(count),
+    session_id_uniq                                 AggregateFunction(uniq, UInt64),
+    octet_delta_count_from_subscriber_sum_if        AggregateFunction(sumIf, UInt64, UInt8),
+    octet_delta_count_to_subscriber_sum_if          AggregateFunction(sumIf, UInt64, UInt8),
+    octet_delta_count_sum                           AggregateFunction(sum, UInt64),
+    packet_delta_count_from_subscriber_sum_if       AggregateFunction(sumIf, UInt64, UInt8),
+    packet_delta_count_to_subscriber_sum_if         AggregateFunction(sumIf, UInt64, UInt8),
+    packet_delta_count_sum                          AggregateFunction(sum, UInt64),
+    ip_class_of_service_any                         AggregateFunction(anyHeavy, UInt8),
+    rtt_from_subscriber_avg_if                      AggregateFunction(avgIf, UInt32, UInt8),
+    rtt_to_subscriber_avg_if                        AggregateFunction(avgIf, UInt32, UInt8),
+    rtt_avg_if                                      AggregateFunction(avgIf, UInt32, UInt8),
+    rtt_median_if                                   AggregateFunction(quantileIf, UInt32, UInt8),
+    rtt_from_subscriber_any_heavy_if                AggregateFunction(anyHeavyIf, UInt32, UInt8),
+    rtt_to_subscriber_any_heavy_if                  AggregateFunction(anyHeavyIf, UInt32, UInt8),
+    rtt_any_heavy_if                                AggregateFunction(anyHeavyIf, UInt32, UInt8),
+    retransmits_from_subscriber_avg_if              AggregateFunction(avgIf, UInt16, UInt8),
+    retransmits_to_subscriber_avg_if                AggregateFunction(avgIf, UInt16, UInt8),
+    retransmits_avg_if                              AggregateFunction(avgIf, UInt16, UInt8),
+    retransmits_rate_from_subscriber_avg_if         AggregateFunction(avgIf, Float64, UInt8),
+    retransmits_rate_to_subscriber_avg_if           AggregateFunction(avgIf, Float64, UInt8),
+    retransmits_rate_avg_if                         AggregateFunction(avgIf, Float64, UInt8),
+    fragments_avg_if                                AggregateFunction(avgIf, UInt16, UInt8)
+) engine = AggregatingMergeTree() partition by toStartOfHour(`time`) order by (`date`, `hour`, `time`,
+                                                                            source_asnum,
+                                                                            destination_asnum,
+                                                                            source_astitle,
+                                                                            destination_astitle,
+                                                                            from_subscriber,
+                                                                            is_subscriber,
+                                                                            source_ip,
+                                                                            destination_ip,
+                                                                            subscriber,
+                                                                            subscriber_login,
+                                                                            login,
+                                                                            host_ip,
+                                                                            host,
+                                                                            protocol_identifier,
+                                                                            protocol_code,
+                                                                            post_nat_source_ipv4,
+                                                                            post_nat_source_port,
+                                                                            dpi_id,
+                                                                            bridge_vchannel_num,
+                                                                            ip_class_of_service);
+
+detach table if exists fullflow_agg;
+
+alter table `.inner.fullflow_agg` add column if not exists is_excluded_subscriber UInt8 default 0 after is_subscriber,
+                                  add column if not exists bridge_vchannel_num UInt16 after dpi_id,
+                                  add column if not exists ip_class_of_service UInt8 after bridge_vchannel_num,
+                                  modify order by (`date`, `hour`, `time`, source_asnum, destination_asnum, source_astitle, destination_astitle, from_subscriber, is_subscriber, source_ip, destination_ip, subscriber, subscriber_login, login, host_ip, host, protocol_identifier, protocol_code, post_nat_source_ipv4, post_nat_source_port, dpi_id, bridge_vchannel_num, ip_class_of_service);
+
+attach materialized view if not exists fullflow_agg
+  engine = AggregatingMergeTree() partition by toStartOfHour(`time`) order by (`date`, `hour`, `time`,
+                                                                            source_asnum,
+                                                                            destination_asnum,
+                                                                            source_astitle,
+                                                                            destination_astitle,
+                                                                            from_subscriber,
+                                                                            is_subscriber,
+                                                                            source_ip,
+                                                                            destination_ip,
+                                                                            subscriber,
+                                                                            subscriber_login,
+                                                                            login,
+                                                                            host_ip,
+                                                                            host,
+                                                                            protocol_identifier,
+                                                                            protocol_code,
+                                                                            post_nat_source_ipv4,
+                                                                            post_nat_source_port,
+                                                                            dpi_id,
+                                                                            bridge_vchannel_num,
+                                                                            ip_class_of_service) as
+    select
+
+      flow_start_date as `date`,
+      toStartOfHour(flow_start_time) as `hour`,
+      toStartOfInterval(flow_start_time, toIntervalMinute(toUInt8(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_GROUP_TIME_INTERVAL'),'15')))) as `time`,
+      from_subscriber,
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),0) ? source_ip : '' as source_ip, --0x1
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),1) ? destination_ip : '' as destination_ip, --0x2
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),2) ? source_asnum : 0 as source_asnum, --0x4
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),3) ? destination_asnum : 0 as destination_asnum, --0x8
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),4) ? source_astitle : '' as source_astitle, --0x10
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),5) ? destination_astitle : '' as destination_astitle, --0x20
+      is_subscriber,
+      is_excluded_subscriber,
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),6) ? subscriber : '' as subscriber, --0x40
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),7) ? subscriber_login : '' as subscriber_login, --0x80
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),8) ? login : '' as login, --0x100
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),9) ? host_ip : '' as host_ip, --0x200
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),10) ? host : '' as host, --0x400
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),11) ? protocol_code : 0 as protocol_code, --0x800
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),12) ? protocol_identifier : 0 as protocol_identifier, --0x1000
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),13) ? post_nat_source_ipv4 : '' as post_nat_source_ipv4, --0x2000
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),14) ? post_nat_source_port : 0 as post_nat_source_port, --0x4000
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),15) ? dpi_id : 0 as dpi_id, --0x8000
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),16) ? bridge_vchannel_num : 0 as bridge_vchannel_num, --0x10000
+
+      bitTest(reinterpretAsInt64(reverse(unhex(replaceOne(dictGetStringOrDefault('settings_dic', 'value', tuple('FULLFLOW_AGG_LOG_FIELDS_TO_SAVE_BITMASK'),'0'),'0x','')))),17) ? ip_class_of_service : 0 as ip_class_of_service, --0x20000
+
+      minState(flow_start_millisecond) flow_start_millisecond_min,
+      minIfState(flow_start_millisecond, from_subscriber == 1) flow_start_millisecond_from_subscriber_min_if,
+      minIfState(flow_start_millisecond, from_subscriber == 0) flow_start_millisecond_to_subscriber_min_if,
+
+      maxState(flow_end_millisecond) flow_end_millisecond_max,
+      maxIfState(flow_end_millisecond, from_subscriber == 1) flow_end_millisecond_from_subscriber_max_if,
+      maxIfState(flow_end_millisecond, from_subscriber == 0) flow_end_millisecond_to_subscriber_max_if,
+
+      countState() total_count,
+      uniqState(session_id) session_id_uniq,
+
+      sumIfState(octet_delta_count, from_subscriber == 1) octet_delta_count_from_subscriber_sum_if,
+      sumIfState(octet_delta_count, from_subscriber == 0) octet_delta_count_to_subscriber_sum_if,
+      sumState(octet_delta_count) octet_delta_count_sum,
+
+      sumIfState(packet_delta_count, from_subscriber == 1) packet_delta_count_from_subscriber_sum_if,
+      sumIfState(packet_delta_count, from_subscriber == 0) packet_delta_count_to_subscriber_sum_if,
+      sumState(packet_delta_count) packet_delta_count_sum,
+
+      anyHeavyState(ip_class_of_service) ip_class_of_service_any,
+
+      avgIfState(packet_deliver_time, from_subscriber == 1 and packet_deliver_time <> 0) rtt_from_subscriber_avg_if,
+      avgIfState(packet_deliver_time, from_subscriber == 0 and packet_deliver_time <> 0) rtt_to_subscriber_avg_if,
+      avgIfState(packet_deliver_time, packet_deliver_time <> 0) rtt_avg_if,
+      medianIfState(packet_deliver_time, packet_deliver_time <> 0) rtt_median_if,
+
+      anyHeavyIfState(packet_deliver_time, from_subscriber == 1 and packet_deliver_time <> 0) rtt_from_subscriber_any_heavy_if,
+      anyHeavyIfState(packet_deliver_time, from_subscriber == 0 and packet_deliver_time <> 0) rtt_to_subscriber_any_heavy_if,
+      anyHeavyIfState(packet_deliver_time, packet_deliver_time <> 0) rtt_any_heavy_if,
+
+      avgIfState(repeat_delta_pack, from_subscriber == 1 and repeat_delta_pack <> 0) retransmits_from_subscriber_avg_if,
+      avgIfState(repeat_delta_pack, from_subscriber == 0 and repeat_delta_pack <> 0) retransmits_to_subscriber_avg_if,
+      avgIfState(repeat_delta_pack, repeat_delta_pack <> 0) retransmits_avg_if,
+
+      avgIfState(repeat_delta_pack / packet_delta_count, from_subscriber == 1) retransmits_rate_from_subscriber_avg_if,
+      avgIfState(repeat_delta_pack / packet_delta_count, from_subscriber == 0) retransmits_rate_to_subscriber_avg_if,
+      avgIfState(repeat_delta_pack / packet_delta_count, 1) retransmits_rate_avg_if,
+
+      avgIfState(frgmt_delta_packs, frgmt_delta_packs <> 0) fragments_avg_if
+    from fullflow
+      where is_subscriber = 1 and is_excluded_subscriber = 0
+      group by `date`, `hour`, `time`,
+        source_asnum,
+        destination_asnum,
+        source_astitle,
+        destination_astitle,
+        from_subscriber,
+        is_subscriber,
+        is_excluded_subscriber,
+        source_ip,
+        destination_ip,
+        subscriber,
+        subscriber_login,
+        login,
+        host_ip,
+        host,
+        protocol_identifier,
+        protocol_code,
+        post_nat_source_ipv4,
+        post_nat_source_port,
+        dpi_id,
+        bridge_vchannel_num,
+        ip_class_of_service
+      order by `time` asc;
+```

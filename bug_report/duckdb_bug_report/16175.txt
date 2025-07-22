@@ -1,0 +1,115 @@
+ID: 16175
+Title: Bernoulli sample gives strange results in CTE with `DISTINCT`
+Description:
+### What happens?
+
+I am getting strange results in duckdb 1.2.0 when I Bernoulli sample from a table in a CTE from a table with `SELECT DISTINCT`. I am finding I get a table with no rows far more often than I would expect (and occasionally a table with far _more_ rows than I would expect also).
+
+For instance, sampling from a table with 1000 rows with a Bernoulli probability of 1% I expect an empty table about 1 in ~23000 times. But it is happening nearly 1 in 3 times.
+
+There seems to be some interaction with using `DISTINCT` - if I sample from the table with a `SELECT DISTINCT` clause I get the strange results (even if my table already has distinct values), but if I sample directly from my source table (which is already distinct) I get the results I expect.
+
+This does not occur in duckdb 1.1.3, where I get the results I expect.
+
+### To Reproduce
+
+With this python script:
+
+```python
+from statistics import mean, stdev
+
+import duckdb
+
+con = duckdb.connect()
+sql = """
+WITH some_tab AS (
+    SELECT UNNEST(range(1000)) AS id
+),
+some_tab_unq AS (
+    SELECT distinct(id) AS id FROM some_tab
+),
+sampled AS (
+    select id from some_tab_unq
+    USING SAMPLE 1% (bernoulli)
+)
+select count(*) as n_rows FROM sampled
+"""
+
+row_counts = [con.sql(sql).fetchone()[0] for _ in range(500)]
+print({
+    "min_rows": min(row_counts),
+    "max_rows": max(row_counts),
+    "count_empty": sum([r == 0 for r in row_counts]),
+    "mean": mean(row_counts),
+    "std": stdev(row_counts)
+})
+```
+
+A typical output is
+```
+{'min_rows': 0, 'max_rows': 50, 'count_empty': 146, 'mean': 10.06, 'std': 11.635599440883885}
+```
+
+This gives far more empty tables than expected, and the standard deviation is far off (should be ~3.1).
+
+In duckdb 1.1.3 this gives (something like)
+```
+{'min_rows': 2, 'max_rows': 22, 'count_empty': 0, 'mean': 10.366, 'std': 3.1502209102802827}
+```
+
+If the query is instead
+```sql
+WITH some_tab AS (
+    SELECT UNNEST(range(1000)) AS id
+),
+sampled AS (
+    select id from some_tab
+    USING SAMPLE 1% (bernoulli)
+)
+select count(*) as n_rows FROM sampled
+```
+
+(which I would expect to give identical results) I get the expected set of values.
+
+I have tried these queries directly in the CLI and find the same issue.
+
+
+### OS:
+
+MacOS 15.3, x86_64
+
+### DuckDB Version:
+
+1.2.0
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Andrew Bond
+
+### Affiliation:
+
+Ministry of Justice
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

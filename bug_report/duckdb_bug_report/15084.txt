@@ -1,0 +1,52 @@
+ID: 15084
+Title: Operator's GetProgress to return ProgressData instead of double
+Description:
+This is a draft PR, since I have not checked (and I would expect some failures out-of-tree extensions or Python / other APIs).
+
+----
+
+Operators currently when queried on progress return just a double.
+
+Problem, how to merge two progresses?
+Currently we rely on cardinalities being the same, do Min (since there cardinalities are irrelevant) or carry around cardinalities externally causing extra complexity.
+Also currently error handling is done via -1.0, but not always propagated.
+
+Proposal here is adding a:
+```c++
+struct ProgressData {
+     double done = 0.0;
+     double total = 0.0;
+     bool is_valid = true;
+};
+```
+That encodes both how much progress is done (like number of rows emitted, or whatever is relevant) and how much work is expected to be required in total.
+
+#### Pro:
+* I think this clean up code, and allows to simplify/clarify the implementation and usage of GetProgress (see for example how [src/parallel/executor.cpp](https://github.com/duckdb/duckdb/compare/main...carlopi:progress_data?expand=1#diff-6cae893584f8ae6b77f518de21317e6c4c4a39c36cbc0c74a1574d534e0ea5ae) changed)
+* (minor) Avoid problems like deciding how to normalize (it's a 0-1 or 0-100), see https://github.com/duckdb/duckdb/pull/15081
+
+#### Cons:
+* code churn, also in extensions, other API
+
+#### Questions:
+* table_function_progress_t currently returns a double. Should that be also changed (via adding cardinality with default at the end of the function)? Then percentage + cardinality can be converted to ProgressData duckdb side
+In this PR this is done assuming cardinality is always 1000:
+```c++
+	ProgressData res;
+	if (function.table_scan_progress) {
+		double table_progress = function.table_scan_progress(context, bind_data.get(), gstate.global_state.get());
+		if (table_progress < 0.0) {
+			res.SetInvalid();
+		} else {
+			res.done = table_progress;
+			res.total = 100.0;
+			// Assume cardinality is always 1e3
+			res.Normalize(1e3);
+		}
+	} else {
+		// if table_scan_progress is not implemented we don't support this function yet in the progress bar
+		res.SetInvalid();
+	}
+	return res;
+```
+* FileSystem's GetProgress still return double, should this also be moved over (that's more complex since currently DUCKDB_API, but than this might also mean better now than later)

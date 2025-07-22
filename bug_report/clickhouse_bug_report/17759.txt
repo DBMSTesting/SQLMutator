@@ -1,0 +1,123 @@
+ID: 17759
+Title: "Address not mapped to object" fatal error on JOIN
+Description:
+**Describe the bug**
+Sometimes (but not always) query `INSERT INTO ... SELECT ... INNER JOIN` fails the server with a fatal error
+
+**How to reproduce**
+* Which ClickHouse server version to use: `20.11.4.13`
+* `CREATE TABLE` statements for all tables involved
+```sql
+CREATE TABLE dr4_meta
+(
+    `oid` UInt64 CODEC(Delta(8), LZ4),
+    `nobs` UInt16 CODEC(T64, LZ4),
+    `ngoodobs` UInt16 CODEC(T64, LZ4),
+    `filter` UInt8 CODEC(T64, LZ4),
+    `fieldid` UInt16 CODEC(T64, LZ4),
+    `rcid` UInt8,
+    `ra` Float64,
+    `dec` Float64,
+    `h3index10` UInt64,
+    `durgood` Float64,
+    `mingoodmag` Float32,
+    `maxgoodmag` Float32,
+    `meangoodmag` Float32
+)
+ENGINE = MergeTree()
+ORDER BY oid
+```
+
+```sql
+CRATE TABLE dr4_circle_match_02
+(
+    `h3index10` UInt64,
+    `oid1` UInt64,
+    `oid2` UInt64,
+    `filter2` UInt8,
+    `fieldid2` UInt16,
+    `distance_deg` Float64
+)
+ENGINE = MergeTree()
+ORDER BY oid1
+```
+
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+[100GB tar](https://drive.google.com/file/d/1lRqzJx650MrTuY8SGfMTO9E_5U8xldL-/view?usp=sharing) of dr4_meta table
+
+* Queries to run that lead to unexpected result
+
+```sql 
+INSERT INTO dr4_circle_match_02 SELECT
+    arrayJoin(h3kRing(ring.h3index10, toUInt8(ceil((0.2 / 3600.) / h3EdgeAngle(10))))) AS h3index10,
+    meta.oid AS oid1,
+    ring.oid AS oid2,
+    ring.filter AS filter2,
+    ring.fieldid AS fieldid2,
+    greatCircleAngle(meta.ra, meta.dec, ring.ra, ring.dec) AS distance_deg
+FROM dr4_meta AS ring
+INNER JOIN
+(
+    SELECT
+        oid,
+        ra,
+        dec,
+        h3index10
+    FROM dr4_meta
+    WHERE (ngoodobs > 0) AND (oid >= 0) AND (oid < 680110600002224)
+) AS meta USING (h3index10)
+WHERE (distance_deg < (0.2 / 3600.)) AND (ring.ngoodobs > 0)
+```
+
+**Error message and/or stacktrace**
+If applicable, add screenshots to help explain your problem.
+
+```
+2020.12.03 02:39:38.588587 [ 316 ] {} <Fatal> BaseDaemon: (version 20.11.3.3 (official build), no build id) (from thread 29573) (query_id: e817f710-4fcf-4fb0-b77a-39b2c909ace7) Received signal Segmentation fault (11)
+2020.12.03 02:39:38.588828 [ 316 ] {} <Fatal> BaseDaemon: Address: 0xbb68 Access: read. Address not mapped to object.
+2020.12.03 02:39:38.589003 [ 316 ] {} <Fatal> BaseDaemon: Stack trace: 0x91eefe9 0xd7a3727 0xd79cb60 0xd704245 0xe485e24 0xe485970 0xde87410 0xe34b8c5 0xe38774c 0xe384877 0xe389825 0x7b6293d 0x7b66463 0x2b453e79aea5 0x2b453eeb98dd
+2020.12.03 02:39:38.646991 [ 316 ] {} <Fatal> BaseDaemon: 2. DB::ColumnVector<unsigned long>::insertFrom(DB::IColumn const&, unsigned long) @ 0x91eefe9 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.647172 [ 316 ] {} <Fatal> BaseDaemon: 3. ? @ 0xd7a3727 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.647308 [ 316 ] {} <Fatal> BaseDaemon: 4. void DB::HashJoin::joinBlockImpl<(DB::ASTTableJoin::Kind)0, (DB::ASTTableJoin::Strictness)3, DB::HashJoin::MapsTemplate<DB::JoinStuff::WithFlags<DB::RowRefList, false> > >(DB::Block&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::Block const&, DB::HashJoin::MapsTemplate<DB::JoinStuff::WithFlags<DB::RowRefList, false> > const&) const @ 0xd79cb60 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.651207 [ 316 ] {} <Fatal> BaseDaemon: 5. DB::HashJoin::joinBlock(DB::Block&, std::__1::shared_ptr<DB::ExtraBlock>&) @ 0xd704245 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.651342 [ 316 ] {} <Fatal> BaseDaemon: 6. DB::JoiningTransform::readExecute(DB::Chunk&) @ 0xe485e24 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.651454 [ 316 ] {} <Fatal> BaseDaemon: 7. DB::JoiningTransform::transform(DB::Chunk&) @ 0xe485970 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.651550 [ 316 ] {} <Fatal> BaseDaemon: 8. DB::ISimpleTransform::transform(DB::Chunk&, DB::Chunk&) @ 0xde87410 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.651714 [ 316 ] {} <Fatal> BaseDaemon: 9. DB::ISimpleTransform::work() @ 0xe34b8c5 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.651827 [ 316 ] {} <Fatal> BaseDaemon: 10. ? @ 0xe38774c in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.652810 [ 316 ] {} <Fatal> BaseDaemon: 11. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xe384877 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.652988 [ 316 ] {} <Fatal> BaseDaemon: 12. ? @ 0xe389825 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.653110 [ 316 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7b6293d in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.656505 [ 316 ] {} <Fatal> BaseDaemon: 14. ? @ 0x7b66463 in /XXX/clickhouse/bin/clickhouse
+2020.12.03 02:39:38.656684 [ 316 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2020.12.03 02:39:38.656820 [ 316 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfe8dd in /usr/lib64/libc-2.17.so
+```
+
+Recent activity from the thread:
+
+```
+2020.12.03 02:31:49.124032 [ 29573 ] {c042908e-1a6f-4fb0-9939-31836739a163} <Debug> DiskLocal: Reserving 35.30 MiB on disk `default`, having unreserved 186.49 TiB.
+2020.12.03 02:31:49.423248 [ 29573 ] {c042908e-1a6f-4fb0-9939-31836739a163} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1206_1206_0 to all_1206_1206_0.
+2020.12.03 02:31:49.822385 [ 29573 ] {c042908e-1a6f-4fb0-9939-31836739a163} <Debug> DiskLocal: Reserving 35.88 MiB on disk `default`, having unreserved 186.49 TiB.
+2020.12.03 02:31:50.090820 [ 29573 ] {c042908e-1a6f-4fb0-9939-31836739a163} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1208_1208_0 to all_1208_1208_0.
+2020.12.03 02:31:54.002878 [ 29573 ] {c042908e-1a6f-4fb0-9939-31836739a163} <Debug> DiskLocal: Reserving 35.74 MiB on disk `default`, having unreserved 186.49 TiB.
+2020.12.03 02:31:54.267909 [ 29573 ] {c042908e-1a6f-4fb0-9939-31836739a163} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1220_1220_0 to all_1220_1220_0.
+2020.12.03 02:32:00.254892 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> MemoryTracker: Current memory usage (for query): 4.00 GiB.
+2020.12.03 02:32:11.792764 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> MemoryTracker: Current memory usage (for query): 16.00 GiB.
+2020.12.03 02:37:01.867476 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> DiskLocal: Reserving 35.54 MiB on disk `default`, having unreserved 186.47 TiB.
+2020.12.03 02:37:02.181688 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1504_1504_0 to all_1504_1504_0.
+2020.12.03 02:37:03.065569 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> DiskLocal: Reserving 35.88 MiB on disk `default`, having unreserved 186.47 TiB.
+2020.12.03 02:37:03.376801 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1506_1506_0 to all_1506_1506_0.
+2020.12.03 02:37:05.031262 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> DiskLocal: Reserving 35.87 MiB on disk `default`, having unreserved 186.47 TiB.
+2020.12.03 02:37:05.354680 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1509_1509_0 to all_1509_1509_0.
+2020.12.03 02:37:08.177002 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> DiskLocal: Reserving 35.38 MiB on disk `default`, having unreserved 186.47 TiB.
+2020.12.03 02:37:08.561168 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1514_1514_0 to all_1514_1514_0.
+2020.12.03 02:37:08.805078 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> DiskLocal: Reserving 35.68 MiB on disk `default`, having unreserved 186.47 TiB.
+2020.12.03 02:37:09.114874 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1515_1515_0 to all_1515_1515_0.
+2020.12.03 02:37:09.760442 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Debug> DiskLocal: Reserving 36.21 MiB on disk `default`, having unreserved 186.47 TiB.
+2020.12.03 02:37:10.083461 [ 29573 ] {89c001ea-e11e-4614-94e2-b6ddbd909646} <Trace> xxx.dr3_circle_match_02: Renaming temporary part tmp_insert_all_1517_1517_0 to all_1517_1517_0.
+2020.12.03 02:37:38.443113 [ 29573 ] {e817f710-4fcf-4fb0-b77a-39b2c909ace7} <Debug> MemoryTracker: Current memory usage (for query): 1.39 GiB.
+2020.12.03 02:37:55.121468 [ 29573 ] {e817f710-4fcf-4fb0-b77a-39b2c909ace7} <Debug> MemoryTracker: Current memory usage (for query): 17.00 GiB.
+2020.12.03 02:37:59.924428 [ 29573 ] {e817f710-4fcf-4fb0-b77a-39b2c909ace7} <Debug> MemoryTracker: Current memory usage (for query): 20.10 GiB.
+2020.12.03 02:38:01.928214 [ 29573 ] {e817f710-4fcf-4fb0-b77a-39b2c909ace7} <Debug> CreatingSetsTransform: Created Join with 117868491 entries from 198494314 rows in 24.455750451 sec.
+```

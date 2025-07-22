@@ -1,0 +1,177 @@
+ID: 14838
+Title: Support multiple function descriptions
+Description:
+
+This PR makes it possible tor register per function multiple descriptions and/or examples in the catalog.
+The examples and descritpions can be defined per (group of) function overloads.
+This makes it possible to programmatically retrieve more detailed function documentation via duckdb_functions().
+
+- Via their respective `functions.json` files the extra information can be set:
+  - `variants` can be defined to distinguish between overloads
+  - when a single description is sufficient for multiple or all overloads, `"type": "ANY"` can be used. When "type" is omitted, it is treated as ANY.
+  - nested types: 
+  - multiple examples can be set with list attribute `examples`
+  - nested types (LIST, ARRAY, MAP, STRUCT, UNION) are also supported
+  - the old format of `functions.json` is still supported for backward compatibility
+- With `duckdb_functions()`, this information can be retrieved.
+
+In this PR 5 functions have been converted to the new format, to demonstrate the functionality:
+- `trim`
+- `strptime`
+- `list_slice` aka `array_slice`
+- `make_date`
+- `contains`
+
+In future PRs, other functions will be converted as well.
+
+
+### examples from: `functions.json`
+Example with different descriptions and examples per variant:
+```json
+{
+    "name": "trim",
+    "variants": [
+        {
+            "parameters": [
+                {"name": "string", "type": "VARCHAR"}
+            ],
+            "description": "Removes any spaces from either side of the string.",
+            "example": "trim(' test ')"
+        },
+        {
+            "parameters": [
+                {"name": "string", "type": "VARCHAR"},
+                {"name": "characters", "type": "VARCHAR"}
+            ],
+            "description": "Removes any occurrences of any of the characters from either side of the string",
+            "example": "trim('>>>>test<<', '><')"
+        }
+    ],
+    "type": "scalar_function_set"
+}
+```
+
+In the example below, the first variant has attribute `examples` while the second variant has attribute `example`.
+Both labels are supported for backward compatibility. The omitted parameter types imply "ANY".
+```json
+{
+    "name": "list_slice",
+    "variants": [
+        {
+            "parameters": [
+                {"name": "list"},
+                {"name": "begin"},
+                {"name": "end"}
+            ],
+            "description": "Extract a sublist using slice conventions. Negative values are accepted.",
+            "examples": ["list_slice([4, 5, 6], 2, 3)", "array_slice('DuckDB', 3, 4)", "array_slice('DuckDB', 3, NULL)", "array_slice('DuckDB', 0, -3)"]
+        },
+        {
+            "parameters": [
+                {"name": "list"},
+                {"name": "begin"},
+                {"name": "end"},
+                {"name": "step"}
+            ],
+            "description": "list_slice with added step feature.",
+            "example": "list_slice([4, 5, 6], 1, 3, 2)"
+        }
+    ],
+    "type": "scalar_function_set",
+    "aliases": ["array_slice"]
+},
+
+```
+
+Example with regular and nested types:
+```json
+{
+    "name": "contains",
+    "variants": [
+        {
+            "parameters": [
+                {"name": "string", "type": "VARCHAR"},
+                {"name": "search_string", "type": "VARCHAR"}
+            ],
+            "description": "Returns true if search_string is found within string.",
+            "example": "contains('abc', 'a')"
+        },
+        {
+            "parameters": [
+                {"name": "list", "type": "ANY[]"},
+                {"name": "element", "type": "ANY"}
+            ],
+            "description": "Returns true if the list contains the element.",
+            "example": "contains([1, 2, NULL], 1)"
+        },
+        {
+            "parameters": [
+                {"name": "map", "type": "MAP(ANY,ANY)"},
+                {"name": "key", "type": "ANY"}
+            ],
+            "description": "Checks if a map contains a given key.",
+            "example": "contains(MAP {'key1': 10, 'key2': 20, 'key3': 30}, 'key2')"
+        }
+    ],
+    "type": "scalar_function_set"
+},
+```
+
+### backward compatibility
+The old function descritpions are still supported for backward compatibility. e.g.:
+```json
+{
+    "name": "list_aggregate",
+    "parameters": "list,name",
+    "description": "Executes the aggregate function name on the elements of list",
+    "example": "list_aggregate([1, 2, NULL], 'min')",
+    "type": "scalar_function",
+    "aliases": ["array_aggregate", "list_aggr", "array_aggr", "aggregate"]
+}
+```
+
+### example `duckdb_functions()`
+```sql
+D SELECT
+      function_name,
+      parameter_types,
+      parameters,
+      description,
+      unnest(CASE WHEN len(examples) THEN examples ELSE [NULL] END)
+  FROM
+      duckdb_functions()
+  WHERE
+      function_name in ['trim', 'strptime', 'array_slice', 'list_slice', 'make_date', 'contains']
+  ORDER BY
+      all;
+┌───────────────┬──────────────────────┬──────────────────────┬───────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────┐
+│ function_name │   parameter_types    │      parameters      │            description            │ unnest(CASE  WHEN (len(examples)) THEN (examples) ELSE main.list_value(NULL) END) │
+│    varchar    │      varchar[]       │      varchar[]       │              varchar              │                                      varchar                                      │
+├───────────────┼──────────────────────┼──────────────────────┼───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+│ array_slice   │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ array_slice('DuckDB', 0, -3)                                                      │
+│ array_slice   │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ array_slice('DuckDB', 3, 4)                                                       │
+│ array_slice   │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ array_slice('DuckDB', 3, NULL)                                                    │
+│ array_slice   │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ list_slice([4, 5, 6], 2, 3)                                                       │
+│ array_slice   │ [ANY, ANY, ANY, BI…  │ [list, begin, end,…  │ list_slice with added step feat…  │ list_slice([4, 5, 6], 1, 3, 2)                                                    │
+│ contains      │ [ANY[], ANY]         │ [list, element]      │ Returns true if the list contai…  │ contains([1, 2, NULL], 1)                                                         │
+│ contains      │ [MAP(ANY, ANY), ANY] │ [map, key]           │ Checks if a map contains a give…  │ contains(MAP {'key1': 10, 'key2': 20, 'key3': 30}, 'key2')                        │
+│ contains      │ [VARCHAR, VARCHAR]   │ [string, search_st…  │ Returns true if search_string i…  │ contains('abc', 'a')                                                              │
+│ list_slice    │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ array_slice('DuckDB', 0, -3)                                                      │
+│ list_slice    │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ array_slice('DuckDB', 3, 4)                                                       │
+│ list_slice    │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ array_slice('DuckDB', 3, NULL)                                                    │
+│ list_slice    │ [ANY, ANY, ANY]      │ [list, begin, end]   │ Extract a sublist using slice c…  │ list_slice([4, 5, 6], 2, 3)                                                       │
+│ list_slice    │ [ANY, ANY, ANY, BI…  │ [list, begin, end,…  │ list_slice with added step feat…  │ list_slice([4, 5, 6], 1, 3, 2)                                                    │
+│ make_date     │ [BIGINT, BIGINT, B…  │ [year, month, day]   │ The date for the given parts      │ make_date(1992, 9, 20)                                                            │
+│ make_date     │ [STRUCT("year" BIG…  │ [date-struct]        │ The date for the given struct.    │ make_date({'year': 2024, 'month': 11, 'day': 14})                                 │
+│ strptime      │ [VARCHAR, VARCHAR]   │ [text, format]       │ Converts the string text to tim…  │ strptime('Wed, 1 January 1992 - 08:38:40 PM', '%a, %-d %B %Y - %I:%M:%S %p')      │
+│ strptime      │ [VARCHAR, VARCHAR[]] │ [text, format-list]  │ Converts the string text to tim…  │ strptime('4/15/2023 10:56:00', ['%d/%m/%Y %H:%M:%S', '%m/%d/%Y %H:%M:%S'])        │
+│ trim          │ [VARCHAR]            │ [string]             │ Removes any spaces from either …  │ trim(' test ')                                                                    │
+│ trim          │ [VARCHAR, VARCHAR]   │ [string, characters] │ Removes any occurrences of any …  │ trim('>>>>test<<', '><')                                                          │
+├───────────────┴──────────────────────┴──────────────────────┴───────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────┤
+│ 19 rows                                                                                                                                                                   5 columns │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+
+
+

@@ -1,0 +1,125 @@
+ID: 29014
+Title: set tidb_enable_index_merge =on, prepared stmt use or select return wrong result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+configure as follow:
+
+new_collations_enabled_on_first_bootstrap = true
+[prepared-plan-cache]
+enabled = true
+
+set global tidb_enable_clustered_index =on;
+
+CREATE TABLE `t` (
+  `c_int` int(11) NOT NULL,
+  `c_str` varchar(40) CHARACTER SET utf8 COLLATE utf8_general_ci DEFAULT NULL,
+  `v_str` varchar(40) GENERATED ALWAYS AS (substr(`c_str`, 1, 1)) VIRTUAL,
+  `s_str` varchar(40) GENERATED ALWAYS AS (substr(`c_str`, 1, 21)) STORED,
+  `c_datetime` datetime DEFAULT NULL,
+  `c_timestamp` timestamp NULL DEFAULT NULL,
+  `c_double` double DEFAULT NULL,
+  `c_decimal` decimal(12,6) DEFAULT NULL,
+  `c_enum` enum('blue','green','red','yellow','white','orange','purple') DEFAULT NULL,
+  `c_set` set('blue','green','red','yellow','white','orange','purple') NOT NULL,
+  PRIMARY KEY (`c_int`,`c_set`) /*T![clustered_index] CLUSTERED */,
+  KEY `c_int_2` (`c_int`),
+  UNIQUE KEY `c_decimal` (`c_decimal`),
+  KEY `c_datetime` (`c_datetime`),
+  KEY `c_timestamp` (`c_timestamp`),
+  KEY `c_enum` (`c_enum`),
+  KEY `c_set` (`c_set`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+insert into t(c_int,c_str,c_datetime,c_timestamp,c_double,c_decimal,c_enum,c_set) values(1055,"inspiring chatelet"  ,"2020-01-14 07:55:31","2020-03-18 03:56:36",53.823015,6.864000,"green","blue"  );
+insert into t(c_int,c_str,c_datetime,c_timestamp,c_double,c_decimal,c_enum,c_set) values(2004,"cranky proskuriakova","2020-05-09 06:15:28","2020-04-14 01:58:07",76.947938,5.331000,"red"  ,"blue" );
+insert into t(c_int,c_str,c_datetime,c_timestamp,c_double,c_decimal,c_enum,c_set) values(2344,"sleepy bohr"         ,"2020-04-11 15:12:43","2020-04-29 09:04:15",26.624786,0.992000,"red"  ,"blue"  );
+insert into t(c_int,c_str,c_datetime,c_timestamp,c_double,c_decimal,c_enum,c_set) values(2364,"infallible hoover"   ,"2020-02-28 00:10:04","2020-04-02 12:18:52",28.971922,6.891000,"red"  ,"blue"  );
+insert into t(c_int,c_str,c_datetime,c_timestamp,c_double,c_decimal,c_enum,c_set) values(2365,"trusting morse"      ,"2020-01-08 09:29:22","2020-06-29 19:33:13",96.294946,0.070000,"green","white" );
+insert into t(c_int,c_str,c_datetime,c_timestamp,c_double,c_decimal,c_enum,c_set) values(2366,"stoic bartik"        ,"2020-05-17 04:28:52","2020-03-05 11:44:12",51.011564,5.766000,"green","purple");
+
+prepare stmt21 from "select * from t where c_int in (?, ?) or c_enum in (?, ?, ?, ?) ";
+begin;
+set @v0 = 13;
+set @v1 = 1;
+set @v2 = "orange";
+set @v3 = "yellow";
+set @v4 = "orange";
+set @v5 = "white";
+execute stmt21 using @v0, @v1, @v2, @v3, @v4, @v5;
+commit;
+begin;
+set @v0 = 2364;
+set @v1 = 237;
+set @v2 = "purple";
+set @v3 = "blue";
+set @v4 = "purple";
+set @v5 = "green";
+execute stmt21 using @v0, @v1, @v2, @v3, @v4, @v5;  ---check
+
+```
+### 2. What did you expect to see? (Required)
+
+```
+mysql> prepare stmt21 from "select * from t where c_int in (?, ?) or c_enum in (?, ?, ?, ?) ";
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> execute stmt21 using @v0, @v1, @v2, @v3, @v4, @v5;
++-------+--------------------+-------+--------------------+---------------------+---------------------+-----------+-----------+--------+--------+
+| c_int | c_str              | v_str | s_str              | c_datetime          | c_timestamp         | c_double  | c_decimal | c_enum | c_set  |
++-------+--------------------+-------+--------------------+---------------------+---------------------+-----------+-----------+--------+--------+
+|  2364 | infallible hoover  | i     | infallible hoover  | 2020-02-28 00:10:04 | 2020-04-02 12:18:52 | 28.971922 |  6.891000 | red    | blue   |
+|  1055 | inspiring chatelet | i     | inspiring chatelet | 2020-01-14 07:55:31 | 2020-03-18 03:56:36 | 53.823015 |  6.864000 | green  | blue   |
+|  2365 | trusting morse     | t     | trusting morse     | 2020-01-08 09:29:22 | 2020-06-29 19:33:13 | 96.294946 |  0.070000 | green  | white  |
+|  2366 | stoic bartik       | s     | stoic bartik       | 2020-05-17 04:28:52 | 2020-03-05 11:44:12 | 51.011564 |  5.766000 | green  | purple |
++-------+--------------------+-------+--------------------+---------------------+---------------------+-----------+-----------+--------+--------+
+4 rows in set (0.00 sec)
+
+mysql> explain for connection 1407;
++--------------------------------+---------+---------+-----------+-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------+--------+------+
+| id                             | estRows | actRows | task      | access object                 | execution info                                                                                                                                                                                                                                                                                                                                                                                                                                       | operator info                                                                                 | memory | disk |
++--------------------------------+---------+---------+-----------+-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------+--------+------+
+| IndexMerge_11                  | 49.94   | 4       | root      |                               | time:1.52ms, loops:2, index_task:{fetch_handle:1.576361ms, merge:15.336µs}, table_task:{num:2, concurrency:5, fetch_row:1.066953ms, wait_time:1.739997ms}                                                                                                                                                                                                                                                                                            |                                                                                               | N/A    | N/A  |
+| ├─TableRangeScan_8(Build)      | 20.00   | 1       | cop[tikv] | table:t                       | time:759.1µs, loops:1, cop_task: {num: 1, max: 661.8µs, proc_keys: 1, rpc_num: 1, rpc_time: 647.9µs, copr_cache_hit_ratio: 0.00}, tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_keys: 3, rocksdb: {delete_skipped_count: 0, key_skipped_count: 1, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}                                                                                                        | range:[237,237], [2364,2364], keep order:false, stats:pseudo                                  | N/A    | N/A  |
+| ├─IndexRangeScan_9(Build)      | 30.00   | 3       | cop[tikv] | table:t, index:c_enum(c_enum) | time:818.8µs, loops:1, cop_task: {num: 1, max: 697.3µs, proc_keys: 3, rpc_num: 1, rpc_time: 666.5µs, copr_cache_hit_ratio: 0.00}, tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 3, total_keys: 6, rocksdb: {delete_skipped_count: 0, key_skipped_count: 3, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}                                                                                                        | range:["blue","blue"], ["green","green"], ["purple","purple"], keep order:false, stats:pseudo | N/A    | N/A  |
+| └─TableRowIDScan_10(Probe)     | 49.94   | 4       | cop[tikv] | table:t                       | time:889.8µs, loops:4, cop_task: {num: 2, max: 392µs, min: 374.7µs, avg: 383.3µs, p95: 392µs, max_proc_keys: 3, p95_proc_keys: 3, rpc_num: 2, rpc_time: 749.4µs, copr_cache_hit_ratio: 0.00}, tikv_task:{proc max:0s, min:0s, p80:0s, p95:0s, iters:2, tasks:2}, scan_detail: {total_process_keys: 4, total_keys: 8, rocksdb: {delete_skipped_count: 0, key_skipped_count: 4, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}       | keep order:false, stats:pseudo                                                                | N/A    | N/A  |
++--------------------------------+---------+---------+-----------+-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------+--------+------+
+4 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+```
+mysql> execute stmt21 using @v0, @v1, @v2, @v3, @v4, @v5;
+Empty set (0.01 sec)
+
+mysql> explain for connection 1407;
++--------------------------------+---------+---------+-----------+-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------+--------+------+
+| id                             | estRows | actRows | task      | access object                 | execution info                                                                                                                                                                                                                                                                                                                                             | operator info                                                                                     | memory | disk |
++--------------------------------+---------+---------+-----------+-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------+--------+------+
+| IndexMerge_11                  | 49.94   | 0       | root      |                               | time:1.23ms, loops:1,                                                                                                                                                                                                                                                                                                                                      |                                                                                                   | N/A    | N/A  |
+| ├─TableRangeScan_8(Build)      | 20.00   | 0       | cop[tikv] | table:t                       | time:0s, loops:0, cop_task: {num: 1, max: 817.1µs, proc_keys: 0, tot_proc: 1ms, rpc_num: 1, rpc_time: 779.6µs, copr_cache_hit_ratio: 0.00}, tikv_task:{time:1ms, loops:1}, scan_detail: {total_process_keys: 0, total_keys: 2, rocksdb: {delete_skipped_count: 0, key_skipped_count: 0, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}   | range:[1,1], [13,13], keep order:false, stats:pseudo                                              | N/A    | N/A  |
+| ├─IndexRangeScan_9(Build)      | 30.00   | 0       | cop[tikv] | table:t, index:c_enum(c_enum) | time:0s, loops:0, cop_task: {num: 1, max: 633.8µs, proc_keys: 0, rpc_num: 1, rpc_time: 614.5µs, copr_cache_hit_ratio: 0.00}, tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 0, total_keys: 3, rocksdb: {delete_skipped_count: 0, key_skipped_count: 0, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}}                   | range:["yellow","yellow"], ["white","white"], ["orange","orange"], keep order:false, stats:pseudo | N/A    | N/A  |
+| └─TableRowIDScan_10(Probe)     | 49.94   | 0       | cop[tikv] | table:t                       |                                                                                                                                                                                                                                                                                                                                                            | keep order:false, stats:pseudo                                                                    | N/A    | N/A  |
++--------------------------------+---------+---------+-----------+-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------+--------+------+
+```
+4 rows in set (0.00 sec)
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.2.0-nightly
+Edition: Community
+Git Commit Hash: da1c21fd45a4ea5900ac16d2f4a248143f378d18
+Git Branch: heads/refs/tags/v5.2.0-nightly
+UTC Build Time: 2021-10-21 02:42:28
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

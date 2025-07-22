@@ -1,0 +1,74 @@
+ID: 4714
+Title: Segfault on INSERT-SELECT-UNION (19.4.0)
+Description:
+ClickHouse segfaults with "Address: NULL pointer." after multiple heavy INSERT-SELECT-UNION queries on VersionedCollapsingMergeTree table at random times. The table contains ~20M records. The SELECT-UNION queries contains "cancel" data select query + "update" data query and they differs with column values only. Each select query results to ~100-1000 rows in ~1-1.5 sec.
+
+**How to reproduce**
+* ClickHouse server version 19.4.0.49 on Ubuntu 18.04.2 (from Yandex repo)
+* max_memory_usage is set to 21474836480 (20 GB) (sever has ~80 GB free memory),
+* max_threads is set to 8 (number of cores)
+
+```sql
+CREATE TABLE dataraw 
+(
+  date Date,
+  sign Int8,
+  version UInt64,
+  hash UInt64 materialized cityHash64(toString(date), col1, col2),  -- date+col1+col2 is unique
+  col1 String,
+  col2 String
+  -- +70 more cols 
+) 
+ENGINE = VersionedCollapsingMergeTree('sign', 'version')
+PARTITION BY toYYYYMM(date)
+ORDER BY date, col1, col2
+```
+
+The INSERT query:
+
+```sql
+INSERT INTO dataraw (date, sign, version, col1, col2)
+SELECT date, -1, version, col1, col2 FROM dataraw WHERE col1 = 'value1' AND hash IN (
+    SELECT hash FROM dataraw WHERE col1 = 'value1' GROUP BY hash HAVING sum(sign) > 0
+) LIMIT 1 BY hash
+UNION ALL
+SELECT date, 1, 1552750115242, 'value1', 'newvalue2' FROM dataraw WHERE col1 = 'value1' AND hash IN (
+    SELECT hash FROM dataraw WHERE col1 = 'value1' GROUP BY hash HAVING sum(sign) > 0
+) LIMIT 1 BY hash
+```
+
+**Stacktrace**
+
+```
+2019.03.16 15:28:35.357952 [ 99 ] {} <Error> BaseDaemon: ########################################
+2019.03.16 15:28:35.358035 [ 99 ] {} <Error> BaseDaemon: (from thread 27) Received signal Segmentation fault (11).
+2019.03.16 15:28:35.358052 [ 99 ] {} <Error> BaseDaemon: Address: NULL pointer.
+2019.03.16 15:28:35.358067 [ 99 ] {} <Error> BaseDaemon: Access: write.
+2019.03.16 15:28:35.358080 [ 99 ] {} <Error> BaseDaemon: Address not mapped to object.
+2019.03.16 15:28:35.458887 [ 99 ] {} <Error> BaseDaemon: 0. /usr/bin/clickhouse-server() [0x6608860]
+2019.03.16 15:28:35.459001 [ 99 ] {} <Error> BaseDaemon: 1. /usr/bin/clickhouse-server(DB::ITableDeclaration::check(DB::NamesAndTypesList const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&) const+0x72) [0x6609a32]
+2019.03.16 15:28:35.459026 [ 99 ] {} <Error> BaseDaemon: 2. /usr/bin/clickhouse-server(DB::MergeTreeReadPool::fillPerPartInfo(std::vector<DB::RangesInDataPart, std::allocator<DB::RangesInDataPart> >&, bool)+0x825) [0x67470c5]
+2019.03.16 15:28:35.459055 [ 99 ] {} <Error> BaseDaemon: 3. /usr/bin/clickhouse-server(DB::MergeTreeReadPool::MergeTreeReadPool(unsigned long, unsigned long, unsigned long, std::vector<DB::RangesInDataPart, std::allocator<DB::RangesInDataPart> >, DB::MergeTreeData const&, std::shared_ptr<DB::PrewhereInfo> const&, bool, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::MergeTreeReadPool::BackoffSettings const&, unsigned long, bool)+0x63b) [0x674848b]
+2019.03.16 15:28:35.459144 [ 99 ] {} <Error> BaseDaemon: 4. /usr/bin/clickhouse-server(DB::MergeTreeDataSelectExecutor::spreadMarkRangesAmongStreams(std::vector<DB::RangesInDataPart, std::allocator<DB::RangesInDataPart> >&&, unsigned long, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, unsigned long, bool, std::shared_ptr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::Settings const&) const+0xb72) [0x67215b2]
+2019.03.16 15:28:35.459178 [ 99 ] {} <Error> BaseDaemon: 5. /usr/bin/clickhouse-server(DB::MergeTreeDataSelectExecutor::readFromParts(std::vector<std::shared_ptr<DB::MergeTreeDataPart const>, std::allocator<std::shared_ptr<DB::MergeTreeDataPart const> > >, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, unsigned long, unsigned int, std::unordered_map<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, long, std::hash<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::equal_to<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, long> > > const*) const+0x3057) [0x67283b7]
+2019.03.16 15:28:35.459247 [ 99 ] {} <Error> BaseDaemon: 6. /usr/bin/clickhouse-server(DB::MergeTreeDataSelectExecutor::read(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, unsigned long, unsigned int, std::unordered_map<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, long, std::hash<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::equal_to<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >, std::allocator<std::pair<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const, long> > > const*) const+0x77) [0x67294a7]
+2019.03.16 15:28:35.459274 [ 99 ] {} <Error> BaseDaemon: 7. /usr/bin/clickhouse-server(DB::StorageMergeTree::read(std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int)+0x31) [0x6647f61]
+2019.03.16 15:28:35.459298 [ 99 ] {} <Error> BaseDaemon: 8. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x1d32) [0x6422ad2]
+2019.03.16 15:28:35.459318 [ 99 ] {} <Error> BaseDaemon: 9. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeImpl(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, bool)+0x3ba) [0x64247da]
+2019.03.16 15:28:35.459337 [ 99 ] {} <Error> BaseDaemon: 10. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::executeWithMultipleStreams()+0x50) [0x64271f0]
+2019.03.16 15:28:35.459355 [ 99 ] {} <Error> BaseDaemon: 11. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams()+0x6c) [0x643052c]
+2019.03.16 15:28:35.459392 [ 99 ] {} <Error> BaseDaemon: 12. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::execute()+0x38) [0x6430b28]
+2019.03.16 15:28:35.459410 [ 99 ] {} <Error> BaseDaemon: 13. /usr/bin/clickhouse-server(DB::InterpreterInsertQuery::execute()+0xc63) [0x64100e3]
+2019.03.16 15:28:35.459426 [ 99 ] {} <Error> BaseDaemon: 14. /usr/bin/clickhouse-server() [0x655c26f]
+2019.03.16 15:28:35.459448 [ 99 ] {} <Error> BaseDaemon: 15. /usr/bin/clickhouse-server(DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>)+0xfa) [0x655dffa]
+2019.03.16 15:28:35.459468 [ 99 ] {} <Error> BaseDaemon: 16. /usr/bin/clickhouse-server(DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&)+0x35f6) [0x372e0a6]
+2019.03.16 15:28:35.459486 [ 99 ] {} <Error> BaseDaemon: 17. /usr/bin/clickhouse-server(DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&)+0x3f1) [0x3730071]
+2019.03.16 15:28:35.459542 [ 99 ] {} <Error> BaseDaemon: 18. /usr/bin/clickhouse-server(Poco::Net::HTTPServerConnection::run()+0x32c) [0x707c66c]
+2019.03.16 15:28:35.459561 [ 99 ] {} <Error> BaseDaemon: 19. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x707666f]
+2019.03.16 15:28:35.459577 [ 99 ] {} <Error> BaseDaemon: 20. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0xe9) [0x7076da9]
+2019.03.16 15:28:35.459610 [ 99 ] {} <Error> BaseDaemon: 21. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x81) [0x7129ee1]
+2019.03.16 15:28:35.459628 [ 99 ] {} <Error> BaseDaemon: 22. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0x71260a8]
+2019.03.16 15:28:35.459644 [ 99 ] {} <Error> BaseDaemon: 23. /usr/bin/clickhouse-server() [0xadeeb5f]
+2019.03.16 15:28:35.459659 [ 99 ] {} <Error> BaseDaemon: 24. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f29c21f46db]
+
+```

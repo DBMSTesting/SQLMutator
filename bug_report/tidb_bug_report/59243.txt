@@ -1,0 +1,41 @@
+ID: 59243
+Title: 7% throughput regression from active sampling when workload repository is enabled
+Description:
+## Bug Report
+
+When the workload repository (#58247) is enabled, active sampling of tables appears to introduce a 7% throughput regression in the sysbench OLTP 90:10 read/write workload.
+
+Profiling this revealed that sampling `TIDB_HOT_REGIONS` seems to cause this regression, due to using `ListTables`. Specifically, `FindTableIndexOfRegion` loops through `is.AllSchemas` and `is.SchemaTableInfos`, i.e. an O(N) loop over all database objects:
+
+<img width="335" alt="Image" src="https://github.com/user-attachments/assets/c2e8e5a7-50f6-4082-b16a-ff5184e9ab0a" />
+
+When `TIDB_HOT_REGIONS` is excluded from the list of tables to actively sample for the workload repository, there is no regression in throughput.
+
+### 1. Minimal reproduce step (Required)
+
+1. Run `sysbench oltp_read_write` for 30 minutes, with the following parameters:```--point-selects=9 --range-selects=false --index-updates=0 --non-index-updates=1 --delete-inserts=0 --tables=32 --table-size=10000000 --mysql-ignore-errors=1062,2013,8028,9007 --auto-inc=false```
+2. Run the same sysbench workload, but with the workload repository enabled (using the default sampling/snapshot intervals):
+```set global tidb_workload_repository_dest="table"; ```
+
+### 2. What did you expect to see? (Required)
+
+No statistically significant throughput regressions.
+
+### 3. What did you see instead (Required)
+
+Averaged over 3 runs, the baseline transactions per second (TPS) was 4289.33, and the baseline queries per second (QPS) was 51152.33.
+
+With the workload repository enabled, the average TPS over 3 runs dropped to 3989.67 (-7.24% change), and the average QPS over 3 runs dropped to 47501.67 (-7.40% change).
+
+These measurements were collected by running sysbench on the following topology of Kingsoft Cloud instances:
+
+* 3 TiDB nodes, each with 4 CPUs and 48 GB of memory
+* 3 TiKV nodes, each with 4 CPUs and 48 GB of memory
+* 1 PD node, with 4 CPUs and 8 GB of memory
+
+### 4. What is your TiDB version? (Required)
+
+This was observed on the master branch as of a3cc774869aa581892fbeba869190796197e0bb3.
+
+<!-- Paste the output of SELECT tidb_version() -->
+

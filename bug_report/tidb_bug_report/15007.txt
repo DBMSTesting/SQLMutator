@@ -1,0 +1,37 @@
+ID: 15007
+Title: GC doesn't skip when safe point is equal to the previous safe point
+Description:
+## Bug Report
+
+1. What did you do?
+
+A session with an old start_ts is blocking safe point from advancing for a long time, and GC is in default settings (10min interval, 10min lifetime). (Currently when doing GC, if there is a session which is running with a start_ts older than the safe point, then GC will use the start_ts's physical part as the safe point.)
+
+2. What did you expect to see?
+
+GC is skipped during the time because safe point is not advancing.
+
+3. What did you see instead?
+
+TiDB didn't skip GC, however, it does the full GC workflow and finally sends the same safe point to PD, and TiKV's GC is not triggered since safe point is not updated. So as a result, resolve lock is running every 10min but TiKV's GC is not.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+master.
+
+The problem is located that in function `calculateNewSafePoint`, gc_worker.go:
+
+```go
+	// We should never decrease safePoint.
+	if lastSafePoint != nil && safePoint.Before(*lastSafePoint) {
+		logutil.BgLogger().Info("[gc worker] last safe point is later than current one."+
+			"No need to gc."+
+			"This might be caused by manually enlarging gc lifetime",
+			zap.String("leaderTick on", w.uuid),
+			zap.Time("last safe point", *lastSafePoint),
+			zap.Time("current safe point", safePoint))
+		return nil, nil
+	}
+	return &safePoint, nil
+```
+So when the safe point equals to the `lastSafePoint`, the GC will still be triggered.

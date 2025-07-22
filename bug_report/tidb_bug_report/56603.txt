@@ -1,0 +1,56 @@
+ID: 56603
+Title: Parsing CTE error with "doesn't yet support 'ORDER BY / LIMIT / SELECT DISTINCT in recursive query block"
+Description:
+## Bug Report
+
+The CTE contain DISTINCT keyword could not be inlined by default when the CTE is referenced by recursive query block of another CTE.
+
+### 1. Minimal reproduce step (Required)
+
+```
+create table test(a int);
+
+explain 
+WITH RECURSIVE 
+CTE (x) AS (SELECT distinct a FROM test) ,
+CTE1(x) AS (SELECT a FROM test UNION ALL select CTE.x from CTE join CTE1 on CTE.x=CTE1.x) 
+SELECT * FROM CTE1;
+
+```
+
+### 2. What did you expect to see? (Required)
+
+CTE is not inlined.
+
+```
++-----------------------------------+----------+-----------+---------------+----------------------------------------------------------------+
+| id                                | estRows  | task      | access object | operator info                                                  |
++-----------------------------------+----------+-----------+---------------+----------------------------------------------------------------+
+| CTEFullScan_42                    | 18000.00 | root      | CTE:cte1      | data:CTE_1                                                     |
+| CTE_1                             | 18000.00 | root      |               | Recursive CTE                                                  |
+| ├─TableReader_22(Seed Part)       | 10000.00 | root      |               | data:TableFullScan_21                                          |
+| │ └─TableFullScan_21              | 10000.00 | cop[tikv] | table:test    | keep order:false, stats:pseudo                                 |
+| └─HashJoin_36(Recursive Part)     | 8000.00  | root      |               | inner join, equal:[eq(test.test.a, test.test.a)]               |
+|   ├─Selection_37(Build)           | 6400.00  | root      |               | not(isnull(test.test.a))                                       |
+|   │ └─CTEFullScan_38              | 8000.00  | root      | CTE:cte       | data:CTE_0                                                     |
+|   └─Selection_39(Probe)           | 8000.00  | root      |               | not(isnull(test.test.a))                                       |
+|     └─CTETable_40                 | 10000.00 | root      |               | Scan on CTE_1                                                  |
+| CTE_0                             | 8000.00  | root      |               | Non-Recursive CTE                                              |
+| └─HashAgg_29(Seed Part)           | 8000.00  | root      |               | group by:test.test.a, funcs:firstrow(test.test.a)->test.test.a |
+|   └─TableReader_30                | 8000.00  | root      |               | data:HashAgg_25                                                |
+|     └─HashAgg_25                  | 8000.00  | cop[tikv] |               | group by:test.test.a,                                          |
+|       └─TableFullScan_28          | 10000.00 | cop[tikv] | table:test    | keep order:false, stats:pseudo                                 |
++-----------------------------------+----------+-----------+---------------+----------------------------------------------------------------+
+14 rows in set (5.94 sec)
+```
+
+### 3. What did you see instead (Required)
+
+ERROR 1235 (42000): This version of TiDB doesn't yet support 'ORDER BY / LIMIT / SELECT DISTINCT in recursive query block of Common Table Expression'
+
+### 4. What is your TiDB version? (Required)
+
+after v6.5.10 (include)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

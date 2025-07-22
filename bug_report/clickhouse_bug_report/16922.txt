@@ -1,0 +1,49 @@
+ID: 16922
+Title: Duplicate values of column values used in GROUP BY
+Description:
+**Describe the bug**
+We are running Clickhouse in distributed setup: 3 shards, no replicas, shards injest data from Kafka; 1 additional server sits in front of those having `Distributed` tables pointing to these shards' tables.
+
+Running a query like SELECT x, COUNT(*) FROM table GROUP BY x _sometimes_ returns duplicate values (roughly 1 out of 5 tries). Running the query on individual shards does not exhibit this issue.
+
+**How to reproduce**
+* 20.6.7.4 x86 on "proxy" server, 20.6.7.4 ARM builds on shards (did not try with x86 shards)
+* Proxy server: `CREATE TABLE test (x LowCardinality(String)) ENGINE = Distributed('main', 'db', 'test')`
+   Shards: `CREATE TABLE test (x LowCardinality(String)) ENGINE = MergeTree()`
+* SQL query is `SELECT x, COUNT(*) FROM table GROUP BY x`
+
+**Expected behavior**
+The result of aforementioned query should contain a single row per unique `x` value.
+
+**Error message and/or stacktrace**
+There are no error messages logged, *but* we did manage to observe a difference in debug output in runs when the problem appears versus runs when the results are correct. 
+
+So, when aggregation completes properly (no duplicates on `x` column) the logs contain the following sequences of messages:
+```
+2020.11.12 08:58:07.264544 [ 155 ] {25b4c5fb-03a6-49f8-9273-ca78ed7cec9a} <Trace> MergingAggregatedTransform: Reading blocks of partially aggregated data.
+2020.11.12 08:58:07.283757 [ 144 ] {25b4c5fb-03a6-49f8-9273-ca78ed7cec9a} <Trace> MergingAggregatedTransform: Read 3 blocks of partially aggregated data, total 30 rows.
+2020.11.12 08:58:07.283786 [ 144 ] {25b4c5fb-03a6-49f8-9273-ca78ed7cec9a} <Trace> Aggregator: Merging partially aggregated single-level data.
+2020.11.12 08:58:07.283811 [ 144 ] {25b4c5fb-03a6-49f8-9273-ca78ed7cec9a} <Trace> Aggregator: Merged partially aggregated single-level data.
+2020.11.12 08:58:07.283818 [ 144 ] {25b4c5fb-03a6-49f8-9273-ca78ed7cec9a} <Trace> Aggregator: Converting aggregated data to blocks
+2020.11.12 08:58:07.283848 [ 144 ] {25b4c5fb-03a6-49f8-9273-ca78ed7cec9a} <Trace> Aggregator: Converted aggregated data to blocks. 10 rows, 271.00 B in 1.8122e-05 sec. (551815.4729058603 rows/sec., 14.26 MiB/sec.)
+```
+
+When the issue appears, the logs contain a _slightly_ different output:
+```
+2020.11.12 08:58:09.484942 [ 50 ]  {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> MergingAggregatedTransform: Reading blocks of partially aggregated data.
+2020.11.12 08:58:09.517105 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> MergingAggregatedTransform: Read 21 blocks of partially aggregated data, total 30 rows.
+2020.11.12 08:58:09.518164 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> Aggregator: Merging partially aggregated two-level data.
+2020.11.12 08:58:09.518250 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> Aggregator: Merged partially aggregated two-level data.
+2020.11.12 08:58:09.518257 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> Aggregator: Merging partially aggregated single-level data.
+2020.11.12 08:58:09.518279 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> Aggregator: Merged partially aggregated single-level data.
+2020.11.12 08:58:09.518288 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> Aggregator: Converting aggregated data to blocks
+2020.11.12 08:58:09.518409 [ 174 ] {ac8d2b90-b710-466d-bb04-6cdc6a829da8} <Trace> Aggregator: Converted aggregated data to blocks. 17 rows, 606.00 B in 0.000108663 sec. (156446.996677802 rows/sec., 5.32 MiB/sec.)
+```
+
+This output corresponds to slightly more complex queries (involving ```sumIf``` function in SELECT clause), however, a similar difference is observe in simplier cases.
+
+There seems to be no particular reason for intermediate block count changing from 3 to 21 and back - it's just subsequent runs of exactly the same SQL. It seems, however, that as soon as shards return multiple blocks (not fully aggregated or something?), the proxy server fails to complete the aggregation properly.
+
+**Additional context**
+Problem happens more often with ```SummingMergeTree``` tables, but does happen with plain ```MergeTree``` as well.
+Appending `FINAL` modifier makes the issue go away, however, this does not seem to be right since performance drops significantly.

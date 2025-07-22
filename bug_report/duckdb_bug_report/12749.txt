@@ -1,0 +1,174 @@
+ID: 12749
+Title: Significant performance degradation when sorting strings with common prefix
+Description:
+### What happens?
+
+Env:
+- DuckDB main branch
+- 96 x 2 CPUs
+- 2TB memory
+- DuckDB is configured to use 64 cores and 1TB memory.
+
+```
+SET threads TO 64;
+SET memory_limit='1TB';
+```
+
+Generate tables with identical data sizes, each containing 1,000,000,000 rows of 24-character-long strings. The difference is that the content of `data` is completely random, whereas the strings in `prefixed_data` share a common prefix `com.`.
+
+```
+create macro randint() as cast(random() * 10 as int);
+create macro randstr(len) as list_aggregate(list_transform(list_resize([], len), x -> randint()), 'string_agg', '');
+create table trange as from range(1000000000);
+
+create table data as select concat(randstr(4), randstr(20)) as key from trange;
+create table prefixed_data as select concat('com.', randstr(20)) as key from trange;
+```
+
+The time taken to sort the `prefixed_data` table is significantly greater than that for the `data` table (59s vs 127s).
+```
+explain analyze create or replace table sorted as select * from data order by key;
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││         Total Time: 59.44s        ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌───────────────────────────┐
+│      RESULT_COLLECTOR     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│   BATCH_CREATE_TABLE_AS   │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             1             │
+│         (359.93s)         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│          ORDER_BY         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          ORDERS:          │
+│      "data"."key" ASC     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│         (2760.30s)        │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            data           │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            key            │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       EC: 1000000000      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│          (17.08s)         │
+└───────────────────────────┘ 
+```
+```                            
+D explain analyze create or replace table sorted as select * from prefixed_data order by key;
+100% ▕████████████████████████████████████████████████████████████▏ 
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+explain analyze create or replace table sorted as select * from prefixed_data order by key;
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││        Total Time: 127.82s        ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+┌───────────────────────────┐
+│      RESULT_COLLECTOR     │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             0             │
+│          (0.00s)          │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│   BATCH_CREATE_TABLE_AS   │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             1             │
+│         (339.32s)         │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│          ORDER_BY         │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          ORDERS:          │
+│  prefixed_data."key" ASC  │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│         (1635.20s)        │
+└─────────────┬─────────────┘                             
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       prefixed_data       │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│            key            │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│       EC: 1000000000      │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│         1000000000        │
+│          (15.58s)         │
+└───────────────────────────┘
+```
+
+`UpdateUsedMemory` used a lot of CPU when sorting `prefixed_data`.
+
+<img width="652" alt="image" src="https://github.com/duckdb/duckdb/assets/13906397/6cc0c81a-befa-4224-9c36-e798b6a46c58">
+
+
+### To Reproduce
+
+see above.
+
+### OS:
+
+ubuntu x64
+
+### DuckDB Version:
+
+v1.0.1-dev2000 a235f65c47
+
+### DuckDB Client:
+
+cli
+
+### Full Name:
+
+Yiyuan Liu
+
+### Affiliation:
+
+High-Flyer AI
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

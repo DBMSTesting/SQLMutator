@@ -1,0 +1,53 @@
+ID: 49652
+Title: Continuous execution of begin statements does not behave as expected
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+prepare:
+
+```sql
+create table t1 (id int primary key, name varchar(10));
+insert into t1 values (1, 'abc');
+set @@global.tidb_txn_mode='optimistic';
+set @@global.tidb_disable_txn_auto_retry=0;
+```
+
+| Session-A                                                                                                                                                                                                            | Session-B                                                       |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| begin optimistic;                                                                                                                                                                                                    |                                                                 |
+| begin optimistic;                                                                                                                                                                                                    |                                                                 |
+| update t1 set name = 'session 1' where id = 1 and name = 'abc';                                                                                                                                                      |                                                                 |
+|                                                                                                                                                                                                                      | begin optimistic;                                               |
+|                                                                                                                                                                                                                      | update t1 set name = 'session 2' where id = 1 and name = 'abc'; |
+|                                                                                                                                                                                                                      | commit;                                                         |
+| commit; (9007, 'Write conflict, txnStartTS=446466768598466563, conflictStartTS=446466770507661313, conflictCommitTS=446466771718766593, key={tableID=49, handle=1} primary={tableID=49, handle=1} [try again later]') |                                                                 |
+
+
+Session-A commit failed.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Session-A commit success. Since it is a optimistic transaction and retryable.
+
+### 3. What did you see instead (Required)
+
+Session-A commit failed.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v4.0.0
+
+
+### Investigate
+
+The main reason is when continuous execution of `begin optimistic` statement, will `NewTxn() inside a transaction auto commit`, then it doesn't set the `CouldRetry` info, then the transaction become not retryable.
+
+https://github.com/pingcap/tidb/blob/838b6a0cf2df2d1907508e56d9de9ba7fab502e5/session/session.go#L1428-L1433

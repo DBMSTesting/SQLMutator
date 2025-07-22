@@ -1,0 +1,194 @@
+ID: 58486
+Title: on owner change, info schema might skip some diffs that it thinks it is a hole due to error
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+steps to reproduce:(to workaround https://github.com/pingcap/tidb/issues/58483, we have comment out the code related to continue on `jobNeedToSync=false`)
+- start `nightly` playground, after it bootstrapped, we kill tidb
+- start tidb A using `tidb-server-5000`(created with below diff), so A became owner
+- start tidb B using `tidb-server-4000`(created with below diff)
+- run `create table aaa(id int)` J1 on A, when we see `set version, begin`, trigger owner change by delete the related election key
+- now B became owner, but A keeps think it's the owner too as we add some sleep
+- when we see `before commit`, the allocated schema version is `X`.
+- run `create table bbb(id int)` J2 on B before we see `after commit`
+- as we have a sleep when B tries to run J1, so J2 runs and finishes first with a larger schema version `X+1`, and at this time `X` hasn't commit it's diff, so all node take `X` as a hole and skip it.
+- the txn of `X` with diff on node A committed, and then A retire completely
+- B starts to run J1, and will meet issues described in https://github.com/pingcap/tidb/issues/58483, and will start to sync the schema version, but no node load the diff and update self version directly for J1. https://github.com/pingcap/tidb/blob/14a469ab9d4ef3c2fbd6bfc8390eec39e6173984/pkg/domain/domain.go#L320
+- if we tries to query the table, we will meet `Table 'test.aaa' doesn't exist`, this breaks consistency after we fix all other issues
+
+
+steps to create the binary for test
+- apply this diff to create tidb-server-4000
+```diff
+diff --git a/pkg/ddl/job_scheduler.go b/pkg/ddl/job_scheduler.go
+index c73ffdd9f4..b2a7953a20 100644
+--- a/pkg/ddl/job_scheduler.go
++++ b/pkg/ddl/job_scheduler.go
+@@ -562,6 +562,10 @@ func (s *jobScheduler) transitOneJobStepAndWaitSync(wk *worker, jobCtx *jobConte
+ 	// if owner not change, we need try to sync when it's un-synced.
+ 	// if owner changed, we need to try sync it if the job is not started by
+ 	// current owner.
++	if job.TableName == "aaa" {
++		// wait bbb created first
++		time.Sleep(10 * time.Second)
++	}
+ 	if jobCtx.isUnSynced(job.ID) || (job.Started() && !jobCtx.maybeAlreadyRunOnce(job.ID)) {
+ 		if variable.EnableMDL.Load() {
+ 			version, err := s.sysTblMgr.GetMDLVer(s.schCtx, job.ID)
+diff --git a/pkg/domain/domain.go b/pkg/domain/domain.go
+index 2ac4ebda71..38322cad74 100644
+--- a/pkg/domain/domain.go
++++ b/pkg/domain/domain.go
+@@ -1063,10 +1063,11 @@ func (do *Domain) mdlCheckLoop() {
+ 		maxVer := do.mdlCheckTableInfo.newestVer
+ 		if maxVer > saveMaxSchemaVersion {
+ 			saveMaxSchemaVersion = maxVer
+-		} else if !jobNeedToSync {
+-			// Schema doesn't change, and no job to check in the last run.
+-			do.mdlCheckTableInfo.mu.Unlock()
+-			continue
++			//} else if !jobNeedToSync {
++			//	// Schema doesn't change, and no job to check in the last run.
++			//	do.mdlCheckTableInfo.mu.Unlock()
++			//	continue
++			_ = jobNeedToSync
+ 		}
+ 
+ 		jobNeedToCheckCnt := len(do.mdlCheckTableInfo.jobsVerMap)
+```
+- apply this diff to create `tidb-server-5000`
+```diff
+diff --git a/pkg/ddl/ddl.go b/pkg/ddl/ddl.go
+index bf610f6763..3445f9f246 100644
+--- a/pkg/ddl/ddl.go
++++ b/pkg/ddl/ddl.go
+@@ -409,6 +409,11 @@ func (sv *schemaVersionManager) setSchemaVersion(jobCtx *jobContext, job *model.
+ 	defer func() {
+ 		metrics.DDLIncrSchemaVerOpHist.Observe(time.Since(start).Seconds())
+ 	}()
++	if job.TableName == "aaa" {
++		fmt.Println("set version, begin")
++		<-owner.GlobalTestCh
++		fmt.Println("set version, end")
++	}
+ 	return schemaVersion, err
+ }
+ 
+diff --git a/pkg/ddl/job_scheduler.go b/pkg/ddl/job_scheduler.go
+index c73ffdd9f4..4e8e17689c 100644
+--- a/pkg/ddl/job_scheduler.go
++++ b/pkg/ddl/job_scheduler.go
+@@ -187,7 +187,13 @@ func (s *jobScheduler) start() {
+ }
+ 
+ func (s *jobScheduler) close() {
++	fmt.Println("job scheduler begin close")
++	owner.GlobalTestCh <- struct{}{}
++	fmt.Println("job scheduler before cancel")
+ 	s.cancel(dbterror.ErrNotOwner)
++	fmt.Println("job scheduler after cancel")
++	owner.GlobalTestCh <- struct{}{}
++	fmt.Println("job scheduler end close")
+ 	s.wg.Wait()
+ 	if s.reorgWorkerPool != nil {
+ 		s.reorgWorkerPool.close()
+diff --git a/pkg/ddl/job_worker.go b/pkg/ddl/job_worker.go
+index ca49d45b20..a9597c2c13 100644
+--- a/pkg/ddl/job_worker.go
++++ b/pkg/ddl/job_worker.go
+@@ -38,6 +38,7 @@ import (
+ 	"github.com/pingcap/tidb/pkg/meta/autoid"
+ 	"github.com/pingcap/tidb/pkg/meta/model"
+ 	"github.com/pingcap/tidb/pkg/metrics"
++	"github.com/pingcap/tidb/pkg/owner"
+ 	"github.com/pingcap/tidb/pkg/parser"
+ 	"github.com/pingcap/tidb/pkg/parser/terror"
+ 	"github.com/pingcap/tidb/pkg/sessionctx"
+@@ -613,7 +614,10 @@ func (w *worker) transitOneJobStep(
+ 	}
+ 	// reset the SQL digest to make topsql work right.
+ 	w.sess.GetSessionVars().StmtCtx.ResetSQLDigest(job.Query)
++	fmt.Println("before commit")
++	time.Sleep(5 * time.Second)
+ 	err = w.sess.Commit(w.workCtx)
++	fmt.Println("after commit")
+ 	jobCtx.unlockSchemaVersion(jobCtx, job.ID)
+ 	if err != nil {
+ 		return 0, err
+@@ -1077,6 +1081,11 @@ func updateGlobalVersionAndWaitSynced(
+ 	}
+ 
+ 	var err error
++	if job.TableName == "aaa" {
++		fmt.Println("updateGlobalVersionAndWaitSynced for aaa begin wait")
++		<-owner.GlobalTestCh
++		fmt.Println("updateGlobalVersionAndWaitSynced for aaa after wait")
++	}
+ 
+ 	if latestSchemaVersion == 0 {
+ 		logutil.DDLLogger().Info("schema version doesn't change", zap.Int64("jobID", job.ID))
+diff --git a/pkg/domain/domain.go b/pkg/domain/domain.go
+index 2ac4ebda71..38322cad74 100644
+--- a/pkg/domain/domain.go
++++ b/pkg/domain/domain.go
+@@ -1063,10 +1063,11 @@ func (do *Domain) mdlCheckLoop() {
+ 		maxVer := do.mdlCheckTableInfo.newestVer
+ 		if maxVer > saveMaxSchemaVersion {
+ 			saveMaxSchemaVersion = maxVer
+-		} else if !jobNeedToSync {
+-			// Schema doesn't change, and no job to check in the last run.
+-			do.mdlCheckTableInfo.mu.Unlock()
+-			continue
++			//} else if !jobNeedToSync {
++			//	// Schema doesn't change, and no job to check in the last run.
++			//	do.mdlCheckTableInfo.mu.Unlock()
++			//	continue
++			_ = jobNeedToSync
+ 		}
+ 
+ 		jobNeedToCheckCnt := len(do.mdlCheckTableInfo.jobsVerMap)
+diff --git a/pkg/owner/manager.go b/pkg/owner/manager.go
+index c11ef66cf9..e9d08b88ff 100644
+--- a/pkg/owner/manager.go
++++ b/pkg/owner/manager.go
+@@ -20,6 +20,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"strconv"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -327,8 +328,16 @@ func (m *ownerManager) toBeOwner(elec *concurrency.Election) {
+ 	}
+ }
+ 
++var GlobalTestCh = make(chan struct{})
++
+ // RetireOwner make the manager to be a not owner.
+ func (m *ownerManager) RetireOwner() {
++	if strings.Contains(m.key, "ddl") {
++		fmt.Println("retire ddl owner, begin")
++		GlobalTestCh <- struct{}{}
++		time.Sleep(time.Second)
++		fmt.Println("retire ddl owner, end")
++	}
+ 	m.elec.Store(nil)
+ 	m.logger.Info("retire owner")
+ 	if m.listener != nil {
+
+```
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

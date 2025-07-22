@@ -1,0 +1,67 @@
+ID: 51768
+Title: The time drifts in timer store in daylight saving time
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+The below test will fail:
+
+```
+func TestTimerStoreWithDST(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	dbName := "test"
+	tblName := "timerstore"
+	tk.MustExec("use test")
+	tk.MustExec(tablestore.CreateTimerTableSQL(dbName, tblName))
+	tk.MustExec("set @@time_zone = 'America/Los_Angeles'")
+
+	pool := pools.NewResourcePool(func() (pools.Resource, error) {
+		return tk.Session(), nil
+	}, 1, 1, time.Second)
+	defer pool.Close()
+
+	timerStore := tablestore.NewTableTimerStore(1, pool, dbName, tblName, nil)
+	defer timerStore.Close()
+
+	watermark, err := time.ParseInLocation(time.DateTime, "2024-11-03 09:30:00", time.UTC)
+	require.NoError(t, err)
+
+	id, err := timerStore.Create(context.TODO(), &api.TimerRecord{
+		TimerSpec: api.TimerSpec{
+			Namespace:       "default",
+			Key:             "test",
+			SchedPolicyType: api.SchedEventInterval,
+			SchedPolicyExpr: "1h",
+			Watermark:       watermark,
+		},
+	})
+	require.NoError(t, err)
+
+	timer, err := timerStore.GetByID(context.TODO(), id)
+	require.NoError(t, err)
+	// this assert will fail
+	require.Equal(t, watermark.In(time.UTC).String(), timer.Watermark.In(time.UTC).String())
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+test success
+
+### 3. What did you see instead (Required)
+
+```
+--- FAIL: TestTimerStoreWithDST (2.53s)
+
+Expected :2024-11-03 09:30:00 +0000 UTC
+Actual   :2024-11-03 08:30:00 +0000 UTC
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

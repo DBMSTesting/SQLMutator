@@ -1,0 +1,57 @@
+ID: 53222
+Title: Using match with `^$` as anchors on a primary key column returns incorrect results
+Description:
+**Describe what's wrong**
+
+When running a query that applies a regex expression to the primary key column and uses `^$` as anchors on the first element, Clickhouse incorrectly returns only a portion of the expected results. 
+
+**Does it reproduce on recent release?**
+
+Running release `23.3.8.21`.
+
+**How to reproduce**
+Create table and insert data into different parts. Note that this bug appears to apply to only the primary key condition as inserting both data items into same part will return the correct result.
+```
+CREATE TABLE example(
+    "time" Int64 CODEC(ZSTD(1)),
+    "svc" LowCardinality(String) CODEC(ZSTD(1)),
+    "title" String CODEC(ZSTD(1)),
+ ) ENGINE = MergeTree
+ PARTITION BY intDiv("time", 1000)
+ ORDER BY ("svc", "time");
+ 
+INSERT INTO example(*) VALUES(toInt64(4500), 'first', 'blah blah')
+INSERT INTO example(*) VALUES(toInt64(3500), 'second', 'blah blah blah')
+```
+
+Reading data with `^$` returns only the 1/2 expected rows:
+```
+SELECT svc, title FROM example WHERE match(svc, '^first$|^second$')
+```
+
+Running the query with index explain enabled (`EXPLAIN indexes = 1`) shows the problem right away:
+```
+Expression ((Projection + Before ORDER BY))
+	  ReadFromMergeTree (7_ca_43_de_8_a_195_42_c_7_b_590_7_a_270_a_945433.example)
+	  Indexes:
+	    MinMax
+	      Condition: true
+	      Parts: 2/2
+	      Granules: 2/2
+	    Partition
+	      Condition: true
+	      Parts: 2/2
+	      Granules: 2/2
+	    PrimaryKey
+	      Keys: 
+	        svc
+	      Condition: (svc in ['first', 'firsu')) <-- this is the problem
+	      Parts: 1/2
+	      Granules: 1/2
+```
+**Additional context**
+
+A simple workaround is to use `\A\z` for anchoring which returns the expected results:
+```
+SELECT svc, title FROM example WHERE match(svc, '\Afirst\z|\Asecond\z')
+```

@@ -1,0 +1,61 @@
+ID: 40620
+Title: concurrently modify column for partition table with index cause data inconsistency
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+Here is the test case:
+``` 
+func TestIssue40135Ver2(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	tk3 := testkit.NewTestKit(t, store)
+	tk3.MustExec("use test")
+
+	tk.MustExec("CREATE TABLE t40135 ( a int DEFAULT NULL, b varchar(32) DEFAULT 'md', index(a)) PARTITION BY HASH (a) PARTITIONS 6")
+	tk.MustExec("insert into t40135 values (1, 'md'), (2, 'ma'), (3, 'md'), (4, 'ma'), (5, 'md'), (6, 'ma')")
+	one := true
+	hook := &ddl.TestDDLCallback{Do: dom}
+	var checkErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	hook.OnJobRunBeforeExported = func(job *model.Job) {
+		if job.SchemaState == model.StateDeleteOnly {
+			tk3.MustExec("delete from t40135 where a = 1")
+		}
+		if one {
+			one = false
+			go func() {
+				_, checkErr = tk1.Exec("alter table t40135 modify column a int NULL")
+				wg.Done()
+			}()
+		}
+	}
+	dom.DDL().SetHook(hook)
+	tk.MustExec("alter table t40135 modify column a bigint NULL DEFAULT '6243108' FIRST")
+	wg.Wait()
+	require.NoError(t, checkErr)
+	tk.MustExec("admin check table t40135")
+}
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The second DDL should fail.
+
+### 3. What did you see instead (Required)
+
+[admin:8223]data inconsistency in table: t40135, index: a, handle: 6, index-values:"" != record-values:"handle: 6, values: [KindNull <nil>]"
+
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

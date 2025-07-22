@@ -1,0 +1,82 @@
+ID: 22223
+Title: wait_ts in slow log is inaccurately
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+mock a delay in TiDB code:
+
+```go
+--- a/session/session.go
++++ b/session/session.go
+@@ -1567,6 +1567,10 @@ func (s *session) Txn(active bool) (kv.Transaction, error) {
+        }
+        if s.txn.pending() {
+                defer func(begin time.Time) {
++                       if !s.sessionVars.InRestrictedSQL {
++                               fmt.Printf("sleep--\n")
++                               time.Sleep(50 * time.Millisecond)
++                       }
+                        s.sessionVars.DurationWaitTS = time.Since(begin)
+                }(time.Now())
+                // Transaction is lazy initialized.
+```
+
+then:
+
+```sql
+set @@tidb_slow_log_threshold=30;
+begin;
+select * from t where a=1 and (select sleep(0.03)) is null;
+```
+ Check the related slow-log of last SQL:
+
+```sql
+# Time: 2021-01-06T17:52:17.927353+08:00
+# Txn_start_ts: 422032634769833985
+# Query_time: 0.051914883
+# Wait_TS: 0.051791473
+...
+begin;
+
+# Time: 2021-01-06T17:52:24.252546+08:00
+# Txn_start_ts: 422032634769833985
+# Query_time: 0.032830658
+# Wait_TS: 0.051791473
+....
+select * from t where a=1 and (select sleep(0.03)) is null;
+
+```
+
+As you can see, the `Query_time` is `0.032630017` second, but the `Wait_TS` is `0.050233804`, it's wired, since `Wait_TS` should be 0 for the query `select ...`, and the `Wait_TS` should only emerging in the slow log of the SQL `begin`.
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```sql
+test> select tidb_version();
++-------------------------------------------------------------------+
+| tidb_version()                                                    |
++-------------------------------------------------------------------+
+| Release Version: v4.0.0-beta.2-1973-g51794e9d3-dirty              |
+| Edition: Community                                                |
+| Git Commit Hash: 51794e9d304896a315d80ccb4603f59dc75f26d9         |
+| Git Branch: master                                                |
+| UTC Build Time: 2021-01-06 09:23:45                               |
+| GoVersion: go1.15.6                                               |
+| Race Enabled: false                                               |
+| TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306 |
+| Check Table Before Drop: false                                    |
++-------------------------------------------------------------------+
+```
+

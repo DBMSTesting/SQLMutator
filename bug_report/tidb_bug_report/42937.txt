@@ -1,0 +1,37 @@
+ID: 42937
+Title: ResolveLocks for pessimistic transaction that has switched primary may break transaction atomicity
+Description:
+## Bug Report
+
+\* I haven't strictly confirm that the problem does exist yet, but it worth discussion, I think.
+
+
+Giventhe fact that:
+
+* A pessimistic transaction that has selected the primary may switch to another key if its first transaction
+* When statement retrying happens, pessimistic locks that are just locked should be pessimistic-rollback-ed
+* PessimisticRollback request may fail without affecting the data consistency
+
+Consider this case:
+
+**Initially, transaction T1 produces such state of data:**
+
+* key1: primary, prewrite finished
+* key2: secondary, prewrite finished, primary = k1
+* key3: residual pessimistic lock, primary = k2
+
+<details>
+<summary>Steps to construct this state...</summary>
+
+1. Transaction T1's first statement locks key2 and key3, and key2 is selected as primary
+2. Transaction T1's first statement encounters write conflict and rolls back the pessimistic locks (key2 and key3) it has locked, but the pessimisticRollback request to key3 failed
+3. Transaction T1's subsequent operations first locks key1 (as the primary), and then locked key2 (again) as a secondary
+
+</details>
+
+**Then:**
+
+1. T1 (committing in 2PC mode) completely finished its prewrite operation.
+2. Another transaction T2 encounters the lock on key3, and then it trys to resolve lock and tries to call `check_txn_status` on key2 (though it's not the real primary)
+3. TiKV doens't check if `check_txn_status` is called on a primary lock. It finds that the lock (written during T1's prewrite) is expired, so it considers T1 to be failed and rolls back the lock.
+4. T1 successfully commit key1 (primary), but failed to commit key2. So, T1's atomicity is broken.

@@ -1,0 +1,108 @@
+ID: 39453
+Title: UPDATE non-indexed column throws `DB::Exception: Missing columns`
+Description:
+Hi, I'm testing `alter...update` query with index. I create a table with five columns, `a`, `b`, `c`, `d` and `sum`, and a minmax index `INDEX idx (c, d) TYPE minmax GRANULARITY 1`. Two of the columns are materialized columns `d UInt32 MATERIALIZED 0` and `sum UInt32 MATERIALIZED (a + b) + c`. 
+After execute `alter table test_1 update b = 100 where b = 0` or `c = 0`, error message shows 'DB::Exception: Missing columns'. Maybe it's a bug.
+
+**Some Information**
+- ClickHouse server version: 22.3.8.39 (official build)
+- OS: Ubuntu 20.04.2 LTS, amd64
+- Create statement
+```sql
+CREATE TABLE test1.test_1
+(
+    `a` UInt32,
+    `b` UInt32,
+    `c` UInt32,
+    `d` UInt32 MATERIALIZED 0,
+    `sum` UInt32 MATERIALIZED (a + b) + c,
+    INDEX idx (c, d) TYPE minmax GRANULARITY 1
+)
+ENGINE = MergeTree
+ORDER BY a
+SETTINGS index_granularity = 8192
+```
+- `count()` and part
+```sql
+select count() from test_1;
+┌─count()─┐
+│ 1000000 │
+└─────────┘
+select count() from test_1 where b = 0;
+┌─count()─┐
+│   10000 │
+└─────────┘
+select name, part_type from system.parts where table='test_1' and active=1;
+┌─name─────────────┬─part_type─┐
+│ all_1_10000_7408 │ Wide      │
+└──────────────────┴───────────┘
+```
+- Query statement: `alter table test_1 update b = 100 where b = 0` or `where c = 0`
+
+**Error message and stacktrace**
+```sql
+select * from system.mutations where table='test_1';
+┌─database─┬─table──┬─mutation_id────────┬─command────────────────────┬─────────create_time─┬─block_numbers.partition_id─┬─block_numbers.number─┬─parts_to_do_names────┬─parts_to_do─┬─is_done─┬─latest_failed_part─┬────latest_fail_time─┬─latest_fail_reason─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ test1    │ test_1 │ mutation_10003.txt │ UPDATE b = 100 WHERE c = 0 │ 2022-07-21 10:46:35 │ ['']                       │ [10003]              │ ['all_1_10000_7408'] │           1 │       0 │ all_1_10000_7408   │ 2022-07-21 10:46:37 │ Code: 47. DB::Exception: Missing columns: 'c' while processing query: 'c, d', required columns: 'c' 'd' 'c' 'd'. (UNKNOWN_IDENTIFIER) (version 22.3.8.39 (official build)) │
+└──────────┴────────┴────────────────────┴────────────────────────────┴─────────────────────┴────────────────────────────┴──────────────────────┴──────────────────────┴─────────────┴─────────┴────────────────────┴─────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+```
+2022.07.21 10:28:28.544159 [ 13225 ] {740c6b41-b085-4165-be81-d655a8fe2ad0} <Debug> executeQuery: (from 127.0.0.1:59463) alter table test_1 update b = 100 where b = 0
+2022.07.21 10:28:28.545844 [ 13225 ] {740c6b41-b085-4165-be81-d655a8fe2ad0} <Information> test1.test_1 (02dfb1da-51d4-4a77-8978-24ad25f8917b): Added mutation: mutation_10001.txt
+2022.07.21 10:28:28.545947 [ 13225 ] {740c6b41-b085-4165-be81-d655a8fe2ad0} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2022.07.21 10:28:28.546018 [ 13225 ] {} <Debug> TCPHandler: Processed in 0.002277304 sec.
+2022.07.21 10:28:28.546516 [ 13347 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 6.31 TiB.
+2022.07.21 10:28:28.547170 [ 13245 ] {02dfb1da-51d4-4a77-8978-24ad25f8917b::all_1_10000_7408_10001} <Debug> test1.test_1 (02dfb1da-51d4-4a77-8978-24ad25f8917b) (SelectExecutor): Key condition: unknown
+2022.07.21 10:28:28.547276 [ 13245 ] {02dfb1da-51d4-4a77-8978-24ad25f8917b::all_1_10000_7408_10001} <Debug> test1.test_1 (02dfb1da-51d4-4a77-8978-24ad25f8917b) (SelectExecutor): Selected 1/1 parts by partition key, 1 parts by primary key, 123/123 marks by primary key, 123 marks to read from 1 ranges
+2022.07.21 10:28:28.549240 [ 13245 ] {02dfb1da-51d4-4a77-8978-24ad25f8917b::all_1_10000_7408_10001} <Debug> AggregatingTransform: Aggregated. 10000 to 1 rows (from 0.00 B) in 0.00178085 sec. (5615296.066 rows/sec., 0.00 B/sec.)
+2022.07.21 10:28:28.549815 [ 13245 ] {02dfb1da-51d4-4a77-8978-24ad25f8917b::all_1_10000_7408_10001} <Debug> test1.test_1 (02dfb1da-51d4-4a77-8978-24ad25f8917b) (SelectExecutor): Key condition: unknown
+2022.07.21 10:28:28.549878 [ 13245 ] {02dfb1da-51d4-4a77-8978-24ad25f8917b::all_1_10000_7408_10001} <Debug> test1.test_1 (02dfb1da-51d4-4a77-8978-24ad25f8917b) (SelectExecutor): Selected 1/1 parts by partition key, 1 parts by primary key, 123/123 marks by primary key, 123 marks to read from 1 ranges
+2022.07.21 10:28:28.550714 [ 13245 ] {02dfb1da-51d4-4a77-8978-24ad25f8917b::all_1_10000_7408_10001} <Error> virtual bool DB::MutatePlainMergeTreeTask::executeStep(): Code: 47. DB::Exception: Missing columns: 'c' while processing query: 'c, d', required columns: 'c' 'd' 'c' 'd'. (UNKNOWN_IDENTIFIER), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xb37467a in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+1. DB::TreeRewriterResult::collectUsedColumns(std::__1::shared_ptr<DB::IAST> const&, bool) @ 0x15c7cd69 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+2. DB::TreeRewriter::analyze(std::__1::shared_ptr<DB::IAST>&, DB::NamesAndTypesList const&, std::__1::shared_ptr<DB::IStorage const>, std::__1::shared_ptr<DB::StorageSnapshot const> const&, bool, bool, bool) const @ 0x15c862c8 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+3. DB::MutateTask::prepare() @ 0x16483cc2 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+4. DB::MutatePlainMergeTreeTask::executeStep() @ 0x1647b663 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+5. DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::routine(std::__1::shared_ptr<DB::TaskRuntimeData>) @ 0xb34b92b in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+6. DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::threadFunction() @ 0xb34b579 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+7. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0xb41e70a in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+8. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0xb4208a4 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+9. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xb41bad7 in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+10. ? @ 0xb41f65d in /root/zyf/workspace/official/clickhouse-common-static-22.3.8.39/usr/bin/clickhouse
+```
+
+**Additional context**
+I found codes from `MutationsInterpreter.cpp: 551` in function `MutationsInterpreter::prepare()`
+```cpp
+if (!affected_materialized.empty())
+{
+    stages.emplace_back(context);
+    for (const auto & column : columns_desc)
+    {
+        if (column.default_desc.kind == ColumnDefaultKind::Materialized)
+        {
+            stages.back().column_to_updated.emplace(
+                column.name,
+                column.default_desc.expression->clone());
+        }
+    }
+}
+```
+I think the bug may be caused by here. Materialized columns not affected by the updated column should not be inserted to `column_to_updated`. So I try to modify it.
+```cpp
+if (!affected_materialized.empty())
+{
+    stages.emplace_back(context);
+    for (const auto & column : columns_desc)
+    {
+        if (column.default_desc.kind == ColumnDefaultKind::Materialized && affected_materialized.count(column.name))
+        {
+            stages.back().column_to_updated.emplace(
+                column.name,
+                column.default_desc.expression->clone());
+        }
+    }
+}
+```
+Then the `alter...update` query exectue successfully.

@@ -1,0 +1,78 @@
+ID: 65468
+Title: Cannot find column _CAST with allow_experimental_analyzer
+Description:
+24.6.1
+
+```sql
+CREATE TABLE t (hr DateTime, ts DateTime) ENGINE=Memory
+as select '2000-01-01' d, d;
+```
+
+Q1) Not distributed table + analyzer https://fiddle.clickhouse.com/7e58d62f-4442-4a1a-ae49-20a38a0c649b
+expected result, all OK:
+
+```sql
+SELECT
+  count(),
+  tuple(nullIf(toDateTime(formatDateTime(hr, '%F %T', 'America/Los_Angeles'), 'America/Los_Angeles'), toDateTime(0)))  as c1,
+  defaultValueOfArgumentType(toTimeZone(ts, 'America/Los_Angeles'))  as c2,
+  formatDateTime(hr, '%F %T', 'America/Los_Angeles')  as c3
+FROM   t
+GROUP BY c1, c2, c3
+settings allow_experimental_analyzer=1 
+format Pretty;
+
+   +---------+-------------------------+---------------------+---------------------+
+   | count() | c1                      |                  c2 | c3                  |
+   +---------+-------------------------+---------------------+---------------------+
+1. |       1 | ('1999-12-31 16:00:00') | 1969-12-31 16:00:00 | 1999-12-31 16:00:00 |
+   +---------+-------------------------+---------------------+---------------------+
+```
+
+Q2) distributed table + analyzer  https://fiddle.clickhouse.com/e8a9dfea-1ff5-4614-a4ef-8449cfda66f3
+
+```sql
+SELECT
+  count(),
+  tuple(nullIf(toDateTime(formatDateTime(hr, '%F %T', 'America/Los_Angeles'), 'America/Los_Angeles'), toDateTime(0)))  as c1,
+  defaultValueOfArgumentType(toTimeZone(ts, 'America/Los_Angeles'))  as c2,
+  formatDateTime(hr, '%F %T', 'America/Los_Angeles')  as c3
+FROM   remote('127.0.0.{1,2}', default,  t)
+GROUP BY c1, c2, c3
+settings allow_experimental_analyzer=1;
+
+DB::Exception: THERE_IS_NO_COLUMN
+```
+
+Q3)  Not distributed table + No analyzer https://fiddle.clickhouse.com/ca357000-b2c9-4897-8468-4d32bcad2062
+
+```sql
+SELECT
+   count(),
+   tuple(nullIf(toDateTime(formatDateTime(hr, '%F %T', 'America/Los_Angeles'), 'America/Los_Angeles'), toDateTime(0)))  as c1,
+   defaultValueOfArgumentType(toTimeZone(ts, 'America/Los_Angeles'))  as c2,
+   formatDateTime(hr, '%F %T', 'America/Los_Angeles')  as c3
+FROM t
+GROUP BY c1, c2, c3
+settings allow_experimental_analyzer=0;
+
+DB::Exception: Column `ts` is not under aggregate function and not in GROUP BY
+```
+
+----
+
+Probably it's another/known issue https://fiddle.clickhouse.com/fa39a068-cfc1-4eab-8d7f-c848c5ba9092
+
+```sql
+CREATE TABLE t (hr DateTime, ts DateTime) ENGINE=Memory
+as select '2000-01-01' d, d;
+
+SELECT
+     count(),
+     now() as c1
+FROM remote('127.0.0.{1,2}', default,  t)
+GROUP BY c1
+settings allow_experimental_analyzer=1;
+
+DB::Exception: Cannot find column `_CAST(1718827653_DateTime
+```

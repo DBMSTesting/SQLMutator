@@ -1,0 +1,89 @@
+ID: 4754
+Title: Crash on insert via materialized view
+Description:
+* version: `19.4.1.3` (also happens on `18.161`).
+
+Description:
+
+I have 2 tables:
+
+```
+CREATE TABLE foo(d Date, x String, y String, z String)
+ENGINE = [Replicated]MergeTree() 
+PARTITION BY toYYYYMMDD(d) 
+ORDER BY (x, y)
+
+CREATE TABLE bar(d Date, x String, y String, z String, ... 35 more columns)
+ENGINE = [Replicated]MergeTree() 
+PARTITION BY toYYYYMMDD(d) 
+ORDER BY (x, y)
+```
+
+(`bar` has 39 columns, `foo` has 7 columns)
+
+Then I create a common deduplicated table to collect unique `(x,y,z)` per `d`:
+
+```
+CREATE TABLE dest(d Date, x String, y String, z String)
+ENGINE = ReplacingMergeTree()
+PARTITION BY toYYYYMMDD(d)
+ORDER BY (d,x,y,z)
+```
+
+Then I populate the table:
+```
+INSERT INTO dest SELECT d,x,y,z FROM foo
+INSERT INTO dest SELECT d,x,y,z FROM bar
+```
+
+
+Then I create 2 MVs from `foo` & `bar` to `dest`:
+
+```
+CREATE MATERIALIZED VIEW foo2dest TO dest AS SELECT d,x,y,z FROM foo
+CREATE MATERIALIZED VIEW bar2dest TO dest AS SELECT d,x,y,z FROM bar
+```
+
+Expected behavior: updates to `foo`/`bar` eventually end up in `dest` and get deduplicated by the `Replacing` engine.
+
+Observed behavior: process runs fine for ~8-10 minutes, then crashes and restarts (CH is running in Docker). 
+
+`dmesg` does not contain anything useful or even related.
+
+I tried attaching `strace -f -p $CH_PID` to the process, here's what I recorded:
+
+```
+[pid 29615] madvise(0x7f6859003000, 2629632, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6858c40000, 172032, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6870e48000, 86016, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6870dfc000, 12288, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6870df1000, 28672, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6870e0f000, 8192, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f68cb5fa000, 20480, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6870dcb000, 24576, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] madvise(0x7f6870d91000, 40960, MADV_DONTNEED <unfinished ...>
+[pid 29615] <... madvise resumed> )     = 0
+[pid 29615] --- SIGSEGV {si_signo=SIGSEGV, si_code=SEGV_ACCERR, si_addr=0x7f6857f7efd8} ---
+```
+
+I also tried to create MVs as follows
+
+```
+CREATE MATERIALIZED VIEW foo2dest TO dest AS SELECT d,x,y,z FROM foo GROUP BY d,x,y,z
+CREATE MATERIALIZED VIEW bar2dest TO dest AS SELECT d,x,y,z FROM bar GROUP BY d,x,y,z
+```
+
+in order to see if grouping affects this (just a random thought, didn't have a reason to suspect this would help).
+
+This happens exclusively after inserts into a fatter table (`bar`, 39 columns). Inserts are batched, but this happens on a _very_ low-load setup (max batch size I observed today was ~300 entries).
+Real-life setup uses `Replicated` trees for everything but i'm not sure that matters.
+
+Let me know if I can provide any additional details.

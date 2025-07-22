@@ -1,0 +1,40 @@
+ID: 14094
+Title: comparison of nested types returns true or false always (even with nulls)
+Description:
+fixes https://github.com/duckdblabs/duckdb-internal/issues/3063
+fixes https://github.com/duckdb/duckdb/issues/13924
+
+Postgres teats nulls in nested types as equal and orderable (see examples below). In duckdb v1.1.0 we did the same for comparisons in `where` conditions. In select conditions, however, we would return `NULL` if there was a NULL somewhere in the nested object. This would lead to inconsistent results, i.e 
+
+```
+select a<>b from VALUES ((NULL, 1, NULL), (5, 6, 7)) t(a, b);
+```
+would return `NULL`
+
+while 
+```
+select 1 from VALUES ((NULL, 1, NULL), (5, 6, 7)) t(a, b) where a<>b;
+```
+would return `1` even though the where condition evaluates to `NULL`
+
+
+The fix I came up with is to copy the validity mask from `ComparesNotNull(leftv, rightv, result_validity, count)` in the `NestedComparisonExecutor`. This validity mask stores `NULL` results if a value in a nested type column is `NULL`. In these cases `NULL` is correct since `NULL` compared with anything is `NULL`
+
+After the `ComparisonSelector` is called, we set all rows to valid if they were valid after the `ComparesNotNull` call. Normally the `ComparisonSelector` sets rows to `NULL` if a value in the nested types is `NULL`, which is what we want to prevent. Setting the rows back to valid ensures that if two non-null nested values are compared, there is always a non-null boolean result
+
+
+Postgres behavior
+```
+create type foo as (a integer, b integer);
+create type buzz as (c integer, d integer);
+create table t3 (a foo);
+create table t4 (b buzz);
+insert into t3 values (row(1, NULL), row(NULL, NULL), row(2, 2));
+insert into t3 values (row(4, NULL), row(NULL, NULL), row(2, 2));
+select (a).a, (b).a from t3, t4;
+select a, b, a=b from t3, t4 where a = b;
+ --   a    |    b    | ?column?
+-- ---------+---------+----------
+ -- (10,10) | (10,10) | t
+ -- (,)     | (,)     | t
+```

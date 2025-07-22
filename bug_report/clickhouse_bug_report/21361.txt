@@ -1,0 +1,88 @@
+ID: 21361
+Title: Lost parts that aren't really lost => replication queue grows very fast
+Description:
+**Describe the bug**
+We have noticed the number of nodes in ZK is growing very fast:
+![image](https://user-images.githubusercontent.com/979624/109590234-93a62b00-7b46-11eb-9d36-3d2fc7701ee3.png)
+
+After checking, it appears they correspond to the replication queue in CH:
+```
+SELECT
+    count(*),
+    type
+FROM system.replication_queue
+GROUP BY type
+
+Query id: 22b47a8a-a637-4e02-80a2-e5f4afe512da
+
+┌─count()─┬─type──────────┐
+│  146833 │ REPLACE_RANGE │
+│      47 │ MERGE_PARTS   │
+└─────────┴───────────────┘
+```
+
+When checking further, these are errors because of missing parts, starting several days ago:
+```
+SELECT * EXCEPT database EXCEPT table
+FROM system.replication_queue
+WHERE type = 'REPLACE_RANGE'
+ORDER BY create_time ASC
+LIMIT 5
+
+Query id: 94cd3b60-2a0d-4e10-9e15-ae781189a9dd
+
+┌─replica_name─┬─position─┬─node_name────────┬─type──────────┬─────────create_time─┬─required_quorum─┬─source_replica─┬─new_part_name─┬─parts_to_merge─┬─is_detach─┬─is_currently_executing─┬─num_tries─┬─last_exception───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬───last_attempt_time─┬─num_postponed─┬─postpone_reason─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬──last_postpone_time─┬─merge_type─┐
+│ 1            │   108617 │ queue-0000107972 │ REPLACE_RANGE │ 2021-02-27 00:11:54 │               0 │ 0              │               │ []             │         0 │                      0 │         2 │ Code: 234, e.displayText() = DB::Exception: Not found part 15-4-0_3021_3021_0 (or part covering it) neither source table neither remote replicas (version 21.2.3.15) │ 2021-03-02 00:00:57 │        788022 │ Not executing log entry queue-0000107972 of type REPLACE_RANGE for part  because another DROP_RANGE or REPLACE_RANGE entry are currently executing. │ 2021-03-02 03:09:13 │            │
+│ 1            │   108619 │ queue-0000107977 │ REPLACE_RANGE │ 2021-02-27 00:11:55 │               0 │ 0              │               │ []             │         0 │                      0 │         2 │ Code: 234, e.displayText() = DB::Exception: Not found part 5-4-0_3007_3007_0 (or part covering it) neither source table neither remote replicas (version 21.2.3.15)  │ 2021-03-02 00:00:58 │        788017 │ Not executing log entry queue-0000107977 of type REPLACE_RANGE for part  because another DROP_RANGE or REPLACE_RANGE entry are currently executing. │ 2021-03-02 03:09:13 │            │
+│ 1            │   108620 │ queue-0000107979 │ REPLACE_RANGE │ 2021-02-27 00:11:55 │               0 │ 0              │               │ []             │         0 │                      0 │         2 │ Code: 234, e.displayText() = DB::Exception: Not found part 79-4-0_2915_2915_0 (or part covering it) neither source table neither remote replicas (version 21.2.3.15) │ 2021-03-02 00:00:58 │        788017 │ Not executing log entry queue-0000107979 of type REPLACE_RANGE for part  because another DROP_RANGE or REPLACE_RANGE entry are currently executing. │ 2021-03-02 03:09:13 │            │
+│ 1            │   108618 │ queue-0000107974 │ REPLACE_RANGE │ 2021-02-27 00:11:55 │               0 │ 0              │               │ []             │         0 │                      0 │         2 │ Code: 234, e.displayText() = DB::Exception: Not found part 23-4-0_3027_3027_0 (or part covering it) neither source table neither remote replicas (version 21.2.3.15) │ 2021-03-02 00:00:58 │        788017 │ Not executing log entry queue-0000107974 of type REPLACE_RANGE for part  because another DROP_RANGE or REPLACE_RANGE entry are currently executing. │ 2021-03-02 03:09:13 │            │
+│ 1            │   108622 │ queue-0000107981 │ REPLACE_RANGE │ 2021-02-27 00:11:55 │               0 │ 0              │               │ []             │         0 │                      0 │         2 │ Code: 234, e.displayText() = DB::Exception: Not found part 41-4-0_3019_3019_0 (or part covering it) neither source table neither remote replicas (version 21.2.3.15) │ 2021-03-02 00:00:59 │        788017 │ Not executing log entry queue-0000107981 of type REPLACE_RANGE for part  because another DROP_RANGE or REPLACE_RANGE entry are currently executing. │ 2021-03-02 03:09:13 │            │
+└──────────────┴──────────┴──────────────────┴───────────────┴─────────────────────┴─────────────────┴────────────────┴───────────────┴────────────────┴───────────┴────────────────────────┴───────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────┴───────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────────────┴────────────┘
+
+5 rows in set. Elapsed: 2.441 sec. Processed 146.88 thousand rows, 74.27 MB (60.17 thousand rows/s., 30.42 MB/s.) 
+```
+
+When checking the parts in `system.part_log`, they don't exist on the host, but exist on the replica.
+
+Local host: no mention of part 15-4-0_3021_3021_0 in `system.part_log`, but there is a repeating error in the CH log:
+```
+254526:2021.02.27 00:12:09.282277 [ 118199 ] {} <Information> database.table_local (3bc87ec4-fcc2-4bd2-810a-3ffc12760885): DB::Exception: Not found part 15-4-0_3021_3021_0 (or part covering it) neither source table neither remote replicas
+```
+
+Remote host: no CH logs related to part 15-4-0_3021_3021_0, but there is a row in the `system.part_log` and the part is still there in `system.parts`:
+```
+SELECT * EXCEPT query_id EXCEPT database EXCEPT table
+FROM system.part_log
+WHERE (database = 'database') AND (part_name = '15-4-0_3021_3021_0')
+ORDER BY event_time ASC
+
+Query id: 2ddc47f0-7b48-443a-bbd1-c288f0ebde71
+
+┌─event_type─┬─event_date─┬──────────event_time─┬─duration_ms─┬─part_name──────────┬─partition_id─┬─path_on_disk──────────────────────────────────────────────────────────────────────────┬─rows─┬─size_in_bytes─┬─merged_from─┬─bytes_uncompressed─┬─read_rows─┬─read_bytes─┬─peak_memory_usage─┬─error─┬─exception─┐
+│ NewPart    │ 2021-02-27 │ 2021-02-27 00:11:54 │         569 │ 15-4-0_3021_3021_0 │ 15-4-0       │ /disk12/clickhouse/store/832/83200d96-3224-40dc-83de-ab7adedbf1ec/15-4-0_3021_3021_0/ │   77 │       6897247 │ []          │                  0 │         0 │          0 │                 0 │     0 │           │
+└────────────┴────────────┴─────────────────────┴─────────────┴────────────────────┴──────────────┴───────────────────────────────────────────────────────────────────────────────────────┴──────┴───────────────┴─────────────┴────────────────────┴───────────┴────────────┴───────────────────┴───────┴───────────┘
+
+1 rows in set. Elapsed: 0.335 sec. Processed 31.11 million rows, 2.00 GB (92.84 million rows/s., 5.97 GB/s.)
+```
+```
+SELECT * EXCEPT database EXCEPT table EXCEPT partition
+FROM system.parts
+WHERE name = '15-4-0_3021_3021_0'
+
+Query id: 0e0ebe32-01c9-4e2f-a2ce-c6fef2b46e45
+
+┌─name───────────────┬─────────────────────────────────uuid─┬─part_type─┬─active─┬─marks─┬─rows─┬─bytes_on_disk─┬─data_compressed_bytes─┬─data_uncompressed_bytes─┬─marks_bytes─┬───modification_time─┬─────────remove_time─┬─refcount─┬───min_date─┬───max_date─┬────────────min_time─┬────────────max_time─┬─partition_id─┬─min_block_number─┬─max_block_number─┬─level─┬─data_version─┬─primary_key_bytes_in_memory─┬─primary_key_bytes_in_memory_allocated─┬─is_frozen─┬─engine───────────────────────┬─disk_name─┬─path──────────────────────────────────────────────────────────────────────────────────┬─hash_of_all_files────────────────┬─hash_of_uncompressed_files───────┬─uncompressed_hash_of_compressed_files─┬─delete_ttl_info_min─┬─delete_ttl_info_max─┬─move_ttl_info.expression─┬─move_ttl_info.min─┬─move_ttl_info.max─┬─default_compression_codec─┬─recompression_ttl_info.expression─┬─recompression_ttl_info.min─┬─recompression_ttl_info.max─┐
+│ 15-4-0_3021_3021_0 │ 00000000-0000-0000-0000-000000000000 │ Compact   │      1 │     4 │   77 │       6897247 │               6896099 │                36829018 │         928 │ 2021-02-27 00:11:54 │ 1970-01-01 00:00:00 │        5 │ 1970-01-01 │ 1970-01-01 │ 1970-01-01 00:00:00 │ 1970-01-01 00:00:00 │ 15-4-0       │             3021 │             3021 │     0 │         3021 │                         249 │                                   584 │         0 │ ReplicatedReplacingMergeTree │ disk12    │ /disk12/clickhouse/store/832/83200d96-3224-40dc-83de-ab7adedbf1ec/15-4-0_3021_3021_0/ │ 242454d627d311e6258a92383c0110c9 │ 5399a1fb04391ab6a486e28d5a9d95dc │ 27a76ceec4e170d6bb63b4ba6754d39d      │ 1970-01-01 00:00:00 │ 1970-01-01 00:00:00 │ []                       │ []                │ []                │ LZ4                       │ []                                │ []                         │ []                         │
+└────────────────────┴──────────────────────────────────────┴───────────┴────────┴───────┴──────┴───────────────┴───────────────────────┴─────────────────────────┴─────────────┴─────────────────────┴─────────────────────┴──────────┴────────────┴────────────┴─────────────────────┴─────────────────────┴──────────────┴──────────────────┴──────────────────┴───────┴──────────────┴─────────────────────────────┴───────────────────────────────────────┴───────────┴──────────────────────────────┴───────────┴───────────────────────────────────────────────────────────────────────────────────────┴──────────────────────────────────┴──────────────────────────────────┴───────────────────────────────────────┴─────────────────────┴─────────────────────┴──────────────────────────┴───────────────────┴───────────────────┴───────────────────────────┴───────────────────────────────────┴────────────────────────────┴────────────────────────────┘
+
+1 rows in set. Elapsed: 20.739 sec. Processed 556.34 thousand rows, 341.05 MB (26.83 thousand rows/s., 16.44 MB/s.)
+```
+
+On some other hosts, the parts mentioned in the replication queue error message existed before, but were merged into other parts later.
+
+It seems as we insert more and more rows into the table, there are more and more "lost" parts, and it is causing the replication queue grow more and more. Stopping the writes improves the situation, but very slowly.
+
+* Which ClickHouse server version to use
+
+21.2.3.15
+

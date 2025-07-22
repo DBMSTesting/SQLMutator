@@ -1,0 +1,63 @@
+ID: 38665
+Title: Unexpected Estimated Rows by INNER JOIN
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+CREATE TABLE t0(c0 CHAR);
+CREATE TABLE t1(c0 INT);
+INSERT INTO t0 VALUES ('a'), ('b'), ('c'), ('d'), ('e'), ('f'), ('g'), ('h'), ('i'), ('j');
+INSERT INTO t1 VALUES (1), (NULL);
+ANALYZE TABLE t0;
+ANALYZE TABLE t1;
+
+EXPLAIN SELECT * FROM t1 RIGHT JOIN t0 ON t1.c0!=t0.c0 WHERE t1.c0 OR t0.c0; -- estimated row count: 16
+EXPLAIN SELECT * FROM t1 INNER JOIN t0 ON t1.c0!=t0.c0 WHERE t1.c0 OR t0.c0; -- estimated row count: 20
+```
+
+### 2. What did you expect to see? (Required)
+I expect the second SELECT returns no more estimated rows than the first SELECT.
+
+The query plan of the first SELECT:
+```
+id      estRows task    access object   operator info
+Selection_7     16.00   root            or(database4.t1.c0, istrue_with_null(cast(database4.t0.c0, double BINARY)))
+└─HashJoin_9    20.00   root            CARTESIAN right outer join, other cond:ne(cast(database4.t1.c0, double BINARY), cast(database4.t0.c0, double BINARY))
+  ├─TableReader_11(Build)       2.00    root            data:TableFullScan_10
+  │ └─TableFullScan_10  2.00    cop[tikv]       table:t1        keep order:false
+  └─TableReader_13(Probe)       10.00   root            data:TableFullScan_12
+    └─TableFullScan_12  10.00   cop[tikv]       table:t0        keep order:false
+```
+The query plan of the second SELECT:
+```
+id      estRows task    access object   operator info
+HashJoin_10     20.00   root            CARTESIAN inner join, other cond:ne(cast(database4.t1.c0, double BINARY), cast(database4.t0.c0, double BINARY)), or(database4.t1.c0, istrue_with_null(cast(database4.t0.c0, double BINARY)))
+├─TableReader_12(Build) 2.00    root            data:TableFullScan_11
+│ └─TableFullScan_11    2.00    cop[tikv]       table:t1        keep order:false
+└─TableReader_14(Probe) 10.00   root            data:TableFullScan_13
+  └─TableFullScan_13    10.00   cop[tikv]       table:t0        keep order:false
+```
+
+Both query plans have similar structure below HashJoin and exact the same number of estimated rows after the HashJoin. After that, applying the same `WHERE` clause incur different estimated rows.
+
+
+### 3. What did you see instead (Required)
+The second SELECT returns more estimated rows than the first SELECT.
+
+### 4. What is your TiDB version? (Required)
+
+```
+| Release Version: v6.4.0-alpha-133-g6c55faf03
+Edition: Community
+Git Commit Hash: 6c55faf034e8c205ffd23126829c637fb8a47451
+Git Branch: master
+UTC Build Time: 2022-10-26 07:47:53
+GoVersion: go1.19.1
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: true
+Store: unistore |
+```
+

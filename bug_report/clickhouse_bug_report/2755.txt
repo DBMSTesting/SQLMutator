@@ -1,0 +1,125 @@
+ID: 2755
+Title: Problem with merges if some replica stopped
+Description:
+We have a CH cluster (v 1.1.54385), 8 nodes, 4 shard * 2 replicas.
+
+
+Writing rate (we insert into MetricsDistributed table, see below) is something like 30k-50k rows in each batch, ~100 batches per minute.
+
+
+We have Metrics table on each node
+```
+CREATE TABLE IF NOT EXISTS default.Metrics ON CLUSTER metrics
+(
+    appId UInt32,
+    metricId UInt32,
+    timestamp UInt32,
+    value Float64,
+    `tags.name` Array(UInt32),
+    `tags.value` Array(UInt32)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/metrics/{shard}/Metrics', '{replica}')
+PARTITION BY (floor(timestamp/86400)) ORDER BY (appId, metricId, timestamp);
+```
+
+
+Distributed table on each node
+```
+CREATE TABLE IF NOT EXISTS  default.MetricsDistributed ON CLUSTER metrics AS default.Metrics
+ENGINE = Distributed(metrics, default, Metrics, rand());
+
+```
+
+
+And MV with its own Distributed table on each node
+
+```
+CREATE MATERIALIZED VIEW default.MetricsSampledView  ON CLUSTER metrics
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/metrics/{shard}/MetricsSampledView', '{replica}')
+PARTITION BY floor(timestamp / 86400)
+ORDER BY (appId, metricId, timestamp) POPULATE AS
+SELECT *
+FROM default.Metrics
+WHERE intHash32(timestamp) % 20 = 0;
+```
+
+```
+CREATE TABLE IF NOT EXISTS  default.MetricsDistributedSampledView ON CLUSTER metrics AS default.MetricsSampledView
+ENGINE = Distributed(metrics, default, MetricsSampledView, rand());
+```
+
+
+In front of CH cluster there is load balancer, queries execute on Distributed tables.
+
+
+
+Before statring use CH on prod we decided to perfor some HA test. We just stopped CH on one node (with leaders).
+
+Problems:
+
+1. With time number of parts started growing here ```SELECT count(*),table FROM system.parts WHERE active group by table;``` (we checked on other replica)
+
+Then we started getting error on client side 
+```
+2018.07.27 10:26:01.949040 [ 638 ] <Error> executeQuery: Code: 252, e.displayText() = DB::Exception: Too many parts (302). Merges are processing significantly slower than inserts., e.what() = DB::Exception (from 10.1.2.5:47558) (in query: INSERT INTO MetricsDistributed  FORMAT TabSeparated), Stack trace:
+2018.07.27 10:26:02.010363 [ 638 ] <Error> HTTPHandler: Code: 252, e.displayText() = DB::Exception: Too many parts (302). Merges are processing significantly slower than inserts., 
+```
+
+What we see in system.replicas (on other node) is that leader was reassigned, this is ok, but errors in tjer table are (part of errors):
+
+
+```
+
+┌─table─────────────────────┬─postpone_reason─┬─last_exception───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1875_1875_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1904_1904_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1869_1869_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1897_1897_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1867_1867_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1940_1940_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1881_1881_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1919_1919_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1928_1928_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1868_1868_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+│ .inner.MetricsSampledView │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_1934_1934_0 or covering part, e.what() = DB::Exception   │
+│ .inner.MetricsSampledView │                 │                                                                                                                                                                  │
+
+                                                                                                                       │
+│ Metrics                   │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_42206_42206_0 or covering part, e.what() = DB::Exception │
+│ Metrics                   │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_42289_42289_0 or covering part, e.what() = DB::Exception │
+│ Metrics                   │                 │                                                                                                                                                                  │
+│ Metrics                   │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_42243_42243_0 or covering part, e.what() = DB::Exception │
+│ Metrics                   │                 │                                                                                                                                                                  │
+│ Metrics                   │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_42212_42212_0 or covering part, e.what() = DB::Exception │
+│ Metrics                   │                 │                                                                                                                                                                  │
+│ Metrics                   │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_42257_42257_0 or covering part, e.what() = DB::Exception │
+│ Metrics                   │                 │ Code: 234, e.displayText() = DB::Exception: No active replica has part 722f7ee72516522ffdfc83494465fd4e_42228_42228_0 or covering part, e.what() = DB::Exception │
+
+│ .inner.MetricsSampledView │ Not merging into part 722f7ee72516522ffdfc83494465fd4e_2877_2942_14 because part 722f7ee72516522ffdfc83494465fd4e_2877_2938_13 is not ready yet (log entry for that part is being processed).    │ Poco::Exception. Code: 1000, e.code() = 111, e.displayText() = Connection refused, e.what() = Connection refused                                                  │
+│ .inner.MetricsSampledView │ Not executing log entry for part 722f7ee72516522ffdfc83494465fd4e_2877_2954_17 because another log entry for the same part is being processed. This shouldn\'t happen often.                     │ Poco::Exception. Code: 1000, e.code() = 111, e.displayText() = Connection refused, e.what() = Connection refused                                                  │
+│ .inner.MetricsSampledView │ Not executing log entry for part 722f7ee72516522ffdfc83494465fd4e_2877_2964_20 because another log entry for the same part is being processed. This shouldn\'t happen often.                     │ Poco::Exception. Code: 1000, e.code() = 111, e.displayText() = Connection refused, e.what() = Connection refused                                                  │
+│ .inner.MetricsSampledView │ Not executing log entry for part 722f7ee72516522ffdfc83494465fd4e_2877_2970_22 because another log entry for the same part is being processed. This shouldn\'t happen often.
+
+```
+
+
+2. This is not all, main problem was that after our batcher tried to repeat insert few times we started getting duplications in table (max_insert_block_size is default and our batch size significantly lower than this value, so can't be a problem).
+
+
+
+
+
+If we DROP MV and repeat test number of parts will grow too and we will see the same errors in log and in table, but with time numbers will stabilize and clsuter will continue working without ```Too many parts (302). Merges are processing significantly slower than inserts.``` issue and without duplications in main table. 
+
+
+Could you please provide a receipt how to avoid such problems, if you need more info we always ready to provide.
+
+PS: Alex Zatelepin @ztlpn  can provide more info, I already contact him, big thx Alex.
+
+PSS: thx for a great product

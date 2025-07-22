@@ -1,0 +1,80 @@
+ID: 35318
+Title: Inl_join hints doesn't work when join operator including CTE after merge
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+First, add merge hint for master #34574 
+```
+mysql> desc t1;
++-------+---------+------+------+---------+-------+
+| Field | Type    | Null | Key  | Default | Extra |
++-------+---------+------+------+---------+-------+
+| a     | int(11) | YES  |      | NULL    |       |
+| b     | int(11) | YES  | MUL  | NULL    |       |
+| c     | int(11) | YES  | MUL  | NULL    |       |
++-------+---------+------+------+---------+-------+
+3 rows in set (0.00 sec)
+
+mysql> desc t2;
++-------+---------+------+------+---------+-------+
+| Field | Type    | Null | Key  | Default | Extra |
++-------+---------+------+------+---------+-------+
+| a     | int(11) | YES  |      | NULL    |       |
+| b     | int(11) | YES  | MUL  | NULL    |       |
+| c     | int(11) | YES  | MUL  | NULL    |       |
++-------+---------+------+------+---------+-------+
+3 rows in set (0.00 sec)
+
+mysql> explain WITH cte1 AS (SELECT /*+ merge() */  * FROM t1) SELECT /*+ inl_join(cte1) */  * FROM cte1 join t2 on cte1.b = t2.b;
++------------------------------+----------+-----------+---------------+----------------------------------------------+
+| id                           | estRows  | task      | access object | operator info                                |
++------------------------------+----------+-----------+---------------+----------------------------------------------+
+| HashJoin_41                  | 12487.50 | root      |               | inner join, equal:[eq(test.t1.b, test.t2.b)] |
+| ├─TableReader_59(Build)      | 9990.00  | root      |               | data:Selection_58                            |
+| │ └─Selection_58             | 9990.00  | cop[tikv] |               | not(isnull(test.t2.b))                       |
+| │   └─TableFullScan_57       | 10000.00 | cop[tikv] | table:t2      | keep order:false, stats:pseudo               |
+| └─TableReader_53(Probe)      | 9990.00  | root      |               | data:Selection_52                            |
+|   └─Selection_52             | 9990.00  | cop[tikv] |               | not(isnull(test.t1.b))                       |
+|     └─TableFullScan_51       | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo               |
++------------------------------+----------+-----------+---------------+----------------------------------------------+
+7 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                                                                                                |
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Warning | 1815 | There are no matching table names for (cte1) in optimizer hint /*+ INL_JOIN(cte1) */ or /*+ TIDB_INLJ(cte1) */. Maybe you can use the table alias name |
++---------+------+--------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+According to the cost, plan will choose the hint, just like index join hint for t2
+```
+mysql> explain WITH cte1 AS (SELECT /*+ merge() */  * FROM t1) SELECT /*+ inl_join(t2) */  * FROM cte1 join t2 on cte1.b = t2.b;
++----------------------------------+----------+-----------+--------------------------+-----------------------------------------------------------------------------------------------------------------+
+| id                               | estRows  | task      | access object            | operator info                                                                                                   |
++----------------------------------+----------+-----------+--------------------------+-----------------------------------------------------------------------------------------------------------------+
+| IndexJoin_16                     | 12487.50 | root      |                          | inner join, inner:IndexLookUp_15, outer key:test.t1.b, inner key:test.t2.b, equal cond:eq(test.t1.b, test.t2.b) |
+| ├─TableReader_28(Build)          | 9990.00  | root      |                          | data:Selection_27                                                                                               |
+| │ └─Selection_27                 | 9990.00  | cop[tikv] |                          | not(isnull(test.t1.b))                                                                                          |
+| │   └─TableFullScan_26           | 10000.00 | cop[tikv] | table:t1                 | keep order:false, stats:pseudo                                                                                  |
+| └─IndexLookUp_15(Probe)          | 1.25     | root      |                          |                                                                                                                 |
+|   ├─Selection_14(Build)          | 1.25     | cop[tikv] |                          | not(isnull(test.t2.b))                                                                                          |
+|   │ └─IndexRangeScan_12          | 1.25     | cop[tikv] | table:t2, index:idx_b(b) | range: decided by [eq(test.t2.b, test.t1.b)], keep order:false, stats:pseudo                                    |
+|   └─TableRowIDScan_13(Probe)     | 1.25     | cop[tikv] | table:t2                 | keep order:false, stats:pseudo                                                                                  |
++----------------------------------+----------+-----------+--------------------------+-----------------------------------------------------------------------------------------------------------------+
+8 rows in set (0.01 sec)
+``` 
+### 3. What did you see instead (Required)
+No match table names.
+### 4. What is your TiDB version? (Required)
+master, add #34574 
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,150 @@
+ID: 7207
+Title: Suspected memory leak
+Description:
+We have ClickHouse servers that continually grow in RAM usage. Our setup is quite simple:
+
+- ClickHouse 19.9.4
+- Single server, nothing replicated / distributed
+- About 60 GB of data on disk (after compression)
+- About 60 databases, with one third of them being written to continuously (the others contain historical data that does not change)
+- Less than 30 tables in each database
+- We use only MergeTree tables behind Buffer tables (we have many small writes so the Buffer is used to reduce the number of parts and merges)
+- All communications with the database are via HTTP
+
+We run "ps" every hour and you can see that the RSS grows and grows:
+```
+TIMESTAMP                 USER     PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+2019-10-02 09:00:01+00:00 clickho+ 476 14.4 8.2 24307812 1347404 ? Ssl Sep23 1826:07 /usr/bin/clickhouse-server 
+2019-10-02 10:00:01+00:00 clickho+ 476 14.4 8.3 24307812 1363848 ? Ssl Sep23 1834:12 /usr/bin/clickhouse-server 
+2019-10-02 11:00:01+00:00 clickho+ 476 14.4 8.2 24389732 1346968 ? Ssl Sep23 1841:44 /usr/bin/clickhouse-server 
+2019-10-02 12:00:01+00:00 clickho+ 476 14.4 8.2 24389732 1352168 ? Ssl Sep23 1850:36 /usr/bin/clickhouse-server 
+2019-10-02 13:00:01+00:00 clickho+ 476 14.4 8.2 24471652 1353384 ? Ssl Sep23 1859:06 /usr/bin/clickhouse-server 
+2019-10-02 14:00:01+00:00 clickho+ 476 14.4 8.2 24471652 1346976 ? Ssl Sep23 1868:45 /usr/bin/clickhouse-server 
+2019-10-02 15:00:01+00:00 clickho+ 476 14.4 8.3 24471652 1363852 ? Ssl Sep23 1877:01 /usr/bin/clickhouse-server 
+2019-10-02 16:00:01+00:00 clickho+ 476 14.4 8.4 24471652 1388272 ? Ssl Sep23 1885:11 /usr/bin/clickhouse-server 
+2019-10-02 17:00:01+00:00 clickho+ 476 14.4 8.3 24471652 1368556 ? Ssl Sep23 1892:54 /usr/bin/clickhouse-server 
+2019-10-02 18:00:01+00:00 clickho+ 476 14.4 8.4 24471652 1394792 ? Ssl Sep23 1901:06 /usr/bin/clickhouse-server 
+2019-10-02 19:00:01+00:00 clickho+ 476 14.4 8.4 24471652 1380816 ? Ssl Sep23 1908:56 /usr/bin/clickhouse-server 
+2019-10-02 20:00:01+00:00 clickho+ 476 14.4 8.7 24471652 1439076 ? Ssl Sep23 1917:36 /usr/bin/clickhouse-server 
+2019-10-02 21:00:01+00:00 clickho+ 476 14.4 8.4 24471652 1393600 ? Ssl Sep23 1926:23 /usr/bin/clickhouse-server 
+2019-10-02 22:00:01+00:00 clickho+ 476 14.4 8.4 24471652 1386732 ? Ssl Sep23 1934:36 /usr/bin/clickhouse-server 
+2019-10-02 23:00:01+00:00 clickho+ 476 14.3 8.4 24471652 1394264 ? Ssl Sep23 1942:29 /usr/bin/clickhouse-server 
+2019-10-03 00:00:01+00:00 clickho+ 476 14.3 8.4 24553572 1391704 ? Ssl Sep23 1950:50 /usr/bin/clickhouse-server 
+2019-10-03 01:00:01+00:00 clickho+ 476 14.3 8.5 24619108 1396604 ? Ssl Sep23 1959:02 /usr/bin/clickhouse-server 
+2019-10-03 02:00:01+00:00 clickho+ 476 14.3 8.5 24766564 1407768 ? Ssl Sep23 1967:31 /usr/bin/clickhouse-server 
+2019-10-03 03:00:01+00:00 clickho+ 476 14.3 8.5 24766564 1402432 ? Ssl Sep23 1975:36 /usr/bin/clickhouse-server 
+2019-10-03 04:00:01+00:00 clickho+ 476 14.3 8.6 24766564 1418952 ? Ssl Sep23 1983:51 /usr/bin/clickhouse-server 
+2019-10-03 05:00:01+00:00 clickho+ 476 14.3 8.6 24766564 1419320 ? Ssl Sep23 1992:11 /usr/bin/clickhouse-server 
+2019-10-03 06:00:01+00:00 clickho+ 476 14.3 9.1 24832100 1498424 ? Ssl Sep23 2000:17 /usr/bin/clickhouse-server 
+2019-10-03 07:00:01+00:00 clickho+ 476 14.3 8.6 24832100 1415112 ? Ssl Sep23 2008:19 /usr/bin/clickhouse-server 
+2019-10-03 08:00:01+00:00 clickho+ 476 14.3 8.5 24832100 1410228 ? Ssl Sep23 2016:33 /usr/bin/clickhouse-server 
+2019-10-03 09:00:01+00:00 clickho+ 476 14.3 8.5 24832100 1412512 ? Ssl Sep23 2025:17 /usr/bin/clickhouse-server 
+2019-10-03 10:00:01+00:00 clickho+ 476 14.3 8.6 24832100 1417368 ? Ssl Sep23 2033:21 /usr/bin/clickhouse-server 
+2019-10-03 11:00:01+00:00 clickho+ 476 14.3 8.6 24832100 1424476 ? Ssl Sep23 2041:04 /usr/bin/clickhouse-server 
+2019-10-03 12:00:01+00:00 clickho+ 476 14.3 8.6 24832100 1426472 ? Ssl Sep23 2049:44 /usr/bin/clickhouse-server 
+2019-10-03 13:00:01+00:00 clickho+ 476 14.3 8.7 24832100 1435392 ? Ssl Sep23 2058:21 /usr/bin/clickhouse-server 
+2019-10-03 14:00:01+00:00 clickho+ 476 14.3 8.7 24832100 1441024 ? Ssl Sep23 2068:29 /usr/bin/clickhouse-server 
+2019-10-03 15:00:01+00:00 clickho+ 476 14.3 8.8 24832100 1452376 ? Ssl Sep23 2078:07 /usr/bin/clickhouse-server 
+2019-10-03 16:00:01+00:00 clickho+ 476 14.3 8.8 24832100 1456420 ? Ssl Sep23 2089:09 /usr/bin/clickhouse-server 
+2019-10-03 17:00:02+00:00 clickho+ 476 14.4 8.7 24832100 1439860 ? Ssl Sep23 2101:10 /usr/bin/clickhouse-server 
+2019-10-03 18:00:01+00:00 clickho+ 476 14.4 8.7 24832100 1441256 ? Ssl Sep23 2111:56 /usr/bin/clickhouse-server 
+2019-10-03 19:00:01+00:00 clickho+ 476 14.4 8.8 24832100 1450908 ? Ssl Sep23 2123:19 /usr/bin/clickhouse-server 
+2019-10-03 20:00:01+00:00 clickho+ 476 14.4 8.8 24832100 1459820 ? Ssl Sep23 2134:31 /usr/bin/clickhouse-server 
+2019-10-03 21:00:02+00:00 clickho+ 476 14.4 8.8 24832100 1449452 ? Ssl Sep23 2146:38 /usr/bin/clickhouse-server 
+2019-10-03 22:00:01+00:00 clickho+ 476 14.5 8.9 24832100 1470216 ? Ssl Sep23 2158:17 /usr/bin/clickhouse-server 
+2019-10-03 23:00:01+00:00 clickho+ 476 14.5 8.8 24832100 1461244 ? Ssl Sep23 2170:37 /usr/bin/clickhouse-server 
+2019-10-04 00:00:01+00:00 clickho+ 476 14.5 8.9 24832100 1467384 ? Ssl Sep23 2182:09 /usr/bin/clickhouse-server 
+2019-10-04 01:00:01+00:00 clickho+ 476 14.5 9.0 24832100 1481384 ? Ssl Sep23 2194:30 /usr/bin/clickhouse-server 
+2019-10-04 02:00:01+00:00 clickho+ 476 14.6 9.0 24832100 1491952 ? Ssl Sep23 2207:10 /usr/bin/clickhouse-server 
+2019-10-04 03:00:01+00:00 clickho+ 476 14.6 9.4 24832100 1549724 ? Ssl Sep23 2217:47 /usr/bin/clickhouse-server 
+2019-10-04 04:00:01+00:00 clickho+ 476 14.6 9.0 24832100 1482592 ? Ssl Sep23 2228:53 /usr/bin/clickhouse-server 
+2019-10-04 05:00:01+00:00 clickho+ 476 14.6 9.1 24832100 1498624 ? Ssl Sep23 2238:58 /usr/bin/clickhouse-server 
+2019-10-04 06:00:01+00:00 clickho+ 476 14.6 9.2 24832100 1517576 ? Ssl Sep23 2248:49 /usr/bin/clickhouse-server 
+2019-10-04 07:00:01+00:00 clickho+ 476 14.6 9.1 24832100 1510400 ? Ssl Sep23 2258:19 /usr/bin/clickhouse-server 
+2019-10-04 08:00:01+00:00 clickho+ 476 14.6 9.2 24832100 1517564 ? Ssl Sep23 2267:41 /usr/bin/clickhouse-server 
+2019-10-04 09:00:01+00:00 clickho+ 476 14.6 9.3 24832100 1540844 ? Ssl Sep23 2277:47 /usr/bin/clickhouse-server 
+2019-10-04 10:00:01+00:00 clickho+ 476 14.6 9.4 24832100 1546216 ? Ssl Sep23 2288:30 /usr/bin/clickhouse-server 
+2019-10-04 11:00:01+00:00 clickho+ 476 14.6 9.9 24832100 1631576 ? Ssl Sep23 2298:00 /usr/bin/clickhouse-server 
+2019-10-04 12:00:01+00:00 clickho+ 476 14.6 9.5 24832100 1565524 ? Ssl Sep23 2307:00 /usr/bin/clickhouse-server 
+2019-10-04 13:00:01+00:00 clickho+ 476 14.6 9.4 24832100 1544184 ? Ssl Sep23 2315:41 /usr/bin/clickhouse-server 
+2019-10-04 14:00:01+00:00 clickho+ 476 14.6 9.4 24832100 1545076 ? Ssl Sep23 2325:03 /usr/bin/clickhouse-server 
+2019-10-04 15:00:01+00:00 clickho+ 476 14.6 9.4 24930404 1548540 ? Ssl Sep23 2334:28 /usr/bin/clickhouse-server 
+2019-10-04 16:00:01+00:00 clickho+ 476 14.6 9.4 24930404 1554632 ? Ssl Sep23 2343:09 /usr/bin/clickhouse-server 
+2019-10-04 17:00:01+00:00 clickho+ 476 14.6 9.3 25012324 1538664 ? Ssl Sep23 2351:57 /usr/bin/clickhouse-server 
+2019-10-04 18:00:01+00:00 clickho+ 476 14.6 9.4 25012324 1556792 ? Ssl Sep23 2360:21 /usr/bin/clickhouse-server 
+2019-10-04 19:00:01+00:00 clickho+ 476 14.7 9.5 25012324 1569996 ? Ssl Sep23 2371:56 /usr/bin/clickhouse-server 
+2019-10-04 20:00:01+00:00 clickho+ 476 14.7 9.5 25012324 1567940 ? Ssl Sep23 2382:41 /usr/bin/clickhouse-server 
+2019-10-04 21:00:01+00:00 clickho+ 476 14.7 9.7 25012324 1595180 ? Ssl Sep23 2394:05 /usr/bin/clickhouse-server 
+2019-10-04 22:00:01+00:00 clickho+ 476 14.7 9.9 25012324 1628124 ? Ssl Sep23 2404:30 /usr/bin/clickhouse-server 
+2019-10-04 23:00:01+00:00 clickho+ 476 14.7 9.7 25012324 1594628 ? Ssl Sep23 2415:54 /usr/bin/clickhouse-server 
+2019-10-05 00:00:01+00:00 clickho+ 476 14.7 9.5 25012324 1575296 ? Ssl Sep23 2426:08 /usr/bin/clickhouse-server 
+2019-10-05 01:00:01+00:00 clickho+ 476 14.7 9.5 25012324 1565132 ? Ssl Sep23 2435:20 /usr/bin/clickhouse-server 
+2019-10-05 02:00:01+00:00 clickho+ 476 14.7 9.7 25012324 1594532 ? Ssl Sep23 2445:31 /usr/bin/clickhouse-server 
+2019-10-05 03:00:01+00:00 clickho+ 476 14.7 9.6 25012324 1590192 ? Ssl Sep23 2454:33 /usr/bin/clickhouse-server 
+2019-10-05 04:00:01+00:00 clickho+ 476 14.7 9.6 25094244 1589564 ? Ssl Sep23 2464:26 /usr/bin/clickhouse-server 
+2019-10-05 05:00:01+00:00 clickho+ 476 14.7 9.6 25094244 1584648 ? Ssl Sep23 2475:52 /usr/bin/clickhouse-server 
+2019-10-05 06:00:01+00:00 clickho+ 476 14.8 9.6 25094244 1592676 ? Ssl Sep23 2487:14 /usr/bin/clickhouse-server 
+2019-10-05 07:00:01+00:00 clickho+ 476 14.8 9.8 25094244 1615088 ? Ssl Sep23 2498:23 /usr/bin/clickhouse-server 
+2019-10-05 08:00:01+00:00 clickho+ 476 14.8 9.8 25094244 1625260 ? Ssl Sep23 2507:11 /usr/bin/clickhouse-server 
+2019-10-05 09:00:01+00:00 clickho+ 476 14.8 9.9 25094244 1628088 ? Ssl Sep23 2515:15 /usr/bin/clickhouse-server 
+2019-10-05 10:00:01+00:00 clickho+ 476 14.8 9.7 25094244 1602948 ? Ssl Sep23 2523:27 /usr/bin/clickhouse-server 
+2019-10-05 11:00:01+00:00 clickho+ 476 14.8 9.7 25208932 1594800 ? Ssl Sep23 2531:36 /usr/bin/clickhouse-server 
+2019-10-05 12:00:01+00:00 clickho+ 476 14.8 9.9 25208932 1640720 ? Ssl Sep23 2539:50 /usr/bin/clickhouse-server 
+2019-10-05 13:00:01+00:00 clickho+ 476 14.8 9.7 25208932 1599152 ? Ssl Sep23 2547:53 /usr/bin/clickhouse-server 
+2019-10-05 14:00:01+00:00 clickho+ 476 14.8 9.8 25208932 1611236 ? Ssl Sep23 2556:26 /usr/bin/clickhouse-server 
+2019-10-05 15:00:01+00:00 clickho+ 476 14.7 9.8 25208932 1616996 ? Ssl Sep23 2564:49 /usr/bin/clickhouse-server 
+2019-10-05 16:00:01+00:00 clickho+ 476 14.7 9.8 25208932 1614648 ? Ssl Sep23 2573:17 /usr/bin/clickhouse-server 
+2019-10-05 17:00:01+00:00 clickho+ 476 14.7 9.9 25208932 1633268 ? Ssl Sep23 2581:47 /usr/bin/clickhouse-server 
+2019-10-05 18:00:01+00:00 clickho+ 476 14.7 9.9 25213028 1640192 ? Ssl Sep23 2590:05 /usr/bin/clickhouse-server 
+2019-10-05 19:00:01+00:00 clickho+ 476 14.7 10.2 25213028 1684348 ? Ssl Sep23 2600:14 /usr/bin/clickhouse-server
+2019-10-05 20:00:01+00:00 clickho+ 476 14.8 10.0 25213028 1658404 ? Ssl Sep23 2610:06 /usr/bin/clickhouse-server
+2019-10-05 21:00:01+00:00 clickho+ 476 14.8 10.1 25217124 1667280 ? Ssl Sep23 2621:14 /usr/bin/clickhouse-server
+2019-10-05 22:00:01+00:00 clickho+ 476 14.8 10.1 25217124 1662416 ? Ssl Sep23 2630:57 /usr/bin/clickhouse-server
+2019-10-05 23:00:01+00:00 clickho+ 476 14.8 10.0 25217124 1653352 ? Ssl Sep23 2639:43 /usr/bin/clickhouse-server
+2019-10-06 00:00:01+00:00 clickho+ 476 14.8 10.0 25217124 1657104 ? Ssl Sep23 2648:22 /usr/bin/clickhouse-server
+2019-10-06 01:00:01+00:00 clickho+ 476 14.8 10.0 25217124 1657284 ? Ssl Sep23 2657:52 /usr/bin/clickhouse-server
+2019-10-06 02:00:01+00:00 clickho+ 476 14.8 10.0 25217124 1644652 ? Ssl Sep23 2666:53 /usr/bin/clickhouse-server
+2019-10-06 03:00:01+00:00 clickho+ 476 14.8 10.0 25217124 1655044 ? Ssl Sep23 2676:30 /usr/bin/clickhouse-server
+2019-10-06 04:00:01+00:00 clickho+ 476 14.8 10.1 25217124 1659372 ? Ssl Sep23 2687:25 /usr/bin/clickhouse-server
+2019-10-06 05:00:01+00:00 clickho+ 476 14.8 10.3 25217124 1694012 ? Ssl Sep23 2697:03 /usr/bin/clickhouse-server
+2019-10-06 06:00:01+00:00 clickho+ 476 14.8 10.3 25221220 1692380 ? Ssl Sep23 2706:51 /usr/bin/clickhouse-server
+2019-10-06 07:00:01+00:00 clickho+ 476 14.8 10.1 25221220 1665176 ? Ssl Sep23 2716:30 /usr/bin/clickhouse-server
+2019-10-06 08:00:01+00:00 clickho+ 476 14.8 10.3 25221220 1694472 ? Ssl Sep23 2728:05 /usr/bin/clickhouse-server
+2019-10-06 09:00:02+00:00 clickho+ 476 14.8 10.3 25221220 1705524 ? Ssl Sep23 2740:01 /usr/bin/clickhouse-server
+2019-10-06 10:00:01+00:00 clickho+ 476 14.9 10.3 25225316 1692844 ? Ssl Sep23 2753:32 /usr/bin/clickhouse-server
+2019-10-06 11:00:01+00:00 clickho+ 476 14.9 10.1 25225316 1671516 ? Ssl Sep23 2767:05 /usr/bin/clickhouse-server
+2019-10-06 12:00:01+00:00 clickho+ 476 14.9 10.5 25229412 1728508 ? Ssl Sep23 2780:48 /usr/bin/clickhouse-server
+2019-10-06 13:00:01+00:00 clickho+ 476 14.9 10.3 25229412 1702056 ? Ssl Sep23 2791:45 /usr/bin/clickhouse-server
+2019-10-06 14:00:01+00:00 clickho+ 476 14.9 10.4 25229412 1713096 ? Ssl Sep23 2803:43 /usr/bin/clickhouse-server
+2019-10-06 15:00:02+00:00 clickho+ 476 14.9 10.4 25233508 1709464 ? Ssl Sep23 2814:49 /usr/bin/clickhouse-server
+2019-10-06 16:00:02+00:00 clickho+ 476 15.0 10.4 25233508 1708932 ? Ssl Sep23 2827:23 /usr/bin/clickhouse-server
+2019-10-06 17:00:01+00:00 clickho+ 476 15.0 10.4 25237604 1713056 ? Ssl Sep23 2841:20 /usr/bin/clickhouse-server
+2019-10-06 18:00:01+00:00 clickho+ 476 15.0 10.4 25237604 1719100 ? Ssl Sep23 2854:51 /usr/bin/clickhouse-server
+2019-10-06 19:00:01+00:00 clickho+ 476 15.0 10.5 25237604 1737156 ? Ssl Sep23 2865:58 /usr/bin/clickhouse-server
+2019-10-06 20:00:01+00:00 clickho+ 476 15.0 10.4 25237604 1714572 ? Ssl Sep23 2877:32 /usr/bin/clickhouse-server
+2019-10-06 21:00:01+00:00 clickho+ 476 15.0 10.4 25237604 1718800 ? Ssl Sep23 2888:44 /usr/bin/clickhouse-server
+2019-10-06 22:00:01+00:00 clickho+ 476 15.1 10.5 25237604 1737828 ? Ssl Sep23 2899:35 /usr/bin/clickhouse-server
+2019-10-06 23:00:01+00:00 clickho+ 476 15.1 10.4 25237604 1722504 ? Ssl Sep23 2911:21 /usr/bin/clickhouse-server
+2019-10-07 00:00:01+00:00 clickho+ 476 15.1 10.8 25319524 1774328 ? Ssl Sep23 2922:59 /usr/bin/clickhouse-server
+2019-10-07 01:00:01+00:00 clickho+ 476 15.1 10.7 25319524 1759308 ? Ssl Sep23 2934:05 /usr/bin/clickhouse-server
+2019-10-07 02:00:01+00:00 clickho+ 476 15.1 10.6 25319524 1752416 ? Ssl Sep23 2945:36 /usr/bin/clickhouse-server
+2019-10-07 03:00:01+00:00 clickho+ 476 15.1 10.7 25323620 1763020 ? Ssl Sep23 2957:08 /usr/bin/clickhouse-server
+2019-10-07 04:00:01+00:00 clickho+ 476 15.1 10.6 25323620 1754436 ? Ssl Sep23 2969:26 /usr/bin/clickhouse-server
+2019-10-07 05:00:01+00:00 clickho+ 476 15.2 10.6 25323620 1746176 ? Ssl Sep23 2982:26 /usr/bin/clickhouse-server
+2019-10-07 06:00:01+00:00 clickho+ 476 15.2 10.7 25323620 1768248 ? Ssl Sep23 2993:46 /usr/bin/clickhouse-server
+2019-10-07 07:00:01+00:00 clickho+ 476 15.2 10.5 25323620 1737476 ? Ssl Sep23 3005:02 /usr/bin/clickhouse-server
+2019-10-07 08:00:01+00:00 clickho+ 476 15.2 10.6 25323620 1744468 ? Ssl Sep23 3014:56 /usr/bin/clickhouse-server
+2019-10-07 09:00:01+00:00 clickho+ 476 15.2 10.6 25323620 1742600 ? Ssl Sep23 3026:44 /usr/bin/clickhouse-server
+2019-10-07 10:00:01+00:00 clickho+ 476 15.2 10.6 25323620 1742268 ? Ssl Sep23 3038:50 /usr/bin/clickhouse-server
+2019-10-07 11:00:01+00:00 clickho+ 476 15.2 10.6 25323620 1744856 ? Ssl Sep23 3051:02 /usr/bin/clickhouse-server
+2019-10-07 12:00:01+00:00 clickho+ 476 15.3 10.7 25323620 1762076 ? Ssl Sep23 3064:59 /usr/bin/clickhouse-server
+2019-10-07 13:00:01+00:00 clickho+ 476 15.3 10.8 25323620 1780424 ? Ssl Sep23 3078:58 /usr/bin/clickhouse-server
+2019-10-07 14:00:01+00:00 clickho+ 476 15.3 10.7 25323620 1773448 ? Ssl Sep23 3092:35 /usr/bin/clickhouse-server
+2019-10-07 15:00:01+00:00 clickho+ 476 15.3 10.6 25323620 1752780 ? Ssl Sep23 3104:01 /usr/bin/clickhouse-server
+```
+
+When looking at all the jemalloc statistics in the system.asynchronous_metrics table, the values do not change over time: jemalloc.allocated remains at 1990 MB.
+
+Could it be related to the large number of databases on the server? We have another server that has only one database, and its memory use (RSS) does not grow. It fluctuates over time, but after growing it also shrinks back down.
+
+Any assistance would be appreciated, as this issue is forcing our customers to restart their servers from time to time in order to keep memory usage down.

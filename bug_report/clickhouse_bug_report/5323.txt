@@ -1,0 +1,74 @@
+ID: 5323
+Title: Error using WITH when equality disjunction optimization is enable
+Description:
+**Description**
+This is a bug on SQL query execution if an alias contains a condition that will be optimized.
+
+For Eg 
+```
+match(field, 1) AND (field = '1' OR field = '2' OR field = '3')
+```
+will be optimized to 
+```
+match(field, 1) AND field IN ('1', '2, '3')
+```
+
+But if this expression is used in an alias, this will provoke an error
+
+**How to reproduce this bug**
+* this bug is present in at least versions 19.6.2 and 19.5.3 
+```sql
+CREATE TABLE test_bug_optimization (`path` String) ENGINE = MergeTree ORDER BY path
+```
+* Queries to run that lead to unexpected result
+The following alias will return an error:
+```sql
+WITH
+  (path = 'test1') 
+  OR match(path, 'test2')
+  OR (match(path, 'test3') AND match(path, 'test2'))
+  OR match(path, 'test4')
+  OR (path = 'test5')
+  OR (path = 'test6') AS alias_in_error
+SELECT count(1)
+FROM default.test_bug_optimization
+WHERE alias_in_error
+```
+
+**Expected behavior**
+```
+┌─count(1)─┐
+│        0 │
+└──────────┘
+
+1 rows in set. Elapsed: 0.011 sec. 
+```
+
+
+**Error message and/or stacktrace**
+
+```
+Received exception from server (version 19.6.2):
+Code: 179. DB::Exception: Received from localhost:9000, 127.0.0.1. DB::Exception: Different expressions with the same alias alias_in_error:
+match(path, 'test2') OR (match(path, 'test3') AND match(path, 'test2')) OR match(path, 'test4') OR alias_in_error AS alias_in_error
+and
+path IN ('test1', 'test5', 'test6') AS alias_in_error
+```
+
+**temporary fix to avoid the bug**
+The bug can be avoided by disabling the optimizer with the setting optimize_min_equality_disjunction_chain_length
+
+For eg: the same query with the setting gives the right result
+```
+WITH (path = 'test1') OR match(path, 'test2') OR (match(path, 'test3') AND match(path, 'test2')) OR match(path, 'test4') OR (path = 'test5') OR (path = 'test6') AS alias_in_error
+SELECT count(1)
+FROM default.test_bug_optimization 
+WHERE alias_in_error
+SETTINGS optimize_min_equality_disjunction_chain_length = 100
+
+┌─count(1)─┐
+│        0 │
+└──────────┘
+
+1 rows in set. Elapsed: 0.011 sec. 
+```

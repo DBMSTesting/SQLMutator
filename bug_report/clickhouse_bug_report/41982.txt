@@ -1,0 +1,76 @@
+ID: 41982
+Title: The dictionary the table depends on breaks the clickhouse when drop it
+Description:
+When you try to drop a dictionary on which the table depends, the clickhouse thinks that the dictionary exists and does not exist at the same time. This bug is reproduced on any version ( 22.1.3.7 , 22.3.11.12 , 22.9.3). It is treated by restart
+
+**How to reproduce**
+
+```
+CREATE VIEW default.view AS SELECT toUInt32(1) as id, 'v' as value;
+
+CREATE DICTIONARY default.dict (id UInt32, value String) 
+PRIMARY KEY id 
+SOURCE(CLICKHOUSE(host 'localhost' port 9000 user 'default' db 'default' table 'view')) 
+LAYOUT (HASHED()) LIFETIME (600);
+
+CREATE TABLE default.table
+(
+  col String MATERIALIZED dictGet('default.dict', 'value', toUInt32(1))
+) 
+ENGINE = MergeTree() 
+ORDER BY tuple();
+
+DROP DICTIONARY default.dict;
+
+SELECT * FROM dictionary('default.dict');
+
+SYSTEM RELOAD DICTIONARY default.dict;
+
+
+CREATE DICTIONARY default.dict (id UInt32, value String) 
+PRIMARY KEY id 
+SOURCE(CLICKHOUSE(host 'localhost' port 9000 user 'default' db 'default' table 'view')) 
+LAYOUT (HASHED()) LIFETIME (600);
+```
+
+**Errors**
+
+This error is OK
+```
+DROP DICTIONARY default.dict
+
+Received exception from server (version 22.9.3):
+Code: 630. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Cannot drop or rename default.dict, because some tables depend on it: default.table. (HAVE_DEPENDENT_OBJECTS)
+```
+
+And the following is not OK
+```
+SELECT *
+FROM dictionary('default.dict')
+
+Received exception from server (version 22.9.3):
+Code: 36. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Dictionary (`default.dict`) not found. (BAD_ARGUMENTS)
+
+---
+
+SYSTEM RELOAD DICTIONARY default.dict
+
+Received exception from server (version 22.9.3):
+Code: 36. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Dictionary (`default.dict`) not found. (BAD_ARGUMENTS)
+```
+
+```
+CREATE DICTIONARY default.dict
+(
+    `id` UInt32,
+    `value` String
+)
+PRIMARY KEY id
+SOURCE(CLICKHOUSE(HOST 'localhost' PORT 9000 USER 'default' DB 'default' TABLE 'view'))
+LIFETIME(MIN 0 MAX 600)
+LAYOUT(HASHED())
+
+Received exception from server (version 22.9.3):
+Code: 387. DB::Exception: Received from clickhouse-server:9000. DB::Exception: Dictionary default.dict already exists. (DICTIONARY_ALREADY_EXISTS)
+```
+

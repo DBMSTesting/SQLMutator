@@ -1,0 +1,42 @@
+ID: 15152
+Title: Add dictionary size, and use dictionary/constant vectors in the aggregate hash table to speed up finding groups 
+Description:
+This PR adjusts the dictionary vector to have an optional dictionary size. This size parameter is set only for duplicate-eliminated dictionaries that are read from disk (either from dictionary-compressed columns in DuckDB's own storage, or from dictionary-compressed columns in Parquet). The dictionary size can be used to optimize various optimizations on the vectors, as we can operate on the underlying dictionary instead of on the individual values, allowing us to operate only on unique values in the vector.
+
+This PR adjusts the aggregate hash table to utilize both dictionary and constant vectors when inserting groups. In particular, when figuring out which group a value belongs to, we only need to figure this out once per unique value. For constant vectors, that means we only need to probe the hash table once. For dictionary vectors, we only need to probe the unique values within the dictionary.
+
+This behavior is added in the `TryAddCompressedGroups` method. We first figure out which unique values are present in the dictionary (that are also referenced in the vector), and then call `FindOrCreateGroups` only for those unique values. 
+
+#### UnaryExecutor
+
+We also use the dictionary vectors to speed up execution of `UnaryExecutor` - however, we only do this if the function cannot throw errors (`FunctionErrors`). The reason for this is that we actually compute the function for the entire dictionary at this layer instead of only the elements that are explicitly referenced - and if the function can throw an error we might execute the function on a filtered out row and introduce errors. Currently we explicitly define `FunctionErrors:: CANNOT_ERROR` only for compressed materialization - so this is still limited (to be expanded in the future).
+
+#### Benchmarks
+
+Below are some performance numbers for synthetic data (100M rows):
+
+###### Aggregation over string dictionary
+
+```sql
+CREATE TABLE strings AS SELECT CONCAT('thisisastringwithrepetitions', i%100) AS grp, i FROM range(100_000_000) tbl(i);
+SELECT grp, SUM(i) FROM strings GROUP BY ALL ORDER BY ALL;
+```
+
+| v1.1.3 |  new   |
+|--------|--------|
+| 0.12s  | 0.04s |
+
+###### Aggregation over constant dates
+
+```sql
+CREATE TABLE dates AS SELECT DATE '1900-01-01' + INTERVAL (i // 50000) MONTH grp, i FROM range(100_000_000) tbl(i);
+SELECT grp, SUM(i) FROM dates GROUP BY ALL ORDER BY ALL;
+```
+| v1.1.3 |  new  |
+|--------|-------|
+| 0.07s | 0.04s |
+
+#### Limitations
+
+* Currently this only works for grouping of individual dictionary vectors (i.e. grouping by a single column). Grouping by multiple dictionary vectors is possible but more challenging especially when it comes to caching of the data.
+* We limit dictionary size to `20000` - for larger dictionaries we don't consider the optimization.

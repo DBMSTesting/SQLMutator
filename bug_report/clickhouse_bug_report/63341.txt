@@ -1,0 +1,50 @@
+ID: 63341
+Title: Cached MySQL Dictionary tries to use derived table:  Code: 1000, e.code() = 1248 Every derived table must have its own alias
+Description:
+**Describe what's wrong**
+
+This may be a regression as it started happening when I upgraded from 23.8 to 24.3. **Cache dictionaries with a MySQL source fail on dictGet**. Hashed dictionaries on the same data source still work the same as before
+
+**Does it reproduce on the most recent release?**
+
+Happens on latest LTS release: 24.3.3.
+Not happening on 23.8.x.
+
+**How to reproduce**
+
+```clickhouse
+CREATE OR REPLACE DICTIONARY dict_monolith_user ON CLUSTER `analytics`
+(
+    tenantid     Int32,
+    id           String,
+    display_name String,
+    first_name   String,
+    last_name    String,
+    is_bot       UInt8,
+    suspeded_at  DateTime
+)
+    PRIMARY KEY tenantid, id
+    SOURCE (
+        MYSQL(
+                NAME monolith_mysql
+                query
+                'SELECT tenantid, id, COALESCE(NULLIF(CONCAT_WS(" ", firstname, lastname),""), name) as display_name, firstname as first_name, lastname as last_name, is_bot, suspended_at FROM `user`'
+        )
+        )
+    LAYOUT (COMPLEX_KEY_CACHE(SIZE_IN_CELLS 500000))
+    LIFETIME (3600);
+```
+
+```clickhouse
+ SELECT dictGet('dict_monolith_user', 'display_name', (909, 'a'));
+```
+
+**Error message and/or stacktrace**
+
+Error is:
+
+```
+Code: 510. DB::Exception: Update failed for dictionary 'default.dict_monolith_user (1d15a9c5-2251-43ca-8029-49267d9fdb95)': Code: 510. DB::Exception: Update failed for dictionary default.dict_monolith_user (1d15a9c5-2251-43ca-8029-49267d9fdb95) : Poco::Exception. Code: 1000, e.code() = 1248, mysqlxx::BadQuery: Every derived table must have its own alias while executing query: 'SELECT * FROM (SELECT tenantid, id, COALESCE(NULLIF(CONCAT_WS(" ", firstname, lastname),""), name) as display_name, firstname as first_name, lastname as last_name, is_bot, suspended_at FROM `user`) WHERE (`tenantid`=909 AND `id`='a');' (db-read-replica-1.development:3306),. (CACHE_DICTIONARY_UPDATE_FAIL) (version 24.3.3.102 (official build))
+```
+
+Seems like the dictionary tries to use a derived table style query without an alias.

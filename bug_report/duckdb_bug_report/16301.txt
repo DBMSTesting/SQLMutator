@@ -1,0 +1,41 @@
+ID: 16301
+Title: Parallel HT Zeroing: Set entries_per_task so that there are 4x more tasks than threads
+Description:
+I noticed a regression for building very large hash tables. The issue is that with the current fixed size of tasks, for very big hash tables too many tasks are generated which leads to the hash table not being accessed sequentially for zeroing, which itself leads to performance regressions. I think the parallel zero is a great improvement, but I think it would be even better with a less granular parallelism taking into account the number of threads and the size of the hash table. 
+
+My benchmark consists of only building the join hash table on `100 000 000` unique keys by joining on an empty probe and disabling the optimizer to prevent join side swapping: 
+
+```sql
+load
+ATTACH '/Users/paul/micro.duckdb' AS micro;
+USE micro;
+PRAGMA disable_optimizer;
+PRAGMA disable_progress_bar;
+
+run
+SELECT * FROM probe JOIN build ON probe.key = build.key;
+``` 
+
+Where 
+```sql
+CREATE TABLE probe (key BIGINT);
+CREATE TABLE build AS
+  SELECT
+      range AS key,
+  FROM
+      RANGE(0, 100_000_000)
+  ORDER BY hash(key + 32);
+```
+
+Running on a Macbook Pro with an M4 and 8 threads I get the following performance numbers:
+
+Experiment | Strategy | Average Timing
+-- | -- | --
+1 | ENTRIES_PER_TASK = 131072 | 0.404637
+2 | entries_per_task = entry_count / num_threads / 16 |  0.336537 
+3 | entries_per_task = entry_count / num_threads / 8 | 0.306807
+4 | entries_per_task = entry_count / num_threads / 4 | 0.286299
+5 | entries_per_task = entry_count / num_threads / 2 | 0.289076
+6 | entries_per_task = entry_count / num_threads / 1 | 0.285086
+
+To still have more tasks than threads I now set the number of tasks to be 4 times the number of cores, but we could even think about having the same amount of tasks then cores. Let me know what you think. 

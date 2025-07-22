@@ -1,0 +1,150 @@
+ID: 31898
+Title: Inconsistent behavior when casting Double to TIME/TIMESTAMP/DATETIME
+Description:
+## Bug Report
+For the TIME type, valid values range from '-838:59:59.000000' to '838:59:59.000000'. 
+
+### 1. Minimal reproduce step 
+```sql
+SET sql_mode = '';
+-- Insert Double into TIME
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (a TIME(6));
+INSERT INTO t1 VALUES (8385959.1e0);
+INSERT INTO t1 VALUES (8390000.0e0);
+INSERT INTO t1 VALUES (-8385959.0e0); -- works in MySQL 5.7.35, 8.0.26, TiDB master
+INSERT INTO t1 VALUES (-8385959.1e0);
+INSERT INTO t1 VALUES (-8385959.999999e0); -- wrong result when sql_mode='' (NULL, expected: '-838:59:59.000000')
+INSERT INTO t1 VALUES (-8390000.0e0); -- wrong result when sql_mode='' (NULL, expected: -838:59:59.000000')
+SELECT * FROM t1; 
+
+-- Insert Double into DATETIME
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (a DATETIME(6));
+INSERT INTO t1 VALUES (112.233e-3); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '0000-00-00 00:00:00.112233')
+INSERT INTO t1 VALUES (112.223e-2); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '0000-00-00 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e-1); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '0000-00-00 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e0); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '2000-01-12 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e1); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '2001-12-23 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e2); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '2001-12-23 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e3); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '0000-00-00 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e4); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '0000-00-00 00:00:00.000000')
+INSERT INTO t1 VALUES (-123.456e0); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (NULL, expected: '0000-00-00 00:00:00.000000')
+SELECT * FROM t1;
+
+-- Insert Double to  TIMESTAMP
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (a TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6));
+INSERT INTO t1 VALUES (112.233e-3); -- wrong error message in TiDB (minor)
+INSERT INTO t1 VALUES (112.223e-2); -- wrong error message in TiDB (minor)
+INSERT INTO t1 VALUES (112.233e-1); -- wrong error message in TiDB (minor)
+INSERT INTO t1 VALUES (112.233e0); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (0000-00-00 00:00:00.000000, expected: '2000-01-12 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e1); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (0000-00-00 00:00:00.000000, expected: '2000-11-22 00:00:00.000000')
+INSERT INTO t1 VALUES (112.233e2); -- wrong error message in TiDB (minor); wrong result when sql_mode='' (0000-00-00 00:00:00.000000, expected: '2001-12-23 00:00:00.000000')
+SELECT * FROM t1;
+DROP TABLE t1;
+SET sql_mode = default;
+```
+
+### 2. What did you expect to see? 
+```sql
+-- Insert Double into TIME
+mysql> SELECT * FROM t1;
++-------------------+
+| a                 |
++-------------------+
+| 838:59:59.000000  |
+| 838:59:59.000000  |
+| -838:59:59.000000 |
+| -838:59:59.000000 |
+| -838:59:59.000000 |
+| -838:59:59.000000 |
++-------------------+
+
+-- Insert Double into DATETIME
+mysql> SELECT * FROM t1;
++----------------------------+
+| a                          |
++----------------------------+
+| 0000-00-00 00:00:00.112233 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 2000-01-12 00:00:00.000000 |
+| 2000-11-22 00:00:00.000000 |
+| 2001-12-23 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
++----------------------------+
+
+-- Insert Double to TIMESTAMP
+mysql> SELECT * FROM t1;
++----------------------------+
+| a                          |
++----------------------------+
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 2000-01-12 00:00:00.000000 |
+| 2000-11-22 00:00:00.000000 |
+| 2001-12-23 00:00:00.000000 |
++----------------------------+
+```
+
+### 3. What did you see instead 
+```sql
+-- Insert Double into TIME
+tidb> SELECT * FROM t1; 
++-------------------+
+| a                 |
++-------------------+
+| 838:59:59.000000  |
+| 838:59:59.000000  |
+| -838:59:59.000000 |
+| -838:59:59.000000 |
+| NULL              |  
+| NULL              |   
++-------------------+
+
+-- Insert Double into DATETIME
+tidb> SELECT * FROM t1;
++------+
+| a    |
++------+
+| NULL |
+| NULL |
+| NULL |
+| NULL |
+| NULL |
+| NULL |
+| NULL |
+| NULL |
+| NULL |
++------+
+
+-- Insert Double to TIMESTAMP
+tidb> SELECT * FROM t1;
++----------------------------+
+| a                          |
++----------------------------+
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
+| 0000-00-00 00:00:00.000000 |
++----------------------------+
+```
+### 4. What is your TiDB version? 
+```
+tidb_version(): Release Version: v5.5.0-alpha-154-gc589ee547
+Edition: Community
+Git Commit Hash: c589ee5471e05430f7f888190780a27fddb9ce7a
+Git Branch: master
+UTC Build Time: 2022-01-19 21:56:30
+GoVersion: go1.17.2
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

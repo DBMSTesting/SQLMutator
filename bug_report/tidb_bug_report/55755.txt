@@ -1,0 +1,79 @@
+ID: 55755
+Title: Modify column recreates the same index multiple times.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+The loop in [`updateCurrentElement`](https://github.com/pingcap/tidb/blob/eaa75a81d56471b602efa3f4ee19bc5345f2cdff/pkg/ddl/column.go#L566-L589) will do one iteration for each index, while the `addTableIndex` function recreates all the needed indexes.
+
+Create a simple sysbench table with 10M rows
+```bash
+sysbench /opt/homebrew/share/sysbench/select_random_ranges.lua --mysql-host=127.0.0.1 --mysql-port=4000 --mysql-user=root --mysql-db=test --tables=1 --table_size=1000000 prepare
+```
+
+Test modify column and see how the time takes longer time than needed (
+```sql
+alter table sbtest1 modify column k bigint;
+Query OK, 0 rows affected (0.04 sec)
+
+-- With a single index
+tidb> alter table sbtest1 modify column k int;
+Query OK, 0 rows affected (36.61 sec)
+
+tidb> alter table sbtest1 add key k_2 (k);
+Query OK, 0 rows affected (2.88 sec)
+
+tidb> alter table sbtest1 modify column k bigint;
+Query OK, 0 rows affected (0.03 sec)
+
+-- With two indexes ~3x the time of a single index! ~ update column + 2 index recreation + 1 index recreation?
+tidb> alter table sbtest1 modify column k int;
+Query OK, 0 rows affected (1 min 24.34 sec)
+
+tidb> alter table sbtest1 add key k_3 (k);
+Query OK, 0 rows affected (5.89 sec)
+
+tidb> alter table sbtest1 modify column k bigint;
+Query OK, 0 rows affected (0.03 sec)
+
+-- With three indexes ~5x time! ~ update column + 3 index recreation + 2 index recreation + 1 index recreation?
+tidb> alter table sbtest1 modify column k int;
+Query OK, 0 rows affected (2 min 26.84 sec)
+
+tidb> alter table sbtest1 drop index k_2;
+Query OK, 0 rows affected (0.10 sec)
+
+tidb> alter table sbtest1 drop index k_3;
+Query OK, 0 rows affected (0.11 sec)
+
+tidb> alter table sbtest1 modify column k bigint;
+Query OK, 0 rows affected (0.03 sec)
+
+tidb> alter table sbtest1 modify column k int;
+Query OK, 0 rows affected (32.32 sec)
+```
+
+### 2. What did you expect to see? (Required)
+A linear time related to number of indexes.
+
+### 3. What did you see instead (Required)
+Non-linear time increase, probably more like N+(N-1)+(N-2)...1 instead of N
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v8.3.0
+Edition: Community
+Git Commit Hash: 1a0c3ac3292fff7742faa0c00a662ccb66ba40db
+Git Branch: HEAD
+UTC Build Time: 2024-08-20 10:23:00
+GoVersion: go1.21.10
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+```

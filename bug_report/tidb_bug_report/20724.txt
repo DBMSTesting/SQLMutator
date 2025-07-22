@@ -1,0 +1,89 @@
+ID: 20724
+Title: charset, transaction: update is skipped when the value is treated as the same in CI collations
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+When the new collation is enabled:
+```
+tidb> select * from mysql.tidb;
++-----------------------+----------------+----------------------------------------------------+
+| VARIABLE_NAME         | VARIABLE_VALUE | COMMENT                                            |
++-----------------------+----------------+----------------------------------------------------+
+| bootstrapped          | True           | Bootstrap flag. Do not delete.                     |
+| tidb_server_version   | 51             | Bootstrap version. Do not delete.                  |
+| system_tz             | Asia/Shanghai  | TiDB Global System Timezone.                       |
+| new_collation_enabled | True           | If the new collations are enabled. Do not edit it. |
++-----------------------+----------------+----------------------------------------------------+
+4 rows in set (0.01 sec)
+```
+And run the following SQLs:
+```
+tidb> create table t1(a varchar(10) collate utf8mb4_general_ci);
+Query OK, 0 rows affected (0.02 sec)
+
+tidb> insert into t1 values ('a');
+Query OK, 1 row affected (0.01 sec)
+
+tidb> update t1 set a = 'A';
+Query OK, 0 rows affected (0.01 sec)
+Rows matched: 1  Changed: 0  Warnings: 0
+
+tidb> select * from t1;
++------+
+| a    |
++------+
+| a    |
++------+
+1 row in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+```
+tidb> select * from t1;
++------+
+| a    |
++------+
+| A    |
++------+
+1 row in set (0.00 sec)
+```
+(Same with MySQL)
+
+### 3. What did you see instead (Required)
+```
+tidb> select * from t1;
++------+
+| a    |
++------+
+| a    |
++------+
+1 row in set (0.00 sec)
+```
+Please notice that the `Changed Rows` of `UPDATE` is 0.
+### 4. What is your TiDB version? (Required)
+It can be reproduced in 4.0 and master branch.
+
+### Root Cause
+Before updating the records, TiDB checks if there is anything that is 'really changed':
+
+https://github.com/pingcap/tidb/blob/13bd62e183f81582248e68227a89b64421af607f/executor/write.go#L95
+
+When "new collation" is enabled, the compare of datum is affected by the collation, '`a'` and '`A`' is equal in CI collations. So TiDB treats the update as 'nothing changed' and skips it.
+
+We need to make the `CompareDatum` compare by something like binary collation and solve this issue.
+
+## SIG slack channel
+
+ [#sig-DDL](https://slack.tidb.io/invite?team=tidb-community&channel=sig-ddl&ref=high-performance)
+
+## Score
+
+- 600
+
+## Mentor
+
+- @bb7133

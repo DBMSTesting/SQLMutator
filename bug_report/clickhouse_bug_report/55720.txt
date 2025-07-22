@@ -1,0 +1,96 @@
+ID: 55720
+Title: Problem with changing comments to columns/tables using on cluster '{}';
+Description:
+The problem occurred when upgrading Clickhouse to version 23.9.1.1854
+```
+select version()
+ ( Connected to ClickHouse server version 23.9.1 revision 54466.
+┌─version()───┐
+│ 23.9.1.1854 │
+)
+```
+
+It occurs only if we want to update the comment to the columns of the table using cluster, executing commands without, on each server separately - everything is OK
+
+**Playback Steps:**
+
+1. **Create database with Atomic** 
+`Create database draft on cluster '{cluster}' engine = Atomic();`
+2. **Create table** 
+```
+CREATE TABLE draft.testmodify on cluster '{cluster}'
+(
+    `Kapusta` String,
+    `Persik` String
+)
+ENGINE = ReplicatedMergeTree()
+PRIMARY KEY Kapusta
+ORDER BY (Kapusta, Persik)
+SETTINGS index_granularity = 8192 ;
+```
+
+3. **Alter columns**
+```
+ALTER TABLE draft.testmodify on cluster '{cluster}' comment column Kapusta 'cabbage';
+ALTER TABLE draft.testmodify on cluster '{cluster}' comment column Persik 'peach';
+```
+
+4. **Checks out results on different replicates:**
+Started replica: 
+```
+SHOW CREATE TABLE draft.testmodify
+
+Query id: 746368ad-e316-480f-a84f-86a844956d26
+
+┌─statement─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE draft.testmodify
+(
+    `Kapusta` String COMMENT 'cabbage',
+    `Persik` String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')
+PRIMARY KEY Kapusta
+ORDER BY (Kapusta, Persik)
+SETTINGS index_granularity = 8192 
+```
+
+Second replica:
+```
+SHOW CREATE TABLE draft.testmodify
+
+Query id: d634b07d-6315-413f-96b0-5a3f079d9cbc
+
+┌─statement─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE draft.testmodify
+(
+    `Kapusta` String COMMENT 'cabbage',
+    `Persik` String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')
+PRIMARY KEY Kapusta
+ORDER BY (Kapusta, Persik)
+SETTINGS index_granularity = 8192 
+```
+Third replica: 
+```
+SHOW CREATE TABLE draft.testmodify
+
+Query id: 6527c4c1-0663-405b-9dcb-c9cc6ada20df
+
+┌─statement───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE draft.testmodify
+(
+    `Kapusta` String,
+    `Persik` String COMMENT 'peach'
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')
+PRIMARY KEY Kapusta
+ORDER BY (Kapusta, Persik)
+SETTINGS index_granularity = 8192 
+```
+
+If i run alter table like 3-4 in a row, it will add Missing comments on a random replica, but to get each replica to perfection - I need to run alter table without cluster on each individual replica
+
+version: 
+select version(); 
+23.9.1.1854 

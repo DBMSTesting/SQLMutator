@@ -1,0 +1,78 @@
+ID: 32499
+Title: 'Block structure mismatch' when UNION ALL with distributed table on 21.5.6
+Description:
+**Describe what's wrong**
+
+A correct-looking query fails immediately with the error `Block structure mismatch in Pipe::unitePipes stream`.
+
+**Does it reproduce on recent release?**
+
+Don't know. Reproduced on 21.5.6, but I was unable to reproduce on a clear environment with the same version, let alone different version.
+
+**How to reproduce**
+
+I'm unable to reproduce on a clear configuration; I can only observe this on the existing DB. Given that, I can only give you simplified schema.
+
+Tables:
+```sql
+CREATE TABLE tableB ON CLUSTER my_cluster
+(
+        `Period`                Date,
+        `Rate`                  UInt32,
+        -- other columns...
+)
+ENGINE = ReplicatedMergeTree('...', '...')
+PARTITION BY toYYYYMM(Period)
+ORDER BY (..., Period, ...)
+SETTINGS replicated_deduplication_window = 0;
+```
+
+```sql
+CREATE TABLE tableA ON CLUSTER my_cluster
+(
+        `Period`                Date,
+        `UserID`                UInt64,
+        -- other columns...
+)
+ENGINE = ReplicatedMergeTree('...', '...')
+PARTITION BY toYYYYMM(Period)
+ORDER BY (..., Period, ...)
+SETTINGS replicated_deduplication_window = 0;
+```
+
+```sql
+CREATE TABLE tableA_dist ON CLUSTER my_cluster AS tableA
+ENGINE = Distributed(my_cluster, remote_database, tableA, UserID);
+```
+
+Query:
+
+```sql
+SELECT
+    sum(Rate) AS Rate
+FROM
+(
+    SELECT
+        Period,
+        Rate
+    FROM tableB
+    UNION ALL
+    SELECT
+        Period,
+        0 AS Rate
+    FROM tableA_dist
+)
+WHERE Period = '2021-01-01'
+```
+
+
+**Error message and/or stacktrace**
+
+```
+Received exception from server (version 21.5.6):
+Code: 49. DB::Exception: Received from <hostname>. DB::Exception: Block structure mismatch in Pipe::unitePipes stream: different number of columns:
+Rate UInt32 UInt32(size = 0), 0 UInt8 Const(size = 0, UInt8(size = 1))
+Rate UInt32 UInt32(size = 0). (LOGICAL_ERROR)
+```
+
+Weirdly, removing the `WHERE` or moving it to both subqueries removes the issue. Querying the non-distributed `tableA` instead also fixes it.

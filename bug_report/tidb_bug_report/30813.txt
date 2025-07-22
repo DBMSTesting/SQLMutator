@@ -1,0 +1,123 @@
+ID: 30813
+Title: Session can't see new add column after DDL commit
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+tiup playground v5.3.0  -T src --db 1 --tiflash 0 --ticdc 1
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Session 1:
+```
+mysql> show variables like "%amend%";
++-----------------------------------+-------+
+| Variable_name                     | Value |
++-----------------------------------+-------+
+| tidb_enable_amend_pessimistic_txn | ON    |
++-----------------------------------+-------+
+1 row in set (0.01 sec)
+
+mysql> create table t2(id int primary key);
+Query OK, 0 rows affected (0.09 sec)
+
+mysql> insert into t2 values(1);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> select * from t2;
++----+
+| id |
++----+
+|  1 |
++----+
+1 row in set (0.00 sec)
+
+mysql> begin;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into t2 values(2);
+Query OK, 1 row affected (0.00 sec)
+
+// HOLD here until session2 commit DDL
+
+mysql> commit;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> select * from t2;
++----+
+| id |
++----+
+|  1 |
+|  2 |
++----+
+2 rows in set (0.00 sec).     // Why we can't see c1 column here？？？
+
+```
+
+Session2: 
+```
+mysql> select * from t2;
++----+
+| id |
++----+
+|  1 |
++----+
+1 row in set (0.05 sec)
+
+// Exec DDL before session1 commit
+
+mysql> alter table t2 add column c1 datetime default "2020-10-10 10:10:10";
+Query OK, 0 rows affected (0.06 sec)
+Records: 0  Duplicates: 0  Warnings: 0
+
+// Before Session1 commit, we do select 
+
+mysql> select * from t2;
++----+---------------------+
+| id | c1                  |
++----+---------------------+
+|  1 | 2020-10-10 10:10:10 |
++----+---------------------+
+1 row in set (0.06 sec)
+
+// After Session1 commit, we do select
+
+mysql> select * from t2;
++----+---------------------+
+| id | c1                  |
++----+---------------------+
+|  1 | 2020-10-10 10:10:10 |
+|  2 | 2020-10-10 10:10:10 |
++----+---------------------+
+2 rows in set (0.06 sec)
+
+```
+
+### 2. What did you expect to see? (Required)
+We can see column c1 after trx commit in session1
+
+### 3. What did you see instead (Required)
+We can't see  column c1 after trx commit in session1, which is unexpectedly.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+mysql> select version();
++--------------------+
+| version()          |
++--------------------+
+| 5.7.25-TiDB-v5.3.0 |
++--------------------+
+1 row in set (0.00 sec)
+
+mysql> show variables like "tidb_txn_mode";
++---------------+-------------+
+| Variable_name | Value       |
++---------------+-------------+
+| tidb_txn_mode | pessimistic |
++---------------+-------------+
+1 row in set (0.01 sec)

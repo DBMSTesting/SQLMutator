@@ -1,0 +1,84 @@
+ID: 61060
+Title: Making a query through http to a table, attached to Kafka Engine, crushes server
+Description:
+I have a table with null engine attached via materialized view to a kafka engine table (being a producer here).
+So the goal is to insert into the first table and transfer data to the kafka in a transparent way.
+
+Here is a reproducible example.
+```SQL
+create table default.insertlocal  (num UInt32) Engine=Null();
+
+create table default.insertlocal2 as   default.insertlocal Engine=Memory();
+create or replace table KafkaSend  as  default.insertlocal ENGINE = Kafka ('kafka:29092', 'topic', 'clickhouse') SETTINGS kafka_format = 'JSONEachRow';
+
+create materialized view  default.KafkaLink to default.KafkaSend as select * from default.insertlocal;
+
+insert into insertlocal2 select arrayJoin(range(100));
+```
+
+And the query below goes fine through the cli, but crashes from Clickhouse Client immediately, leading to corrupted messages to Kafka and, eventually, can break down the server and other tables, which have nothing in common with those ones (complaining on some "bad metadata").
+
+`insert into  default.insertlocal select * from default.insertlocal2`
+
+I know, that it could be an issue with the client realization, but it could be a possible vulnerability.
+
+P.S. The insertion could be straight to insertlocal from the client side, i.e. `insert into insertlocal values (1),(2)` The example shows, that it does not matter which data came from client, it is just the query itself which break.
+If we put one value - we will have one good message to Kafka. If there are two or more - we have one good message, one corrupted and the error.
+
+Version is 24.3.1.282 (revision: 54484, git hash: a1d1f76f67ab29c759374cf5a51b2e1fecf933f8, build id: 6FECFF7A9785B8EFE1F500762D6EB7190AEA4B73
+
+And it seems working in 23.8 at least.
+
+I am using C# Clickhouse Client 7.1.1.
+
+
+Error 1 stack:
+
+<Error> TCPHandler: Code: 1001. DB::Exception: std::length_error: basic_string. (STD_EXCEPTION), Stack trace (when copying this message, always include the lines below):
+
+0. std::length_error::length_error[abi:v15000](char const*) @ 0x00000000076a3189
+1. std::__throw_length_error[abi:v15000](char const*) @ 0x00000000076a3140
+2. ? @ 0x00000000076a30eb
+3. ? @ 0x00000000174f4e67
+4. DB::WriteBufferFromVector<String>::finalizeImpl() @ 0x00000000076ba2af
+5. DB::WriteBuffer::finalize() @ 0x00000000076b2c08
+6. DB::MessageQueueSink::consume(DB::Chunk) @ 0x0000000011b5c4fd
+7. DB::SinkToStorage::onConsume(DB::Chunk) @ 0x0000000012b6a022
+8. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::ExceptionKeepingTransform::work()::$_1, void ()>>(std::__function::__policy_storage const*) @ 0x0000000012a9a54b
+9. DB::runStep(std::function<void ()>, DB::ThreadStatus*, std::atomic<unsigned long>*) @ 0x0000000012a9a25c
+10. DB::ExceptionKeepingTransform::work() @ 0x0000000012a99933
+11. DB::ExecutionThreadContext::executeTask() @ 0x000000001282e09a
+12. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012824af0
+13. DB::PipelineExecutor::executeStep(std::atomic<bool>*) @ 0x00000000128242a8
+14. DB::TCPHandler::runImpl() @ 0x00000000127bdbf7
+15. DB::TCPHandler::run() @ 0x00000000127cdfb9
+16. Poco::Net::TCPServerConnection::start() @ 0x00000000150ae1b2
+17. Poco::Net::TCPServerDispatcher::run() @ 0x00000000150aefb1
+18. Poco::PooledThread::run() @ 0x00000000151a7647
+19. Poco::ThreadImpl::runnableEntry(void*) @ 0x00000000151a5c7d
+20. ? @ 0x00007f3a9d2cb609
+21. ? @ 0x00007f3a9d1f0353
+
+
+Error 2 stack:
+
+{5a3ffd45-4f7e-4e16-aa70-a471501874af} <Error> executeQuery: std::exception. Code: 1001, type: cppkafka::HandleException, e.what() = Broker: Message size too large (version 24.3.1.282 (official build)) (from 10.112.208.27:44160) (in query: INSERT INTO skipped this  VALUES), Stack trace (when copying this message, always include the lines below):
+
+0. cppkafka::Producer::produce(cppkafka::MessageBuilder const&) @ 0x0000000014d9dad9
+1. DB::KafkaProducer::produce(String const&, unsigned long, std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>> const&, unsigned long) @ 0x000000000fd5738b
+2. DB::MessageQueueSink::consume(DB::Chunk) @ 0x0000000011b5c518
+3. DB::SinkToStorage::onConsume(DB::Chunk) @ 0x0000000012b6a022
+4. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::ExceptionKeepingTransform::work()::$_1, void ()>>(std::__function::__policy_storage const*) @ 0x0000000012a9a54b
+5. DB::runStep(std::function<void ()>, DB::ThreadStatus*, std::atomic<unsigned long>*) @ 0x0000000012a9a25c
+6. DB::ExceptionKeepingTransform::work() @ 0x0000000012a99933
+7. DB::ExecutionThreadContext::executeTask() @ 0x000000001282e09a
+8. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012824af0
+9. DB::PipelineExecutor::executeStep(std::atomic<bool>*) @ 0x00000000128242a8
+10. DB::TCPHandler::runImpl() @ 0x00000000127bdbf7
+11. DB::TCPHandler::run() @ 0x00000000127cdfb9
+12. Poco::Net::TCPServerConnection::start() @ 0x00000000150ae1b2
+13. Poco::Net::TCPServerDispatcher::run() @ 0x00000000150aefb1
+14. Poco::PooledThread::run() @ 0x00000000151a7647
+15. Poco::ThreadImpl::runnableEntry(void*) @ 0x00000000151a5c7d
+16. ? @ 0x00007f6660db9609
+17. ? @ 0x00007f6660cde353

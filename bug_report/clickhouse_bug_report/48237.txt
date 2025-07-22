@@ -1,0 +1,62 @@
+ID: 48237
+Title: Fix EXPLAIN indexes =1 for tuple IN (set) 
+Description:
+Example:
+```
+create table tab (x UInt32, y UInt32) engine = MergeTree order by (x, y) settings index_granularity = 1;
+insert into tab select number, number / 3 from numbers(6);
+
+SELECT * FROM tab
+
+┌─x─┬─y─┐
+│ 0 │ 0 │
+│ 1 │ 0 │
+│ 2 │ 0 │
+│ 3 │ 1 │
+│ 4 │ 1 │
+│ 5 │ 1 │
+└───┴───┘
+
+
+EXPLAIN indexes = 1
+SELECT *
+FROM tab
+WHERE (x, y) IN ((0, 0), (5, 1))
+FORMAT TSVRaw
+
+Query id: e1b29671-7744-4818-8c94-7813dec17437
+
+Expression ((Projection + Before ORDER BY))
+  Filter (WHERE)
+    ReadFromMergeTree (default.tab)
+    Indexes:
+      PrimaryKey
+        Keys: 
+          y
+        Condition: (y in 2-element set)
+        Parts: 1/1
+        Granules: 3/6
+```
+
+**What's right**
+PK condition is used for both `x` and `y` columns. `Granules: 3/6`
+
+**What's wrong**
+`EXPLAIN indexes = 1` prints only the last name from the tuple.
+
+**Expected result**
+```
+Expression ((Projection + Before ORDER BY))
+  Filter (WHERE)
+    ReadFromMergeTree (default.tab)
+    Indexes:
+      PrimaryKey
+        Keys: 
+          x, y
+        Condition: ((x, y) in 2-element set)
+        Parts: 1/1
+        Granules: 3/6
+```
+
+The reason: we remember only one column. Can be replaced to vector.
+https://github.com/ClickHouse/ClickHouse/blob/66f546ef705f08ab895b310ac0be3483a2334f0a/src/Storages/MergeTree/KeyCondition.cpp#L1162

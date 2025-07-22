@@ -1,0 +1,139 @@
+ID: 18741
+Title: Data rejected by server when clickhouse-client uses zstd network compression 
+Description:
+Hello guys,
+
+**Description**
+When inserting data into a replicated+distributed table, I've noticed that not all data reaches all shards, only shard where client connects.
+
+TLDR; version of command which fails:
+cat payload.json | clickhouse client --input_format_skip_unknown_fields 1 --host 192.168.121.201 --query "INSERT INTO test_db.tbl_distributed FORMAT JSONEachRow" --max_insert_block_size=1000000
+
+Clickhouse version: 20.12.5 revision 54442
+
+**How to reproduce**
+For a 4 node cluster splited into two shards (with 2 replicas), 
+- shard01r1
+- shard01r2
+- shard02r1
+- shard02r2
+
+when connecting to the shard01r1 node, data is inserted into shard01r1 (and replica in shard01r2).
+If I drop `--network_compression_method` all goes fine.
+
+***ClickHouse remote_servers***
+```
+<yandex>
+<remote_servers>
+    <test_cluster>
+        <shard>
+            <internal_replication>true</internal_replication>
+            <replica>
+                <host>192.168.121.201</host>
+                <port>9000</port>
+             </replica>
+            <replica>
+                <host>192.168.121.202</host>
+                <port>9000</port>
+             </replica>
+        </shard>
+        <shard>
+            <internal_replication>true</internal_replication>
+            <replica>
+                <host>192.168.121.203</host>
+                <port>9000</port>
+             </replica>
+            <replica>
+                <host>192.168.121.204</host>
+                <port>9000</port>
+             </replica>
+        </shard>
+    </test_cluster>
+</remote_servers>
+</yandex>
+```
+
+***SQL DDL***
+```
+CREATE DATABASE IF NOT EXISTS test_db ON CLUSTER test_cluster;
+
+CREATE TABLE IF NOT EXISTS test_db.tbl_local ON CLUSTER test_cluster
+(
+    timestamp DateTime64,
+    data String
+)
+ENGINE = ReplicatedMergeTree()
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY (timestamp)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS test_db.tbl_distributed ON CLUSTER test_cluster AS test_db.tbl_local ENGINE = Distributed(test_cluster, test_db, tbl_local, rand());
+```
+***Payload***
+```json
+{"timestamp":"2021-01-01T01:00:00.000","data": "Hello World #1"}
+{"timestamp":"2021-01-01T02:00:00.000","data": "Hello World #2"}
+{"timestamp":"2021-01-01T03:00:00.000","data": "Hello World #3"}
+{"timestamp":"2021-01-01T04:00:00.000","data": "Hello World #4"}
+```
+Upon insert, only two rows will be saved in the database.
+
+
+**Error message**
+```
+ (version 20.12.5.14 (official build))
+2021.01.04 18:20:56.489979 [ 6860 ] {} <Error> test_db.tbl_distributed.DirectoryMonitor: Renamed `/var/lib/clickhouse/store/dfa/dfaa92a5-34d4-4269-af39-a739fed1541a/shard2_replica1,shard2_replica2/1.bin` to `/var/lib/clickhouse/store/dfa/dfaa92a5-34d4-4269-af39-a739fed1541a/shard2_replica1,shard2_replica2/broken/1.bin`
+2021.01.04 18:20:56.490303 [ 6860 ] {} <Error> test_db.tbl_distributed.DirectoryMonitor: Code: 271, e.displayText() = DB::Exception: Received from 192.168.121.204:9000. DB::Exception: Data compressed with different methods, given method byte 0x90, previous method byte 0x82. Stack trace:
+
+0. DB::CompressedReadBufferBase::readCompressedData(unsigned long&, unsigned long&) @ 0xd7d654e in /usr/bin/clickhouse
+1. DB::CompressedReadBuffer::nextImpl() @ 0xd7d4b20 in /usr/bin/clickhouse
+2. DB::NativeBlockInputStream::readImpl() @ 0xdf40dd6 in /usr/bin/clickhouse
+3. DB::IBlockInputStream::read() @ 0xd8a0715 in /usr/bin/clickhouse
+4. DB::TCPHandler::receiveData(bool) @ 0xe7408f1 in /usr/bin/clickhouse
+5. DB::TCPHandler::receivePacket() @ 0xe739ddc in /usr/bin/clickhouse
+6. DB::TCPHandler::readDataNext(unsigned long const&, int const&) @ 0xe73b56f in /usr/bin/clickhouse
+7. DB::TCPHandler::processInsertQuery(DB::Settings const&) @ 0xe73a31e in /usr/bin/clickhouse
+8. DB::TCPHandler::runImpl() @ 0xe735929 in /usr/bin/clickhouse
+9. DB::TCPHandler::run() @ 0xe741c47 in /usr/bin/clickhouse
+10. Poco::Net::TCPServerConnection::start() @ 0x10eebb1f in /usr/bin/clickhouse
+11. Poco::Net::TCPServerDispatcher::run() @ 0x10eed531 in /usr/bin/clickhouse
+12. Poco::PooledThread::run() @ 0x1101ab09 in /usr/bin/clickhouse
+13. Poco::ThreadImpl::runnableEntry(void*) @ 0x11016a9a in /usr/bin/clickhouse
+14. start_thread @ 0x7fa3 in /usr/lib/x86_64-linux-gnu/libpthread-2.28.so
+15. clone @ 0xf94cf in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+```
+
+We can observe `broken` directory in store with missing data in *.bin files.
+`/var/lib/clickhouse/store/dfa/dfaa92a5-34d4-4269-af39-a739fed1541a/shard2_replica1,shard2_replica2/broken`
+
+`clickhouse-compressor` also complains when opening bin file:
+
+```
+clickhouse-compressor --decompress < /var/lib/clickhouse/store/dfa/dfaa92a5-34d4-4269-af39-a739fed1541a/shard2_replica1,shard2_replica2/broken/1.bin > 1.txt
+Code: 432, e.displayText() = DB::Exception: Unknown codec family code: 84, Stack trace (when copying this message, always include the lines below):
+
+0. DB::CompressionCodecFactory::get(unsigned char) const @ 0xd7dbe38 in /usr/bin/clickhouse
+1. DB::CompressedReadBufferBase::readCompressedData(unsigned long&, unsigned long&) @ 0xd7d514f in /usr/bin/clickhouse
+2. DB::CompressedReadBuffer::nextImpl() @ 0xd7d4b20 in /usr/bin/clickhouse
+3. mainEntryClickHouseCompressor(int, char**) @ 0x7ee721e in /usr/bin/clickhouse
+4. main @ 0x7d8acbd in /usr/bin/clickhouse
+5. __libc_start_main @ 0x2409b in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+6. _start @ 0x7d3b02e in /usr/bin/clickhouse
+```
+
+**Additional context**
+
+For what it's worth, we use `zstd` compression everywhere, aside from that I don't think there is nothing exotic in the conf.
+
+```
+<yandex>
+    <compression>
+        <case>
+            <method>zstd</method>
+        </case>
+    </compression>
+</yandex>
+```
+
+Last, but not the least, I've attached Vagrant setup (with Ansible provisioner), which can be used to reproduce the bug.
+[clickhouse_bug.tar.gz](https://github.com/ClickHouse/ClickHouse/files/5766355/clickhouse_bug.tar.gz)

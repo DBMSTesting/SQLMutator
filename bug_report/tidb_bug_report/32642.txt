@@ -1,0 +1,87 @@
+ID: 32642
+Title: A corner case of renew lease operation on cached table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+It's difficult to reproduce such kind of issue.
+By reading the code logic...
+
+If renew lease success, update the lease time of the cache, reuse it.
+
+```
+succ, err := c.handle.RenewLease(context.Background(), tid, lease, op)
+if err != nil {
+	log.Warn("Renew read lease error", zap.Error(err))
+}
+if succ {
+	c.cacheData.Store(&cacheData{
+		Start:     data.Start,
+		Lease:     lease,
+		MemBuffer: data.MemBuffer,
+	})
+}
+```
+
+
+The renew lease logic is buggy:
+
+```
+func (h *stateRemoteHandle) renewReadLease(ctx context.Context, tid int64, newLease uint64) (bool, error) {
+	var succ bool
+	err := h.runInTxn(ctx, func(ctx context.Context, now uint64) error {
+		lockType, oldLease, _, err := h.loadRow(ctx, tid)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if now >= oldLease {
+			// read lock had already expired, fail to renew
+			return nil
+		}
+		if lockType != CachedTableLockRead {
+			// Not read lock, fail to renew
+			return nil
+		}
+
+		if newLease > oldLease { // lease should never decrease!
+			err = h.updateRow(ctx, tid, "READ", newLease)
+			if err != nil {
+				return errors.Trace(err)
+			}
+		}
+		succ = true
+		return nil
+	})
+	return succ, err
+}
+```
+
+**It may happen that the meta state change from: Read Locked -> Write -> Read Locked again,
+and then the renew lease operation success!**
+
+An example of a pratical case:
+
+1. session1 read from cached data
+2. session1 find the read lock lease is about to expire, so it renew the lease
+3. the renew lease background gorouine hang for a long time
+
+4. session2 (maybe in another tidb) update the table
+5. session3 (maybe in another tidb) read the table, make the table cached
+
+6. session1 continue from step3, the renew lease operation execute, **it succeed**! now the cached data is a stale one.
+7. session1 read from cached date in a new query, get the wrong result.
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master e389170624e227068213f523b7bed837ae3d95b1 

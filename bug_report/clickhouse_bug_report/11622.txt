@@ -1,0 +1,93 @@
+ID: 11622
+Title: "Code 10 Not found column" when passing an array via the array function to the transform function
+Description:
+Hello, (first of all thanks for the great product, we love it at Sentry). 
+We are experiencing this error when querying a distributed table:
+
+```
+Code: 10.                                                                                                                                                         
+DB::Exception: Not found column transform(toString(project_id), array('1'), array('sentry'), '') in block. There are only columns: event_id, timestamp, transform(toString(project_id), ['1'], ['sentry'], '
+')
+```
+(see the full query in the reproducer)
+The same query works just fine if I replace 
+`transform(toString(project_id), array('1'), array('sentry'), '')`
+with
+`transform(toString(project_id), ['1'], ['sentry'], '')`
+
+**How to reproduce**
+
+**Tested on Clickhouse 19.17.4**
+**Interfaces**
+I tried this in multiple environments:
+- local table not distributed: it works fine
+- distributed table through python native driver: error above
+- distributed table sending the query via curl on the http port: error above
+- distributed table sending the query via the CLI clickhouse-client: it works fine.
+
+**Default settings**
+
+**Tables**
+local
+```
+CREATE TABLE sentry_local (
+    `event_id` FixedString(32), 
+    `project_id` UInt64,
+    `timestamp` DateTime,
+    `retention_days` UInt16)
+ENGINE = ReplacingMergeTree(deleted) 
+PARTITION BY (toMonday(timestamp), if(retention_days = 30, 30, 90)) 
+ORDER BY (project_id, toStartOfDay(timestamp), cityHash64(toString(event_id))) 
+SAMPLE BY cityHash64(toString(event_id)) 
+SETTINGS index_granularity = 8192
+```
+distributed:
+```
+CREATE TABLE sentry_dist (
+    `event_id` FixedString(32), 
+    `project_id` UInt64,
+    `timestamp` DateTime,
+    `retention_days` UInt16)
+ENGINE = Distributed(test_cluster_two_shards_localhost, default, sentry_local, cityHash64(event_id))```
+```
+
+**Query**
+```
+SELECT
+    event_id,
+    (transform(toString(project_id), array('2'), array('sentry'), '') AS test_proj)
+FROM sentry_dist
+WHERE
+    project_id IN (2)
+ORDER BY timestamp DESC LIMIT 0, 1
+```
+
+**Expected behavior**
+The fact that the query works properly in some environment makes me think it should be a working query.
+
+
+**Error message and/or stacktrace**
+```
+
+Code: 10.                                                                                                                                                         
+DB::Exception: Not found column transform(toString(project_id), array('1'), array('sentry'), '') in block. There are only columns: event_id, timestamp, transform(toString(project_id), ['1'], ['sentry'], '
+')
+0. 0x559aa8758f60 StackTrace::StackTrace() /build/obj-x86_64-linux-gnu/../dbms/src/Common/StackTrace.cpp:228
+1. 0x559aa8758d35 DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int) /build/obj-x86_64-linux-gnu/../dbms/src/Common/Exception.h:27
+2. 0x559aa844788d DB::Block::getByName(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) const [clone .cold] /usr/include/c++/9/bits/basic_string.h:222
+3. 0x559aab9c6879 DB::RemoteBlockInputStream::readImpl() /build/obj-x86_64-linux-gnu/../dbms/src/DataStreams/RemoteBlockInputStream.cpp:202
+4. 0x559aab9af01a DB::IBlockInputStream::read() /usr/include/c++/9/bits/stl_vector.h:108
+5. 0x559aab9a80eb DB::AsynchronousBlockInputStream::calculate() /usr/include/c++/9/bits/stl_vector.h:108
+6. 0x559aab9a84b0 std::_Function_handler<void (), DB::AsynchronousBlockInputStream::next()::{lambda()#1}>::_M_invoke(std::_Any_data const&) /usr/include/c++/9/bits/atomic_base.h:551
+7. 0x559aa87a5a4e ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::_List_iterator<ThreadFromGlobalPool>) /usr/include/c++/9/bits/atomic_base.h:551
+8. 0x559aa87a605e ThreadFromGlobalPool::ThreadFromGlobalPool<ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}>(ThreadPoolIm
+pl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}&&)::{lambda()#1}::operator()() const /build/obj-x86_64-linux-gnu/../dbms/src/Common/Th
+readPool.h:155
+9. 0x559aa87a351c ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/include/c++/9/bits/atomic_base.h:551
+10. 0x559aae528e00 execute_native_thread_routine /usr/lib/debug/usr/bin/clickhouse
+11. 0x7f70217d6184 start_thread /lib/x86_64-linux-gnu/libpthread-2.19.so
+12. 0x7f70210f703d clone /lib/x86_64-linux-gnu/libc-2.19.so
+```
+
+**Additional context**
+The issue is visible only if the query result set is not empty.

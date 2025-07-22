@@ -1,0 +1,80 @@
+ID: 20621
+Title: Issue when copying data with aggregateFunction(avg, ....) between servers
+Description:
+We are trying to copy data from one server with version 20.5.2.7 (official build) to another one version 21.1.2.15 (official build)
+
+After copying all data we have acknowledged that there are differences in several fields that are defined as avg aggregateFuncion in this way
+```
+....
+`duration` AggregateFunction(avg, UInt32),
+`scroll` AggregateFunction(avg, UInt8),    
+`rfv` AggregateFunction(avg, UInt32),
+....
+```
+
+We have reproduced the bug in this simplier way
+
+First, we have created a test table in each of the servers
+```
+CREATE TABLE IF NOT EXISTS compass.test_merge
+(
+
+    `scroll` AggregateFunction(avg, UInt8)
+)
+ENGINE = AggregatingMergeTree()
+ORDER BY tuple()
+SETTINGS index_granularity = 8192;
+```
+
+After that we export one of the problematic rows to a csv
+```
+echo "SELECT scroll from compass.m_hits_day_1 WHERE event_time < toDateTime('2021-02-16 07:30:00') AND site_id=108 AND finalizeAggregation(scroll) = 43.89265536723164 FORMAT CSV" > /tmp/query.sql
+cat /tmp/query.sql | clickhouse-client --password OLD_SERVER_PASS --host OLD_SERVER_HOST --max_memory_usage 40G > /tmp/hits.csv
+```
+So we have a csv with only one row with a binary value ([csv content here](https://nrbi.s3.fr-par.scw.cloud/hits.csv))
+
+
+Then, we uploaded this csv to the test table in each server
+```
+cat /tmp/hits.csv | clickhouse-client --password OLD_SERVER_PASS --host OLD_SERVER_HOST --max_memory_usage 40G --query="INSERT INTO compass.test_merge FORMAT CSV"
+cat /tmp/hits.csv | clickhouse-client --password NEW_SERVER_PASS --host NEW_SERVER_HOST --max_memory_usage 40G --query="INSERT INTO compass.test_merge FORMAT CSV"
+```
+
+When we checked the data uploaded in each server we saw
+```
+***** OLD SERVER
+SELECT *
+FROM compass.test_merge
+
+┌─scroll─┐
+│ Y�      │
+└────────┘
+
+
+SELECT finalizeAggregation(scroll)
+FROM compass.test_merge
+
+┌─finalizeAggregation(scroll)─┐
+│           43.89265536723164 │
+└─────────────────────────────┘
+```
+
+
+***** NEW SERVER
+```
+SELECT *
+FROM compass.test_merge
+
+┌─scroll─┐
+│ Y1     │
+└────────┘
+
+
+
+SELECT finalizeAggregation(scroll)
+FROM compass.test_merge
+
+┌─finalizeAggregation(scroll)─┐
+│          158.55102040816325 │
+└─────────────────────────────┘
+```

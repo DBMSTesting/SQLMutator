@@ -1,0 +1,119 @@
+ID: 13177
+Title: Wrong result when substr in index merge join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+```sql
+tidb(localhost:4000) > create table t1(a varchar(20), b int, c int);
+Query OK, 0 rows affected (0.01 sec)
+
+tidb(localhost:4000) > create table t2(a varchar(20), b int, c int, primary key(a, b));
+Query OK, 0 rows affected (0.01 sec)
+
+tidb(localhost:4000) > insert into t1 values("abcd", 1, 1), ("bacd", 2, 2), ("cbad", 3, 3);
+Query OK, 3 rows affected (0.01 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+
+tidb(localhost:4000) > insert into t2 values("bcd", 1, 1), ("acd", 2, 2), ("bad", 3, 3);
+Query OK, 3 rows affected (0.00 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+
+tidb(localhost:4000) > desc select /*+ tidb_inlj(t1, t2) */ * from t1 join t2 on substr(t1.a, 2, 4) = t2.a and t1.b = t2.b where t1.c between 1 and 5;                                                                                                           [13/1996]
++------------------------------+-------+-----------+------------------------------------------------------------------------------------------------------------+
+| id                           | count | task      | operator info                                                                                              |
++------------------------------+-------+-----------+------------------------------------------------------------------------------------------------------------+
+| Projection_7                 | 3.00  | root      | Column#1, Column#2, Column#3, Column#5, Column#6, Column#7                                                 |
+| └─IndexJoin_11               | 3.00  | root      | inner join, inner:IndexLookUp_10, outer key:Column#2, Column#15, inner key:Column#6, Column#5              |
+|   ├─Projection_20            | 3.00  | root      | Column#1, Column#2, Column#3, substr(Column#1, 2, 4)                                                       |
+|   │ └─TableReader_23         | 3.00  | root      | data:Selection_22                                                                                          |
+|   │   └─Selection_22         | 3.00  | cop[tikv] | ge(Column#3, 1), le(Column#3, 5), not(isnull(Column#2))                                                    |
+|   │     └─TableScan_21       | 3.00  | cop[tikv] | table:t1, range:[-inf,+inf], keep order:false                                                              |
+|   └─IndexLookUp_10           | 1.00  | root      |                                                                                                            |
+|     ├─IndexScan_8            | 1.00  | cop[tikv] | table:t2, index:a, b, range: decided by [eq(Column#5, Column#15) eq(Column#6, Column#2)], keep order:false |
+|     └─TableScan_9            | 1.00  | cop[tikv] | table:t2, keep order:false                                                                                 |
++------------------------------+-------+-----------+------------------------------------------------------------------------------------------------------------+
+9 rows in set (0.01 sec)
+
+tidb(localhost:4000) > desc select /*+ tidb_inlj(t1, t2) */ t1.* from t1 join t2 on substr(t1.a, 2, 4) = t2.a and t1.b = t2.b where t1.c between 1 and 5;
++------------------------------+-------+-----------+-----------------------------------------------------------------------------------------------------------+
+| id                           | count | task      | operator info                                                                                             |
++------------------------------+-------+-----------+-----------------------------------------------------------------------------------------------------------+
+| Projection_7                 | 3.00  | root      | Column#1, Column#2, Column#3                                                                              |
+| └─IndexMergeJoin_14          | 3.00  | root      | inner join, inner:IndexReader_12, outer key:Column#2, Column#12, inner key:Column#6, Column#5             |
+|   ├─Projection_17            | 3.00  | root      | Column#1, Column#2, Column#3, substr(Column#1, 2, 4)                                                      |
+|   │ └─TableReader_20         | 3.00  | root      | data:Selection_19                                                                                         |
+|   │   └─Selection_19         | 3.00  | cop[tikv] | ge(Column#3, 1), le(Column#3, 5), not(isnull(Column#2))                                                   |
+|   │     └─TableScan_18       | 3.00  | cop[tikv] | table:t1, range:[-inf,+inf], keep order:false                                                             |
+|   └─IndexReader_12           | 1.00  | root      | index:IndexScan_11                                                                                        |
+|     └─IndexScan_11           | 1.00  | cop[tikv] | table:t2, index:a, b, range: decided by [eq(Column#5, Column#12) eq(Column#6, Column#2)], keep order:true |
++------------------------------+-------+-----------+-----------------------------------------------------------------------------------------------------------+
+8 rows in set (0.01 sec)
+
+tidb(localhost:4000) > select /*+ tidb_inlj(t1, t2) */ * from t1 join t2 on substr(t1.a, 2, 4) = t2.a and t1.b = t2.b where t1.c between 1 and 5;
++------+------+------+-----+---+------+
+| a    | b    | c    | a   | b | c    |
++------+------+------+-----+---+------+
+| abcd |    1 |    1 | bcd | 1 |    1 |
+| bacd |    2 |    2 | acd | 2 |    2 |
+| cbad |    3 |    3 | bad | 3 |    3 |
++------+------+------+-----+---+------+
+3 rows in set (0.00 sec)
+
+tidb(localhost:4000) > select /*+ tidb_inlj(t1, t2) */ t1.* from t1 join t2 on substr(t1.a, 2, 4) = t2.a and t1.b = t2.b where t1.c between 1 and 5;
++------+------+------+
+| a    | b    | c    |
++------+------+------+
+| bacd |    2 |    2 |
+| cbad |    3 |    3 |
++------+------+------+
+2 rows in set (0.01 sec)
+```
+
+2. What did you expect to see?
+```sql
+tidb(localhost:4000) > select /*+ tidb_inlj(t1, t2) */ t1.* from t1 join t2 on substr(t1.a, 2, 4) = t2.a and t1.b = t2.b where t1.c between 1 and 5;
++------+------+------+
+| a    | b    | c    |
++------+------+------+
+| abcd |    1 |    1 |
+| bacd |    2 |    2 |
+| cbad |    3 |    3 |
++------+------+------+
+2 rows in set (0.01 sec)
+```
+
+
+3. What did you see instead?
+```sql
+tidb(localhost:4000) > select /*+ tidb_inlj(t1, t2) */ t1.* from t1 join t2 on substr(t1.a, 2, 4) = t2.a and t1.b = t2.b where t1.c between 1 and 5;
++------+------+------+
+| a    | b    | c    |
++------+------+------+
+| bacd |    2 |    2 |
+| cbad |    3 |    3 |
++------+------+------+
+2 rows in set (0.01 sec)
+```
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+```sql
+tidb(localhost:4000) > select tidb_version();
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                             |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v4.0.0-alpha-729-ga28fc711d
+Git Commit Hash: a28fc711d738676abf873955054a01222095602b
+Git Branch: HEAD
+UTC Build Time: 2019-11-06 03:03:50
+GoVersion: go version go1.13 darwin/amd64
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

@@ -1,0 +1,60 @@
+ID: 13806
+Title: When sending data to HashAgg's father node, the execution logic is not paralleled
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+Find the Q17/Q18 is too much slower than others.
+
+2. What did you expect to see?
+
+Skip this chapter.
+
+3. What did you see instead?
+
+Testing TPC-H with scale factor 100.
+
+For Q17, there're three tables joined, and one aggregation performed on the largest table `lineitem`. It executes 6mins+
+For Q18, there're four tables joined, and one aggregation performed on the largest table `lineitem`. It executes 10mins+
+For Q5, all tables are joined and the largest table `lineitem` was full joined without data filtered out before join, it executes 84.79s.
+For Q9, nearly all tables are joined and one aggregation performed on join result, it executes 173.5s.
+
+Though we cannot compre the execution time directly in fact. But it's very strange that the hash aggregation is too much slower compared with hash join.
+
+So we looked into the codes and find something is unexpected.
+
+```
+	for !chk.IsFull() {
+		e.finalInputCh <- chk
+		result, ok := <-e.finalOutputCh
+		if !ok { // all finalWorkers exited
+			e.executed = true
+			if chk.NumRows() > 0 { // but there are some data left
+				return nil
+			}
+			if e.isChildReturnEmpty && e.defaultVal != nil {
+				chk.Append(e.defaultVal, 0, 1)
+			}
+			e.isChildReturnEmpty = false
+			return nil
+		}
+		if result.err != nil {
+			return result.err
+		}
+		if chk.NumRows() > 0 {
+			e.isChildReturnEmpty = false
+		}
+```
+Here we do nothing about the `result.chk` received from the `e.finalOutputCh`, return the `chk` directly, which seems that there's only one chunk in the `e.finalInputCh`.
+
+And i find that we do only send chunk to the `e.finalInputCh` here.
+
+Though there're `FinalConcurrency`s FinalWorker waiting to send data to the `e.finalOutputCh`. But they're competing for only one chunk from `e.finalInputCh`, which make the parallel execution unparalled.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+current master

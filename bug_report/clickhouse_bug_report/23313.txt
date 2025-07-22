@@ -1,0 +1,26 @@
+ID: 23313
+Title: Tight loop/deadlock in replication queue when merges aren't actually executing
+Description:
+ClickHouse version 21.4.4
+
+We have several instances of the following situation:
+
+```
+┌─num_tries─┬─new_part_name──────────┬─postpone_reason─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬─type────────┬─merge_type─┐
+│     24602 │ 20210402_83834_83834_0 │ Not executing log entry queue-0056309155 for part 20210402_83834_83834_0 because it is covered by part 20210402_83810_83840_2 that is currently executing.                                      │ GET_PART    │            │
+│     24414 │ 20210402_83810_83840_2 │ Not executing log entry queue-0056309178 of type MERGE_PARTS for part 20210402_83810_83840_2 because part 20210402_83834_83834_0 is not ready yet (log entry for that part is being processed). │ MERGE_PARTS │ REGULAR    │
+└───────────┴────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────┴────────────┘
+```
+
+The first GET_PART task in the queue keeps looping because the part it is getting is covered by the MERGE_PARTS task.
+The MERGE_PARTS task keeps looping because it's waiting for the GET_PART task.
+
+Neither of these tasks is actually executing.
+
+As you can see this happens repeatedly, the 20k num_tries is over the course of about two hours.
+
+I know this can be fixed by detaching and attaching the partition, but as you can tell by the part numbers, we have very large partitions.
+
+I'm not quite certain how the replication queue got in this state, but we do have occasional zookeeper network issues and server restarts for maintenance, etc.
+
+It seems like the GET_PART task should occasionally check to see if the part that it *thinks* is executing is actually executing, or there should be some other way to break out of this loop without removing the nodes from the queue.

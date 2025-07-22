@@ -1,0 +1,55 @@
+ID: 39304
+Title: TIDB_DECODE_KEY use partition id instead of table id
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+select `TIDB_DECODE_KEY` from `information_schema.tikv_region_status` 
+```
+SELECT START_KEY, TIDB_DECODE_KEY(START_KEY) FROM information_schema.tikv_region_status WHERE table_name='stock' AND REGION_ID=49103157;
++--------------------------------------------------------------------------+----------------------------------------------+
+| START_KEY                                                                | TIDB_DECODE_KEY(START_KEY)                   |
++--------------------------------------------------------------------------+----------------------------------------------+
+| 748000000000035BFFA25F720380000000FF00001F3303800000FF0000011723000000FC | {"handle":"{7987, 71459}","table_id":220066} |
+| 748000000000035BFFA25F720380000000FF00001F3303800000FF0000011723000000FC | {"handle":"{7987, 71459}","table_id":220066} |
+| 748000000000035BFFA25F720380000000FF00001F3303800000FF0000011723000000FC | {"handle":"{7987, 71459}","table_id":220066} |
+| 748000000000035BFFA25F720380000000FF00001F3303800000FF0000011723000000FC | {"handle":"{7987, 71459}","table_id":220066} |
++--------------------------------------------------------------------------+----------------------------------------------+
+```
+When we check the table, there's no table with id `220066`
+The real id for such table is `212078` instead
+```
+mysql> select tidb_table_id from information_schema.tables where table_name = 'stock';
++---------------+
+| tidb_table_id |
++---------------+
+|        212078 |
++---------------+
+1 row in set (0.94 sec)
+```
+
+We found `stock` table is partitioned and the table id in the key is actually partition id
+```
+mysql> select * from partitions where TIDB_PARTITION_ID = 220066;
++---------------+-----------------+------------+----------------+-------------------+----------------------------+-------------------------------+------------------+---------------------+----------------------+-------------------------+-----------------------+------------+----------------+-------------+-----------------+--------------+-----------+---------------------+-------------+------------+----------+-------------------+-----------+-----------------+-------------------+----------------------------+
+| TABLE_CATALOG | TABLE_SCHEMA    | TABLE_NAME | PARTITION_NAME | SUBPARTITION_NAME | PARTITION_ORDINAL_POSITION | SUBPARTITION_ORDINAL_POSITION | PARTITION_METHOD | SUBPARTITION_METHOD | PARTITION_EXPRESSION | SUBPARTITION_EXPRESSION | PARTITION_DESCRIPTION | TABLE_ROWS | AVG_ROW_LENGTH | DATA_LENGTH | MAX_DATA_LENGTH | INDEX_LENGTH | DATA_FREE | CREATE_TIME         | UPDATE_TIME | CHECK_TIME | CHECKSUM | PARTITION_COMMENT | NODEGROUP | TABLESPACE_NAME | TIDB_PARTITION_ID | TIDB_PLACEMENT_POLICY_NAME |
++---------------+-----------------+------------+----------------+-------------------+----------------------------+-------------------------------+------------------+---------------------+----------------------+-------------------------+-----------------------+------------+----------------+-------------+-----------------+--------------+-----------+---------------------+-------------+------------+----------+-------------------+-----------+-----------------+-------------------+----------------------------+
+| def           | tpcc_load_test1 | stock      | p7987          | NULL              |                       7988 |                          NULL | HASH             | NULL                | `s_w_id`             | NULL                    |                       |          0 |              0 |           0 |               0 |            0 |         0 | 2022-11-12 02:28:31 | NULL        | NULL       |     NULL |                   | NULL      | NULL            |            220066 | NULL                       |
++---------------+-----------------+------------+----------------+-------------------+----------------------------+-------------------------------+------------------+---------------------+----------------------+-------------------------+-----------------------+------------+----------------+-------------+-----------------+--------------+-----------+---------------------+-------------+------------+----------+-------------------+-----------+-----------------+-------------------+----------------------------+
+1 row in set (1.01 sec)
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+We expect TIDB_DECODE_KEY provides proper table id `212078` instead of `220066` which is the partition id of this table. 
+ 
+### 3. What did you see instead (Required)
+Partition id `220066` is shown as table id in TIDB_DECODE_KEY
+We found the current tidb_decode_key function is using partition id instead of table id.
+https://github.com/pingcap/tidb/blob/e48f35751f56470aaba1fa12f68cc97f7b64fa56/planner/core/expression_rewriter.go#L2144
+### 4. What is your TiDB version? (Required)
+v6.1.0
+<!-- Paste the output of SELECT tidb_version() -->
+

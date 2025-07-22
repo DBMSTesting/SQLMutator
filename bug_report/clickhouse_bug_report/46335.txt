@@ -1,0 +1,60 @@
+ID: 46335
+Title: Unknown column: if(equals(plus(...))) bug TPC-DS
+Description:
+
+**Describe what's wrong**
+
+23.2
+
+```sql
+SELECT key_a + key_b as d, rank() OVER () as f FROM (SELECT rand() % 10 as key_a, rand(1) % 5 as key_b, number  FROM numbers(100)) GROUP BY rollup(key_a,key_b) ORDER BY  case when d = 0 then key_a end;
+
+Code: 47. DB::Exception: Unknown column: if(equals(plus(key_a, key_b), 0), key_a, NULL), there are only columns __grouping_set, key_a, key_b, plus(key_a, key_b). (UNKNOWN_IDENTIFIER)
+
+SELECT key_a + key_b as d, rank() OVER (PARTITION BY key_a + key_b) as f FROM (SELECT rand() % 10 as key_a, rand(1) % 5 as key_b, number  FROM numbers(100)) GROUP BY rollup(key_a,key_b) ORDER BY  case when d = 0 then key_a end;
+
+Code: 47. DB::Exception: Unknown column: if(equals(plus(key_a, key_b), 0), key_a, NULL), there are only columns __grouping_set, key_a, key_b, plus(key_a, key_b). (UNKNOWN_IDENTIFIER)
+
+ SELECT grouping(key_a) + grouping(key_b) as d, rank() OVER (PARTITION BY grouping(key_a) + grouping(key_b), case when grouping(key_b) = 0 then key_a end) as f FROM (SELECT rand() % 10 as key_a, rand(1) % 5 as key_b, number  FROM numbers(100)) GROUP BY rollup(key_a,key_b) ORDER BY  case when d = 0 then key_a end;
+
+Received exception:
+Code: 47. DB::Exception: Unknown column: if(equals(plus(grouping(key_a), grouping(key_b)), 0), key_a, NULL), there are only columns __grouping_set, key_a, key_b, grouping(key_a), grouping(key_b), plus(grouping(key_a), grouping(key_b)), 0, equals(grouping(key_b), 0), NULL, if(equals(grouping(key_b), 0), key_a, NULL). (UNKNOWN_IDENTIFIER)
+```
+
+**Does it reproduce on recent release?**
+
+Yes, 23.2
+
+**Expected behavior**
+
+Query works
+
+**Error message and/or stacktrace**
+
+```sql
+Received exception from server (version 23.2.1):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: Unknown column: if(equals(plus(grouping(i_category), grouping(i_class)), 0), i_category, NULL), there are only columns __grouping_set, i_category, i_class, sum(ws_net_paid), grouping(i_category), grouping(i_class), plus(grouping(i_category), grouping(i_class)), 0, equals(grouping(i_class), 0), NULL, if(equals(grouping(i_class), 0), i_category, NULL). (UNKNOWN_IDENTIFIER)
+(query: select   
+    sum(ws_net_paid) as total_sum
+   ,i_category
+   ,i_class
+   ,grouping(i_category)+grouping(i_class) as lochierarchy
+   ,rank() over (
+    partition by grouping(i_category)+grouping(i_class),
+    case when grouping(i_class) = 0 then i_category end 
+    order by sum(ws_net_paid) desc) as rank_within_parent
+ from
+    web_sales
+   ,date_dim       d1
+   ,item
+ where
+    d1.d_month_seq between 1212 and 1212+11
+ and d1.d_date_sk = ws_sold_date_sk
+ and i_item_sk  = ws_item_sk
+ group by rollup(i_category,i_class)
+ order by
+   lochierarchy desc,
+   case when lochierarchy = 0 then i_category end,
+   rank_within_parent
+ LIMIT 100;)
+```

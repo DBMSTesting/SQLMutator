@@ -1,0 +1,67 @@
+ID: 42021
+Title: The wrong index was selected when indexjoin meets clustered index
+Description:
+## Bug Report
+The wrong index was selected when indexjoin constructing InnerTablescan
+
+### 1. Minimal reproduce step (Required)
+```
+CREATE TABLE `test` (
+`id1` varbinary(16) NOT NULL,
+`id2` varbinary(16) DEFAULT NULL,
+`id3` int(11) DEFAULT NULL,
+`id4` datetime NOT NULL,
+`id5` datetime NOT NULL,
+`id6` text DEFAULT NULL,
+`id7` text DEFAULT NULL,
+`id8` varchar(255) DEFAULT 'pending' COMMENT '同步状态',
+`id9` int(11) NOT NULL,
+PRIMARY KEY (`id9`,`id1`) CLUSTERED,
+UNIQUE KEY `uk_pi_id` (`id1`),
+KEY `index_id2` (`id2`),
+KEY `index_id4` (`id4`),
+KEY `idx_id2_id3` (`id2`,`id3`),
+KEY `idx_id8_id4` (`id8`,`id4`),
+KEY `idx_id9_id2_id3` (`id9`,`id2`,`id3`));
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```
+mysql> EXPLAIN SELECT a.* FROM test a use INDEX (idx_id9_id2_id3), ( SELECT id9, id2, min(id3) AS id3 FROM test WHERE id9 = 1 AND id2 IN ('1') GROUP BY id9, id2 ) b WHERE a.id9 = b.id9 AND a.id2 = b.id2 AND a.id3 = b.id3;
++----------------------------------+---------+-----------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                               | estRows | task      | access object                                    | operator info                                                                                                                                                                                                                                                     |
++----------------------------------+---------+-----------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| IndexHashJoin_20                 | 7984.01 | root      |                                                  | inner join, inner:IndexLookUp_17, outer key:test1.test.id9, test1.test.id2, Column#19, inner key:test1.test.id9, test1.test.id2, test1.test.id3, equal cond:eq(Column#19, test1.test.id3), eq(test1.test.id2, test1.test.id2), eq(test1.test.id9, test1.test.id9) |
+| ├─Selection_29(Build)            | 0.80    | root      |                                                  | not(isnull(Column#19))                                                                                                                                                                                                                                            |
+| │ └─StreamAgg_34                 | 1.00    | root      |                                                  | group by:test1.test.id2, test1.test.id9, funcs:min(test1.test.id3)->Column#19, funcs:firstrow(test1.test.id2)->test1.test.id2, funcs:firstrow(test1.test.id9)->test1.test.id9                                                                                     |
+| │   └─IndexReader_44             | 0.10    | root      |                                                  | index:IndexRangeScan_43                                                                                                                                                                                                                                           |
+| │     └─IndexRangeScan_43        | 0.10    | cop[tikv] | table:test, index:idx_id9_id2_id3(id9, id2, id3) | range:[1 0x31,1 0x31], keep order:true, stats:pseudo                                                                                                                                                                                                              |
+| └─IndexLookUp_17(Probe)          | 7984.01 | root      |                                                  |                                                                                                                                                                                                                                                                   |
+|   ├─Selection_16(Build)          | 7984.01 | cop[tikv] |                                                  | not(isnull(test1.test.id2)), not(isnull(test1.test.id3))                                                                                                                                                                                                          |
+|   │ └─IndexRangeScan_14          | 8000.00 | cop[tikv] | table:a, index:idx_id9_id2_id3(id9, id2, id3)    | range: decided by [eq(test1.test.id9, test1.test.id9) eq(test1.test.id2, test1.test.id2) eq(test1.test.id3, Column#19)], keep order:false, stats:pseudo                                                                                                           |
+|   └─TableRowIDScan_15(Probe)     | 7984.01 | cop[tikv] | table:a                                          | keep order:false, stats:pseudo                                                                                                                                                                                                                                    |
++----------------------------------+---------+-----------+--------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+9 rows in set (0.00 sec)
+```
+### 3. What did you see instead (Required)
+```
+mysql> EXPLAIN SELECT a.* FROM test a , ( SELECT id9, id2, min(id3) AS id3 FROM test WHERE id9 = 1 AND id2 IN ('1') GROUP BY id9, id2 ) b WHERE a.id9 = b.id9 AND a.id2 = b.id2 AND a.id3 = b.id3;
++---------------------------------+---------+-----------+--------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                    | operator info                                                                                                                                                                                          |
++---------------------------------+---------+-----------+--------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| IndexHashJoin_22                | 7984.01 | root      |                                                  | inner join, inner:TableReader_16, outer key:test1.test.id9, inner key:test1.test.id9, equal cond:eq(Column#19, test1.test.id3), eq(test1.test.id2, test1.test.id2), eq(test1.test.id9, test1.test.id9) |
+| ├─Selection_26(Build)           | 0.80    | root      |                                                  | not(isnull(Column#19))                                                                                                                                                                                 |
+| │ └─StreamAgg_31                | 1.00    | root      |                                                  | group by:test1.test.id2, test1.test.id9, funcs:min(test1.test.id3)->Column#19, funcs:firstrow(test1.test.id2)->test1.test.id2, funcs:firstrow(test1.test.id9)->test1.test.id9                          |
+| │   └─IndexReader_41            | 0.10    | root      |                                                  | index:IndexRangeScan_40                                                                                                                                                                                |
+| │     └─IndexRangeScan_40       | 0.10    | cop[tikv] | table:test, index:idx_id9_id2_id3(id9, id2, id3) | range:[1 0x31,1 0x31], keep order:true, stats:pseudo                                                                                                                                                   |
+| └─TableReader_16(Probe)         | 0.80    | root      |                                                  | data:Selection_15                                                                                                                                                                                      |
+|   └─Selection_15                | 0.80    | cop[tikv] |                                                  | not(isnull(test1.test.id2)), not(isnull(test1.test.id3))                                                                                                                                               |
+|     └─TableRangeScan_14         | 0.80    | cop[tikv] | table:a                                          | range: decided by [eq(test1.test.id9, test1.test.id9)], keep order:false, stats:pseudo                                                                                                                 |
++---------------------------------+---------+-----------+--------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+8 rows in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

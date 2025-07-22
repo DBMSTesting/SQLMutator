@@ -1,0 +1,60 @@
+ID: 37190
+Title: PREWHERE breaks CTE clause with arrayJoin(arrayEnumerate())
+Description:
+**Describe what's wrong**
+Before going into description I must warn that the issue seems to be quite random and magically heals itself with even subtle changes to the original setup.
+
+TLDR is `arrayJoin(arrayEnumerate())` (and probably other functions) cannot be used when specified in a CTE block if the query involves `PREWHERE` section or optimisation. The error returned says something like:
+```
+DB::Exception: Illegal column Function of first argument of function arrayEnumerate: while executing 'FUNCTION arrayEnumerate(arr : 5) -> arrayEnumerate(arr) Array(UInt32) : 7'. (ILLEGAL_COLUMN)
+```
+
+Disabling `PREWHERE`, moving CTE block to `SELECT` clause, removing the usage of `arrayEnumerate` results or removing `arrayJoin` function makes the issue go away.
+
+**Does it reproduce on recent release?**
+We were able to reproduce on several versions starting with 21.9, including latest-and-greatest 22.3 and 22.4 releases (using official Docker Hub images).
+
+**How to reproduce**
+Run the following SQL in Clickhouse:
+```
+CREATE TABLE test (a Int32, b Int32) ENGINE = MergeTree() ORDER BY a;
+INSERT INTO test SELECT number, 1 FROM numbers(3);
+WITH
+    transform(a, [0], [1]) as t,
+    [[1]][t] as arr,
+    arrayJoin(arrayEnumerate(arr)) as i,
+    arr[i] as v
+SELECT 
+    a, b
+FROM 
+    test
+PREWHERE b >= 0
+WHERE v IN (1);
+```
+
+If `PREWHERE` section is removed or `arr` expression is replaced with inline value, the query starts to work:
+```
+WITH
+    transform(a, [0], [1]) as t,
+    [[1]][t] as arr,
+    arrayJoin(arrayEnumerate([[1]][transform(a, [0], [1])])) as i,
+    arr[i] as v
+SELECT 
+    a, b
+FROM 
+    test
+PREWHERE b >= 0
+WHERE v IN (1);
+```
+
+**Expected behavior**
+Two rows of (0, 1) and (1, 1) are returned.
+
+**Error message and/or stacktrace**
+```
+Received exception from server (version 22.4.5):
+Code: 44. DB::Exception: Received from localhost:9000. DB::Exception: Illegal column Function of first argument of function arrayEnumerate: while executing 'FUNCTION arrayEnumerate(arr : 5) -> arrayEnumerate(arr) Array(UInt32) : 7'. (ILLEGAL_COLUMN)
+```
+
+**Additional context**
+We have obtained this example by itertively simplifying a real-world query from our codebase. I do appreciate the provided example looks like Frankenstein's monster, but in our setup all parts (CTE, `transform`, `arrayJoin(arrayEnumerate)` etc) do make sense and cannot be easily replaced without loosing flexibility or performance.

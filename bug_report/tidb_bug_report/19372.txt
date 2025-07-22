@@ -1,0 +1,112 @@
+ID: 19372
+Title: Incorrect result when applying IndexLookUp multiple times
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```sql
+drop table if exists t1, t2;
+create table t1 (c_int int, c_str varchar(40), key(c_str));
+create table t2 like t1;
+insert into t1 values (1, 'a'), (2, 'b'), (3, 'c');
+insert into t2 select * from t1;
+select (select t2.c_str from t2 where t2.c_str <= t1.c_str and t2.c_int in (1, 2) order by t2.c_str limit 1) x from t1 order by c_int;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++------+
+| x    |
++------+
+| a    |
+| a    |
+| a    |
++------+
+```
+
+### 3. What did you see instead (Required)
+
+```
++------+
+| x    |
++------+
+| a    |
+| a    |
+| b    |
++------+
+```
+
+<details>
+
+```
+mysql> select (select t2.c_str from t2 where t2.c_str <= t1.c_str and t2.c_int in (1, 2) order by t2.c_str limit 1) x from t1 order by c_int;
++------+
+| x    |
++------+
+| a    |
+| a    |
+| b    |
++------+
+3 rows in set (0.06 sec)
+
+mysql> explain select (select t2.c_str from t2 where t2.c_str <= t1.c_str and t2.c_int in (1, 2) order by t2.c_str limit 1) x from t1;
++------------------------------------+----------+-----------+------------------------------+----------------------------------+
+| id                                 | estRows  | task      | access object                | operator info                    |
++------------------------------------+----------+-----------+------------------------------+----------------------------------+
+| Projection_11                      | 10000.00 | root      |                              | test.t2.c_str                    |
+| └─Apply_13                         | 10000.00 | root      |                              | CARTESIAN left outer join        |
+|   ├─IndexReader_17(Build)          | 10000.00 | root      |                              | index:IndexFullScan_16           |
+|   │ └─IndexFullScan_16             | 10000.00 | cop[tikv] | table:t1, index:c_str(c_str) | keep order:false, stats:pseudo   |
+|   └─Limit_22(Probe)                | 1.00     | root      |                              | offset:0, count:1                |
+|     └─Projection_36                | 1.00     | root      |                              | test.t2.c_int, test.t2.c_str     |
+|       └─IndexLookUp_35             | 1.00     | root      |                              |                                  |
+|         ├─Selection_33(Build)      | 500.00   | cop[tikv] |                              | le(test.t2.c_str, test.t1.c_str) |
+|         │ └─IndexFullScan_31       | 625.00   | cop[tikv] | table:t2, index:c_str(c_str) | keep order:true, stats:pseudo    |
+|         └─Selection_34(Probe)      | 1.00     | cop[tikv] |                              | in(test.t2.c_int, 1, 2)          |
+|           └─TableRowIDScan_32      | 500.00   | cop[tikv] | table:t2                     | keep order:false, stats:pseudo   |
++------------------------------------+----------+-----------+------------------------------+----------------------------------+
+11 rows in set (0.04 sec)
+
+mysql> analyze table t2;
+Query OK, 0 rows affected (0.43 sec)
+
+mysql> select (select t2.c_str from t2 where t2.c_str <= t1.c_str and t2.c_int in (1, 2) order by t2.c_str limit 1) x from t1;
++------+
+| x    |
++------+
+| a    |
+| a    |
+| a    |
++------+
+3 rows in set (0.04 sec)
+
+mysql> explain select (select t2.c_str from t2 where t2.c_str <= t1.c_str and t2.c_int in (1, 2) order by t2.c_str limit 1) x from t1;
++--------------------------------+----------+-----------+------------------------------+-----------------------------------------------------------+
+| id                             | estRows  | task      | access object                | operator info                                             |
++--------------------------------+----------+-----------+------------------------------+-----------------------------------------------------------+
+| Projection_11                  | 10000.00 | root      |                              | test.t2.c_str                                             |
+| └─Apply_13                     | 10000.00 | root      |                              | CARTESIAN left outer join                                 |
+|   ├─IndexReader_17(Build)      | 10000.00 | root      |                              | index:IndexFullScan_16                                    |
+|   │ └─IndexFullScan_16         | 10000.00 | cop[tikv] | table:t1, index:c_str(c_str) | keep order:false, stats:pseudo                            |
+|   └─TopN_20(Probe)             | 0.00     | root      |                              | test.t2.c_str:asc, offset:0, count:1                      |
+|     └─TableReader_30           | 0.00     | root      |                              | data:Selection_29                                         |
+|       └─Selection_29           | 0.00     | cop[tikv] |                              | in(test.t2.c_int, 1, 2), le(test.t2.c_str, test.t1.c_str) |
+|         └─TableFullScan_28     | 3.00     | cop[tikv] | table:t2                     | keep order:false                                          |
++--------------------------------+----------+-----------+------------------------------+-----------------------------------------------------------+
+8 rows in set (0.04 sec)
+
+```
+
+</details>
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master @ 6b3964c75d42f3a73970be2fcc308a0d65b84500
+release-4.0 @ fb952937dcef74555af9b3333801a0628e61565f

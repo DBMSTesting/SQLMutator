@@ -1,0 +1,84 @@
+ID: 51786
+Title: Task meta in DFE may be inconsistent
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+First, make it always use merge sort:
+```diff
+@@ -175,7 +175,8 @@ func skipMergeSort(stats []external.MultipleFilesStat) bool {
+        failpoint.Inject("forceMergeSort", func() {
+                failpoint.Return(false)
+        })
+-       return external.GetMaxOverlappingTotal(stats) <= external.MergeSortOverlapThreshold
++       return false
++       // return external.GetMaxOverlappingTotal(stats) <= external.MergeSortOverlapThreshold
+ }
+```
+Add some logs around `switch2NextStep`:
+```diff
+ func (s *BaseScheduler) switch2NextStep() error {
+        task := *s.GetTask()
++       s.logger.Info("switch2NextStep start", zap.String("meta", string(task.Meta)))
+        nextStep := s.GetNextStep(&task.TaskBase)
+        s.logger.Info("switch to next step",
+                zap.String("current-step", proto.Step2Str(task.Type, task.Step)),
+@@ -458,6 +459,7 @@ func (s *BaseScheduler) switch2NextStep() error {
+        task.State = proto.TaskStateRunning
+        // and OnNextSubtasksBatch might change meta of task.
+        s.task.Store(&task)
++       s.logger.Info("switch2NextStep end", zap.String("meta", string(task.Meta)))
+        return nil
+ }
+```
+And `updateTaskStateStep`:
+```diff
+@@ -632,6 +634,8 @@ func (*TaskManager) updateTaskStateStep(ctx context.Context, se sessionctx.Conte
+                        meta = %?
+                where id = %? and state = %? and step = %?`,
+                nextState, nextStep, task.Meta, task.ID, task.State, task.Step)
++
++       logutil.BgLogger().Info("updateTaskStateStep", zap.String("meta", string(task.Meta)))
+        return err
+ }
+```
+
+Run an add index task:
+```sql
+mysql> create table t (a int, b int);
+Query OK, 0 rows affected (0.13 sec)
+
+mysql> insert into t values (1, 1), (2, 2), (3, 3);
+Query OK, 3 rows affected (0.02 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+
+mysql> set global tidb_enable_dist_task = 1;
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> set global tidb_cloud_storage_uri = "s3://globalsort/addindex?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http://127.0.0.1:9000&force-path-style=true";
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> alter table t add index idx(a);
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Logs are consistent.
+
+### 3. What did you see instead (Required)
+
+Search the log around
+```
+[scheduler.go:423] ["switch to next step"] [task-id=150001] [task-type=backfill] [allocated-slots=true] [current-step=read-index] [next-step=merge-sort]
+```
+You will see the `use_merge_sort` is false at `updateTaskStateStep`, but it is true after `switch2NextStep end`. That means task meta is inconsistent between memory and persistent task table. If the owner changes, new owner may see unexpected meta values.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+f46ccb3ec

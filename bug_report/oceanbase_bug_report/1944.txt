@@ -1,0 +1,147 @@
+ID: 1944
+Title: [Bug]: `stddev_samp()` 返回了预期之外的NULL
+Description:
+**Describe the bug**
+master分支版本，对于参数为常数的`stddev_samp()`，返回了预期之外的NULL
+
+**Fast Reproduce Steps(Required)**
+先执行`init.sql`建表，随后执行`error.sql`，出现预期之外的结果。可以尝试多次执行`error.sql`来复现错误。如果多次尝试未果，可以尝试重新建立数据库，再次执行`init.sql`建表
+
+[init.sql.txt](https://github.com/oceanbase/oceanbase/files/15174606/init.sql.txt)
+[error.sql.txt](https://github.com/oceanbase/oceanbase/files/15174604/error.sql.txt)
+
+**Expected behavior**
+对于参数为常数的`stddev_samp()`，结果不应为NULL.
+
+**Actual Behavior**
+
+MySQL结果：
+```
+mysql> SELECT
+    ->   stddev_samp(
+    ->     cast(cot(
+    ->       cast(9433 as signed)) as double)) as c0
+    -> FROM
+    ->   t_i40uc as ref_7
+    -> WHERE
+    ->   ref_7.c_j7k0 is not NULL
+    -> GROUP BY
+    ->   ref_7.c_wc2kqiaf61
+    -> ORDER BY
+    ->   c0 ASC
+    -> ;
++------+
+| c0   |
++------+
+|    0 |
+|    0 |
+|    0 |
++------+
+```
+
+对于OB的单节点和多节点版本，都有错误行
+多节点：
+```
+`#NULL` | 
+`#NULL` | 
+`#NULL` | 
+```
+
+单节点：
+```
+`#NULL`  | 
+0.000000 | 
+0.000000 | 
+```
+
+**Environment**
+```
+Linux c0bae494cabb 6.5.0-18-generic #18~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Feb  7 11:40:03 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+
+commit 7ead2595472f666ae677b2a820aef3bfe40ffcb0 (HEAD -> master, origin/master)
+
+observer (OceanBase_CE 4.3.1.0)
+
+REVISION: 1-7ead2595472f666ae677b2a820aef3bfe40ffcb0
+BUILD_BRANCH: master
+BUILD_TIME: Apr 29 2024 21:37:35
+BUILD_FLAGS: RelWithDebInfo
+BUILD_INFO: 
+
+Copyright (c) 2011-present OceanBase Inc.
+```
+
+
+部署配置文件
+```
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.11
+    - name: server2
+      ip: 10.0.10.12
+    - name: server3
+      ip: 10.0.10.13
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+  server2:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer2
+    zone: zone2
+  server3:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer3
+    zone: zone3
+  tag: latest
+  include: obd/observer.include.yaml
+  global: 
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '30G'
+    # diag_syslog_per_error_limit: '4'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+obproxy-ce:
+  servers:
+    - 10.0.10.8
+  global:
+    listen_port: 10004
+    prometheus_listen_port: 10005
+    syslog_level: 'WARN'
+    home_path: /root/data/obproxy
+    root_password: ''
+  include: obd/obproxy.include.yaml
+  depends:
+    - oceanbase-ce
+ ```
+
+租户配置：
+```
+DROP TENANT mysql FORCE;
+DROP RESOURCE POOL pool_for_tenant_mysql;
+
+CREATE RESOURCE UNIT 4c7g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '7G';
+create resource pool pool_test unit='4c7g', unit_num=1, zone_list=('zone1' ,'zone2', 'zone3');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF, ob_query_timeout=5000000;
+```
+
+**Additional Context** 
+我们是来自北京航空航天大学网络空间安全学院的BASS团队，主要从事系统软件安全、操作系统和程序分析研究，研发自动化程序测试框架检测软件缺陷。我们使用自研的数据库漏洞测试工具在OceanBase中找到了上述可能的漏洞。

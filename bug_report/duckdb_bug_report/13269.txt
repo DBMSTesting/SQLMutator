@@ -1,0 +1,141 @@
+ID: 13269
+Title: Duplicate create_sort_key computations in DISTINCT ON queries
+Description:
+### What happens?
+
+## Context
+I recently stumbled across an interesting function `create_sort_key` made available by @Mytherin in PR #10321. It's amazing! Now we can compute the top 1 element in each group more efficiently. Traditionally this can be done by using the `ROW_NUMBER` window function and then getting the rows where the row number is 1. But this has to do a full sort on each partition which is somewhat overkill for the top 1 problem. Another more efficient way is to use `arg_min(arg, val)` (or `arg_max`). This works only when there's one element in the order to be compared against. `create_sort_key` extends this limitation so that we can now achieve
+```sql
+-- q1
+select *, row_number() over (partition by key order by x desc, y asc) as rn
+from tbl
+qualify rn = 1
+```
+with
+```sql
+-- q2
+select key, 
+    arg_min[_null](c1, create_sort_key(x, 'desc nulls last', y, 'asc nulls last')) as c1,
+    arg_min[_null](c2, create_sort_key(x, 'desc nulls last', y, 'asc nulls last')) as c2,
+    ...
+from tbl
+group by key
+```
+which is what `DISTINCT ON` does under the hood now:
+```sql
+-- q3
+select distinct on (key) key, c1, c2, ...
+from tbl
+order by [key, ] x desc, y asc
+```
+It's much less to type and performant. Fantastic!
+
+## Missed CSE Optimization
+`create_sort_key` works by concatenating the sorting fields and forming a combined, comparable `BLOB` key (prefixed by a validity byte). So `create_sort_key` won't be that cheap if we have a lot of sorting fields or some fields are big (like `VARCHAR`). There would be a lot of memory pressure. I've noticed there are repeated computations for `create_sort_key` on `DISTINCT ON` (`q3`) compared to our handwritten aggregates `q2`. They are eliminated in `q2` but not in `q3`.
+
+### To Reproduce
+
+```sql
+explain select k, 
+    arg_min_null(x, create_sort_key(x, 'desc nulls last', y, 'asc nulls last')) as x, 
+    arg_min_null(y, create_sort_key(x, 'desc nulls last', y, 'asc nulls last')) as y, 
+from (
+    values
+        ('A', 'a', 13),
+        ('B', 'b', 12),
+        ('A', 'c', 11),
+        ('B', 'a', 10),
+        ('A', 'c',  9)
+) as t(k, x, y)
+group by k;
+```
+vs
+```sql
+explain select distinct on (k) k, x, y
+from (
+    values
+        ('A', 'a', 13),
+        ('B', 'b', 12),
+        ('A', 'c', 11),
+        ('B', 'a', 10),
+        ('A', 'c',  9)
+) as t(k, x, y)
+order by x desc, y;
+```
+They produce:
+```
+        DISTINCT ON                             Manual
+┌───────────────────────────┐        ┌───────────────────────────┐
+│          ORDER_BY         │        │       HASH_GROUP_BY       │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │        │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│          ORDERS:          │        │             #0            │
+│          t.x DESC         │        │    arg_min_null(#1, #2)   │
+│          t.y ASC          │        │    arg_min_null(#3, #4)   │
+└─────────────┬─────────────┘        └─────────────┬─────────────┘
+┌─────────────┴─────────────┐        ┌─────────────┴─────────────┐
+│         PROJECTION        │        │         PROJECTION        │
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │        │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│             #0            │        │             k             │
+│             #1            │        │             x             │
+│             #2            │        │             #2            │
+└─────────────┬─────────────┘        │             y             │
+┌─────────────┴─────────────┐        │             #2            │
+│       HASH_GROUP_BY       │        └─────────────┬─────────────┘
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │        ┌─────────────┴─────────────┐
+│             #0            │        │         PROJECTION        │
+│    arg_min_null(#1, #2)   │        │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │
+│    arg_min_null(#3, #4)   │        │             k             │
+└─────────────┬─────────────┘        │             x             │
+┌─────────────┴─────────────┐        │  create_sort_key(x, 'desc │
+│         PROJECTION        │        │ nulls last', y, 'asc nulls│
+│   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─   │        │           last')          │
+│            t.k            │        │             y             │
+│             #1            │        └─────────────┬─────────────┘
+│ create_sort_key(t.x, 'DESC│        ┌─────────────┴─────────────┐
+│   NULLS LAST', t.y, 'ASC  │        │      COLUMN_DATA_SCAN     │
+│        NULLS LAST')       │        └───────────────────────────┘
+│             #2            │
+│ create_sort_key(t.x, 'DESC│
+│   NULLS LAST', t.y, 'ASC  │
+│        NULLS LAST')       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      COLUMN_DATA_SCAN     │
+└───────────────────────────┘
+```
+
+### OS:
+
+MacOS
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+python
+
+### Full Name:
+
+Mark
+
+### Affiliation:
+
+None
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

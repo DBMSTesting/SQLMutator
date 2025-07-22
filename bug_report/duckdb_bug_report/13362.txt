@@ -1,0 +1,238 @@
+ID: 13362
+Title: Performance issues on large queries with CTEs and GROUP BYs
+Description:
+### What happens?
+
+I'm experimenting with (stupid and needlessly large) queries on directed acyclic graphs, using a lot of CTEs and joins. I notice that the query execution time scales exponentially with the size of my graph.
+
+I'm a bit hesitant to even call this a bug, because the query is so silly. The main reason I'm opening this report is because sqlite doesn't seem to have any problem with it, or at least not as bad.
+
+### To Reproduce
+
+As some background, I am creating a DAG that looks like this:
+
+![image](https://github.com/user-attachments/assets/8818b8c3-9419-4abf-8bf6-8df5b2c86de3)
+
+Each node and each edge has a value. I am generating a (long) query that simulates walking over the graph and doing some operation on it. In this case, it's simply summing all values.
+
+Consider this code:
+
+```python
+import duckdb
+import random
+import time
+
+con = duckdb.connect()
+
+# A "layer" is basically a column, kinda like how a neural network is divided in layers.
+num_layers = 2
+nodes_per_layer = 3
+
+def create_dag_and_query_it(num_layers):
+    con.sql("DROP TABLE IF EXISTS edge")
+    con.sql("DROP TABLE IF EXISTS node")
+    con.sql("DROP SEQUENCE IF EXISTS seq_node")
+
+    con.sql("CREATE SEQUENCE seq_node START 1")
+
+    con.sql(
+        """
+        CREATE TABLE node(
+            id INTEGER PRIMARY KEY DEFAULT nextval('seq_node'),
+            value REAL
+        )"""
+    )
+    con.sql(
+        """
+        CREATE TABLE edge(
+            src INTEGER,
+            dst INTEGER,
+            value REAL,
+            FOREIGN KEY (src) REFERENCES node(id),
+            FOREIGN KEY (dst) REFERENCES node(id)
+        )"""
+    )
+
+    for _ in range(0, num_layers * nodes_per_layer):
+        con.execute(
+            "INSERT INTO node (value) VALUES ($value)",
+            {'value': random.uniform(-10, 10)}
+        )
+
+    # Now insert edges to create a DAG where each node is 
+    # pointing to the next one in its row.
+    for layer in range(0, num_layers - 1):
+
+        for i in range(0, nodes_per_layer):
+            from_node_id = layer * nodes_per_layer + i + 1
+            to_node_id = from_node_id + nodes_per_layer
+            con.execute(
+                "INSERT INTO edge (src, dst, value) VALUES ($src, $dst, $value)",
+                {
+                    'src': from_node_id,
+                    'dst': to_node_id,
+                    'value': random.uniform(-10, 10)
+                }
+            )
+
+    query = f"""
+        WITH input_nodes AS (
+            SELECT id, value
+            FROM node
+            WHERE id NOT IN
+            (SELECT dst FROM edge)
+        ),
+        layer_1 AS (
+            SELECT
+                e.dst,
+                i.value + e.value + n.value AS total
+            FROM edge e
+            JOIN input_nodes i ON i.id = e.src
+            JOIN node n ON e.dst = n.id
+            GROUP BY e.dst, i.value, e.value, n.value
+        )
+        """
+
+    for layer in range(2, num_layers):
+        curr = layer
+        prev = layer - 1
+        query += f""",
+            layer_{curr} AS (
+                SELECT
+                    e.dst,
+                    layer_{prev}.total + e.value + n.value AS total
+                FROM edge e
+                JOIN layer_{prev} ON layer_{prev}.dst = e.src
+                JOIN node n ON e.dst = n.id
+                GROUP BY e.dst, layer_{prev}.total, e.value, n.value
+            )
+        """
+
+    query += f"""
+        SELECT * FROM layer_{num_layers - 1};
+    """
+
+
+    start = time.time()
+    con.sql(query).show()
+    end = time.time()
+
+    print(f"Querying {num_layers} took {end - start}s")
+
+for i in range(0, 20):
+    create_dag_and_query_it(num_layers)
+    num_layers += 1
+ ```
+ 
+ For clarity, this is the kind of query that gets generated:
+ 
+ ```sql
+ WITH input_nodes AS (
+    SELECT id, value
+    FROM node
+    WHERE id NOT IN
+    (SELECT dst FROM edge)
+),
+layer_1 AS (
+    SELECT
+        e.dst,
+        i.value + e.value + n.value AS total
+    FROM edge e
+    JOIN input_nodes i ON i.id = e.src
+    JOIN node n ON e.dst = n.id
+    GROUP BY e.dst, i.value, e.value, n.value
+),
+layer_2 AS (
+    SELECT
+        e.dst,
+        layer_1.total + e.value + n.value AS total
+    FROM edge e
+    JOIN layer_1 ON layer_1.dst = e.src
+    JOIN node n ON e.dst = n.id
+    GROUP BY e.dst, layer_1.total, e.value, n.value
+)
+SELECT * FROM layer_2;
+ ```
+ 
+Now, timing the code for a network ranging from 2 up until 20ish layers:
+ 
+ ```
+Querying 2 took 0.0034301280975341797s
+Querying 3 took 0.004618644714355469s
+Querying 4 took 0.005792379379272461s
+Querying 5 took 0.0063631534576416016s
+Querying 6 took 0.008967399597167969s
+Querying 7 took 0.010886430740356445s
+Querying 8 took 0.01476740837097168s
+Querying 9 took 0.021861553192138672s
+Querying 10 took 0.03244328498840332s
+Querying 11 took 0.05426931381225586s
+Querying 12 took 0.09526395797729492s
+Querying 13 took 0.1749591827392578s
+Querying 14 took 0.3407433032989502s
+Querying 15 took 0.6575884819030762s
+Querying 16 took 1.2881064414978027s
+Querying 17 took 2.594111919403076s
+Querying 18 took 5.168762683868408s
+Querying 19 took 10.253994703292847s
+Querying 20 took 20.891204595565796s
+Querying 21 took 41.28697609901428s
+```
+
+You can see that the query time roughly doubles for each layer added.
+
+Note that the `GROUP BY`-clauses are not doing anything for this particular graph, I put them there for more complex graphs where nodes have multiple incoming edges. Omitting them solves the performance issue.
+
+I implemented the same thing in sqlite. There I need a few magnitudes more layers to achieve similar behavior, but even then it's increasing more slowly. The timings:
+
+```
+Querying 1000 took 0.3962862491607666s
+Querying 2000 took 1.545116901397705s
+Querying 3000 took 3.428781032562256s
+Querying 4000 took 6.097514629364014s
+Querying 5000 took 9.63413119316101s
+Querying 6000 took 13.858047485351562s
+Querying 7000 took 19.006457567214966s
+Querying 8000 took 25.072754621505737s
+Querying 9000 took 31.487000465393066s
+```
+
+I can provide the sqlite code as well if needed.
+
+As a final note I want to stress that this is a very silly example, so please don't spend too much time on this bug report.
+
+### OS:
+
+Ubuntu 22.04
+
+### DuckDB Version:
+
+v1.0.0 1f98600c2c
+
+### DuckDB Client:
+
+Python (duckdb==1.0.0)
+
+### Full Name:
+
+Mark Gerarts
+
+### Affiliation:
+
+Personal
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

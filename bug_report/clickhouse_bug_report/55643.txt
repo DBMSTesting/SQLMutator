@@ -1,0 +1,108 @@
+ID: 55643
+Title: 23.9 returns incorrect results depending on ORDER BY key (also affects projections)
+Description:
+**Describe what's wrong**
+
+We see a regression in 23.9 where, depending on a table's ORDER BY and filters, ClickHouse returns incorrect results. We see correct results in 23.8. I couldn't find a way to manually generate a data set that exhibits this issue, so instead I have uploaded an example data set to S3. Anyway, consider the following two tables:
+
+<table>
+<tr>
+<td>
+<pre><code>
+-- TS in ORDER BY
+CREATE TABLE tbl1
+(
+    `ID` String,
+    `TS` DateTime64(3, 'UTC')
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(TS)
+ORDER BY TS
+SETTINGS index_granularity = 8192;
+</code></pre>
+</td>
+<td>
+<pre><code>
+-- ID and TS in ORDER BY
+CREATE TABLE tbl2
+(
+    `ID` String,
+    `TS` DateTime64(3, 'UTC')
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(TS)
+ORDER BY (ID, TS)
+SETTINGS index_granularity = 8192;
+</code></pre>
+</td>
+</tr>
+</table>
+
+If I insert the following data into both of them, the number of records in each matches, as expected; however, filtering on ID returns different results:
+
+```
+INSERT INTO tbl1 SELECT * FROM s3('https://public-test-data-xyz.s3.us-east-2.amazonaws.com/tbl1.clickhouse', Native);
+
+INSERT INTO tbl2 SELECT * FROM s3('https://public-test-data-xyz.s3.us-east-2.amazonaws.com/tbl1.clickhouse', Native);
+```
+
+```
+SELECT count(*) FROM tbl1;
+-- 1500854
+
+SELECT count(*) FROM tbl2;
+-- 1500854
+
+SELECT count(*) FROM tbl1 WHERE ID = '37242ba15380c91ef199a19834325589';
+-- 107608
+
+SELECT count(*) FROM tbl2 WHERE ID = '37242ba15380c91ef199a19834325589';
+-- 75736
+```
+
+This also seems to affect projections. For example, consider this table:
+
+```
+-- TS in ORDER BY, ID in projection
+CREATE TABLE default.tbl3
+(
+    `ID` String,
+    `TS` DateTime64(3, 'UTC'),
+    PROJECTION proj
+    (
+        SELECT count(*)
+        GROUP BY ID
+    )
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(TS)
+ORDER BY TS
+SETTINGS index_granularity = 8192
+```
+
+Whether the projection already existed or is materialized after the fact, it seems like it can also return incorrect results:
+
+```
+SELECT count(*) FROM tbl1;
+-- 1500854
+
+SELECT count(*) FROM tbl3;
+-- 1500854
+
+SELECT count(*) FROM tbl1 WHERE ID = '37242ba15380c91ef199a19834325589';
+-- 107608
+
+SELECT count(*) FROM tbl3 WHERE ID = '37242ba15380c91ef199a19834325589';
+-- 97654
+```
+
+For what it's worth, we actually first saw this bug (or a version of this bug?) in projection usage. But I am having difficulties creating a minimal reproduction there.
+
+**Does it reproduce on recent release?**
+
+23.9
+
+**How to reproduce**
+
+- [ClickHouse Fiddle for 23.8](https://fiddle.clickhouse.com/37f47688-32f2-4f6a-a29f-d4321ac4acc4) ✅
+- [ClickHouse Fiddle for 23.9](https://fiddle.clickhouse.com/ce97352c-b090-4504-920a-7509c048ccdf) ❌

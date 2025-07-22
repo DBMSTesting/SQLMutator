@@ -1,0 +1,77 @@
+ID: 27249
+Title: planner: `est-rows` in the probe side of `IndexJoin` are not correct
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+create table t1 (a int, key(a));
+create table t2 (a int, key(a));
+
+insert into t1 values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
+insert into t2 values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
+
+analyze table t1;
+analyze table t2;
+
+explain format='brief' select /*+ TiDB_INLJ(t1, t2) */ * from t1, t2 where t1.a=t2.a;
+```
+
+### 2. What did you expect to see? (Required)
+```
+mysql> explain format='brief' select /*+ TiDB_INLJ(t1, t2) */ * from t1, t2 where t1.a=t2.a;
++--------------------------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------+
+| id                       | estRows | task      | access object        | operator info                                                                                                |
++--------------------------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------+
+| IndexJoin                | 10.00   | root      |                      | inner join, inner:IndexReader, outer key:test.t1.a, inner key:test.t2.a, equal cond:eq(test.t1.a, test.t2.a) |
+| ├─IndexReader(Build)     | 10.00   | root      |                      | index:IndexFullScan                                                                                          |
+| │ └─IndexFullScan        | 10.00   | cop[tikv] | table:t1, index:a(a) | keep order:false                                                                                             |
+| └─IndexReader(Probe)     | 10.00    | root      |                      | index:Selection                                                                                              |
+|   └─Selection            | 10.00    | cop[tikv] |                      | not(isnull(test.t2.a))                                                                                       |
+|     └─IndexRangeScan     | 10.00    | cop[tikv] | table:t2, index:a(a) | range: decided by [eq(test.t2.a, test.t1.a)], keep order:false                                               |
++--------------------------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+All `est-rows` in the probe side of `IndexJoin` are not correct. 
+And in the current implementation, the actual meaning of `est-rows` is `the number of rows that the probe side may return for one row from the build side` instead of `the total number of rows the probe side may return`.
+```
+mysql> explain format='brief' select /*+ TiDB_INLJ(t1, t2) */ * from t1, t2 where t1.a=t2.a;
++--------------------------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------+
+| id                       | estRows | task      | access object        | operator info                                                                                                |
++--------------------------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------+
+| IndexJoin                | 10.00   | root      |                      | inner join, inner:IndexReader, outer key:test.t1.a, inner key:test.t2.a, equal cond:eq(test.t1.a, test.t2.a) |
+| ├─IndexReader(Build)     | 10.00   | root      |                      | index:IndexFullScan                                                                                          |
+| │ └─IndexFullScan        | 10.00   | cop[tikv] | table:t1, index:a(a) | keep order:false                                                                                             |
+| └─IndexReader(Probe)     | 1.00    | root      |                      | index:Selection                                                                                              |
+|   └─Selection            | 1.00    | cop[tikv] |                      | not(isnull(test.t2.a))                                                                                       |
+|     └─IndexRangeScan     | 1.00    | cop[tikv] | table:t2, index:a(a) | range: decided by [eq(test.t2.a, test.t1.a)], keep order:false                                               |
++--------------------------+---------+-----------+----------------------+--------------------------------------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+mysql> select tidb_version();
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                            |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v5.2.0-alpha-626-g5ae87cae8
+Edition: Community
+Git Commit Hash: 5ae87cae85edeedfd47dae48cd03fd9f45cb312b
+Git Branch: master
+UTC Build Time: 2021-08-16 08:38:16
+GoVersion: go1.16.3
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

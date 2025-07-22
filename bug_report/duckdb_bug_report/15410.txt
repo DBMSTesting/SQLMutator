@@ -1,0 +1,31 @@
+ID: 15410
+Title: Index scan on (dynamic) table filters
+Description:
+DuckDB has seen some recent changes w.r.t. table filter pushdown.
+
+Before this PR, we'd attempt an index scan during plan optimization, and while doing so, _we'd already scan the relevant row IDs_. This is not optimal, as it ties the optimization phase to the storage. It also does not allow to use dynamic filters created by other operators. Implicitly, these filters would create index-join semantics, which we currently cannot utilize.
+
+**This PR includes the following changes**
+- remove any index scan from the optimization code path (for now / draft)
+- dynamically perform an index scan when initializing the global state of the table scan - storing the scanned row IDs in the global state
+- using the scanned row IDs during the table scan function to fetch the respective payload directly
+
+**Open questions/issues**
+~I removed the `TableScanFunction::GetIndexScanFunction()` function, as we no longer choose an index-scan function in the optimizer. Consequently, the `TableScanFunction::GetFunction()` function now covers both the index and conventional table scans. An unresolved issue here is that I am unsure how to either 1. disable partitioning when performing an index scan or 2. correctly set all parameters to support partitioning for index scans. The problem is that we first check if all sources support partitioning and only later initialize the global scan state - where we discover that we want to perform an index scan instead.~
+
+Additionally, by removing the index scan code from the optimization pass, our `EXPLAIN` no longer outputs that we will use an index scan - how would we address this? And if that is okay, should we somehow remedy this during `EXPLAIN ANALYZE` by returning the information we swapped to an index scan?
+
+**We've decided to tackle this in a separate PR. `EXPLAIN` no longer shows the index scan, and `ANALYZE` does not (yet) show the index scan.**
+
+This draft does not yet support multi-column index expressions, as we never push multi-column filters. This is currently a known limitation, which we should 1. either address in this PR or 2. document accordingly. Multi-column expressions have the following form: `CREATE INDEX idx ON tbl (a + b)` with a filter of type `a + b = 42`.
+
+**Pushing down multi-column filters is complex and outside the scope of this PR.**
+
+This PR does not support matching multiple filters to multiple indexes or a single compound index. I.e., `a = 42 AND b = 43` pushes down two filters.
+```
+	// If multiple filters exist, i.e., a = 11 AND b = 24, we need to
+	// 1.	1.1. Find + scan one ART for a = 11.
+	//		1.2. Find + scan one ART for b = 24.
+	//		1.3. Return the intersecting row IDs.
+	// 2. (Reorder and) scan a single ART with a compound key of (a, b).
+```

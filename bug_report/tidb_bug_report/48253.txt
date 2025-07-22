@@ -1,0 +1,80 @@
+ID: 48253
+Title: TABLESAMPLE REGIONS() with unsigned bigint primary key returns unordered result 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Populate data:
+
+```sql
+CREATE TABLE a (pk bigint unsigned primary key clustered, v text);
+INSERT INTO a WITH RECURSIVE b(pk) AS (SELECT 1 UNION ALL SELECT pk+1 FROM b WHERE pk < 1000) SELECT pk, 'a' FROM b;
+INSERT INTO a WITH RECURSIVE b(pk) AS (SELECT 1 UNION ALL SELECT pk+1 FROM b WHERE pk < 1000) SELECT pk + (1<<63), 'b' FROM b;
+SPLIT TABLE a BY (500);
+```
+
+Perform the tablesample regions() query:
+
+```sql
+SELECT * FROM a TABLESAMPLE REGIONS() ORDER BY pk;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++---------------------+------+
+| pk                  | v    |
++---------------------+------+
+|                 500 | a    |
+| 9223372036854775809 | b    |
++---------------------+------+
+```
+
+### 3. What did you see instead (Required)
+
+```
++---------------------+------+
+| pk                  | v    |
++---------------------+------+
+| 9223372036854775809 | b    |
+|                 500 | a    |
++---------------------+------+
+```
+
+<details><summary>The `pk` is ordered like a signed integer.</summary>
+
+`EXPLAIN`ing this shows the `ORDER BY` is eliminated. So the fix should be applied to the `TableSample` object itself.
+
+```
+mysql> explain SELECT * FROM a TABLESAMPLE REGIONS() ORDER BY pk;
++---------------+---------+------+---------------+---------------+
+| id            | estRows | task | access object | operator info |
++---------------+---------+------+---------------+---------------+
+| TableSample_9 | 1.00    | root |               |               |
++---------------+---------+------+---------------+---------------+
+```
+
+</details>
+
+### 4. What is your TiDB version? (Required)
+
+v7.6.0-alpha-nightly-20231101
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+Release Version: v7.6.0-alpha
+Edition: Community
+Git Commit Hash: c652a92df890196ad1e956da3a6afa7abf71adfb
+Git Branch: heads/refs/tags/v7.6.0-alpha
+UTC Build Time: 2023-11-01 14:21:14
+GoVersion: go1.21.3
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv 
+```
+
+(Also reproduced on v7.3.0 and v6.5.2. Should affect every TiDB version since TABLESAMPLE REGIONS() was implemented)

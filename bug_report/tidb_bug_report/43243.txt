@@ -1,0 +1,14 @@
+ID: 43243
+Title: BatchResolveLock doesn't handle stale pessimistic locks with invalidated primary and may break data consistency
+Description:
+## Bug Report
+
+\* This is found by reviewing code and not yet confirmed by tests.
+
+As way know, pessimistic transactions may switch primary during execution, and a stale pessimistic lock's primary may point to a key that is no longer the primary of the transaction.
+
+It's quite tricky to handle this case when resolving locks. Historically, we've done several fixes trying to make it correct, such as https://github.com/pingcap/tidb/pull/14787 , https://github.com/pingcap/tidb/pull/21689 and many more. However, we still find some incorrectly handled corner cases recently. One is https://github.com/pingcap/tidb/issues/42937 , and here's another one.
+
+Since a stale pessimistic lock may points to a key that's not the actual primary of that transaction, the status of the key pointed by the pessimistic lock may not indicate the real state (committed or rolled back) of that transaction. We used to optimize resolving lock by caching the result of `check_txn_status`, and then it's found to be problematic and fixed in https://github.com/pingcap/tidb/pull/21689 .
+
+However, we found that `BatchResolveLocks` (which is used in GC) have a different way to misuse the wrong transaction status. It's passed an array of locks (which is usually collected by `ScanLock` RPC), then checks their primary's status, collects the results in a list, and finally send them to TiKV in one `ResolveLock` RPC. There's no special handling for pessimistic locks, and it may send incorrect transaction state to TiKV. If the transaction is committed and some of their keys are prewritten but not committed (secondaries of 2PC transactions, or any keys of async commit transactions), these key may be incorrectly rolled back, causing the transaction incompletely committed and breaks the data consistency.

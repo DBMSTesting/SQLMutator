@@ -1,0 +1,146 @@
+ID: 12590
+Title: Add support for `histogram` and `histogram_values` table macro, and add support for default table macros (similar to how we support default macros)
+Description:
+Implements https://github.com/duckdb/duckdb/issues/2268
+
+This PR adds support for the `histogram` and `histogram_values` macros, building on previous PRs (https://github.com/duckdb/duckdb/pull/12574, https://github.com/duckdb/duckdb/pull/12548).
+
+These are table macros that generate a histogram, their signature is as follows:
+
+```sql
+histogram_values(table, column, bin_count := 10, technique := 'auto') -> TABLE(bin TYPEOF(column), count UBIGINT)
+histogram(table, column, bin_count := 10, technique := 'auto')  -> TABLE(bin VARCHAR, count UBIGINT, bar VARCHAR)
+```
+
+`table` must be a `FROM` clause element (i.e. it cannot be a subquery) - but it can be a table, a parquet/csv/json file, or refer to a CTE.
+
+
+Supported values for `technique` are `auto, equi-width, equi-width-nice, sample and equi-height`. By default, `equi-width-nice` is used for numeric values, and `sample` is used for strings. Currently not all types are supported (booleans and nested types don't work yet) - but I plan to resolve that in the future.
+
+
+
+Example usage:
+
+```sql
+D select * from histogram(ontime, make_date(year, month, dayofweek));
+┌──────────────────────────────┬────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│             bin              │ count  │                                       bar                                        │
+│           varchar            │ uint64 │                                     varchar                                      │
+├──────────────────────────────┼────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│ x <= 2017-02-03              │ 632025 │ ████████████████████████████████████████████████████████████████████████████████ │
+│ 2017-02-03 < x <= 2017-02-27 │ 228509 │ ████████████████████████████▉                                                    │
+│ 2017-02-27 < x <= 2017-03-23 │ 488597 │ █████████████████████████████████████████████████████████████▊                   │
+│ 2017-03-23 < x <= 2017-04-16 │ 468329 │ ███████████████████████████████████████████████████████████▎                     │
+│ 2017-04-16 < x <= 2017-05-10 │ 486483 │ █████████████████████████████████████████████████████████████▌                   │
+│ 2017-05-10 < x <= 2017-06-03 │ 202542 │ █████████████████████████▋                                                       │
+│ 2017-06-03 < x <= 2017-06-27 │ 291724 │ ████████████████████████████████████▉                                            │
+│ 2017-06-27 < x <= 2017-07-21 │ 509070 │ ████████████████████████████████████████████████████████████████▍                │
+│ 2017-07-21 < x <= 2017-08-14 │ 510451 │ ████████████████████████████████████████████████████████████████▌                │
+│ 2017-08-14 < x <= 2017-09-07 │ 458727 │ ██████████████████████████████████████████████████████████                       │
+├──────────────────────────────┴────────┴──────────────────────────────────────────────────────────────────────────────────┤
+│ 10 rows                                                                                                        3 columns │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+D select * from histogram(ontime, carrier);
+┌─────────┬─────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│   bin   │  count  │                                       bar                                        │
+│ varchar │ uint64  │                                     varchar                                      │
+├─────────┼─────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│ AA      │  677215 │ ███████████████████████████████████████████████████▌                             │
+│ AS      │  139971 │ ██████████▋                                                                      │
+│ B6      │  225718 │ █████████████████▏                                                               │
+│ DL      │  696931 │ █████████████████████████████████████████████████████                            │
+│ EV      │  274565 │ ████████████████████▉                                                            │
+│ F9      │   75066 │ █████▋                                                                           │
+│ HA      │   60156 │ ████▌                                                                            │
+│ NK      │  117714 │ ████████▉                                                                        │
+│ UA      │  957713 │ ████████████████████████████████████████████████████████████████████████▊        │
+│ WN      │ 1051408 │ ████████████████████████████████████████████████████████████████████████████████ │
+├─────────┴─────────┴──────────────────────────────────────────────────────────────────────────────────┤
+│ 10 rows                                                                                    3 columns │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+D select * from histogram(ontime, depdelayminutes, bin_count := 20, technique := 'equi-height');
+┌────────────────────┬─────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│        bin         │  count  │                                       bar                                        │
+│      varchar       │ uint64  │                                     varchar                                      │
+├────────────────────┼─────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│ x <= 0.0           │ 2697212 │ ████████████████████████████████████████████████████████████████████████████████ │
+│ 0.0 < x <= 1.0     │  102445 │ ███                                                                              │
+│ 1.0 < x <= 3.0     │  145004 │ ████▎                                                                            │
+│ 3.0 < x <= 7.0     │  211859 │ ██████▎                                                                          │
+│ 7.0 < x <= 13.0    │  215068 │ ██████▍                                                                          │
+│ 13.0 < x <= 22.0   │  205054 │ ██████                                                                           │
+│ 22.0 < x <= 39.0   │  215281 │ ██████▍                                                                          │
+│ 39.0 < x <= 75.0   │  204882 │ ██████                                                                           │
+│ 75.0 < x <= 2755.0 │  208980 │ ██████▏                                                                          │
+└────────────────────┴─────────┴──────────────────────────────────────────────────────────────────────────────────┘
+with cte as (select * from ontime limit 1000) select * from histogram(cte, depdelayminutes);
+┌────────────────────┬────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│        bin         │ count  │                                       bar                                        │
+│      varchar       │ uint64 │                                     varchar                                      │
+├────────────────────┼────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│ x <= 66.0          │    979 │ ████████████████████████████████████████████████████████████████████████████████ │
+│ 66.0 < x <= 136.0  │     14 │ █▏                                                                               │
+│ 136.0 < x <= 206.0 │      4 │ ▎                                                                                │
+│ 206.0 < x <= 276.0 │      0 │                                                                                  │
+│ 276.0 < x <= 346.0 │      0 │                                                                                  │
+│ 346.0 < x <= 416.0 │      2 │ ▏                                                                                │
+│ 416.0 < x <= 486.0 │      0 │                                                                                  │
+│ 486.0 < x <= 556.0 │      0 │                                                                                  │
+│ 556.0 < x <= 626.0 │      0 │                                                                                  │
+│ 626.0 < x <= 696.0 │      1 │                                                                                  │
+├────────────────────┴────────┴──────────────────────────────────────────────────────────────────────────────────┤
+│ 10 rows                                                                                              3 columns │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+```
+
+The SQL definitions of the macros are given below:
+
+```sql
+
+CREATE OR REPLACE MACRO histogram_values(source, col_name, bin_count := 10, technique := 'auto') AS TABLE
+WITH bins AS (
+   SELECT
+      CASE
+      WHEN (NOT (can_cast_implicitly(MIN(col_name), NULL::BIGINT) OR
+            can_cast_implicitly(MIN(col_name), NULL::DOUBLE) OR
+            can_cast_implicitly(MIN(col_name), NULL::TIMESTAMP)) AND technique='auto')
+            OR technique='sample'
+      THEN
+         list(distinct col_name)[:bin_count]
+      WHEN technique='equi-height'
+      THEN
+         quantile(col_name, [x / bin_count::DOUBLE for x in generate_series(1, bin_count)])
+      WHEN technique='equi-width'
+      THEN
+         equi_width_bins(MIN(col_name), MAX(col_name), bin_count, false)
+      WHEN technique='equi-width-nice' OR technique='auto'
+      THEN
+         equi_width_bins(MIN(col_name), MAX(col_name), bin_count, true)
+      ELSE
+         error(concat('Unrecognized technique ', technique))
+      END AS bins
+   FROM query_table(source::VARCHAR)
+   )
+SELECT UNNEST(bins) AS bin, UNNEST([histogram[bin] for bin in bins])[1] AS count
+FROM (
+   SELECT list_sort(list_distinct(FIRST(bins))) AS bins, histogram(col_name, bins) AS histogram
+   FROM query_table(source::VARCHAR), bins
+);
+
+CREATE OR REPLACE MACRO histogram(source, col_name, bin_count := 10, technique := 'auto') AS TABLE
+SELECT
+   CASE
+   WHEN (NOT (can_cast_implicitly(bin, NULL::BIGINT) OR
+              can_cast_implicitly(bin, NULL::DOUBLE) OR
+              can_cast_implicitly(bin, NULL::TIMESTAMP)) AND technique='auto')
+              OR technique='sample'
+   THEN bin::VARCHAR
+   WHEN row_number() over () = 1
+   THEN concat('x <= ', bin::VARCHAR)
+   ELSE concat(lag(bin::VARCHAR) over (), ' < x <= ', bin::VARCHAR)
+   END AS bin,
+   count,
+   bar(count, 0, max(count) over ()) AS bar
+FROM histogram_values(source, col_name, bin_count := bin_count, technique := technique);
+```

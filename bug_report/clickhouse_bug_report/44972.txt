@@ -1,0 +1,81 @@
+ID: 44972
+Title: Quorum is not updated on empty parts cleanup
+Description:
+When turn on the setting `select_sequential_consistency ` and create a ReplicatedMergeTree table with some data filled in, the REPLICA_IS_NOT_IN_QUORUM excpetion will occur after deleted all data of the table, because that the `quorum/last_part` contains a data part to check and all data parts have been removed in local after deleting all data.
+
+The below code throws the exception. If `!getActiveContainingPart(added_part.second)` returns true, then exception will be thrown.
+
+```C++
+    String added_parts_str;
+    if (zookeeper->tryGet(fs::path(zookeeper_path) / "quorum" / "last_part", added_parts_str))
+    {
+        if (!added_parts_str.empty())
+        {
+            ReplicatedMergeTreeQuorumAddedParts part_with_quorum(format_version);
+            part_with_quorum.fromString(added_parts_str);
+
+            auto added_parts = part_with_quorum.added_parts;
+
+            for (const auto & added_part : added_parts)
+                if (!getActiveContainingPart(added_part.second))
+                    throw Exception(
+                        "Replica doesn't have part " + added_part.second
+                            + " which was successfully written to quorum of other replicas."
+                              " Send query to another replica or disable 'select_sequential_consistency' setting.",
+                        ErrorCodes::REPLICA_IS_NOT_IN_QUORUM);
+
+            for (const auto & max_block : part_with_quorum.getMaxInsertedBlocks())
+                max_added_blocks[max_block.first] = max_block.second;
+        }
+    }
+```
+
+
+> A link to reproducer in [https://fiddle.clickhouse.com/90496470-8acc-47b6-b078-03e007d2c0a8/](https://fiddle.clickhouse.com/90496470-8acc-47b6-b078-03e007d2c0a8).
+It needs to be run on cluster(ond shard, multi-replicas).
+
+**Does it reproduce on recent release?**
+v22.8.5.29-lts
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+v22.8.5.29-lts
+
+* Which interface to use, if matters
+clickhouse-client
+
+* Non-default settings, if any
+select_sequential_consistency =1
+
+* `CREATE TABLE` statements for all tables involved
+Run following SQL script in the cluster `ch-pro-cluster` with two nodes: node01 and node02. Run SQL script in node01 to reproduce.
+```
+create database test_001 ON CLUSTER 'ch-pro-cluster';
+
+CREATE TABLE `test_001`.`events5` ON CLUSTER 'ch-pro-cluster'
+(
+    ID UInt64,
+    v Int64,
+    n String,
+    case_id String
+) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}', '{replica}')
+ORDER BY ID;
+
+insert into `test_001`.`events5`(ID, v, n, case_id) select number, rand(), 'haha', toString(number / 10) from numbers(1000);
+
+OPTIMIZE TABLE `test_001`.`events5` FINAL;
+```
+
+* Queries to run that lead to unexpected result
+```
+ALTER TABLE `test_001`.`events5` DELETE  WHERE 1;
+
+-- wait for a while 
+
+SELECT * FROM `test_001`.`events5`;
+```
+
+**Expected behavior**
+Query `SELECT * FROM `test_001`.`events5`;` should not throw exception.
+

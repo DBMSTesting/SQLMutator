@@ -1,0 +1,119 @@
+ID: 12587
+Title: Exporting to Pandas has incorrect column type for BOOLEAN and BIGINT when some entries are NA/NULL
+Description:
+### What happens?
+
+If a relation with columns of type `BOOLEAN` or `BIGINT` has any values which are `NULL` in the column, exporting to Pandas DataFrame results in column with `object` or `float64` dtype respectively. Expected behaviour is that column has dtype `boolean` or `Int64` Pandas types.
+
+This is somewhat trivial to deal with on the Python side by querying the schema and casting all the columns to the correct type after calling `.df()` but is still unexpected. I have only tested this for `BOOLEAN`, `BIGINT`, `DOUBLE`, and `VARCHAR` columns. If this is a bug, it may also affect other column types which are implicitly cast when calling `.df()`
+
+### To Reproduce
+
+```python
+import random
+
+import pandas as pd
+import numpy as np
+import duckdb
+
+DUCKDB_TYPE_LUT: dict = {
+    'int_column': 'BIGINT',
+    'bool_column': 'BOOLEAN',
+    'float_column': 'DOUBLE',
+    'string_column': 'VARCHAR'
+}
+
+def get_df(rows: int = 100, use_string_type: bool = True, add_random_na: bool = False) -> pd.DataFrame:
+    """Return dataframe filled with random data of specific types, optionally with a single random None value."""
+    index = np.arange(rows)
+    data: dict = {
+        "int_column": [random.randint(0, 100) for _ in range(rows)],
+        "bool_column": [random.choice([True, False]) for _ in range(rows)],
+        "float_column": [random.uniform(0, 1) for _ in range(rows)],
+        "string_column": [random.choice(["foo", "bar", "baz", "qux"]) for _ in range(rows)]
+    }
+
+    if add_random_na:
+        data['int_column'][random.randint(0, rows - 1)] = None
+        data['bool_column'][random.randint(0, rows - 1)] = None
+        data['float_column'][random.randint(0, rows - 1)] = None
+        data['string_column'][random.randint(0, rows - 1)] = None
+
+    return pd.DataFrame(data=data, index=index).convert_dtypes(infer_objects=False, convert_string=use_string_type)
+
+print(f"Pandas version: {pd.__version__}") # 2.2.2
+print(f"Numpy version: {np.__version__}") # 1.26.4
+print(f"DuckDB version: {duckdb.__version__}") # 1.0.1-dev167
+
+def check_roundtrip_types(add_random_na: bool = False):
+    df: pd.DataFrame = get_df(add_random_na=add_random_na)
+
+    # check our df is correct
+    assert isinstance(df['int_column'].dtype, pd.Int64Dtype)
+    assert isinstance(df['bool_column'].dtype, pd.BooleanDtype)
+    assert isinstance(df['float_column'].dtype, pd.Float64Dtype)
+    assert isinstance(df['string_column'].dtype, pd.StringDtype)
+
+    # load into duckdb
+    with duckdb.connect(database=":memory:") as con:
+        rel: duckdb.DuckDBPyRelation = con.from_df(df)
+
+        # check duckdb types correct
+        for col, dtype in zip(rel.columns, rel.dtypes):
+            assert DUCKDB_TYPE_LUT[col] == dtype
+
+        roundtrip: pd.DataFrame = rel.df()
+
+        assert isinstance(roundtrip['int_column'].dtype, (pd.Int64Dtype, np.dtypes.Int64DType)), f"Expected Int64 type for int_column, got {roundtrip['int_column'].dtype}"
+        assert isinstance(roundtrip['bool_column'].dtype, (pd.BooleanDtype, np.dtypes.BoolDType)), f"Expected boolean type for bool_column, got {roundtrip['bool_column'].dtype}"
+        assert isinstance(roundtrip['float_column'].dtype, (pd.Float64Dtype, np.dtypes.Float64DType)), f"Expected Float64 type for float_column, got {roundtrip['float_column'].dtype}"
+        assert isinstance(roundtrip['string_column'].dtype, (pd.StringDtype, np.dtypes.ObjectDType)), f"Expected object type for string_column, got {roundtrip['string_column'].dtype}"
+
+# check without na - no error
+# check_roundtrip_types()
+
+# check with na - error
+check_roundtrip_types(True)
+```
+
+This results in:
+
+```console
+AssertionError: Expected Int64 type for int_column, got float64
+```
+
+### OS:
+
+Ubuntu 20.04 WSL x64 (5.15.146.1-microsoft-standard-WSL2)
+
+### DuckDB Version:
+
+1.0.0, 1.0.1-dev167
+
+### DuckDB Client:
+
+Python
+
+### Full Name:
+
+Zander Horn
+
+### Affiliation:
+
+Stone Three
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

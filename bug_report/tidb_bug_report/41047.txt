@@ -1,0 +1,83 @@
+ID: 41047
+Title: tidb panic when IndexMerge query is canceled because of oom
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+https://github.com/pingcap/tidb/blob/15bac9ea91615c3708df1d84383d213e7cfb605d/executor/index_merge_reader.go#L743-L749
+
+processWorker close resultCh when return.
+
+https://github.com/pingcap/tidb/blob/15bac9ea91615c3708df1d84383d213e7cfb605d/executor/index_merge_reader.go#L1030-L1036
+
+partialIndexWorker/partialTableWorker write resultCh when got error. (In this case, we got: `[2023/02/03 19:04:31.629 +08:00] [ERROR] [index_merge_reader.go:1004] [IndexMergeReaderExecutor.syncErr] [error="Out Of Memory Quota![conn_id=2699305444236591507]"]`)
+
+So if processWorker close resultCh, then partialIndexWorker tries to write error msg, will got "write to closed channel panic".
+### 1. Minimal reproduce step (Required)
+1. load data using lightning, dataset too large to upload. (ask me if you want to reproduce).
+2. run sql as following:
+
+```
+set tidb_mem_quota_query = 10<<20;
+explain analyze select /*+ use_index_merge(tp2) */ * from tp2 where a < 40000000 or b < 40000000;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+query is canceled.
+### 3. What did you see instead (Required)
+tidb crash.
+
+```
+panic: send on closed channel [recovered]
+        panic: send on closed channel
+
+goroutine 10650 [running]:
+github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).handleHandlesFetcherPanic.func1({0x4410c20, 0x50a41d0})
+        /home/xhy/gjt_data/tidb/executor/index_merge_reader.go:712 +0x1aa
+github.com/pingcap/tidb/util.WithRecovery.func1()
+        /home/xhy/gjt_data/tidb/util/misc.go:88 +0x58
+panic({0x4410c20, 0x50a41d0})
+        /usr/local/go/src/runtime/panic.go:884 +0x212
+github.com/pingcap/tidb/executor.syncErr(...)
+        /home/xhy/gjt_data/tidb/executor/index_merge_reader.go:1006
+github.com/pingcap/tidb/executor.(*partialIndexWorker).fetchHandles(0xc047f0be48, {0x50d4988, 0xc08441f800}, {0x50cb9f0, 0xc074dae690}, 0xc004446d80, 0xc004446de0, 0x40?, 0xc004446d20, {0x50f4660, ...}, ...)
+        /home/xhy/gjt_data/tidb/executor/index_merge_reader.go:1033 +0x5ea
+github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startPartialIndexWorker.func2.1()
+        /home/xhy/gjt_data/tidb/executor/index_merge_reader.go:371 +0x945
+github.com/pingcap/tidb/util.WithRecovery(0x50d4a30?, 0x50d4a30?)
+        /home/xhy/gjt_data/tidb/util/misc.go:96 +0x53
+github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startPartialIndexWorker.func2()
+        /home/xhy/gjt_data/tidb/executor/index_merge_reader.go:304 +0x1e7
+created by github.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startPartialIndexWorker
+        /home/xhy/gjt_data/tidb/executor/index_merge_reader.go:301 +0x28c
+```
+
+```
+[2023/02/03 18:55:16.362 +08:00] [ERROR] [index_merge_reader.go:1146] ["panic in IndexMergeReaderExecutor indexMergeTableWorker: Out Of Memory Quota![conn_id=8433441102018642323]"] [conn=8433441102018642323]
+[2023/02/03 18:55:16.362 +08:00] [ERROR] [misc.go:91] ["panic in the recoverable goroutine"] [r="\"Out Of Memory Quota![conn_id=8433441102018642323]\""] ["stack trace"="github.com/pingcap/tidb/util.WithRecovery.func1\n\t/home/xhy/gjt_data/tidb/util/misc.go:93\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:884\ngithub.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action\n\t/home/xhy/gjt_data/tidb/util/memory/action.go:148\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:437\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:478\ngithub.com/pingcap/tidb/executor.(*indexMergeTableScanWorker).executeTask\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:1182\ngithub.com/pingcap/tidb/executor.(*indexMergeTableScanWorker).pickAndExecTask\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:1128\ngithub.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeTableScanWorker.func1.1\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:620\ngithub.com/pingcap/tidb/util.WithRecovery\n\t/home/xhy/gjt_data/tidb/util/misc.go:96\ngithub.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeTableScanWorker.func1\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:614"]
+[2023/02/03 18:55:16.384 +08:00] [ERROR] [index_merge_reader.go:1146] ["panic in IndexMergeReaderExecutor indexMergeTableWorker: Out Of Memory Quota![conn_id=8433441102018642323]"] [conn=8433441102018642323]
+[2023/02/03 18:55:16.384 +08:00] [ERROR] [misc.go:91] ["panic in the recoverable goroutine"] [r="\"Out Of Memory Quota![conn_id=8433441102018642323]\""] ["stack trace"="github.com/pingcap/tidb/util.WithRecovery.func1\n\t/home/xhy/gjt_data/tidb/util/misc.go:93\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:884\ngithub.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action\n\t/home/xhy/gjt_data/tidb/util/memory/action.go:148\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:437\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:478\ngithub.com/pingcap/tidb/executor.(*indexMergeTableScanWorker).executeTask\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:1182\ngithub.com/pingcap/tidb/executor.(*indexMergeTableScanWorker).pickAndExecTask\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:1128\ngithub.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeTableScanWorker.func1.1\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:620\ngithub.com/pingcap/tidb/util.WithRecovery\n\t/home/xhy/gjt_data/tidb/util/misc.go:96\ngithub.com/pingcap/tidb/executor.(*IndexMergeReaderExecutor).startIndexMergeTableScanWorker.func1\n\t/home/xhy/gjt_data/tidb/executor/index_merge_reader.go:614"]
+[2023/02/03 18:55:16.384 +08:00] [ERROR] [coprocessor.go:995] ["copIteratorWork meet panic"] [r="\"Out Of Memory Quota![conn_id=8433441102018642323]\""] ["stack trace"="github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask.func1\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:997\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:884\ngithub.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action\n\t/home/xhy/gjt_data/tidb/util/memory/action.go:148\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:437\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:478\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).sendToRespCh\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:885\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopResponse\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1333\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopPagingResult\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1189\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTaskOnce\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1128\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1008\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).run\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:718"]
+[2023/02/03 18:55:16.384 +08:00] [ERROR] [coprocessor.go:995] ["copIteratorWork meet panic"] [r="\"Out Of Memory Quota![conn_id=8433441102018642323]\""] ["stack trace"="github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask.func1\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:997\nruntime.gopanic\n\t/usr/local/go/src/runtime/panic.go:884\ngithub.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action\n\t/home/xhy/gjt_data/tidb/util/memory/action.go:148\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:437\ngithub.com/pingcap/tidb/util/memory.(*Tracker).Consume\n\t/home/xhy/gjt_data/tidb/util/memory/tracker.go:478\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).sendToRespCh\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:885\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopResponse\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1333\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopPagingResult\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1189\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTaskOnce\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1128\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:1008\ngithub.com/pingcap/tidb/store/copr.(*copIteratorWorker).run\n\t/home/xhy/gjt_data/tidb/store/copr/coprocessor.go:718"]
+[2023/02/03 18:55:16.384 +08:00] [ERROR] [index_merge_reader.go:709] ["panic in IndexMergeReaderExecutor partialIndexWorker: send on closed channel"] [conn=8433441102018642323]
+[2023/02/03 18:55:31.970 +08:00] [INFO] [cpuprofile.go:113] ["parallel cpu profiler started"]
+```
+### 4. What is your TiDB version? (Required)
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()
+                                          |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v6.6.0-alpha-262-g8ec2612-dirty
+Edition: Community
+Git Commit Hash: 8ec2612ba2315592d25d55d54f93a7ecd6bb1e6b
+Git Branch: HEAD
+UTC Build Time: 2023-02-03 06:51:26
+GoVersion: go1.19.1
+Race Enabled: false
+TiKV Min Version: 6.2.0-alpha
+Check Table Before Drop: false
+Store: tikv |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.01 sec)

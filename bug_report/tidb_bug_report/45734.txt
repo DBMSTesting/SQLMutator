@@ -1,0 +1,85 @@
+ID: 45734
+Title: No partition information in cluster_slow_query plan column
+Description:
+### 1. Minimal reproduce step (Required)
+
+```
+mysql> drop table  if exists t1;
+Query OK, 0 rows affected (0.22 sec)
+
+mysql> CREATE TABLE `t1` (
+    ->   `p_id` bigint NOT NULL AUTO_RANDOM,
+    ->   `country` char(2) NOT NULL,
+    ->   `userdata` varchar(2056),
+    ->   primary key (p_id,country) clustered)
+    ->   partition by list columns (country)
+    ->   (
+    ->   partition p_A values in ('A'),
+    ->   partition p_B values in ('B'),
+    ->   partition p_C values in ('C'),
+    ->   partition p_D values in ('D'),
+    ->   partition p_E values in ('E'),
+    ->   partition p_F values in ('F')
+    ->   );
+Query OK, 0 rows affected, 1 warning (0.08 sec)
+
+mysql> analyze table t1;
+Query OK, 0 rows affected, 12 warnings (0.23 sec)
+mysql> explain analyze select count(1),sleep(5) from t1 where country='A';
++--------------------------------+----------+---------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------+-----------+------+
+| id                             | estRows  | actRows | task      | access object | execution info                                                                                                                                                                                                                      | operator info                   | memory    | disk |
++--------------------------------+----------+---------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------+-----------+------+
+| Projection_5                   | 1.00     | 1       | root      |               | time:5s, loops:2, RU:0.486417, Concurrency:OFF                                                                                                                                                                                      | Column#4, sleep(5)->Column#5    | 380 Bytes | N/A  |
+| └─StreamAgg_20                 | 1.00     | 1       | root      |               | time:398.4µs, loops:2                                                                                                                                                                                                               | funcs:count(Column#8)->Column#4 | 388 Bytes | N/A  |
+|   └─TableReader_21             | 1.00     | 0       | root      | partition:p_A | time:396.5µs, loops:1, cop_task: {num: 1, max: 383.8µs, proc_keys: 0, tot_proc: 34.3µs, tot_wait: 77.6µs, rpc_num: 1, rpc_time: 371.9µs, copr_cache_hit_ratio: 0.00, build_task_duration: 3.13µs, max_distsql_concurrency: 1}       | data:StreamAgg_9                | 233 Bytes | N/A  |
+|     └─StreamAgg_9              | 1.00     | 0       | cop[tikv] |               | tikv_task:{time:0s, loops:1}, scan_detail: {total_keys: 1, get_snapshot_time: 60.7µs, rocksdb: {block: {cache_hit_count: 1}}}                                                                                                       | funcs:count(1)->Column#8        | N/A       | N/A  |
+|       └─Selection_19           | 10.00    | 0       | cop[tikv] |               | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                        | eq(test.t1.country, "A")        | N/A       | N/A  |
+|         └─TableFullScan_18     | 10000.00 | 0       | cop[tikv] | table:t1      | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                        | keep order:false, stats:pseudo  | N/A       | N/A  |
++--------------------------------+----------+---------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------+-----------+------+
+6 rows in set (5.00 sec)
+
+mysql> select plan from information_schema.cluster_slow_query where query like '%t1%' and query not like '%slow%' and query_time>4\G
+*************************** 1. row ***************************
+plan: 	id                        	task     	estRows	operator info                           	actRows	execution info                                                                                                                                                                                                                     	memory   	disk
+	Projection_5              	root     	1      	Column#4, sleep(5)->Column#5            	1      	time:5s, loops:2, RU:0.486417, Concurrency:OFF                                                                                                                                                                                     	380 Bytes	N/A
+	└─StreamAgg_20            	root     	1      	funcs:count(Column#8)->Column#4         	1      	time:398.4µs, loops:2                                                                                                                                                                                                             	388 Bytes	N/A
+	  └─TableReader_21        	root     	1      	data:StreamAgg_9                        	0      	time:396.5µs, loops:1, cop_task: {num: 1, max: 383.8µs, proc_keys: 0, tot_proc: 34.3µs, tot_wait: 77.6µs, rpc_num: 1, rpc_time: 371.9µs, copr_cache_hit_ratio: 0.00, build_task_duration: 3.13µs, max_distsql_concurrency: 1}	233 Bytes	N/A
+	    └─StreamAgg_9         	cop[tikv]	1      	funcs:count(1)->Column#8                	0      	tikv_task:{time:0s, loops:1}, scan_detail: {total_keys: 1, get_snapshot_time: 60.7µs, rocksdb: {block: {cache_hit_count: 1}}}                                                                                                     	N/A      	N/A
+	      └─Selection_19      	cop[tikv]	10     	eq(test.t1.country, "A")                	0      	tikv_task:{time:0s, loops:1}                                                                                                                                                                                                       	N/A      	N/A
+	        └─TableFullScan_18	cop[tikv]	10000  	table:t1, keep order:false, stats:pseudo	0      	tikv_task:{time:0s, loops:1}                                                                                                                                                                                                       	N/A      	N/A
+1 row in set (0.01 sec)
+
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v7.2.0
+Edition: Community
+Git Commit Hash: 9fd5f4a8e4f273a60fbe7d3848f85a1be8f0600b
+Git Branch: heads/refs/tags/v7.2.0
+UTC Build Time: 2023-06-27 14:56:57
+GoVersion: go1.20.5
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+1 row in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required) 
+Can view partition information in `cluster_slow_query`
+### 3. What did you see instead (Required)
+No partition information in `cluster_slow_query`
+### 4. What is your TiDB version? (Required)
+mysql> select tidb_version()\G
+*************************** 1. row ***************************
+```
+tidb_version(): Release Version: v7.2.0
+Edition: Community
+Git Commit Hash: 9fd5f4a8e4f273a60fbe7d3848f85a1be8f0600b
+Git Branch: heads/refs/tags/v7.2.0
+UTC Build Time: 2023-06-27 14:56:57
+GoVersion: go1.20.5
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+1 row in set (0.00 sec)
+```
+

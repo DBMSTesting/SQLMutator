@@ -1,0 +1,463 @@
+ID: 32765
+Title: [Nullable primary key] Repeatable Segfault crash with IN list on 21.8.11.4 recently upgraded from v20.3.
+Description:
+Hi, 
+
+We have a repeatable SEGFAULT issue after upgrading to v21.8.11.4 from v20.3.12.112. 
+During the research, the data was transferred to the test server and repeatability of the issue was determined,
+
+The typical stacktrace is below.
+
+The query queries the table that has several post-upgrade weird issues:
+- this table has Compact parts despite having 
+<min_bytes_for_wide_part>0</min_bytes_for_wide_part>
+<min_rows_for_wide_part>0</min_rows_for_wide_part> 
+set in config.xml
+- the crash and existence of compact parts persist even if the table is rebuilt with INSERT INTO new_table SELECT * FROM old_table (new_table created on the new version and loaded with data from the old version).
+
+A typical query that caused the crash is:
+```
+SELECT count()
+  FROM node.test_log_v2 sle 
+WHERE 1=1
+AND hostname IN ('dummy')
+AND test_subsystem IN ('dummy')
+;
+```
+
+This is a reduced version of a much more complex query that caused the initial crash. 
+If either of the conditions is removed (hostname or test_subsystem) the query executes normally. 
+Also:
+- if using other types of conditions for any field (LIKE, =) - it works
+- crash is not dependant of values in IN clause - it crashes whether the values should match any, all or no rows. 
+
+
+
+So far - it crashes only when these two conditions are present. The condition ('dummy') doesn't matter - it could be any list that matches any number of rows it produces the crash - if both fields are present. 
+
+When the query is run on the same but empty table it executes as expected.
+
+This DB has several very similarly structured (and much larger) tables and so far only this one has any issues. 
+
+```
+CREATE TABLE node.test_log_v2
+(
+    `test_sys_datetime` DateTime CODEC(DoubleDelta, ZSTD(1)),
+    `test_sys_date` Date DEFAULT toDate(test_sys_datetime) CODEC(DoubleDelta, LZ4),
+    `hostname` LowCardinality(String) CODEC(ZSTD(1)),
+    `test_syslog_hostname` LowCardinality(String) CODEC(ZSTD(1)),
+    `test_syslog_program` LowCardinality(String) CODEC(ZSTD(1)),
+    `sys_pid` LowCardinality(Nullable(String)) CODEC(ZSTD(1)),
+    `test_shard` LowCardinality(Nullable(String)) CODEC(ZSTD(1)),
+    `test_subsystem` LowCardinality(Nullable(String)) CODEC(ZSTD(1)),
+    `test_related_event` LowCardinality(Nullable(String)) CODEC(ZSTD(1)),
+    `test_message` String CODEC(ZSTD(1)),
+    `log_path_and_file` String CODEC(ZSTD(1)),
+    `log_datetime` DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    `loading_meta` String CODEC(ZSTD(1)),
+    `processing_tags` String CODEC(ZSTD(1)),
+    `err_data` Nullable(String) CODEC(ZSTD(1)),
+    `full_test_sys_message` String CODEC(ZSTD(1)),
+    `inserted_on` DateTime DEFAULT now() CODEC(Delta(4), ZSTD(1)),
+    INDEX sc_msg_ix test_message TYPE ngrambf_v1(3, 512, 3, 7) GRANULARITY 1,
+    INDEX full_sc_sys_msg_ix full_test_sys_message TYPE ngrambf_v1(3, 512, 3, 7) GRANULARITY 1,
+    INDEX proc_tags_ix processing_tags TYPE tokenbf_v1(512, 3, 7) GRANULARITY 1,
+    INDEX test_sys_datetime_ix test_sys_datetime TYPE minmax GRANULARITY 1
+)
+ENGINE = MergeTree
+PARTITION BY test_sys_date
+ORDER BY (hostname, test_syslog_program, test_subsystem, test_syslog_hostname, test_related_event)
+SETTINGS index_granularity = 8192;
+```
+
+Exception stacktrace:
+
+
+```
+2021.12.14 13:27:41.477160 [ 10764 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.477366 [ 10765 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.477509 [ 10766 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.477535 [ 10764 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49895) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.477551 [ 10765 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49778) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.477738 [ 10765 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.477795 [ 10764 ] {} <Fatal> BaseDaemon: Address: 0xe Access: read. Address not mapped to object.
+2021.12.14 13:27:41.477696 [ 10767 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.477815 [ 10768 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.477707 [ 10766 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49823) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.477945 [ 10769 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.478580 [ 10767 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49852) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.478624 [ 10769 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49857) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.478658 [ 10764 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd401
+0 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.478673 [ 10766 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.478646 [ 10765 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd401
+0 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.478705 [ 10768 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49950) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.478712 [ 10771 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.478708 [ 10770 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.478865 [ 10769 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.478833 [ 10772 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.478916 [ 10767 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.478925 [ 10766 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde3e3 0x10cd3ea8 0x10dc05b
+4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.478935 [ 10768 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.478945 [ 10771 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49811) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479172 [ 10772 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thr
+ead 49943) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479181 [ 10773 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.479181 [ 10767 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde3e3 0x10cd3ea8 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479251 [ 10764 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479264 [ 10765 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479264 [ 10770 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49886) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479206 [ 10769 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde3e3 0x10cd3ea8 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479206 [ 10768 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479341 [ 10772 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.479357 [ 10770 ] {} <Fatal> BaseDaemon: Address: 0xe Access: read. Address not mapped to object.
+2021.12.14 13:27:41.479321 [ 10766 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479257 [ 10771 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.479281 [ 10774 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.479452 [ 10770 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479445 [ 10773 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49953) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479462 [ 10767 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479455 [ 10775 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.479534 [ 10768 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479539 [ 10769 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479524 [ 10772 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde3e3 0x10cd3ea8 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479617 [ 10770 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479620 [ 10771 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479718 [ 10771 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479595 [ 10774 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49890) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479742 [ 10776 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.479750 [ 10773 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.479752 [ 10775 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49968) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479885 [ 10772 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479860 [ 10776 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49820) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.479895 [ 10769 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.479899 [ 10770 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.479957 [ 10774 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.479902 [ 10765 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.479903 [ 10767 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.479906 [ 10764 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480032 [ 10773 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.479898 [ 10777 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.480081 [ 10774 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.480124 [ 10765 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.479901 [ 10766 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480149 [ 10778 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.480165 [ 10779 ] {} <Fatal> BaseDaemon: ########################################
+2021.12.14 13:27:41.480027 [ 10775 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.480202 [ 10777 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49888) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.480227 [ 10773 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479909 [ 10768 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480130 [ 10770 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480279 [ 10779 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49809) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.480309 [ 10766 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480177 [ 10764 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480362 [ 10768 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.479981 [ 10772 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480216 [ 10774 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479906 [ 10771 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480081 [ 10769 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480465 [ 10764 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480272 [ 10778 ] {} <Fatal> BaseDaemon: (version 21.8.11.4 (official build), build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93) (from thread 49781) (query_id: cb81de3c-9c13-42a4-803b-43b5e928ec68) Received signal Segmentation fault (11)
+2021.12.14 13:27:41.480321 [ 10765 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480330 [ 10777 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.480524 [ 10774 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480184 [ 10767 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480558 [ 10769 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480386 [ 10773 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.480451 [ 10768 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480456 [ 10770 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480465 [ 10766 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.479961 [ 10776 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.480688 [ 10769 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480703 [ 10767 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480347 [ 10775 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde3e3 0x10cd3ea8 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.480532 [ 10778 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.480560 [ 10764 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480788 [ 10766 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480804 [ 10778 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.480812 [ 10769 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde3e3 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480633 [ 10774 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480687 [ 10773 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480865 [ 10775 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480515 [ 10771 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480713 [ 10768 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480765 [ 10770 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480399 [ 10779 ] {} <Fatal> BaseDaemon: Address: 0x9 Access: read. Address not mapped to object.
+2021.12.14 13:27:41.480960 [ 10773 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480606 [ 10765 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480991 [ 10768 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480825 [ 10776 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.481036 [ 10770 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480496 [ 10772 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.480870 [ 10764 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481087 [ 10765 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480896 [ 10769 ] {} <Fatal> BaseDaemon: 7. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd3ea8 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480953 [ 10775 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.481157 [ 10772 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481168 [ 10765 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480827 [ 10767 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481200 [ 10764 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480652 [ 10777 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde611 0x10cde611 0x10cd4010 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.481051 [ 10779 ] {} <Fatal> BaseDaemon: Stack trace: 0x8fd6d98 0x1088727c 0x10677a1e 0x10cd5e30 0x10cde255 0x10cde3e3 0x10cd3ea8 0x10dc05b4 0x10dd2fdb 0x10dd8a27 0x9020038 0x9021bdf 0x901d31f 0x9020c03 0x7f510281eea5 0x7f510213bb0d
+2021.12.14 13:27:41.481237 [ 10769 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480868 [ 10778 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481075 [ 10773 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481277 [ 10765 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481294 [ 10764 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480964 [ 10774 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481171 [ 10776 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480969 [ 10771 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481380 [ 10778 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.481252 [ 10775 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.481270 [ 10772 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481426 [ 10773 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481140 [ 10770 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481298 [ 10767 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde3e3 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481482 [ 10778 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.481490 [ 10771 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481506 [ 10775 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481386 [ 10765 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481545 [ 10771 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481555 [ 10770 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481569 [ 10772 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde3e3 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481448 [ 10776 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.481602 [ 10775 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481347 [ 10769 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.481631 [ 10778 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481503 [ 10773 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481662 [ 10772 ] {} <Fatal> BaseDaemon: 7. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd3ea8 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481392 [ 10764 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481712 [ 10769 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481729 [ 10778 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.480894 [ 10766 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde3e3 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481603 [ 10771 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481766 [ 10773 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481499 [ 10774 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481665 [ 10765 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.481830 [ 10778 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481837 [ 10769 ] {} <Fatal> BaseDaemon: 11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481699 [ 10770 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481056 [ 10768 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481902 [ 10778 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481576 [ 10767 ] {} <Fatal> BaseDaemon: 7. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd3ea8 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481781 [ 10772 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481798 [ 10764 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.481352 [ 10777 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481377 [ 10779 ] {} <Fatal> BaseDaemon: 1. memcpy @ 0x8fd6d98 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481851 [ 10766 ] {} <Fatal> BaseDaemon: 7. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd3ea8 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482039 [ 10767 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482051 [ 10772 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.481701 [ 10775 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde3e3 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481905 [ 10773 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482101 [ 10779 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.481928 [ 10774 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482121 [ 10777 ] {} <Fatal> BaseDaemon: 2. DB::ColumnString::insert(DB::Field const&) @ 0x1088727c in /usr/bin/clickhouse
+2021.12.14 13:27:41.481987 [ 10770 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482022 [ 10769 ] {} <Fatal> BaseDaemon: 12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.482183 [ 10775 ] {} <Fatal> BaseDaemon: 7. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd3ea8 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482198 [ 10774 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482085 [ 10768 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482236 [ 10777 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.481949 [ 10765 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482267 [ 10775 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482141 [ 10767 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482295 [ 10774 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482309 [ 10769 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.482203 [ 10779 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.482344 [ 10765 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481729 [ 10776 ] {} <Fatal> BaseDaemon: 3. DB::MergeTreeSetIndex::checkInRange(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10677a1e in /usr/bin/clickhouse
+2021.12.14 13:27:41.482383 [ 10768 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482087 [ 10764 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482008 [ 10778 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482286 [ 10770 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482185 [ 10772 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.481852 [ 10771 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482502 [ 10776 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482494 [ 10765 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.482538 [ 10770 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482548 [ 10771 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482379 [ 10767 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482216 [ 10766 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482586 [ 10772 ] {} <Fatal> BaseDaemon: 11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482602 [ 10771 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482504 [ 10768 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482626 [ 10765 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.482204 [ 10773 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482351 [ 10777 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482371 [ 10775 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482696 [ 10772 ] {} <Fatal> BaseDaemon: 12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.482544 [ 10778 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482433 [ 10779 ] {} <Fatal> BaseDaemon: 4. DB::KeyCondition::checkInHyperrectangle(std::__1::vector<DB::Range, std::__1::allocator<DB::Range> > const&, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&) const @ 0x10cd5e30 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482739 [ 10773 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482603 [ 10776 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482513 [ 10764 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482664 [ 10771 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482813 [ 10772 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.482826 [ 10778 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482697 [ 10770 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.482858 [ 10776 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482868 [ 10764 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.482727 [ 10765 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482743 [ 10768 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482909 [ 10772 ] {} <Fatal> BaseDaemon: 14. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482783 [ 10777 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482940 [ 10776 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482803 [ 10775 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482832 [ 10773 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482839 [ 10779 ] {} <Fatal> BaseDaemon: 5. ? @ 0x10cde255 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482842 [ 10771 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482714 [ 10766 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.482397 [ 10774 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483078 [ 10772 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.482436 [ 10769 ] {} <Fatal> BaseDaemon: 14. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483099 [ 10779 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde3e3 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482957 [ 10770 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.482972 [ 10764 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483010 [ 10768 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483185 [ 10774 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.483074 [ 10775 ] {} <Fatal> BaseDaemon: 11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483218 [ 10769 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483081 [ 10765 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483253 [ 10772 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.483268 [ 10774 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483105 [ 10771 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.482665 [ 10767 ] {} <Fatal> BaseDaemon: 11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483163 [ 10766 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483336 [ 10768 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483359 [ 10765 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.483372 [ 10774 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483246 [ 10770 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483257 [ 10764 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.482929 [ 10778 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483105 [ 10773 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483478 [ 10768 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483490 [ 10766 ] {} <Fatal> BaseDaemon: 11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483504 [ 10774 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483049 [ 10776 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483529 [ 10764 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483364 [ 10771 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483433 [ 10767 ] {} <Fatal> BaseDaemon: 12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483578 [ 10768 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483347 [ 10775 ] {} <Fatal> BaseDaemon: 12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483363 [ 10769 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.483532 [ 10778 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483657 [ 10771 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483560 [ 10770 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483694 [ 10774 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483184 [ 10779 ] {} <Fatal> BaseDaemon: 7. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd3ea8 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483742 [ 10768 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483630 [ 10764 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.483633 [ 10776 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483814 [ 10774 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483832 [ 10770 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.483839 [ 10778 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483865 [ 10779 ] {} <Fatal> BaseDaemon: 8. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483874 [ 10768 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.483898 [ 10776 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.483081 [ 10777 ] {} <Fatal> BaseDaemon: 6. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483687 [ 10767 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483949 [ 10774 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483730 [ 10771 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.483742 [ 10775 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483999 [ 10777 ] {} <Fatal> BaseDaemon: 7. ? @ 0x10cde611 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483616 [ 10766 ] {} <Fatal> BaseDaemon: 12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.483568 [ 10773 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.483974 [ 10779 ] {} <Fatal> BaseDaemon: 9. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.483999 [ 10776 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.483943 [ 10778 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.484035 [ 10771 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484054 [ 10767 ] {} <Fatal> BaseDaemon: 14. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484100 [ 10774 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484100 [ 10777 ] {} <Fatal> BaseDaemon: 8. DB::KeyCondition::checkInRange(unsigned long, DB::FieldRef const*, DB::FieldRef const*, std::__1::vector<std::__1::shared_ptr<DB::IDataType const>, std::__1::allocator<std::__1::shared_ptr<DB::IDataType const> > > const&, bool, BoolMask) const @ 0x10cd4010 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484199 [ 10778 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484132 [ 10773 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484147 [ 10779 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484160 [ 10776 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484159 [ 10766 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.484291 [ 10777 ] {} <Fatal> BaseDaemon: 9. DB::MergeTreeDataSelectExecutor::markRangesFromPKRange(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::KeyCondition const&, DB::Settings const&, Poco::Logger*) @ 0x10dc05b4 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484102 [ 10775 ] {} <Fatal> BaseDaemon: 14. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484299 [ 10778 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484335 [ 10773 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484336 [ 10779 ] {} <Fatal> BaseDaemon: 11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484243 [ 10767 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484384 [ 10776 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.484413 [ 10773 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484422 [ 10766 ] {} <Fatal> BaseDaemon: 14. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484415 [ 10775 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484425 [ 10777 ] {} <Fatal> BaseDaemon: 10. ? @ 0x10dd2fdb in /usr/bin/clickhouse
+2021.12.14 13:27:41.484459 [ 10778 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484449 [ 10779 ] {} <Fatal> BaseDaemon: 12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.484507 [ 10776 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.484514 [ 10767 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484547 [ 10775 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484579 [ 10777 ] {} <Fatal> BaseDaemon: 11. ? @ 0x10dd8a27 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484604 [ 10779 ] {} <Fatal> BaseDaemon: 13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.484613 [ 10766 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484607 [ 10776 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484663 [ 10777 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x9020038 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484692 [ 10779 ] {} <Fatal> BaseDaemon: 14. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.484739 [ 10776 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484745 [ 10766 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484785 [ 10777 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x9021bdf in /usr/bin/clickhouse
+2021.12.14 13:27:41.484792 [ 10779 ] {} <Fatal> BaseDaemon: 15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.484828 [ 10776 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484887 [ 10777 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x901d31f in /usr/bin/clickhouse
+2021.12.14 13:27:41.484921 [ 10779 ] {} <Fatal> BaseDaemon: 16. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.484967 [ 10777 ] {} <Fatal> BaseDaemon: 15. ? @ 0x9020c03 in /usr/bin/clickhouse
+2021.12.14 13:27:41.485078 [ 10777 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.12.14 13:27:41.485146 [ 10777 ] {} <Fatal> BaseDaemon: 17. clone @ 0xfeb0d in /usr/lib64/libc-2.17.so
+2021.12.14 13:27:41.646785 [ 10764 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.647058 [ 10764 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.650811 [ 10773 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.650995 [ 10773 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.652861 [ 10779 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.652861 [ 10775 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.653050 [ 10779 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.653087 [ 10775 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.653438 [ 10767 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.653462 [ 10765 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.653587 [ 10767 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.653617 [ 10765 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.653988 [ 10778 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.654207 [ 10778 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.656356 [ 10777 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.656529 [ 10777 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.659636 [ 10776 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.659650 [ 10772 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.659852 [ 10776 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.659867 [ 10772 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.676004 [ 10769 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.676008 [ 10774 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.676225 [ 10769 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.676233 [ 10774 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.690725 [ 10766 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.690901 [ 10766 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.706193 [ 10771 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.706193 [ 10768 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.706366 [ 10768 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.706369 [ 10771 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:41.722776 [ 10770 ] {} <Fatal> BaseDaemon: Checksum of the binary: 0F172BF4AF03DFC9E97C5C54806CE79C, integrity check passed.
+2021.12.14 13:27:41.722984 [ 10770 ] {} <Information> SentryWriter: Not sending crash report
+2021.12.14 13:27:45.777724 [ 49619 ] {36d23b5c-e7e0-42be-9155-3316231ed8f7} <Information> executeQuery: Read 68 rows, 7.79 KiB in 0.001195097 sec., 56899 rows/sec., 6.37 MiB/sec.
+2021.12.14 13:27:45.782558 [ 49619 ] {b51bd2c6-67e6-4d69-a98b-e3861a7fad55} <Information> executeQuery: Read 863 rows, 29.79 KiB in 0.002333017 sec., 369907 rows/sec., 12.47 MiB/sec.
+2021.12.14 13:27:45.793581 [ 49619 ] {1cd71600-3c79-4ad6-b879-3fd0dadf99c3} <Information> executeQuery: Read 58 rows, 7.00 KiB in 0.001003935 sec., 57772 rows/sec., 6.80 MiB/sec.
+2021.12.14 13:27:45.806898 [ 49619 ] {821a41f4-6008-4929-a98d-791457075339} <Information> executeQuery: Read 5964 rows, 342.05 KiB in 0.011417981 sec., 522334 rows/sec., 29.25 MiB/sec.
+2021.12.14 13:28:01.829373 [ 49613 ] {} <Fatal> Application: Child process was terminated by signal 11.
+2021.12.14 13:28:33.399819 [ 10836 ] {} <Information> Application: Will watch for the process with pid 10837
+2021.12.14 13:28:33.400641 [ 10837 ] {} <Information> Application: Forked a child process to watch
+2021.12.14 13:28:33.401148 [ 10837 ] {} <Information> SentryWriter: Sending crash reports is disabled
+2021.12.14 13:28:33.487079 [ 10837 ] {} <Information> : Starting ClickHouse 21.8.11.4 with revision 54453, build id: DC0F74B166FF00A52EB52E692C9519C0A46E4D93, PID 10837
+
+```
+
+
+

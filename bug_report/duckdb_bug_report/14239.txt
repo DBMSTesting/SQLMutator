@@ -1,0 +1,208 @@
+ID: 14239
+Title: `NULL` and `NaN` handling of `greatest` / `least` / `max` / `min`
+Description:
+Update: I realized that the odd asymmetry between `greatest(0, 'NaN'::FLOAT) = 'NaN'` and `least(0, 'NaN'::FLOAT) = 0` is because duckdb actually returns `(x < 'NaN'::FLOAT) = true` for all non-`NaN` floats `x` (in contradiction to IEEE754, which specifies `NaN` as non-comparable, i.e. demands `false` on all comparisons). That's sad, but I presume is somehow a necessity of SQL? And I'm afraid you'll tell me this also necessitates `least(0, 'NaN'::FLOAT) = 0`?
+
+In either case, there is still a bug in `greatest(0::FLOAT, NULL) = NULL`, and there is still a need for a `clamp` function to work around the many SQL comparison oddities that may remain. 
+At the moment, `greatest(0, least(1, x))` is
+- `1` when `x is NULL::INT`
+- `1` when `x is NULL::FLOAT`
+- `1` when `x is 'NaN'::FLOAT`
+
+while `least(1, greatest(0, x))` is 
+- `0` when `x is NULL::INT`
+- `1` when `x is NULL::FLOAT` (but that's just a bug)
+- `1` when `x is 'NaN'::FLOAT`
+
+and I'd argue that most people that write this would just want
+- `NULL` when `x is NULL`
+- `'NaN'` when `x is 'NaN'::FLOAT`
+
+and they'd just want to write `x.clamp(0, 1)` and not have to think about it.
+
+---
+
+### What happens?
+
+DuckDB's `greatest` / `least` / `max` / `min` have non-standard and inconsistent `NULL` and `NaN` handling:
+
+|   |  NULLS | NaNs 
+|---|---|---|
+| duckdb-greatest  | IGNORE except for floats  | PROPAGATE  |
+| duckdb-least  | IGNORE  | IGNORE  |  
+|  duckdb-max | IGNORE  |  PROPAGATE |  
+|  duckdb-min | IGNORE  | IGNORE  | 
+|    |   |   | 
+|  PostgreSQL-greatest | IGNORE  |  PROPAGATE | 
+|  PostgreSQL-least |  IGNORE |  IGNORE | 
+|  PostgreSQL-max | IGNORE  |  PROPAGATE | 
+|  PostgreSQL-min |  IGNORE | IGNORE  | 
+|    |   |   | 
+|  SQLStandard-greatest |  PROPAGATE | NA  | 
+|  SQLStandard-least |  PROPAGATE |  NA | 
+|  SQLStandard-max | IGNORE  | NA  | 
+|  SQLStandard-min | IGNORE  | NA  | 
+|    |   |   | 
+|  IEEE-maximum |  NA | PROPAGATE  | 
+|  IEEE-minimum |  NA |  PROPAGATE | 
+|    |   |   | 
+|  IEEE-maximumNumber | NA  | IGNORE  | 
+|  IEEE-minimumNumber | NA  | IGNORE | 
+
+To summarize:
+
+1. duckdb is inconsistent (although only in one place) with PostgreSQL.
+
+2. duckdb's `greatest` and `least` are inconsistent with the SQL standard with respect to `NULL` handling and inconsistent with IEEE754's two-argument `maximum`/`minimum` specification with respect to `NaN` handling (The two standards sort of agree with each other, except that one only considers `NULL` handling and the other only `NaN` handling). 
+
+3. duckdb's `greatest` is inconsistent with duckdb's`least`. Consistent with PostgreSQL but odd, in my opinion. EDIT: As per the update at the top, I realized this is not really inconsistency but a consequence of the fact that duckdb treats `NaN` as comparable to and larger than any non-`NaN` values, contrary to IEEE754.
+
+4. duckdb's `max` is inconsistent with duckdb's `min`. Same as above.
+
+5. duckdb's `greatest(FLOAT, FLOAT)` is inconsistent with duckdb's `greatest(INT, INT)` and `greatest(DECIMAL, DECIMAL)` with respect to `NULL` handling. Same as 1., really.
+
+Below, I outline three options to improve this situation. The first option is to do as little as possible to get PostgreSQL compatibility. However, since duckdb *already* deviates from PostgreSQL, and PostgreSQL doesn't have great floating point treatment behavior, and duckdb has already started consciously deviating from PostgreSQL in 1.1 by following IEEE754 more closely for floating point operations, you could choose to offer even more standard behavior without breaking functional backwards compatibility or established PostgreSQL alignment via Options 2 and 3. Personally, I strongly prefer Option 3.
+
+
+#### Option 1: Quickfix
+
+Fix duckdb's `greatest(FLOAT, FLOAT)` to ignore `NULL`s, i.e., have `greatest(0::FLOAT, NULL::FLOAT) == 0::FLOAT`.
+This would align duckdb with PostgreSQL.
+
+Advantages: 
+- Not much changes
+
+Disadvantages: 
+- The asymmetry between PostgreSQL's `greatest` and `least` (and `max` vs `min`) is bad, in my opinion.
+- No good solutions for common use cases (see below).
+
+#### Option 2: Two sets of scalar functions, and `list_agg` in the middle.
+
+
+The  [IEEE754 specification]( https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://pcv.oss-cn-shanghai.aliyuncs.com/wp-content/upload/2022/12/ieee-std-754-2019.pdf&ved=2ahUKEwij5rvnoPiIAxVXS0EAHccZPCIQFnoECCQQAQ&usg=AOvVaw2c6bjg0_4pO5u-5GmvZQFQ) offers some prior art by offering two solutions to the users: Besides specifying the plain `maximum`/`minimum`, which propagate `NaN`s, it also specifies `maximumNumber`/`minimumNumber`, which ignore `NaN`s.
+
+You could follow this idea:
+
+1.  Offer new `greatest_value`/`least_value` functions that consistently ignore `NULL` and `NaN`, in the spirit of IEEE754s `maximumNumber`/`minimumNumber`'s `NaN` handling and PostgreSQL's `NULL` handling.
+
+2. Change the behavior of `greatest` and `least` to consistently  propagate `NULL` and `NaN`, in the spirit of the the SQL standard's  `NULL` handling and the IEEE754's `maximum`/`minimum`'s `NaN` handling.  (Optionally, revert `greatest`/`least` to  `greatest_value`/`least_value` when `ieee_floating_point_ops` (or some other setting) is set to `false`.)
+
+3. Fix the asymmetry of the `max`/`min` aggregates by propagating `NaN` in both (i.e., make `min` do what `max` already does) while still ignoring `NULL`s. 
+
+Note that users that want the exact "aggregate-`max`" behavior for scalar functions can use `list_max([...])`
+
+Advantages:
+- Most "standard" conforming
+- Maximal choice 
+
+Disadvantages:
+- Maximal choice and many changes
+
+#### Option 3: Align scalar and aggregate functions; offer new `clamp` function
+
+1. Fix the asymmetry of the `max`/`min` aggregates by propagating `NaN` in both (i.e., make `min` do what `max` already does)
+1. Make `greatest`/`least` behave exactly the same as the aggregates (and therefore the same as `list_max([..]) / list_min([..])`)
+2. Add a custom `numericColumn.clamp(lower, upper)` function that:
+- Returns `NaN` when any input is `NaN` (IEEE-754 standard behavior for all arguments) 
+- Else, returns `NULL` when the first argument is `NULL` ("SQL standard behavior for the first argument")
+- Else, returns the mathematical `max(numericColumn, lower)` when `upper` is `NULL` and `lower` isn't. Analogously, return the mathematical `min(numericColumn, upper)` when `lower` is `NULL` and `upper` isn't.  ("Allow one-sided capping via `NULL` arguments). 
+- Else, returns `numericColumn` when both `upper=NULL` and `lower=NULL` (Consistency with previous step)
+- Else, throws an exception when `lower > upper`
+- Else, returns the mathematical `max(lower, min(upper, numericColumn))`. 
+
+This may make sense because all instances that I can think of where the current `NULL`-ignoring behavior leads to bad bugs are instances where a "value column" needs to be capped by "bound / range columns", and all instances I can think of where `NULL`-ignoring is likely the desired behavior are of the "use `greatest` like an aggregate-`max`" nature. 
+
+The "allow one sided capping via `NULL` arguments" steps in this plan are not great (and are born out of the desire to not introduce three different new capping functions, which would require even more new terminology), but I can't think of an example where it'd cause bad unintentional behavior, and duckdb has followed this approach in other scenarios before. 
+
+Advantages:
+- Consistency between scalar and aggregate functions; between max and min; between greatest and least
+- Consistency with PostgreSQL, except for the PostgreSQL's asymmetry between `max`/`min` (and `greatest`/`least`) with respect to `NaN`s
+- Only thing that changes is the `max`/`min` (and `greatest`/`least`) asymmetry, and the obvious bug in the `NULL` handling of `greatest(FLOAT, FLOAT)`
+- Least surprise: `clamp` for capping where  `NULL` propagation is likely desired; `greatest`/`least` for finding extremal values where `NULL` ignoring is likely desired
+
+Disadvantages:
+- Inconsistency between `NULL` (ignored) and `NaN` (propagated) in `max` & `min` & `greatest` & `least`  -- but that's maybe not a bad thing and almost unavoidable, since the SQL standard requires that aggregates like `SUM`/`MAX`/... ignore `NULL`s but few people would think they should ignore `NaN` too.
+
+#### Closing thoughts 
+
+No matter the resolution, I think it's important to offer both conventions since both have the potential to cause unintended behavior:
+
+- Propagating `NULL`s can unintentionally drop records on the floor, e.g. in 
+
+```sql
+greatest(AustralianOpenPlacement, RolandGarrosPlacememt, WimbledonPlacement, USOpenPlacement) AS bestGrandSlamPlacement
+``` 
+when a player didn't play one of the four tournaments.
+
+- Ignoring `NULL`s can unintentionally hallucinate records, e.g. in
+```sql 
+greatest(0, least(1, autoCorrelation)) AS sanitizedAutocorrelation 
+```
+ a product that doesn't have measurements is unintentionally contributing a perfect 100% `autoCorrelation` to any further analysis. In this, current, behavior, you cannot cap a value without turning non-existent data into extreme values of the permitted range. 
+
+It'd therefore be useful to implement the `clamp` function proposed in Option 3 independent of the other choices. 
+
+### To Reproduce
+
+```sql
+SELECT 
+greatest(0, NULL),  -- returns 0 in duckdb and PostgreSQL. Should return NULL according to SQL standard
+greatest(0::FLOAT, NULL),  -- returns NULL in duckdb and 0 in PostgreSQL. Should return NULL according to SQL standard
+greatest(0.0, NULL), --- returns 0 in duckdb and PostgreSQL. Should return NULL according to SQL standard 
+
+least(0, NULL),  -- returns 0 in duckdb and PostgreSQL. Should return NULL according to SQL standard
+least(0::FLOAT, NULL),  -- returns 0 in duckdb and PostgreSQL. Should return NULL according to SQL standard
+least(0.0, NULL), --- returns 0 in duckdb and PostgreSQL. Should return NULL according to SQL standard 
+
+greatest(0.0, 'NaN'::FLOAT), --- returns NaN in duckdb and PostgreSQL. Should return NaN according to IEEE754
+least(0.0, 'NaN'::FLOAT), --returns 0 in duckdb and PostgreSQL. Should return NaN according to IEEE754
+greatest(0, 'NaN'::FLOAT), --- returns NaN in duckdb and PostgreSQL. Should return NaN according to IEEE754
+least(0, 'NaN'::FLOAT), --returns 0 in duckdb and PostgreSQL. Should return NaN according to IEEE754
+greatest(0::FLOAT, 'NaN'::FLOAT), --- returns NaN in duckdb and PostgreSQL. Should return NaN according to IEEE754
+least(0::FLOAT, 'NaN'::FLOAT) --returns 0 in duckdb and PostgreSQL. Should return NaN according to IEEE754
+```
+
+[DuckDB](
+https://shell.duckdb.org/#queries=v0,SELECT-%0Agreatest(0%2C-NULL)%2C--%20%20-returns-0-in-duckdb-and-PostgreSQL.-Should-return-NULL-according-to-SQL-standard%0Agreatest(0%3A%3AFLOAT%2C-NULL)%2C--%20%20-returns-NULL-in-duckdb-and-0-in-PostgreSQL.-Should-return-NULL-according-to-SQL-standard%0Agreatest(0.0%2C-NULL)%2C-%20%20%20-returns-0-in-duckdb-and-PostgreSQL.-Should-return-NULL-according-to-SQL-standard-%0A%0Aleast(0%2C-NULL)%2C--%20%20-returns-0-in-duckdb-and-PostgreSQL.-Should-return-NULL-according-to-SQL-standard%0Aleast(0%3A%3AFLOAT%2C-NULL)%2C--%20%20-returns-0-in-duckdb-and-PostgreSQL.-Should-return-NULL-according-to-SQL-standard%0Aleast(0.0%2C-NULL)%2C-%20%20%20-returns-0-in-duckdb-and-PostgreSQL.-Should-return-NULL-according-to-SQL-standard-%0A%0Agreatest(0.0%2C-'NaN'%3A%3AFLOAT)%2C-%20%20%20-returns-NaN-in-duckdb-and-PostgreSQL.-Should-return-NaN-according-to-IEEE754%0Aleast(0.0%2C-'NaN'%3A%3AFLOAT)%2C-%20%20returns-0-in-duckdb-and-PostgreSQL.-Should-return-NaN-according-to-IEEE754%0Agreatest(0%2C-'NaN'%3A%3AFLOAT)%2C-%20%20%20-returns-NaN-in-duckdb-and-PostgreSQL.-Should-return-NaN-according-to-IEEE754%0Aleast(0%2C-'NaN'%3A%3AFLOAT)%2C-%20%20returns-0-in-duckdb-and-PostgreSQL.-Should-return-NaN-according-to-IEEE754%0Agreatest(0%3A%3AFLOAT%2C-'NaN'%3A%3AFLOAT)%2C-%20%20%20-returns-NaN-in-duckdb-and-PostgreSQL.-Should-return-NaN-according-to-IEEE754%0Aleast(0%3A%3AFLOAT%2C-'NaN'%3A%3AFLOAT)-%20%20returns-0-in-duckdb-and-PostgreSQL.-Should-return-NaN-according-to-IEEE754%0A~)
+
+[PostgreSQL](https://www.db-fiddle.com/f/uk7D8MQnMZC23SnWfrVzFu/4)
+
+### OS:
+
+Linux
+
+### DuckDB Version:
+
+v1.1.2-dev87 
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+x64
+
+### Full Name:
+
+Soeren Wolfers
+
+### Affiliation:
+
+G-Research
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

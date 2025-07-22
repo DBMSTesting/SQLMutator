@@ -1,0 +1,81 @@
+ID: 39311
+Title: select cte cost should not be 0
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+explain  format="verbose" WITH group_by_area AS (
+    SELECT
+        gu.country_code AS country_or_area,
+        COUNT(1) as cnt
+    FROM github_events ge
+    LEFT JOIN github_users gu ON ge.actor_login = gu.login
+    WHERE
+        repo_id IN (41986369)
+        AND ge.type = 'WatchEvent'
+        AND ge.action = 'started'
+
+        AND gu.country_code IS NOT NULL  -- TODO: remove
+        AND gu.country_code != ''
+        AND gu.country_code != 'N/A'
+        AND gu.country_code != 'UND'
+    GROUP BY country_or_area
+    order by cnt desc
+), summary AS (
+    SELECT SUM(cnt) AS total FROM group_by_area
+)
+SELECT 
+    country_or_area,
+    cnt AS count,
+    summary.total AS percentage
+FROM  group_by_area,summary;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+ctefullscan estcost should not be 0
+### 3. What did you see instead (Required)
+query cte estcost is 0
+```sql
++---------------------------------+---------+----------+-----------+-------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                              | estRows | estCost  | task      | access object                                                                                                                 | operator info                                                                                                                                                                                                             |
++---------------------------------+---------+----------+-----------+-------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| HashJoin_108                    | 1.00    | 105.33   | root      |                                                                                                                               | CARTESIAN inner join                                                                                                                                                                                                      |
+| ├─CTEFullScan_114(Build)        | 1.00    | 0.00     | root      | CTE:group_by_area                                                                                                             | data:CTE_0                                                                                                                                                                                                                |
+| └─StreamAgg_111(Probe)          | 1.00    | 49.90    | root      |                                                                                                                               | funcs:sum(Column#83)->Column#65                                                                                                                                                                                           |
+|   └─Projection_115              | 1.00    | 3.33     | root      |                                                                                                                               | cast(Column#64, decimal(20,0) BINARY)->Column#83                                                                                                                                                                          |
+|     └─CTEFullScan_113           | 1.00    | 0.00     | root      | CTE:group_by_area                                                                                                             | data:CTE_0                                                                                                                                                                                                                |
+| CTE_0                           | 1.00    | 0.00     | root      |                                                                                                                               | Non-Recursive CTE                                                                                                                                                                                                         |
+| └─Sort_20(Seed Part)            | 1.00    | 26658.74 | root      |                                                                                                                               | Column#56:desc                                                                                                                                                                                                            |
+|   └─Projection_22               | 1.00    | 26656.54 | root      |                                                                                                                               | gharchive_dev.github_users.country_code, Column#56                                                                                                                                                                        |
+|     └─HashAgg_26                | 1.00    | 26656.54 | root      |                                                                                                                               | group by:gharchive_dev.github_users.country_code, funcs:count(1)->Column#56, funcs:firstrow(gharchive_dev.github_users.country_code)->gharchive_dev.github_users.country_code                                             |
+|       └─IndexJoin_35            | 0.09    | 36.41    | root      |                                                                                                                               | inner join, inner:IndexReader_34, outer key:gharchive_dev.github_events.actor_login, inner key:gharchive_dev.github_users.login, equal cond:eq(gharchive_dev.github_events.actor_login, gharchive_dev.github_users.login) |
+|         ├─IndexReader_66(Build) | 0.09    | 3.04     | root      | partition:watch_event                                                                                                         | index:IndexRangeScan_65                                                                                                                                                                                                   |
+|         │ └─IndexRangeScan_65   | 0.09    | 21.02    | cop[tikv] | table:ge, index:index_github_events_on_repo_id_type_action_month_actor_login(repo_id, type, action, event_month, actor_login) | range:[41986369 "WatchEvent" "started",41986369 "WatchEvent" "started"], keep order:false                                                                                                                                 |
+|         └─IndexReader_34(Probe) | 0.09    | 488.55   | root      |                                                                                                                               | index:Selection_33                                                                                                                                                                                                        |
+|           └─Selection_33        | 0.09    | 6569.45  | cop[tikv] |                                                                                                                               | ne(gharchive_dev.github_users.country_code, ""), ne(gharchive_dev.github_users.country_code, "N/A"), ne(gharchive_dev.github_users.country_code, "UND"), not(isnull(gharchive_dev.github_users.country_code))             |
+|             └─IndexRangeScan_32 | 1.30    | 3533.74  | cop[tikv] | table:gu, index:index_gu_on_login_is_bot_organization_country_code(login, is_bot, organization_formatted, country_code)       | range: decided by [eq(gharchive_dev.github_users.login, gharchive_dev.github_events.actor_login)], keep order:false                                                                                                       |
++---------------------------------+---------+----------+-----------+-------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+### 4. What is your TiDB version? (Required)
+```sql
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v6.4.0-20221121                          |
+| Edition: Enterprise                                       |
+| Git Commit Hash: 0d3bfe701fd38356c70159cfa07a4041d0abb872 |
+| Git Branch: heads/refs/tags/v6.4.0-20221121               |
+| UTC Build Time: 2022-11-21 08:20:52                       |
+| GoVersion: go1.19.2                                       |
+| Race Enabled: false                                       |
+| TiKV Min Version: 6.2.0-alpha                             |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

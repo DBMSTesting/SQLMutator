@@ -1,0 +1,96 @@
+ID: 34591
+Title: join's inner condition should be empty:  Failed to build executor
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+drop table if exists t1,t2,t3;
+create table t1 (a1 int, a2 int);
+create table t2 (b1 int not null, b2 int);
+create table t3 (c1 int, c2 int);
+
+insert into t1 values (1,2), (2,2), (3,2);
+insert into t2 values (1,3), (2,3);
+insert into t3 values (2,4),        (3,4);
+
+select * from t1 left join t2  on  b1 = a1 left join t3  on  c1 = a1  and  b1 is null;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+MySQL root@127.0.0.1:test> explain select * from t1 left join t2  on  b1 = a1 left join t3  on  c1 = a1  and  b1 is null;
+                       ->  select * from t1 left join t2  on  b1 = a1 left join t3  on  c1 = a1  and  b1 is null;
+Reconnecting...
++---------------------------+---------+-----------+---------------+-------------------------------------------------------------------------------------+
+| id                        | estRows | task      | access object | operator info                                                                       |
++---------------------------+---------+-----------+---------------+-------------------------------------------------------------------------------------+
+| HashJoin_8                | 3.00    | root      |               | left outer join, equal:[eq(test.t1.a1, test.t3.c1)], left cond:[isnull(test.t2.b1)] |
+| ├─TableReader_18(Build)   | 2.00    | root      |               | data:Selection_17                                                                   |
+| │ └─Selection_17          | 2.00    | cop[tikv] |               | not(isnull(test.t3.c1))                                                             |
+| │   └─TableFullScan_16    | 2.00    | cop[tikv] | table:t3      | keep order:false, stats:pseudo                                                      |
+| └─HashJoin_10(Probe)      | 3.00    | root      |               | left outer join, equal:[eq(test.t1.a1, test.t2.b1)]                                 |
+|   ├─TableReader_15(Build) | 2.00    | root      |               | data:TableFullScan_14                                                               |
+|   │ └─TableFullScan_14    | 2.00    | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                                      |
+|   └─TableReader_13(Probe) | 3.00    | root      |               | data:TableFullScan_12                                                               |
+|     └─TableFullScan_12    | 3.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                      |
++---------------------------+---------+-----------+---------------+-------------------------------------------------------------------------------------+
+
+9 rows in set
+Time: 0.014s
+
++----+----+--------+--------+--------+--------+
+| a1 | a2 | b1     | b2     | c1     | c2     |
++----+----+--------+--------+--------+--------+
+| 1  | 2  | 1      | 3      | <null> | <null> |
+| 2  | 2  | 2      | 3      | <null> | <null> |
+| 3  | 2  | <null> | <null> | 3      | 4      |
++----+----+--------+--------+--------+--------+
+```
+### 3. What did you see instead (Required)
+```sql
+MySQL root@127.0.0.1:test> explain select * from t1 left join t2  on  b1 = a1 left join t3  on  c1 = a1  and  b1 is null;
+                       ->  select * from t1 left join t2  on  b1 = a1 left join t3  on  c1 = a1  and  b1 is null;
++-----------------------------+---------+-----------+---------------+------------------------------------------------------------------------------------+
+| id                          | estRows | task      | access object | operator info                                                                      |
++-----------------------------+---------+-----------+---------------+------------------------------------------------------------------------------------+
+| Projection_11               | 3.00    | root      |               | test.t1.a1, test.t1.a2, test.t2.b1, test.t2.b2, test.t3.c1, test.t3.c2             |
+| └─HashJoin_12               | 3.00    | root      |               | left outer join, equal:[eq(test.t1.a1, test.t2.b1)], right cond:isnull(test.t2.b1) |
+|   ├─TableReader_22(Build)   | 2.00    | root      |               | data:TableFullScan_21                                                              |
+|   │ └─TableFullScan_21      | 2.00    | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                                     |
+|   └─HashJoin_14(Probe)      | 3.00    | root      |               | left outer join, equal:[eq(test.t1.a1, test.t3.c1)]                                |
+|     ├─TableReader_20(Build) | 2.00    | root      |               | data:Selection_19                                                                  |
+|     │ └─Selection_19        | 2.00    | cop[tikv] |               | not(isnull(test.t3.c1))                                                            |
+|     │   └─TableFullScan_18  | 2.00    | cop[tikv] | table:t3      | keep order:false, stats:pseudo                                                     |
+|     └─TableReader_17(Probe) | 3.00    | root      |               | data:TableFullScan_16                                                              |
+|       └─TableFullScan_16    | 3.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                     |
++-----------------------------+---------+-----------+---------------+------------------------------------------------------------------------------------+
+
+10 rows in set
+Time: 0.011s
+(8118, 'Failed to build executor')
+```
+tidb.log
+```log
+[2022/05/12 11:01:57.253 +08:00] [WARN] [session.go:1938] ["run statement failed"] [conn=403] [schemaVersion=140] [error="join's inner condition should be empty: [executor:8118]Failed to build executor"] [session="{\n  \"currDBName\": \"test\",\n  \"id\": 403,\n  \"status\": 2,\n  \"strictMode\": true,\n  \"user\": {\n    \"Username\": \"root\",\n    \"Hostname\": \"127.0.0.1\",\n    \"CurrentUser\": false,\n    \"AuthUsername\": \"root\",\n    \"AuthHostname\": \"%\"\n  }\n}"]
+[2022/05/12 11:01:57.254 +08:00] [INFO] [conn.go:1144] ["command dispatched failed"] [conn=403] [connInfo="id:403, addr:127.0.0.1:50122 status:10, collation:utf8_general_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql="select * from t1 left join t2  on  b1 = a1 left join t3  on  c1 = a1  and  b1 is null"] [txn_mode=OPTIMISTIC] [timestamp=433146958250508288] [err="[executor:8118]Failed to build executor\njoin's inner condition should be empty\ngithub.com/pingcap/tidb/executor.(*executorBuilder).buildHashJoin\n\t/Users/aytrack/gitproject/pingcap/tidb/executor/builder.go:1321\ngithub.com/pingcap/tidb/executor.(*executorBuilder).build\n\t/Users/aytrack/gitproject/pingcap/tidb/executor/builder.go:258\ngithub.com/pingcap/tidb/executor.(*executorBuilder).buildProjection\n\t/Users/aytrack/gitproject/pingcap/tidb/executor/builder.go:1525\ngithub.com/pingcap/tidb/executor.(*executorBuilder).build\n\t/Users/aytrack/gitproject/pingcap/tidb/executor/builder.go:274\ngithub.com/pingcap/tidb/executor.(*ExecStmt).buildExecutor\n\t/Users/aytrack/gitproject/pingcap/tidb/executor/adapter.go:881\ngithub.com/pingcap/tidb/executor.(*ExecStmt).Exec\n\t/Users/aytrack/gitproject/pingcap/tidb/executor/adapter.go:413\ngithub.com/pingcap/tidb/session.runStmt\n\t/Users/aytrack/gitproject/pingcap/tidb/session/session.go:2059\ngithub.com/pingcap/tidb/session.(*session).ExecuteStmt\n\t/Users/aytrack/gitproject/pingcap/tidb/session/session.go:1935\ngithub.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt\n\t/Users/aytrack/gitproject/pingcap/tidb/server/driver_tidb.go:230\ngithub.com/pingcap/tidb/server.(*clientConn).handleStmt\n\t/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:2013\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery\n\t/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:1871\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch\n\t/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:1366\ngithub.com/pingcap/tidb/server.(*clientConn).Run\n\t/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:1116\ngithub.com/pingcap/tidb/server.(*Server).onConn\n\t/Users/aytrack/gitproject/pingcap/tidb/server/server.go:556\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1571"]
+```
+### 4. What is your TiDB version? (Required)
+```sql
+MySQL root@127.0.0.1:test> select tidb_version()\G
+***************************[ 1. row ]***************************
+tidb_version() | Release Version: v6.1.0-alpha-390-g98c31070d
+Edition: Community
+Git Commit Hash: 98c31070d95858ecf5f9ffb9d5e0dab3aca13d9c
+Git Branch: master
+UTC Build Time: 2022-05-12 01:58:56
+GoVersion: go1.18
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

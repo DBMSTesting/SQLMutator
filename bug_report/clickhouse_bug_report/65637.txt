@@ -1,0 +1,42 @@
+ID: 65637
+Title: Logical error: 'mutation_pointer < it->second->entry->znode_name'  (in stress test)
+Description:
+https://s3.amazonaws.com/clickhouse-test-reports/58934/8b510a67f957c2373f4126d2884614ff7066f1b5/stress_test__tsan_.html
+
+Assertion failure:
+```
+2024.06.22 09:21:37.125121 [ 3937 ] {} <Trace> 98acf51c-94d7-430b-9f44-be22f6e2b23c::all_15_15_0_31 (MutateFromLogEntryTask): Executing log entry to mutate part all_15_15_0_27 to all_15_15_0_31
+[...]
+2024.06.22 09:21:37.125256 [ 3937 ] {} <Fatal> : Logical error: 'mutation_pointer < it->second->entry->znode_name'.
+```
+while running queries from 02962_system_sync_replica_lightweight_from_modifier.sh: random concurrent INSERTs and ALTERs to 10 RMT replicas. A few of the INSERTs hit part count limit. The last attempted ALTER got keeper connection loss:
+```
+2024.06.22 09:21:34.459533 [ 5167 ] {95f73f40-fdf8-4f3a-82fe-57d4608d35c2} <Error> executeQuery: Code: 999. Coordination::Exception: Coordination error: Connection loss, path /clickhouse/tables/02962_system_sync_replica_lightweight_from_modifier_test_9/test_table/mutations. (KEEPER_EXCEPTION) (version 24.7.1.9
+9) (from [::1]:36558) (comment: 02962_system_sync_replica_lightweight_from_modifier.sh) (in query: ALTER TABLE test_table_6 DELETE WHERE key % 2 = 0), Stack trace (when copying this message, always include the lines below):
+
+0. ./contrib/llvm-project/libcxx/include/exception:141: Poco::Exception::Exception(String const&, int) @ 0x000000001d30aa23
+1. ./build_docker/./src/Common/Exception.cpp:101: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000ef108b4
+2. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x00000000072e4740
+3. ./contrib/llvm-project/libcxx/include/vector:434: DB::Exception::Exception<char const*, String const&>(int, FormatStringHelperImpl<std::type_identity<char const*>::type, std::type_identity<String const&>::type>, char const*&&, String const&) @ 0x0000000015493406
+4. ./src/Common/ZooKeeper/IKeeper.h:490: Coordination::Exception::fromPath(Coordination::Error, String const&) @ 0x0000000015492aae
+5. ./build_docker/./src/Common/ZooKeeper/ZooKeeper.cpp:622: zkutil::ZooKeeper::tryGetWatch(String const&, String&, Coordination::Stat*, std::function<void (Coordination::WatchResponse const&)>, Coordination::Error*) @ 0x000000001a2bdc92
+6. ./build_docker/./src/Common/ZooKeeper/ZooKeeper.cpp:590: zkutil::ZooKeeper::tryGet(String const&, String&, Coordination::Stat*, std::shared_ptr<Poco::Event> const&, Coordination::Error*) @ 0x000000001a2bd854
+7. ./build_docker/./src/Common/ZooKeeper/ZooKeeper.cpp:556: zkutil::ZooKeeper::get(String const&, Coordination::Stat*, std::shared_ptr<Poco::Event> const&) @ 0x000000001a2bd623
+8. ./contrib/llvm-project/libcxx/include/string:1499: DB::StorageReplicatedMergeTree::mutate(DB::MutationCommands const&, std::shared_ptr<DB::Context const>) @ 0x0000000018ac6112
+9. ./build_docker/./src/Interpreters/InterpreterAlterQuery.cpp:0: DB::InterpreterAlterQuery::executeToTable(DB::ASTAlterQuery const&) @ 0x000000001754e848
+10. ./build_docker/./src/Interpreters/InterpreterAlterQuery.cpp:71: DB::InterpreterAlterQuery::execute() @ 0x000000001754bbe3
+11. ./build_docker/./src/Interpreters/executeQuery.cpp:0: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000017fc8a07
+12. ./build_docker/./src/Interpreters/executeQuery.cpp:1391: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x0000000017fc3cd8
+13. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:612: DB::TCPHandler::runImpl() @ 0x00000000197e1136
+14. ./build_docker/./src/Server/TCPHandler.cpp:2350: DB::TCPHandler::run() @ 0x00000000197ffd48
+15. ./build_docker/./base/poco/Net/src/TCPServerConnection.cpp:57: Poco::Net::TCPServerConnection::start() @ 0x000000001d416c83
+16. ./contrib/llvm-project/libcxx/include/__memory/unique_ptr.h:48: Poco::Net::TCPServerDispatcher::run() @ 0x000000001d4174f2
+17. ./build_docker/./base/poco/Foundation/src/ThreadPool.cpp:219: Poco::PooledThread::run() @ 0x000000001d390123
+18. ./build_docker/./base/poco/Foundation/src/Thread.cpp:46: Poco::(anonymous namespace)::RunnableHolder::run() @ 0x000000001d38e3f0
+19. ./base/poco/Foundation/include/Poco/SharedPtr.h:231: Poco::ThreadImpl::runnableEntry(void*) @ 0x000000001d38c8ca
+20. __tsan_thread_start_func @ 0x000000000725cf2f
+21. ? @ 0x00007f5d54db1ac3
+22. ? @ 0x00007f5d54e43850
+```
+
+Tried reproducing it by adding a randomized `zookeeper->finalize("")` before the `zookeeper->get()` in `StorageReplicatedMergeTree::mutate()` and running the test a few times, but it didn't reproduce.

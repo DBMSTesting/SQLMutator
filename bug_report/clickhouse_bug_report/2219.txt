@@ -1,0 +1,46 @@
+ID: 2219
+Title: Error occurs when conditional aggregation function with subquery is used
+Description:
+### Summary
+Query from distributed table with aggregation using conditional aggregation function containing subquery from the same distributed table causes error when distributed_product_mode is 'local'. However, query looks correct.
+
+### Steps to reproduce
+Issue is reproducible for version 1.1.54370.
+1. On cluster with at least 2 shards create DB using DDL:
+```
+create database bug_report
+
+create table
+  bug_report.test_table_sharded(
+    date Date,
+    text String,
+    hash UInt64
+  )
+engine=MergeTree(date, (hash, date), 8192)
+
+create table bug_report.test_table as bug_report.test_table_sharded 
+engine=Distributed(bug_report_cluster, bug_report, test_table_sharded, hash)
+```
+
+2. Execute query:
+```
+SELECT
+  text,
+  uniqExactIf(hash, hash IN (
+    SELECT DISTINCT
+      hash
+    FROM bug_report.test_table
+  )) as counter
+FROM bug_report.test_table
+GROUP BY text
+ORDER BY counter, text
+SETTINGS distributed_product_mode = 'local'
+```
+### Result
+Server aborts execution with exception:
+```
+[179] ClickHouse exception, code: 179, host: localhost, port: 8123; Code: 179, e.displayText() = DB::Exception: Different expressions with the same alias _subquery1:
+(SELECT DISTINCT hash FROM bug_report.test_table_sharded ) AS _subquery1
+and
+(SELECT DISTINCT hash FROM bug_report.test_table_sharded ) AS _subquery1
+```

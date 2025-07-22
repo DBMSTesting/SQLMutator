@@ -1,0 +1,151 @@
+ID: 38282
+Title: incorrect result: distinct + distributed + limit 
+Description:
+21.8.13.6, 22.3.7.28, 22.5.1.2079, 22.6.1.1985
+
+distinct + limit over distributed tables stops to read rows from the table before reaching the limit.
+
+```sql
+cat xy.sql
+drop table  if exists test;
+create table test  (d Date, id Int64 ) Engine = MergeTree partition by toYYYYMM(d) order by d;
+
+insert into test select '2021-12-15', -1 from numbers(1e7);
+insert into test select '2021-12-15', -1 from numbers(1e7);
+insert into test select '2021-12-15', -1 from numbers(1e7);
+insert into test select '2021-12-15', -1 from numbers(1e7);
+insert into test select '2022-12-15', 1 from numbers(1e7);
+insert into test select '2022-12-16', 11 from numbers(1);
+insert into test select '2023-12-16', 12 from numbers(1);
+insert into test select '2023-12-16', 13 from numbers(1);
+insert into test select '2023-12-16', 14 from numbers(1);
+
+select distinct id from remote('127.0.0.2,127.0.0.1', currentDatabase(),test) limit 10;
+
+select '-----';
+
+select distinct id from remote('127.0.0.2,127.0.0.1', currentDatabase(),test) ;
+```
+
+```
+$ cat xy.sql |clickhouse-client -mn
+1
+-1
+-----
+-1
+1
+11
+12
+13
+
+$ cat xy.sql |clickhouse-client -mn
+1
+-1
+11
+-----
+1
+-1
+11
+12
+13
+14
+
+$ cat xy.sql |clickhouse-client -mn
+-1
+1
+-----
+-1
+1
+11
+12
+13
+14
+
+$ cat xy.sql |clickhouse-client -mn
+1
+-1
+11
+-----
+-1
+1
+11
+12
+13
+14
+
+$ cat xy.sql |clickhouse-client -mn
+1
+-1
+-----
+-1
+1
+11
+12
+13
+14
+```
+
+------
+
+in real prod it looks like this
+
+```sql
+-- very fast, but incorrect
+
+select distinct ext_io_id from csp_ad_fact_event where access_day > '2021-12-15' limit 10;
+┌─ext_io_id─┐
+│        -1 │
+└───────────┘
+
+1 rows in set. Elapsed: 0.062 sec. Processed 17.30 million rows, 172.98 MB (278.38 million rows/s., 2.78 GB/s.)
+
+
+-- without limit 
+
+select distinct ext_io_id from csp_ad_fact_event where access_day > '2021-12-15';
+┌─ext_io_id─┐
+│        -1 │
+└───────────┘
+┌─ext_io_id─┐
+│     23120 │
+└───────────┘
+┌─ext_io_id─┐
+│   2704949 │
+└───────────┘
+
+3 rows in set. Elapsed: 25.510 sec. Processed 376.27 billion rows, 3.76 TB (14.75 billion rows/s., 147.50 GB/s.)
+
+
+-- limit 100
+
+select distinct ext_io_id from csp_ad_fact_event where access_day > '2021-12-15' limit 100;
+┌─ext_io_id─┐
+│        -1 │
+└───────────┘
+┌─ext_io_id─┐
+│     23120 │
+└───────────┘
+┌─ext_io_id─┐
+│   2704949 │
+└───────────┘
+
+3 rows in set. Elapsed: 26.331 sec. Processed 376.33 billion rows, 3.76 TB (14.29 billion rows/s., 142.92 GB/s.)
+
+
+-- with order by
+
+select distinct ext_io_id from csp_ad_fact_event where access_day > '2021-12-15' order by  ext_io_id limit 10;
+┌─ext_io_id─┐
+│        -1 │
+└───────────┘
+┌─ext_io_id─┐
+│     23120 │
+└───────────┘
+┌─ext_io_id─┐
+│   2704949 │
+└───────────┘
+
+3 rows in set. Elapsed: 26.103 sec. Processed 376.36 billion rows, 3.76 TB (14.42 billion rows/s., 144.18 GB/s.)
+```
+
+Probably related to the optimization with small limits.

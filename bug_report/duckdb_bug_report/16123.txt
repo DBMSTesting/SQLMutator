@@ -1,0 +1,172 @@
+ID: 16123
+Title: Very large query performance difference when using `show()` vs. any conversion (`df()`, `fetchall()`, etc.)
+Description:
+### What happens?
+
+# Summary
+
+I'm getting very different (2-3 orders of magnitude) query times when doing conversion to any type i.e. `df()`, `pl()`, `arrow()` for a `DuckDBPyRelation` for two different ways to query (Temporary Table vs. CTE)
+
+## Using Temporary Table
+
+It takes about 40ms per query, and when I add conversion to dataframe on top it takes a few more ms per query, which makes sense:
+
+```python
+In [95]: %timeit res = db.sql(query)
+38.8 ms ± 2.83 ms per loop (mean ± std. dev. of 7 runs, 10 loops each)
+
+In [96]: %timeit res = db.sql(query).df()
+43.5 ms ± 2.27 ms per loop (mean ± std. dev. of 7 runs, 10 loops each)
+```
+
+## Using CTE
+
+When I run this the query itself only takes 79us, a seemingly 500x speedup! But when I add conversion to df it goes back up to on par with the above query (427x slowdown)
+
+```python
+In [98]: %timeit res = db.sql(query)
+79 μs ± 572 ns per loop (mean ± std. dev. of 7 runs, 10,000 loops each)
+
+In [99]: %timeit res = db.sql(query).df()
+33.8 ms ± 1.21 ms per loop (mean ± std. dev. of 7 runs, 10 loops each)
+```
+
+---------
+
+At first I thought this was something like `res = db.sql(query)` was just building a pipeline for the query which was why it was running so fast, but when I print it out with `show()`, it has the same results as if I print it out after calling `df()`
+
+```python
+In [104]: res.show()
+┌─────────────────────────────────┬───────┐
+│            category             │ count │
+│             varchar             │ int64 │
+├─────────────────────────────────┼───────┤
+│ race: Black or African American │  1993 │
+│ race: White                     │  9008 │
+│ sex: Female                     │  5615 │
+│ sex: Male                       │  5386 │
+│ age: 40                         │   217 │
+│ age: 41                         │   219 │
+│ age: 42                         │   232 │
+...
+In [106]: res.df()
+                           category  count
+0   race: Black or African American   1993
+1                       race: White   9008
+2                         sex: Male   5386
+3                       sex: Female   5615
+4                           age: 40    217
+5                           age: 41    219
+6                           age: 42    232
+...
+```
+
+So my question is what could explain these huge differences in query times? 
+
+
+
+### To Reproduce
+
+## Temporary Table Query
+```sql
+CREATE TEMPORARY TABLE filtered_participants AS
+SELECT 
+    race,sex,p.age as p_age,latest_cdrglob,
+    np.npthal,np.nphipscl,np.nptdpb,np.nptdpc,
+    np.nptdpd,np.nptdpe,
+    np.npftdtau,np.npftdtdp
+FROM participants p left join
+visits v on p.id = v.participant_id left join
+neuropathology np on v.id = np.visit_id
+
+WHERE
+    uds_versions && ARRAY['UDSv1', 'UDSv2', 'UDSv3'] AND -- ANY UDS version can be present
+    primary_language IN ('English', 'Mandarin') AND
+    race IN ('White', 'Black or African American') AND
+    sex IN ('Male','Female') AND
+    latest_cdrglob BETWEEN 1 AND 3 AND
+    p_age BETWEEN 40 AND 90 AND
+    npthal in (1,2,3);
+
+SELECT
+    CONCAT('race: ', race) AS category,
+     COUNT(*) AS count
+FROM filtered_participants
+GROUP BY filtered_participants.race
+```
+
+## CTE Query 
+
+```sql
+WITH filtered_participants AS (
+SELECT 
+    race,sex,p.age as p_age,latest_cdrglob,
+    np.npthal,np.nphipscl,np.nptdpb,np.nptdpc,
+    np.nptdpd,np.nptdpe,
+    np.npftdtau,np.npftdtdp
+FROM participants p left join
+visits v on p.id = v.participant_id left join
+neuropathology np on v.id = np.visit_id
+
+WHERE
+    uds_versions && ARRAY['UDSv1', 'UDSv2', 'UDSv3'] AND -- ANY UDS version can be present
+    primary_language IN ('English', 'Mandarin') AND
+    race IN ('White', 'Black or African American') AND
+    sex IN ('Male','Female') AND
+    latest_cdrglob BETWEEN 1 AND 3 AND
+    p_age BETWEEN 40 AND 90 AND
+    npthal in (1,2,3)
+)
+
+SELECT
+    CONCAT('race: ', race) AS category,
+     COUNT(*) AS count
+FROM filtered_participants
+GROUP BY filtered_participants.race
+```
+
+The data is available here:
+* [visits](https://storage.googleapis.com/fw-public-data/duckdb-testing-data/visits/visits.parquet)
+* [participants](https://storage.googleapis.com/fw-public-data/duckdb-testing-data/participants/participants.parquet)
+* [neuropathology](https://storage.googleapis.com/fw-public-data/duckdb-testing-data/neuropathology/neuropathology.parquet)
+And I loaded them with `CREATE TABLE <table> AS SELECT * FROM read_parquet('<dataset>/*.parquet')`
+
+### OS:
+
+macosx-11.0-arm64
+
+### DuckDB Version:
+
+duckdb -version `v1.1.3 19864453f7`
+
+### DuckDB Client:
+
+duckdb python 1.1.3
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Nate Richman
+
+### Affiliation:
+
+Flywheel
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

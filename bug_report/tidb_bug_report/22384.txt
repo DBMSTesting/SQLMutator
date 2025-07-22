@@ -1,0 +1,140 @@
+ID: 22384
+Title: planner does not reorder the inner joins simplified from outer joins
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+DROP TABLE IF EXISTS t1, t2, t3;
+
+CREATE TABLE t1 (
+  pk char(32) PRIMARY KEY,
+  col1 char(32),
+  col2 varchar(40),
+  col3 char(32),
+  KEY (col1),
+  KEY (col3),
+  KEY (col2,col3),
+  KEY (col1,col3)
+);
+
+CREATE TABLE t2 (
+  pk char(32) PRIMARY KEY,
+  col1 varchar(100)
+);
+
+CREATE TABLE `t3` (
+  pk char(32) PRIMARY KEY,
+  keycol varchar(100),
+  pad1 tinyint(1) DEFAULT NULL,
+  pad2 varchar(40),
+  KEY (keycol,pad1,pad2)
+);
+
+EXPLAIN
+SELECT t1.pk
+FROM t1 
+LEFT JOIN t2 ON t1.col1 = t2.pk
+LEFT JOIN t3 ON t1.col3 = t3.pk
+WHERE
+t2.col1 IN ('a' , 'b') 
+AND t3.keycol = 'c' 
+AND t1.col2 = 'a' 
+AND t1.col1 != 'abcdef' 
+AND t1.col1 != 'aaaaaa';
+```
+
+### 2. What did you expect to see? (Required)
+
+I expect the same result in `EXPLAIN` as when i manually convert the query to `INNER JOIN`.
+
+### 3. What did you see instead (Required)
+
+TiDB does not seem to do this though, and the `EXPLAIN` can be seen as different:
+
+```sql
+mysql> EXPLAIN
+    -> SELECT t1.pk
+    -> FROM t1 
+    -> LEFT JOIN t2 ON t1.col1 = t2.pk
+    -> LEFT JOIN t3 ON t1.col3 = t3.pk
+    -> WHERE
+    -> t2.col1 IN ('a' , 'b') 
+    -> AND t3.keycol = 'c' 
+    -> AND t1.col2 = 'a' 
+    -> AND t1.col1 != 'abcdef' 
+    -> AND t1.col1 != 'aaaaaa';
++---------------------------------------+---------+-----------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| id                                    | estRows | task      | access object                              | operator info                                                                                                           |
++---------------------------------------+---------+-----------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| HashJoin_25                           | 10.00   | root      |                                            | inner join, equal:[eq(test.t1.col3, test.t3.pk)]                                                                        |
+| ├─IndexLookUp_134(Build)              | 10.00   | root      |                                            |                                                                                                                         |
+| │ ├─IndexRangeScan_132(Build)         | 10.00   | cop[tikv] | table:t3, index:keycol(keycol, pad1, pad2) | range:["c","c"], keep order:false, stats:pseudo                                                                         |
+| │ └─TableRowIDScan_133(Probe)         | 10.00   | cop[tikv] | table:t3                                   | keep order:false, stats:pseudo                                                                                          |
+| └─IndexJoin_61(Probe)                 | 17.27   | root      |                                            | inner join, inner:IndexLookUp_60, outer key:test.t1.col1, inner key:test.t2.pk, equal cond:eq(test.t1.col1, test.t2.pk) |
+|   ├─IndexLookUp_116(Build)            | 69.00   | root      |                                            |                                                                                                                         |
+|   │ ├─IndexRangeScan_113(Build)       | 99.90   | cop[tikv] | table:t1, index:col2(col2, col3)           | range:["a" -inf,"a" +inf], keep order:false, stats:pseudo                                                               |
+|   │ └─Selection_115(Probe)            | 69.00   | cop[tikv] |                                            | ne(test.t1.col1, "aaaaaa"), ne(test.t1.col1, "abcdef"), not(isnull(test.t1.col1))                                       |
+|   │   └─TableRowIDScan_114            | 99.90   | cop[tikv] | table:t1                                   | keep order:false, stats:pseudo                                                                                          |
+|   └─IndexLookUp_60(Probe)             | 0.25    | root      |                                            |                                                                                                                         |
+|     ├─Selection_58(Build)             | 1.00    | cop[tikv] |                                            | ne(test.t2.pk, "aaaaaa"), ne(test.t2.pk, "abcdef")                                                                      |
+|     │ └─IndexRangeScan_56             | 1.00    | cop[tikv] | table:t2, index:PRIMARY(pk)                | range: decided by [eq(test.t2.pk, test.t1.col1)], keep order:false, stats:pseudo                                        |
+|     └─Selection_59(Probe)             | 0.25    | cop[tikv] |                                            | in(test.t2.col1, "a", "b")                                                                                              |
+|       └─TableRowIDScan_57             | 1.00    | cop[tikv] | table:t2                                   | keep order:false, stats:pseudo                                                                                          |
++---------------------------------------+---------+-----------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+14 rows in set (0.00 sec)
+
+mysql> 
+mysql> EXPLAIN
+    -> SELECT t1.pk
+    -> FROM t1 
+    -> INNER JOIN t2 ON t1.col1 = t2.pk
+    -> INNER JOIN t3 ON t1.col3 = t3.pk
+    -> WHERE
+    -> t2.col1 IN ('a' , 'b') 
+    -> AND t3.keycol = 'c' 
+    -> AND t1.col2 = 'a' 
+    -> AND t1.col1 != 'abcdef' 
+    -> AND t1.col1 != 'aaaaaa';
++-----------------------------------------+---------+-----------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| id                                      | estRows | task      | access object                              | operator info                                                                                                           |
++-----------------------------------------+---------+-----------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+| IndexJoin_20                            | 13.81   | root      |                                            | inner join, inner:IndexLookUp_19, outer key:test.t1.col1, inner key:test.t2.pk, equal cond:eq(test.t1.col1, test.t2.pk) |
+| ├─IndexJoin_69(Build)                   | 12.50   | root      |                                            | inner join, inner:IndexLookUp_68, outer key:test.t3.pk, inner key:test.t1.col3, equal cond:eq(test.t3.pk, test.t1.col3) |
+| │ ├─IndexLookUp_110(Build)              | 10.00   | root      |                                            |                                                                                                                         |
+| │ │ ├─IndexRangeScan_108(Build)         | 10.00   | cop[tikv] | table:t3, index:keycol(keycol, pad1, pad2) | range:["c","c"], keep order:false, stats:pseudo                                                                         |
+| │ │ └─TableRowIDScan_109(Probe)         | 10.00   | cop[tikv] | table:t3                                   | keep order:false, stats:pseudo                                                                                          |
+| │ └─IndexLookUp_68(Probe)               | 1.25    | root      |                                            |                                                                                                                         |
+| │   ├─Selection_66(Build)               | 1.81    | cop[tikv] |                                            | not(isnull(test.t1.col3))                                                                                               |
+| │   │ └─IndexRangeScan_64               | 1.81    | cop[tikv] | table:t1, index:col2(col2, col3)           | range: decided by [eq(test.t1.col3, test.t3.pk) eq(test.t1.col2, a)], keep order:false, stats:pseudo                    |
+| │   └─Selection_67(Probe)               | 1.25    | cop[tikv] |                                            | ne(test.t1.col1, "aaaaaa"), ne(test.t1.col1, "abcdef"), not(isnull(test.t1.col1))                                       |
+| │     └─TableRowIDScan_65               | 1.81    | cop[tikv] | table:t1                                   | keep order:false, stats:pseudo                                                                                          |
+| └─IndexLookUp_19(Probe)                 | 1.00    | root      |                                            |                                                                                                                         |
+|   ├─Selection_17(Build)                 | 1.00    | cop[tikv] |                                            | ne(test.t2.pk, "aaaaaa"), ne(test.t2.pk, "abcdef")                                                                      |
+|   │ └─IndexRangeScan_15                 | 1.00    | cop[tikv] | table:t2, index:PRIMARY(pk)                | range: decided by [eq(test.t2.pk, test.t1.col1)], keep order:false, stats:pseudo                                        |
+|   └─Selection_18(Probe)                 | 1.00    | cop[tikv] |                                            | in(test.t2.col1, "a", "b")                                                                                              |
+|     └─TableRowIDScan_16                 | 1.00    | cop[tikv] | table:t2                                   | keep order:false, stats:pseudo                                                                                          |
++-----------------------------------------+---------+-----------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------+
+15 rows in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```sql
+mysql> SELECT tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-beta.2-2017-gc2afa14d7
+Edition: Community
+Git Commit Hash: c2afa14d759671a6737f90551db058227aa0017a
+Git Branch: add-is-client-errors
+UTC Build Time: 2021-01-13 20:51:10
+GoVersion: go1.13.15
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

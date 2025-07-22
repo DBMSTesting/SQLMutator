@@ -1,0 +1,152 @@
+ID: 34465
+Title: mpp: wrong planner behaviors when `tidb_opt_agg_push_down` and `tidb_enforce_mpp` enabled
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Run with tiflash
+
+```
+1. table schema.
+
+CREATE TABLE `customer` (
+  `C_CUSTKEY` bigint(20) NOT NULL,
+  `C_NAME` varchar(25) NOT NULL,
+  `C_ADDRESS` varchar(40) NOT NULL,
+  `C_NATIONKEY` bigint(20) NOT NULL,
+  `C_PHONE` char(15) NOT NULL,
+  `C_ACCTBAL` decimal(15,2) NOT NULL,
+  `C_MKTSEGMENT` char(10) NOT NULL,
+  `C_COMMENT` varchar(117) NOT NULL,
+  PRIMARY KEY (`C_CUSTKEY`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+
+CREATE TABLE `orders` (
+  `O_ORDERKEY` bigint(20) NOT NULL,
+  `O_CUSTKEY` bigint(20) NOT NULL,
+  `O_ORDERSTATUS` char(1) NOT NULL,
+  `O_TOTALPRICE` decimal(15,2) NOT NULL,
+  `O_ORDERDATE` date NOT NULL,
+  `O_ORDERPRIORITY` char(15) NOT NULL,
+  `O_CLERK` char(15) NOT NULL,
+  `O_SHIPPRIORITY` bigint(20) NOT NULL,
+  `O_COMMENT` varchar(79) NOT NULL,
+  PRIMARY KEY (`O_ORDERKEY`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+2. set tiflash replica for table customer and orders
+3. insert into customer values (6, "a", "a", 2, "12345", 3, "Z", "haha");
+4. set @@tidb_enforce_mpp=1; set @@tidb_opt_agg_push_down=1;
+5.
+                     select
+                             c_custkey,
+                             count(o_orderkey) as c_count
+                     from
+                             customer left outer join orders on
+                                     c_custkey = o_custkey
+                     group by
+                             c_custkey
+
+```
+
+Run without tiflash
+
+```
+1. 
+CREATE TABLE `customer` (
+  `C_CUSTKEY` bigint(20) NOT NULL,
+  `C_NAME` varchar(25) NOT NULL,
+  `C_ADDRESS` varchar(40) NOT NULL,
+  `C_NATIONKEY` bigint(20) NOT NULL,
+  `C_PHONE` char(15) NOT NULL,
+  `C_ACCTBAL` decimal(15,2) NOT NULL,
+  `C_MKTSEGMENT` char(10) NOT NULL,
+  `C_COMMENT` varchar(117) NOT NULL,
+  PRIMARY KEY (`C_CUSTKEY`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+
+CREATE TABLE `orders` (
+  `O_ORDERKEY` bigint(20) NOT NULL,
+  `O_CUSTKEY` bigint(20) NOT NULL,
+  `O_ORDERSTATUS` char(1) NOT NULL,
+  `O_TOTALPRICE` decimal(15,2) NOT NULL,
+  `O_ORDERDATE` date NOT NULL,
+  `O_ORDERPRIORITY` char(15) NOT NULL,
+  `O_CLERK` char(15) NOT NULL,
+  `O_SHIPPRIORITY` bigint(20) NOT NULL,
+  `O_COMMENT` varchar(79) NOT NULL,
+  PRIMARY KEY (`O_ORDERKEY`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+2. insert into customer values (6, "a", "a", 2, "12345", 3, "Z", "haha");
+3.
+select c_custkey,count(o_orderkey) as c_count from customer left outer join orders on c_custkey = o_custkey group by c_custkey;
+4.
++-----------+---------+
+| c_custkey | c_count |
++-----------+---------+
+|         6 |       0 |
++-----------+---------+
+
+4. set @@tidb_enforce_mpp=1; set @@tidb_opt_agg_push_down=1;
+5. 
+explain select c_custkey,count(o_orderkey) as c_count from customer left outer join orders on c_custkey = o_custkey group by c_custkey;
++----------------------------------+----------+-----------+----------------+---------------------------------------------------------------------------------------------------------------------------------+
+| id                               | estRows  | task      | access object  | operator info                                                                                                                   |
++----------------------------------+----------+-----------+----------------+---------------------------------------------------------------------------------------------------------------------------------+
+| Projection_8                     | 1.00     | root      |                | test.customer.c_custkey, Column#18                                                                                              |
+| └─Projection_9                   | 1.00     | root      |                | Column#19, test.customer.c_custkey                                                                                              |
+|   └─HashJoin_11                  | 1.00     | root      |                | left outer join, equal:[eq(test.customer.c_custkey, test.orders.o_custkey)]                                                     |
+|     ├─TableReader_13(Build)      | 1.00     | root      |                | data:TableFullScan_12                                                                                                           |
+|     │ └─TableFullScan_12         | 1.00     | cop[tikv] | table:customer | keep order:false, stats:pseudo                                                                                                  |
+|     └─HashAgg_18(Probe)          | 8000.00  | root      |                | group by:test.orders.o_custkey, funcs:count(Column#20)->Column#19, funcs:firstrow(test.orders.o_custkey)->test.orders.o_custkey |
+|       └─TableReader_19           | 8000.00  | root      |                | data:HashAgg_14                                                                                                                 |
+|         └─HashAgg_14             | 8000.00  | cop[tikv] |                | group by:test.orders.o_custkey, funcs:count(test.orders.o_orderkey)->Column#20                                                  |
+|           └─TableFullScan_17     | 10000.00 | cop[tikv] | table:orders   | keep order:false, stats:pseudo                                                                                                  |
++----------------------------------+----------+-----------+----------------+---------------------------------------------------------------------------------------------------------------------------------+
+6.
+select c_custkey,count(o_orderkey) as c_count from customer left outer join orders on c_custkey = o_custkey group by c_custkey;
+
++-----------+---------+
+| c_custkey | c_count |
++-----------+---------+
+|         6 |    NULL |
++-----------+---------+
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+```
++-----------+---------+
+| c_custkey | c_count |
++-----------+---------+
+|         6 |       0 |
++-----------+---------+
+```
+
+### 3. What did you see instead (Required)
+
+with tiflash
+
+`ERROR 1105 (HY000): other error for mpp stream: DB::Exception: Cannot convert NULL value to non-Nullable type`
+
+without tiflash
+
+```
++-----------+---------+
+| c_custkey | c_count |
++-----------+---------+
+|         6 |    NULL |
++-----------+---------+
+```
+
+### 4. What is your TiFlash/TiDB/TiKV version? (Required)
+
+master、release-5.4

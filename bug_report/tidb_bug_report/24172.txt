@@ -1,0 +1,90 @@
+ID: 24172
+Title: ddl: admin cancel ddl job may return success appearancely but actually it doesn't
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+1. you can build a big table with many rows and try to add a index to it (this DDL may take a long time)
+2. you can mock the write conflict error for a specified query for `admin cancel ddl jobs job_id`
+3. you will get a successful result for this cancel statement still
+
+Reason:
+We use the session.txn in `CancelDDLJobsExec` to do some meta check and write the canceling job state back.
+```
+txn, err := e.ctx.Txn(true)
+if err != nil {
+b.err = err
+return nil
+}
+
+e.errs, b.err = admin.CancelJobs(txn, e.jobIDs)
+if b.err != nil {
+return nil
+}
+```
+Then we fill the chunk with successful result in `(e *CancelDDLJobsExec) Next` and return.
+```
+for i := e.cursor; i < e.cursor+numCurBatch; i++ {
+req.AppendString(0, fmt.Sprintf("%d", e.jobIDs[i]))
+if e.errs[i] != nil {
+	req.AppendString(1, fmt.Sprintf("error: %v", e.errs[i]))
+} else {
+	req.AppendString(1, "successful")
+}
+}
+e.cursor += numCurBatch
+```
+Actually, the session.txn is not always a successful commit.
+```
+rs, err = s.Exec(ctx)
+sessVars.TxnCtx.StatementCount++
+if rs != nil {
+return &execStmtResult{
+	RecordSet: rs,
+	sql:       s,
+	se:        se,
+}, err
+}
+
+err = finishStmt(ctx, se, err, s)   // skipped for now
+```
+As you see here above, once the rs is not null, the finishStmt will skipped temporarily.
+```
+func (cc *clientConn) handleStmt(ctx context.Context, stmt ast.StmtNode, warns []stmtctx.SQLWarn, lastStmt bool) (bool, error) {
+	ctx = context.WithValue(ctx, execdetails.StmtExecDetailKey, &execdetails.StmtExecDetails{})
+	ctx = context.WithValue(ctx, util.ExecDetailsKey, &util.ExecDetails{})
+	reg := trace.StartRegion(ctx, "ExecuteStmt")
+	rs, err := cc.ctx.ExecuteStmt(ctx, stmt)
+	reg.End()
+	// The session tracker detachment from global tracker is solved in the `rs.Close` in most cases.
+	// If the rs is nil, the detachment will be done in the `handleNoDelay`.
+	if rs != nil {
+		defer terror.Call(rs.Close)
+	}
+
+
+func (rs *execStmtResult) Close() error {
+	se := rs.se
+	err := rs.RecordSet.Close()
+	return finishStmt(context.Background(), se, err, rs.sql)
+}
+```
+Once the upper layer drained the recordSet, the `defer terror.Call(rs.Close)` action will do the finishStmt eventually. 
+The write conflict error doesn't take effect anymore and it is only logged consequently.
+
+### 2. What did you expect to see? (Required)
+Write conflict error for `admin cancel ddl jobs job_id`
+
+### 3. What did you see instead (Required)
+successful
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master, 5.0, 4.0
+

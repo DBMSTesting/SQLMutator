@@ -1,0 +1,72 @@
+ID: 50841
+Title: Goroutine leak when hashJoin triggered spill and sql failed.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. Run the following sql.
+```
+create table tt(a int);
+insert into tt values(1);
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+insert into tt select * from tt;
+
+create table t(a int, b int);
+insert into t select 1, row_number() over() from tt;
+
+select * from (select t1.a as a1, t2.a as a2, t1.b as b1, t2.b as b2 from t t1 join t t2) t order by t.a1, t.a2,t.b1,t.b2;
+```
+2. Wait 30 seconds.
+3. Open another session and kill the sql. `kill tidb xxxxxxxxxx`
+4. See debug/pprof/goroutine?debug=2
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+No goroutine leak.
+
+### 3. What did you see instead (Required)
+```
+goroutine 28898 [select, 4 minutes]:
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).sendToRespCh(0xc007d0f7a0?, 0xc00bab81e0?, 0xc005a9ed80?, 0xf0?)
+	/workspace/source/pkg/store/copr/coprocessor.go:1008 +0xa6
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleCopResponse(0xc007d0f7a0, 0xc005d5bd18, 0xc007cd9320, 0xc00bab81e0, {0xc000205ef0, 0xa8, 0xa8}, 0xc009d399f0?, 0xc007abce00, 0xc005a9ed80, ...)
+	/workspace/source/pkg/store/copr/coprocessor.go:1449 +0x776
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleCopPagingResult(0xc007d0f7a0, 0x0?, 0x2?, 0xc00bab81e0, {0xc000205ef0?, 0xc009d604e0?, 0x968a548?}, 0x1c2e745?, 0xc007abce00, 0xc005a9ed80, ...)
+	/workspace/source/pkg/store/copr/coprocessor.go:1349 +0x59
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleTaskOnce(0xc007d0f7a0, 0xc005d5bd18, 0xc007abce00, 0xc007abce00?)
+	/workspace/source/pkg/store/copr/coprocessor.go:1282 +0x1094
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).handleTask(0xc007d0f7a0, {0x64690f8, 0xc007afd2f0}, 0xc002ef1190?, 0xc005a9ed80)
+	/workspace/source/pkg/store/copr/coprocessor.go:1135 +0x18e
+github.com/pingcap/tidb/pkg/store/copr.(*copIteratorWorker).run(0xc007d0f7a0, {0x64690f8, 0xc007afd2f0})
+	/workspace/source/pkg/store/copr/coprocessor.go:817 +0xc5
+created by github.com/pingcap/tidb/pkg/store/copr.(*copIterator).open in goroutine 27304
+	/workspace/source/pkg/store/copr/coprocessor.go:861 +0x9b
+```
+
+
+We can see the log, the close process interrupted, I debug and find hashRowContainer's byteConsume is negative and panic in c.memTracker.Detach(). So the **hashJoin's children** can't call Close() function and cause leak.
+```
+[2024/01/31 15:31:31.349 +08:00] [ERROR] [terror.go:317] ["function call errored"] [error="[executor:1317]Query execution was interrupted"] [stack="github.com/pingcap/tidb/pkg/parser/terror.Call\n\t/workspace/source/pkg/parser/terror/terror.go:317\ngithub.com/pingcap/tidb/pkg/server/internal/resultset.(*tidbResultSet).Close\n\t/workspace/source/pkg/server/internal/resultset/resultset.go:78\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).handleStmt\n\t/workspace/source/pkg/server/conn.go:2056\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).handleQuery\n\t/workspace/source/pkg/server/conn.go:1775\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).dispatch\n\t/workspace/source/pkg/server/conn.go:1349\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).Run\n\t/workspace/source/pkg/server/conn.go:1122\ngithub.com/pingcap/tidb/pkg/server.(*Server).onConn\n\t/workspace/source/pkg/server/server.go:713"]
+```
+
+
+### 4. What is your TiDB version? (Required)
+master, v7.5, v7.1,v6.5
+<!-- Paste the output of SELECT tidb_version() -->
+

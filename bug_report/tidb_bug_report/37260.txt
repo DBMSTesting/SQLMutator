@@ -1,0 +1,73 @@
+ID: 37260
+Title: TIDB and MySQL implicit conversion results are different
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+CREATE TABLE tmp_t1 (
+id bigint(20) NOT NULL,
+PRIMARY KEY (id) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_bin ROW_FORMAT = Compact;
+INSERT INTO tmp_t1 VALUES (1295772036504131620);
+INSERT INTO tmp_t1 VALUES (1295772036504131621);
+
+CREATE TABLE tmp_t2 (
+id bigint(20) NOT NULL,
+id_f varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL DEFAULT NULL,
+PRIMARY KEY (id) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_bin ROW_FORMAT = Compact;
+INSERT INTO tmp_t2 VALUES (11, '1295772036504131620');
+
+SELECT * from tmp_t2 t2 LEFT JOIN tmp_t1 t1 on t2.id_f = t1.id;
+
+### 2. What did you expect to see? (Required)
++----+---------------------+---------------------+
+| id | id_f                | id                  |
++----+---------------------+---------------------+
+| 11 | 1295772036504131620 | 1295772036504131620 |
++----+---------------------+---------------------+
+
+mysql> explain analyze SELECT * from tmp_t2 t2 LEFT JOIN tmp_t1 t1 on t2.id_f = t1.id;
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| EXPLAIN                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| -> Nested loop left join  (cost=0.70 rows=1) (actual time=0.095..0.103 rows=1 loops=1)
+    -> Table scan on t2  (cost=0.35 rows=1) (actual time=0.050..0.057 rows=1 loops=1)
+    -> Filter: (cast(t2.id_f as double) = cast(t1.id as double))  (cost=0.35 rows=1) (actual time=0.041..0.041 rows=1 loops=1)
+        -> Single-row covering index lookup on t1 using PRIMARY (id=t2.id_f)  (cost=0.35 rows=1) (actual time=0.031..0.031 rows=1 loops=1)
+ |
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+
+### 3. What did you see instead (Required)
+
++----+---------------------+---------------------+
+| id | id_f                | id                  |
++----+---------------------+---------------------+
+| 11 | 1295772036504131620 | 1295772036504131621 |
+| 11 | 1295772036504131620 | 1295772036504131620 |
++----+---------------------+---------------------+
+
+
+mysql> explain analyze SELECT * from tmp_t2 t2 LEFT JOIN tmp_t1 t1 on t2.id_f = t1.id;
++------------------------------+---------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+------------+---------+
+| id                           | estRows | actRows | task      | access object | execution info                                                                                                                                                                                                                           | operator info                                                                     | memory     | disk    |
++------------------------------+---------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+------------+---------+
+| HashJoin_12                  | 1.25    | 2       | root      |               | time:11ms, loops:2, build_hash_table:{total:10.6ms, fetch:10.6ms, build:14.9µs}, probe:{concurrency:5, total:53.2ms, max:10.7ms, probe:28.4µs, fetch:53.1ms}                                                                             | left outer join, equal:[eq(Column#4, Column#5)]                                   | 10.4 KB    | 0 Bytes |
+| ├─Projection_13(Build)       | 1.00    | 1       | root      |               | time:10.5ms, loops:2, Concurrency:OFF                                                                                                                                                                                                    | test.tmp_t2.id, test.tmp_t2.id_f, cast(test.tmp_t2.id_f, double BINARY)->Column#4 | 1016 Bytes | N/A     |
+| │ └─TableReader_15           | 1.00    | 1       | root      |               | time:10.5ms, loops:2, cop_task: {num: 1, max: 10.6ms, proc_keys: 1, rpc_num: 1, rpc_time: 10.6ms, copr_cache_hit_ratio: 0.00}                                                                                                            | data:TableFullScan_14                                                             | 250 Bytes  | N/A     |
+| │   └─TableFullScan_14       | 1.00    | 1       | cop[tikv] | table:t2      | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_process_keys_size: 55, total_keys: 2, rocksdb: {delete_skipped_count: 0, key_skipped_count: 1, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}} | keep order:false, stats:pseudo                                                    | N/A        | N/A     |
+| └─Projection_16(Probe)       | 2.00    | 2       | root      |               | time:10.6ms, loops:2, Concurrency:OFF                                                                                                                                                                                                    | test.tmp_t1.id, cast(test.tmp_t1.id, double BINARY)->Column#5                     | 380 Bytes  | N/A     |
+|   └─TableReader_18           | 2.00    | 2       | root      |               | time:10.6ms, loops:2, cop_task: {num: 1, max: 10.7ms, proc_keys: 2, rpc_num: 1, rpc_time: 10.7ms, copr_cache_hit_ratio: 0.00}                                                                                                            | data:TableFullScan_17                                                             | 215 Bytes  | N/A     |
+|     └─TableFullScan_17       | 2.00    | 2       | cop[tikv] | table:t1      | tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 2, total_process_keys_size: 54, total_keys: 3, rocksdb: {delete_skipped_count: 0, key_skipped_count: 2, block: {cache_hit_count: 0, read_count: 0, read_byte: 0 Bytes}}} | keep order:false, stats:pseudo                                                    | N/A        | N/A     |
++------------------------------+---------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+------------+---------+
+7 rows in set (0.02 sec)
+
+### 4. What is your TiDB version? (Required)
+6.1.0
+<!-- Paste the output of SELECT tidb_version() -->
+

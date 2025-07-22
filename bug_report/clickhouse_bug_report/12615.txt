@@ -1,0 +1,95 @@
+ID: 12615
+Title: Kafka + protobuf not working
+Description:
+**Describe the bug**
+My Protobuf messages from Kafka never make it to the table in Clickhouse, sometimes reporting errors (different errors at different times with same settings and data) and sometimes just not reporting anything but not working.
+
+**How to reproduce**
+clickhouse-server 20.5.2 inside docker + Kafka
+
+```
+CREATE TABLE analytics_stream (
+    username String,
+    timestamp Int32
+  ) ENGINE = Kafka()
+SETTINGS
+    kafka_broker_list = 'kafka:9092',
+    kafka_topic_list = 'social_domain_user',
+    kafka_group_name = 'clickhouse_readers_analytics',
+    kafka_format = 'Protobuf',
+    kafka_schema = 'social:User',
+    kafka_row_delimiter = ''
+
+CREATE TABLE analytics (
+    username String,
+    timestamp Int32
+) ENGINE MergeTree()
+ORDER BY timestamp
+
+CREATE MATERIALIZED VIEW consumer TO analytics
+  AS SELECT * FROM analytics_stream;
+```
+Protobuf schema inside var/lib/clickhouse/format_schemas:
+
+```
+syntax = "proto3";
+
+message User {
+  string username = 1;
+  int32 timestamp = 2;
+}
+
+```
+
+I tried with encoders in python, Elixir and JS (all of them length-delimited).
+I produced the message with 
+`cat encoded.bin | docker run --rm -i --network infra-core kafka:latest kafka-console-producer.sh --broker-list kafka:9092 --topic social_domain_user`
+and have also tried point blank copy/paste of #4710
+**Expected behavior**
+Seeing I've tried with format JSONEachRow and it worked (a message from kafka was succesfully read and stored in CH, i expected protobuf to work as well.
+
+**Error message and/or stacktrace**
+When i query the base with 
+```
+SELECT * 
+FROM analytics
+```
+I get 0 rows, and when i try to query with
+
+```
+SELECT *
+FROM analytics_stream
+```
+I sometimes get this error (and sometimes nothing):
+
+```
+2020.07.21 09:12:57.681931 [ 47 ] {} <Error> void DB::StorageKafka::threadFunc(): Code: 444, e.displayText() = DB::Exception: Protobuf messages are corrupted or don't match the provided schema. Please note that Protobuf stream is length-delimited: every message is prefixed by its length in varint., Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x10ed0da0 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x95c923d in /usr/bin/clickhouse
+2. ? @ 0xe84ce51 in /usr/bin/clickhouse
+3. ? @ 0xe84cf0d in /usr/bin/clickhouse
+4. DB::ProtobufReader::readColumnIndex(unsigned long&) @ 0xe84ba4f in /usr/bin/clickhouse
+5. DB::ProtobufRowInputFormat::readRow(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, DB::RowReadExtension&) @ 0xe847ddd in /usr/bin/clickhouse
+6. DB::IRowInputFormat::generate() @ 0xe760041 in /usr/bin/clickhouse
+7. DB::ISource::work() @ 0xe6dd3ab in /usr/bin/clickhouse
+8. ? @ 0xe35f38d in /usr/bin/clickhouse
+9. DB::KafkaBlockInputStream::readImpl() @ 0xe36029c in /usr/bin/clickhouse
+10. DB::IBlockInputStream::read() @ 0xd999b1d in /usr/bin/clickhouse
+11. DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::__1::atomic<bool>*) @ 0xd9b6d5e in /usr/bin/clickhouse
+12. DB::StorageKafka::streamToViews() @ 0xe351155 in /usr/bin/clickhouse
+13. DB::StorageKafka::threadFunc() @ 0xe351a69 in /usr/bin/clickhouse
+14. DB::BackgroundSchedulePoolTaskInfo::execute() @ 0xdb40869 in /usr/bin/clickhouse
+15. DB::BackgroundSchedulePool::threadFunction() @ 0xdb40cf2 in /usr/bin/clickhouse
+16. ? @ 0xdb40e22 in /usr/bin/clickhouse
+17. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x95f6e97 in /usr/bin/clickhouse
+18. ? @ 0x95f5383 in /usr/bin/clickhouse
+19. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+20. __clone @ 0x12188f in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.5.2.7 (official build))
+```
+
+Whatever I try I can't get the data inside clickhouse from Kafka in protobuf format, including using "working" solutions like the issue i mentioned above.
+
+Thank you in advance
+

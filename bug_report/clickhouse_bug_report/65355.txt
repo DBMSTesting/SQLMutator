@@ -1,0 +1,365 @@
+ID: 65355
+Title: Cyclic dependency between dictionary and view that leads to deadlock at server startup
+Description:
+It is posible to create a dictionary + view with cyclic dependency with no exceptions that will lead to a deadlock at server startup afte restart.
+How to reproduce:
+```
+CREATE TABLE test (id UInt64, value String) ENGINE=MergeTree ORDER BY id;
+INSERT INTO test SELECT number, 'str_' || toString(number) FROM numbers(10);
+CREATE DICTIONARY test_dict
+(
+    id UInt64,
+    value String
+)
+PRIMARY KEY id
+SOURCE(CLICKHOUSE(QUERY 'SELECT * FROM test'))
+LAYOUT(FLAT())
+LIFETIME(MIN 0 MAX 1000);
+CREATE TABLE view_source (id UInt64) ENGINE=MergeTree ORDER BY id;
+INSERT INTO view_source SELECT * FROM numbers(5);
+CREATE VIEW view AS SELECT id, dictGet('test_dict', 'value', id) FROM view_source;
+CREATE OR REPLACE DICTIONARY test_dict
+(
+    id UInt64,
+    value String
+)
+PRIMARY KEY id
+SOURCE(CLICKHOUSE(QUERY 'SELECT * FROM view'))
+LAYOUT(FLAT())
+LIFETIME(MIN 0 MAX 1000);
+```
+Then restart the server with `dictionaries_lazy_load=false` and `wait_dictionaries_load_at_startup=true` and server will be deadlocked at startup because of cyclic dependency `test_dict -> view -> test_dict`.
+
+Thread that waits for dictionaries to be loaded at startup stuck with this stacktrace:
+
+<details>
+<summary>Stacktrace</summary>
+<pre>
+```
+#0  __futex_abstimed_wait_common64 (private=0, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x7f2328c2d604) at ./nptl/futex-internal.c:57
+#1  __futex_abstimed_wait_common (cancel=true, private=0, abstime=0x0, clockid=0, expected=0, futex_word=0x7f2328c2d604) at ./nptl/futex-internal.c:87
+#2  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x7f2328c2d604, expected=expected@entry=0, clockid=clockid@entry=0, abstime=abstime@entry=0x0, private=private@entry=0) at ./nptl/futex-internal.c:139
+#3  0x00007f25dfa93a41 in __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x7f2328c2d5b0, cond=0x7f2328c2d5d8) at ./nptl/pthread_cond_wait.c:503
+#4  ___pthread_cond_wait (cond=0x7f2328c2d5d8, mutex=0x7f2328c2d5b0) at ./nptl/pthread_cond_wait.c:627
+#5  0x00000000257e945d in std::__1::__libcpp_condvar_wait[abi:v15000](pthread_cond_t*, pthread_mutex_t*) (__cv=0x7f2328c2d5d8, __m=0x7f2328c2d5b0) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__threading_support:335
+#6  0x00000000257e9072 in std::__1::condition_variable::wait (this=0x7f2328c2d5d8, lk=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/src/condition_variable.cpp:46
+#7  0x000000001adb2e05 in std::__1::condition_variable::wait<DB::ExternalLoader::LoadingDispatcher::loadImpl(std::__1::function<bool (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> const&, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000l> >, bool, std::__1::unique_lock<std::__1::mutex>&)::{lambda()#1}>(std::__1::unique_lock<std::__1::mutex>&, DB::ExternalLoader::LoadingDispatcher::loadImpl(std::__1::function<bool (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> const&, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000l> >, bool, std::__1::unique_lock<std::__1::mutex>&)::{lambda()#1}) (this=0x7f2328c2d5d8, __lk=..., __pred=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__mutex_base:398
+#8  0x000000001adb2d30 in DB::ExternalLoader::LoadingDispatcher::loadImpl(std::__1::function<bool (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> const&, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000l> >, bool, std::__1::unique_lock<std::__1::mutex>&) (this=0x7f2328c2d580, filter=..., timeout=..., forced_to_reload=false, lock=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:871
+#9  0x000000001ad82c3b in DB::ExternalLoader::LoadingDispatcher::tryLoad<std::__1::vector<DB::ExternalLoader::LoadResult, std::__1::allocator<DB::ExternalLoader::LoadResult> > >(std::__1::function<bool (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> const&, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000l> >) (this=0x7f2328c2d580, filter=..., timeout=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:614
+#10 0x000000001ad82bcc in DB::ExternalLoader::tryLoad<std::__1::vector<DB::ExternalLoader::LoadResult, std::__1::allocator<DB::ExternalLoader::LoadResult> >, void>(std::__1::function<bool (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)> const&, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000l> >) const (this=0x7f243cb718c0, filter=..., timeout=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:1374
+#11 0x000000001a698791 in DB::ExternalLoader::tryLoadAll<std::__1::vector<DB::ExternalLoader::LoadResult, std::__1::allocator<DB::ExternalLoader::LoadResult> >, void> (this=0x7f243cb718c0, timeout=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.h:160
+#12 0x000000001a6779e7 in DB::Context::waitForDictionariesLoad (this=0x7f25de760800) at /home/avogar/ClickHouse/src/Interpreters/Context.cpp:2667
+#13 0x0000000013055360 in DB::Server::main (this=0x7fff25502cf8) at /home/avogar/ClickHouse/programs/server/Server.cpp:2063
+#14 0x0000000021c6bf85 in Poco::Util::Application::run (this=0x7fff25502cf8) at /home/avogar/ClickHouse/base/poco/Util/src/Application.cpp:315
+#15 0x000000001303cb5b in DB::Server::run (this=0x7fff25502cf8) at /home/avogar/ClickHouse/programs/server/Server.cpp:419
+#16 0x0000000021c8ae99 in Poco::Util::ServerApplication::run (this=0x7fff25502cf8, argc=1, argv=0x7f25dec01cc0) at /home/avogar/ClickHouse/base/poco/Util/src/ServerApplication.cpp:131
+#17 0x000000001303a3f8 in mainEntryClickHouseServer (argc=1, argv=0x7f25dec01cc0) at /home/avogar/ClickHouse/programs/server/Server.cpp:225
+#18 0x000000000a83ac05 in main (argc_=2, argv_=0x7fff25503288) at /home/avogar/ClickHouse/programs/main.cpp:502
+```
+</pre>
+</details>
+
+And the thread that actually loads the dictionary `test_dict` is stuck with this stacktrace:
+<details><summary>Stacktrace</summary>
+<pre>
+
+```
+#0  __futex_abstimed_wait_common64 (private=0, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x7f2328c2d604)
+at ./nptl/futex-internal.c:57
+#1  __futex_abstimed_wait_common (cancel=true, private=0, abstime=0x0, clockid=0, expected=0, futex_word=0x7f2328c2d604)
+ at ./nptl/futex-internal.c:87
+#2  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x7f2328c2d604, expected=expected@entry=0, cloc
+kid=clockid@entry=0, abstime=abstime@entry=0x0, private=private@entry=0) at ./nptl/futex-internal.c:139
+#3  0x00007f25dfa93a41 in __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x7f2328c2d5b0, cond=0x7f2328c2d5d8)
+ at ./nptl/pthread_cond_wait.c:503
+#4  ___pthread_cond_wait (cond=0x7f2328c2d5d8, mutex=0x7f2328c2d5b0) at ./nptl/pthread_cond_wait.c:627
+#5  0x00000000257e945d in std::__1::__libcpp_condvar_wait[abi:v15000](pthread_cond_t*, pthread_mutex_t*) (__cv=0x7f2328c
+2d5d8, __m=0x7f2328c2d5b0) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__threading_support:335
+#6  0x00000000257e9072 in std::__1::condition_variable::wait (this=0x7f2328c2d5d8, lk=...) at /home/avogar/ClickHouse/co
+ntrib/llvm-project/libcxx/src/condition_variable.cpp:46
+#7  0x000000001adb23c5 in std::__1::condition_variable::wait<DB::ExternalLoader::LoadingDispatcher::loadImpl(std::__1::b
+asic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::chrono::duration<long long,
+ std::__1::ratio<1l, 1000l> >, bool, std::__1::unique_lock<std::__1::mutex>&)::{lambda()#1}>(std::__1::unique_lock<std::
+__1::mutex>&, DB::ExternalLoader::LoadingDispatcher::loadImpl(std::__1::basic_string<char, std::__1::char_traits<char>,
+std::__1::allocator<char> > const&, std::__1::chrono::duration<long long, std::__1::ratio<1l, 1000l> >, bool, std::__1::
+unique_lock<std::__1::mutex>&)::{lambda()#1}) (this=0x7f2328c2d5d8, __lk=..., __pred=...) at /home/avogar/ClickHouse/con
+trib/llvm-project/libcxx/include/__mutex_base:398
+#8  0x000000001adb22ef in DB::ExternalLoader::LoadingDispatcher::loadImpl (this=0x7f2328c2d580, name=..., timeout=..., f
+orced_to_reload=false, lock=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:841
+#9  0x000000001ad82ade in DB::ExternalLoader::LoadingDispatcher::tryLoad<DB::ExternalLoader::LoadResult> (this=0x7f2328c
+2d580, name=..., timeout=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:604
+#10 0x000000001ad82a6c in DB::ExternalLoader::tryLoad<DB::ExternalLoader::LoadResult, void> (this=0x7f243cb718c0, name=.
+.., timeout=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:1368
+#11 0x000000001ad82cea in DB::ExternalLoader::load<std::__1::shared_ptr<DB::IExternalLoadable const>, void> (this=0x7f24
+3cb718c0, name=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:1380
+#12 0x000000001ad7c368 in DB::ExternalDictionariesLoader::getDictionary (this=0x7f243cb718c0, dictionary_name=..., local
+_context=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalDictionariesLoader.cpp:80
+#13 0x000000000a9e357f in DB::FunctionDictHelper::getDictionary (this=0x7f232f010e20, dictionary_name=...) at /home/avog
+ar/ClickHouse/src/Functions/FunctionsExternalDictionaries.h:76
+#14 0x000000000a9e0e22 in DB::FunctionDictGetNoType<(DB::DictionaryGetFunctionType)0>::executeImpl (this=0x7f232f010e18,
+ arguments=..., result_type=..., input_rows_count=5) at /home/avogar/ClickHouse/src/Functions/FunctionsExternalDictionar
+ies.h:431
+#15 0x000000000b73b942 in DB::FunctionToExecutableFunctionAdaptor::executeImpl (this=0x7f23321f2d60, arguments=..., resu
+lt_type=..., input_rows_count=5) at /home/avogar/ClickHouse/src/Functions/IFunctionAdaptors.h:22
+#16 0x0000000018baef3a in DB::IExecutableFunction::executeWithoutLowCardinalityColumns (this=0x7f23321f2d60, args=..., r
+esult_type=..., input_rows_count=5, dry_run=false) at /home/avogar/ClickHouse/src/Functions/IFunction.cpp:247
+#17 0x0000000018bb001e in DB::IExecutableFunction::executeWithoutSparseColumns (this=0x7f23321f2d60, arguments=..., resu
+lt_type=..., input_rows_count=5, dry_run=false) at /home/avogar/ClickHouse/src/Functions/IFunction.cpp:303
+#18 0x0000000018bb0f95 in DB::IExecutableFunction::execute (this=0x7f23321f2d60, arguments=..., result_type=..., input_r
+ows_count=5, dry_run=false) at /home/avogar/ClickHouse/src/Functions/IFunction.cpp:380
+#19 0x000000001a7b3497 in DB::executeAction (action=..., execution_context=..., dry_run=false, allow_duplicates_in_input
+=false) at /home/avogar/ClickHouse/src/Interpreters/ExpressionActions.cpp:616
+#20 0x000000001a7b2827 in DB::ExpressionActions::execute (this=0x7f23594948d8, block=..., num_rows=@0x7f235eb76a78: 5, d
+ry_run=false, allow_duplicates_in_input=false) at /home/avogar/ClickHouse/src/Interpreters/ExpressionActions.cpp:750
+#21 0x000000001db9c768 in DB::ExpressionTransform::transform (this=0x7f24076ddc98, chunk=...) at /home/avogar/ClickHouse
+/src/Processors/Transforms/ExpressionTransform.cpp:23
+#22 0x0000000015b42f42 in DB::ISimpleTransform::transform (this=0x7f24076ddc98, input_chunk=..., output_chunk=...) at /h
+ome/avogar/ClickHouse/src/Processors/ISimpleTransform.h:32
+#23 0x000000001d65b692 in DB::ISimpleTransform::work (this=0x7f24076ddc98) at /home/avogar/ClickHouse/src/Processors/ISi
+mpleTransform.cpp:89
+#24 0x000000001d69abe3 in DB::executeJob (node=0x7f235938de00, read_progress_callback=0x7f2327da1b40) at /home/avogar/Cl
+ickHouse/src/Processors/Executors/ExecutionThreadContext.cpp:47
+#25 0x000000001d69a920 in DB::ExecutionThreadContext::executeTask (this=0x7f24076a2100) at /home/avogar/ClickHouse/src/P
+rocessors/Executors/ExecutionThreadContext.cpp:96
+#26 0x000000001d67ca61 in DB::PipelineExecutor::executeStepImpl (this=0x7f24076e4418, thread_num=0, yield_flag=0x7f232f0
+c56f0) at /home/avogar/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:272
+#27 0x000000001d67c55e in DB::PipelineExecutor::executeStep (this=0x7f24076e4418, yield_flag=0x7f232f0c56f0) at /home/av
+ogar/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:147
+#28 0x000000001d6a44de in DB::PullingPipelineExecutor::pull (this=0x7f232f0c56f0, chunk=...) at /home/avogar/ClickHouse/
+src/Processors/Executors/PullingPipelineExecutor.cpp:54
+#29 0x000000001d6a4581 in DB::PullingPipelineExecutor::pull (this=0x7f232f0c56f0, block=...) at /home/avogar/ClickHouse/
+src/Processors/Executors/PullingPipelineExecutor.cpp:65
+#30 0x0000000015ca0918 in DB::DictionaryPipelineExecutor::pull (this=0x7f235eb77458, block=...) at /home/avogar/ClickHou
+se/src/Dictionaries/DictionaryPipelineExecutor.cpp:35
+#31 0x0000000015ca72ab in DB::FlatDictionary::loadData (this=0x7f24076b1f80) at /home/avogar/ClickHouse/src/Dictionaries
+/FlatDictionary.cpp:500
+#32 0x0000000015ca6f9e in DB::FlatDictionary::FlatDictionary (this=0x7f24076b1f80, dict_id_=..., dict_struct_=..., sourc
+e_ptr_=..., configuration_=..., update_field_loaded_block_=...) at /home/avogar/ClickHouse/src/Dictionaries/FlatDictiona
+ry.cpp:46
+#33 0x0000000015d02182 in std::__1::make_unique[abi:v15000]<DB::FlatDictionary, DB::StorageID const&, DB::DictionaryStru
+cture const&, std::__1::shared_ptr<DB::IDictionarySource>, DB::FlatDictionary::Configuration&>(DB::StorageID const&, DB:
+:DictionaryStructure const&, std::__1::shared_ptr<DB::IDictionarySource>&&, DB::FlatDictionary::Configuration&) (__args=
+..., __args=..., __args=..., __args=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__memory/unique_
+ptr.h:714
+#34 0x0000000015cda1e7 in DB::registerDictionaryFlat(DB::DictionaryFactory&)::$_0::operator()(std::__1::basic_string<cha
+r, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStructure const&, Poco::Util::Abstract
+Configuration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std:
+:__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const>, bool) const (this=0x7f25ddb70a58, full
+_name=..., dict_struct=..., config=..., config_prefix=..., source_ptr=...) at /home/avogar/ClickHouse/src/Dictionaries/F
+latDictionary.cpp:779
+#35 0x0000000015cd9d9b in std::__1::__invoke[abi:v15000]<DB::registerDictionaryFlat(DB::DictionaryFactory&)::$_0&, std::
+__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStructure const&,
+ Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator
+<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const>, bool>(DB::registe
+rDictionaryFlat(DB::DictionaryFactory&)::$_0&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::alloc
+ator<char> > const&, DB::DictionaryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<ch
+ar, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>&&, std:
+:__1::shared_ptr<DB::Context const>&&, bool&&) (__f=..., __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __a
+rgs=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __a
+rgs=@0x7f235eb77af7: true) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/invoke.h:394
+#36 0x0000000015cd9cb6 in std::__1::__invoke_void_return_wrapper<std::__1::unique_ptr<DB::IDictionary, std::__1::default
+_delete<DB::IDictionary> >, false>::__call<DB::registerDictionaryFlat(DB::DictionaryFactory&)::$_0&, std::__1::basic_str
+ing<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStructure const&, Poco::Util::A
+bstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const
+&, std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const>, bool>(DB::registerDictionaryFla
+t(DB::DictionaryFactory&)::$_0&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > c
+onst&, DB::DictionaryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::
+char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>&&, std::__1::shared_p
+tr<DB::Context const>&&, bool&&) (__args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: tr
+ue, __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: true, __args=@0x7f235eb77af7: tr
+ue, __args=@0x7f235eb77af7: true) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/invoke.h:4
+70
+#37 0x0000000015cd9c36 in std::__1::__function::__default_alloc_func<DB::registerDictionaryFlat(DB::DictionaryFactory&):
+:$_0, std::__1::unique_ptr<DB::IDictionary, std::__1::default_delete<DB::IDictionary> > (std::__1::basic_string<char, st
+d::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStructure const&, Poco::Util::AbstractConfi
+guration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1:
+:shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const>, bool)>::operator()[abi:v15000](std::__1::ba
+sic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStructure const&, Poco::
+Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>
+> const&, std::__1::shared_ptr<DB::IDictionarySource>&&, std::__1::shared_ptr<DB::Context const>&&, bool&&) (this=0x7f25
+ddb70a58, __arg=@0x7f235eb77af7: true, __arg=@0x7f235eb77af7: true, __arg=@0x7f235eb77af7: true, __arg=@0x7f235eb77af7:
+true, __arg=@0x7f235eb77af7: true, __arg=@0x7f235eb77af7: true, __arg=@0x7f235eb77af7: true) at /home/avogar/ClickHouse/
+contrib/llvm-project/libcxx/include/__functional/function.h:235
+#38 0x0000000015cd9bc2 in std::__1::__function::__policy_invoker<std::__1::unique_ptr<DB::IDictionary, std::__1::default
+_delete<DB::IDictionary> > (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&
+, DB::DictionaryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_
+traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::
+Context const>, bool)>::__call_impl<std::__1::__function::__default_alloc_func<DB::registerDictionaryFlat(DB::Dictionary
+Factory&)::$_0, std::__1::unique_ptr<DB::IDictionary, std::__1::default_delete<DB::IDictionary> > (std::__1::basic_strin
+g<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStructure const&, Poco::Util::Abs
+tractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&,
+ std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const>, bool)> >(std::__1::__function::__
+policy_storage const*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB:
+:DictionaryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_trait
+s<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>&&, std::__1::shared_ptr<DB::Con
+text const>&&, bool) (__buf=0x7f25ddb70a58, __args=true, __args=true, __args=true, __args=true, __args=true, __args=true
+, __args=true) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/function.h:716
+#39 0x0000000018ba1fa2 in std::__1::__function::__policy_func<std::__1::unique_ptr<DB::IDictionary, std::__1::default_de
+lete<DB::IDictionary> > (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, D
+B::DictionaryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_tra
+its<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Con
+text const>, bool)>::operator()[abi:v15000](std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocato
+r<char> > const&, DB::DictionaryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char,
+ std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>&&, std::__
+1::shared_ptr<DB::Context const>&&, bool&&) const (this=0x7f25ddb70a58, __args=@0x7f235eb77bdf: true, __args=@0x7f235eb7
+7bdf: true, __args=@0x7f235eb77bdf: true, __args=@0x7f235eb77bdf: true, __args=@0x7f235eb77bdf: true, __args=@0x7f235eb7
+7bdf: true, __args=@0x7f235eb77bdf: true) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/fu
+nction.h:848
+#40 0x0000000018b9f3bb in std::__1::function<std::__1::unique_ptr<DB::IDictionary, std::__1::default_delete<DB::IDiction
+ary> > (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DictionaryStru
+cture const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::_
+_1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const>, bool
+)>::operator()(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Diction
+aryStructure const&, Poco::Util::AbstractConfiguration const&, std::__1::basic_string<char, std::__1::char_traits<char>,
+ std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IDictionarySource>, std::__1::shared_ptr<DB::Context const
+>, bool) const (this=0x7f25ddb70a58, __arg=true, __arg=true, __arg=true, __arg=true, __arg=true, __arg=true, __arg=true)
+ at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/function.h:1187
+#41 0x0000000018b9ea8a in DB::DictionaryFactory::create (this=0x26552d00 <DB::DictionaryFactory::instance()::ret>, name=
+..., config=..., config_prefix=..., global_context=..., created_from_ddl=true) at /home/avogar/ClickHouse/src/Dictionari
+es/DictionaryFactory.cpp:58
+#42 0x000000001ad7bbc9 in DB::ExternalDictionariesLoader::createObject (this=0x7f243cb718c0, name=..., config=..., key_i
+n_config=..., repository_name=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalDictionariesLoader.cpp:42
+#43 0x000000001ad7f9a7 in DB::ExternalLoader::createOrCloneObject (this=0x7f243cb718c0, name=..., config=..., previous_v
+ersion=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:1512
+#44 0x000000001ad8cfad in DB::ExternalLoader::LoadingDispatcher::loadSingleObject (this=0x7f2328c2d580, name=..., config
+=..., previous_version=...) at /home/avogar/ClickHouse/src/Interpreters/ExternalLoader.cpp:1041
+#45 0x000000001ad8a6e1 in DB::ExternalLoader::LoadingDispatcher::doLoading (this=0x7f2328c2d580, name=..., loading_id=1,
+ forced_to_reload=false, min_id_to_finish_loading_dependencies_=1, async=true, thread_group=...) at /home/avogar/ClickHo
+use/src/Interpreters/ExternalLoader.cpp:996
+#46 0x000000001ad93e9e in std::__1::__invoke[abi:v15000]<void (DB::ExternalLoader::LoadingDispatcher::*&)(std::__1::basi
+c_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool
+, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*&, std::__1::basic_string<char, std::__1
+::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&, std::__1::shared_ptr<DB
+::ThreadGroup>&, void>(void (DB::ExternalLoader::LoadingDispatcher::*&)(std::__1::basic_string<char, std::__1::char_trai
+ts<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadG
+roup>), DB::ExternalLoader::LoadingDispatcher*&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::all
+ocator<char> >&, unsigned long&, bool&, unsigned long&, bool&, std::__1::shared_ptr<DB::ThreadGroup>&) (__f=@0x7f235eb78
+f08: (void (DB::ExternalLoader::LoadingDispatcher::*)(DB::ExternalLoader::LoadingDispatcher * const, const std::__1::bas
+ic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > &, unsigned long, bool, unsigned long, bool, st
+d::__1::shared_ptr<DB::ThreadGroup>)) 0x1ad898e0 <DB::ExternalLoader::LoadingDispatcher::doLoading(std::__1::basic_strin
+g<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::
+__1::shared_ptr<DB::ThreadGroup>)>, __a0=@0x7f235eb78eb8: 0x7f2328c2d580, __args=..., __args=..., __args=..., __args=...
+, __args=..., __args=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/invoke.h:359
+#47 0x000000001ad93d99 in std::__1::__apply_tuple_impl[abi:v15000]<void (DB::ExternalLoader::LoadingDispatcher::*&)(std:
+:__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned
+long, bool, std::__1::shared_ptr<DB::ThreadGroup>), std::__1::tuple<DB::ExternalLoader::LoadingDispatcher*, std::__1::ba
+sic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, unsigned long, bool, unsigned long, bool, std
+::__1::shared_ptr<DB::ThreadGroup> >&, 0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul>(void (DB::ExternalLoader::LoadingDispatcher::*
+&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, un
+signed long, bool, std::__1::shared_ptr<DB::ThreadGroup>), std::__1::tuple<DB::ExternalLoader::LoadingDispatcher*, std::
+__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, unsigned long, bool, unsigned long, bo
+ol, std::__1::shared_ptr<DB::ThreadGroup> >&, std::__1::__tuple_indices<0ul, 1ul, 2ul, 3ul, 4ul, 5ul, 6ul>) (__f=@0x7f23
+5eb78f08: (void (DB::ExternalLoader::LoadingDispatcher::*)(DB::ExternalLoader::LoadingDispatcher * const, const std::__1
+::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > &, unsigned long, bool, unsigned long, boo
+l, std::__1::shared_ptr<DB::ThreadGroup>)) 0x1ad898e0 <DB::ExternalLoader::LoadingDispatcher::doLoading(std::__1::basic_
+string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool,
+std::__1::shared_ptr<DB::ThreadGroup>)>, __t=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/tuple:1
+789
+#48 0x000000001ad93b9d in std::__1::apply[abi:v15000]<void (DB::ExternalLoader::LoadingDispatcher::*&)(std::__1::basic_s
+tring<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, s
+td::__1::shared_ptr<DB::ThreadGroup>), std::__1::tuple<DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<ch
+ar, std::__1::char_traits<char>, std::__1::allocator<char> >, unsigned long, bool, unsigned long, bool, std::__1::shared
+_ptr<DB::ThreadGroup> >&>(void (DB::ExternalLoader::LoadingDispatcher::*&)(std::__1::basic_string<char, std::__1::char_t
+raits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::Thre
+adGroup>), std::__1::tuple<DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<ch
+ar>, std::__1::allocator<char> >, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup> >&) (_
+_f=@0x7f235eb78f08: (void (DB::ExternalLoader::LoadingDispatcher::*)(DB::ExternalLoader::LoadingDispatcher * const, cons
+t std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > &, unsigned long, bool, unsigned
+ long, bool, std::__1::shared_ptr<DB::ThreadGroup>)) 0x1ad898e0 <DB::ExternalLoader::LoadingDispatcher::doLoading(std::_
+_1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned lo
+ng, bool, std::__1::shared_ptr<DB::ThreadGroup>)>, __t=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/inclu
+de/tuple:1798
+#49 0x000000001ad93aa2 in ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlobalPoolImpl<void (DB::ExternalLoader::Loadi
+ngDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned
+long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*, std::__
+1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&,
+bool, std::__1::shared_ptr<DB::ThreadGroup> >(void (DB::ExternalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<c
+har, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1
+::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*&&, std::__1::basic_string<char, std::__1::char_tr
+aits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&, std::__1::shared_ptr<DB::Thread
+Group>&&)::{lambda()#1}::operator()() (this=0x7f2313b06480) at /home/avogar/ClickHouse/src/Common/ThreadPool.h:251
+#50 0x000000001ad93955 in std::__1::__invoke[abi:v15000]<ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlobalPoolImpl<
+void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allo
+cator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoad
+er::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned
+ long&, bool&, unsigned long&, bool, std::__1::shared_ptr<DB::ThreadGroup> >(void (DB::ExternalLoader::LoadingDispatcher
+::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool
+, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*&&, std::__1::basic
+_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&,
+std::__1::shared_ptr<DB::ThreadGroup>&&)::{lambda()#1}&>(void (DB::ExternalLoader::LoadingDispatcher::*&&)(std::__1::bas
+ic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, boo
+l, std::__1::shared_ptr<DB::ThreadGroup>)) (__f=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__fu
+nctional/invoke.h:394
+#51 0x000000001ad93935 in std::__1::__invoke_void_return_wrapper<void, true>::__call<ThreadFromGlobalPoolImpl<true, true
+>::ThreadFromGlobalPoolImpl<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_
+traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::Thr
+eadGroup>), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::
+allocator<char> >&, unsigned long&, bool&, unsigned long&, bool, std::__1::shared_ptr<DB::ThreadGroup> >(void (DB::Exter
+nalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >
+ const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDi
+spatcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, boo
+l&, unsigned long&, bool&&, std::__1::shared_ptr<DB::ThreadGroup>&&)::{lambda()#1}&>(ThreadFromGlobalPoolImpl<true, true
+>::ThreadFromGlobalPoolImpl<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_
+traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::Thr
+eadGroup>), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::
+allocator<char> >&, unsigned long&, bool&, unsigned long&, bool, std::__1::shared_ptr<DB::ThreadGroup> >(void (DB::Exter
+nalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >
+ const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDi
+spatcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, boo
+l&, unsigned long&, bool&&, std::__1::shared_ptr<DB::ThreadGroup>&&)::{lambda()#1}&) (__args=...) at /home/avogar/ClickH
+ouse/contrib/llvm-project/libcxx/include/__functional/invoke.h:479
+#52 0x000000001ad93915 in std::__1::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlo
+balPoolImpl<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<char>, st
+d::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::
+ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>
+>&, unsigned long&, bool&, unsigned long&, bool, std::__1::shared_ptr<DB::ThreadGroup> >(void (DB::ExternalLoader::Loadi
+ngDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigne
+d long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*&&, std
+::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned lon
+g&, bool&&, std::__1::shared_ptr<DB::ThreadGroup>&&)::{lambda()#1}, void ()>::operator()[abi:v15000]() (this=0x7f2313b06
+480) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/function.h:235
+#53 0x000000001ad938e0 in std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_a
+lloc_func<ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlobalPoolImpl<void (DB::ExternalLoader::LoadingDispatcher::*)
+(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsi
+gned long, bool, std::__1::shared_ptr<DB::ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<
+char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool, std::__1::
+shared_ptr<DB::ThreadGroup> >(void (DB::ExternalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::c
+har_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB:
+:ThreadGroup>), DB::ExternalLoader::LoadingDispatcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std:
+:__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&, std::__1::shared_ptr<DB::ThreadGroup>&&)::{lamb
+da()#1}, void ()> >(std::__1::__function::__policy_storage const*) (__buf=0x7f235eb791f0) at /home/avogar/ClickHouse/con
+trib/llvm-project/libcxx/include/__functional/function.h:716
+#54 0x0000000011715d76 in std::__1::__function::__policy_func<void ()>::operator()[abi:v15000]() const (this=0x7f235eb79
+1f0) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/function.h:848
+#55 0x0000000011715a75 in std::__1::function<void ()>::operator()() const (this=0x7f235eb791f0) at /home/avogar/ClickHou
+se/contrib/llvm-project/libcxx/include/__functional/function.h:1187
+#56 0x0000000012ec6232 in ThreadPoolImpl<std::__1::thread>::worker (this=0x7f25de73b680, thread_it=...) at /home/avogar/
+ClickHouse/src/Common/ThreadPool.cpp:462
+#57 0x0000000012ecdd04 in ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, Priority, st
+d::__1::optional<unsigned long>, bool)::{lambda()#2}::operator()() const (this=0x7f24b4fc32c8) at /home/avogar/ClickHous
+e/src/Common/ThreadPool.cpp:219
+#58 0x0000000012ecdcb5 in std::__1::__invoke[abi:v15000]<ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::
+function<void ()>, Priority, std::__1::optional<unsigned long>, bool)::{lambda()#2}>(ThreadPoolImpl<std::__1::thread>::s
+cheduleImpl<void>(std::__1::function<void ()>, Priority, std::__1::optional<unsigned long>, bool)::{lambda()#2}&&) (__f=
+...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/__functional/invoke.h:394
+#59 0x0000000012ecdc7d in std::__1::__thread_execute[abi:v15000]<std::__1::unique_ptr<std::__1::__thread_struct, std::__
+1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<
+void ()>, Priority, std::__1::optional<unsigned long>, bool)::{lambda()#2}>(std::__1::tuple<std::__1::unique_ptr<std::__
+1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImp
+l<void>(std::__1::function<void ()>, Priority, std::__1::optional<unsigned long>, bool)::{lambda()#2}>&, std::__1::__tup
+le_indices<>) (__t=...) at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/thread:284
+#60 0x0000000012ecda82 in std::__1::__thread_proxy[abi:v15000]<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_s
+truct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::
+__1::function<void ()>, Priority, std::__1::optional<unsigned long>, bool)::{lambda()#2}> >(void*) (__vp=0x7f24b4fc32c0)
+ at /home/avogar/ClickHouse/contrib/llvm-project/libcxx/include/thread:295
+#61 0x00007f25dfa94ac3 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442
+#62 0x00007f25dfb26850 in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81
+```
+
+</pre>
+</details>
+
+
+As we can see, this thread executes query from the `test_dict` create statement to load the data, then executes query from the view `view` that contains `dictGet('test_dict', ...)` and starts loading the dictionary. So it's stuck loading dictionary while loading the same dictionary.
+
+We should disallow creating such cyclic dependencies and throw an exception during `CREATE` query.

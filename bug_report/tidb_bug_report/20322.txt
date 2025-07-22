@@ -1,0 +1,64 @@
+ID: 20322
+Title: Duplicated ORDER BY condition causes bad execution plan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+create table t1 (id int unsigned not null auto_increment primary key);
+insert into t1 values (),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),(),();
+explain analyze select id from t1 where id > 10 order by id asc limit 5;
+explain analyze select id from t1 where id > 10 order by id asc, id asc limit 5;
+```
+
+### 2. What did you expect to see? (Required)
+
+These should generate the same execution plan since the items in the ORDER BY clause are redundant.
+
+### 3. What did you see instead (Required)
+
+```
+mysql> explain analyze select id from t1 where id > 10 order by id asc limit 5;
++-----------------------------+---------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------+------------------------------------------------+-----------+------+
+| id                          | estRows | actRows | task      | access object | execution info                                                                                                | operator info                                  | memory    | disk |
++-----------------------------+---------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------+------------------------------------------------+-----------+------+
+| Limit_11                    | 5.00    | 5       | root      |               | time:738.012µs, loops:2                                                                                       | offset:0, count:5                              | N/A       | N/A  |
+| └─TableReader_21            | 5.00    | 5       | root      |               | time:735.732µs, loops:1, cop_task: {num: 1, max:708.291µs, proc_keys: 10, rpc_num: 1, rpc_time: 696.397µs}    | data:Limit_20                                  | 220 Bytes | N/A  |
+|   └─Limit_20                | 5.00    | 5       | cop[tikv] |               | time:0s, loops:1                                                                                              | offset:0, count:5                              | N/A       | N/A  |
+|     └─TableRangeScan_19     | 6.25    | 10      | cop[tikv] | table:t1      | time:0s, loops:1                                                                                              | range:(10,+inf], keep order:true, stats:pseudo | N/A       | N/A  |
++-----------------------------+---------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------+------------------------------------------------+-----------+------+
+4 rows in set (0.00 sec)
+
+mysql> explain analyze select id from t1 where id > 10 order by id asc, id asc limit 5;
++-----------------------------+---------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------+---------------------------------------------------+-----------+------+
+| id                          | estRows | actRows | task      | access object | execution info                                                                                                | operator info                                     | memory    | disk |
++-----------------------------+---------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------+---------------------------------------------------+-----------+------+
+| TopN_8                      | 5.00    | 5       | root      |               | time:462.83µs, loops:2                                                                                        | test.t1.id:asc, test.t1.id:asc, offset:0, count:5 | 200 Bytes | N/A  |
+| └─TableReader_16            | 5.00    | 5       | root      |               | time:452.103µs, loops:2, cop_task: {num: 1, max:416.112µs, proc_keys: 10, rpc_num: 1, rpc_time: 409.959µs}    | data:TopN_15                                      | 222 Bytes | N/A  |
+|   └─TopN_15                 | 5.00    | 5       | cop[tikv] |               | time:0s, loops:1                                                                                              | test.t1.id:asc, test.t1.id:asc, offset:0, count:5 | N/A       | N/A  |
+|     └─TableRangeScan_14     | 8.33    | 10      | cop[tikv] | table:t1      | time:0s, loops:1                                                                                              | range:(10,+inf], keep order:false, stats:pseudo   | N/A       | N/A  |
++-----------------------------+---------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------+---------------------------------------------------+-----------+------+
+4 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+tidb_version(): Release Version: v4.0.6
+Edition: Community
+Git Commit Hash: 51d365fc45fdfc039eb204a96268c5bd1c55075f
+Git Branch: heads/v4.0.6
+UTC Build Time: 2020-09-15 10:07:22
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

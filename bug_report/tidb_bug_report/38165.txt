@@ -1,0 +1,64 @@
+ID: 38165
+Title: Admin check failed after creating index
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Change the TiDB config:
+
+```
+[tikv-client.async-commit]
+safe-window = "3s"
+allowed-clock-drift = "0.2s"
+```
+
+Mock the network latency:
+
+```diff
+@@ -1888,6 +1890,12 @@ func (c *twoPhaseCommitter) calculateMaxCommitTS(ctx context.Context) error {
+                return err
+        }
+ 
++       if counter.Load()%2 == 0 {
++               logutil.BgLogger().Info("calculate max commit ts, sleep 2s...")
++               time.Sleep(2 * time.Second)
++       }
++       counter.Add(1)
++
+        safeWindow := config.GetGlobalConfig().TiKVClient.AsyncCommit.SafeWindow
+        maxCommitTS := oracle.ComposeTS(int64(safeWindow/time.Millisecond), 0) + currentTS
+```
+
+```sql
+-- session 1
+create table t (a int);
+insert into t values (1);
+-- session 1 calculate max commit ts, sleep 2s...
+-- session 2
+alter table t add index idx(a);
+admin check table t;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+```sql
+tidb> admin check table t;
+Query OK, 0 rows affected (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```sql
+tidb> admin check table t;
+ERROR 8223 (HY000): data inconsistency in table: t, index: idx, handle: 1, index-values:"" != record-values:"handle: 1, values: [KindInt64 1]"
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+63e3570

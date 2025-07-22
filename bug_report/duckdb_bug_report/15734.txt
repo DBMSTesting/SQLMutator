@@ -1,0 +1,116 @@
+ID: 15734
+Title: Can not query remote files (e.g. parquet files on S3 buckets) if disabled_filesystems = 'LocalFileSystem'
+Description:
+### What happens?
+
+I want to disallow access to the local file system but still query parquet files on S3 buckets.
+
+I get error `'Permission Error: File system LocalFileSystem has been disabled by configuration'`
+
+Originally I used duckdb using pg_duckdb and ran into the following error:
+
+```sql
+show duckdb.disabled_filesystems;
+ duckdb.disabled_filesystems 
+-----------------------------
+ LocalFileSystem
+(1 row)
+SELECT SUM(AdvEngineID), COUNT(*), AVG(ResolutionWidth) FROm read_parquet('s3://performance-us-east-2/clickbench/clickbench.parquet') AS (advengineid smallint, ResolutionWidth smallint );
+ERROR:  (PGDuckDB/CreatePlan) Prepared query returned an error: 'Permission Error: File system LocalFileSystem has been disabled by configuration
+```
+
+However I could repro the problem with just duckdb:
+
+This works
+
+```
+duckdb db2
+v1.1.3 19864453f7
+Enter ".help" for usage hints.
+D INSTALL HTTPS;
+D LOAD HTTPS;
+```
+
+But this fails with same error as above
+
+```sql
+duckdb db2
+v1.1.3 19864453f7
+Enter ".help" for usage hints.
+D select version();
+┌─────────────┐
+│ "version"() │
+│   varchar   │
+├─────────────┤
+│ v1.1.3      │
+└─────────────┘
+D SET disabled_filesystems = 'LocalFileSystem';
+D LOAD httpfs;
+Permission Error: File system LocalFileSystem has been disabled by configuration
+```
+
+### Context
+
+Let me give you some more context: if you are re-using duckdb as a component, for example in a PostgreSQL extension, you want to differentiate between system access and user access to the local file system.
+It is totally fine if duckdb binary as a system component has access to the local file system for its own purposes (like locally caching a parquet file) - but it should not propagate those permissions to *users* of duckdb or the postgres extension.
+
+This is analog to PostgreSQL backend spilling work memory to local disk (if work_mem is too small) or using temporary disk space for temporary tables.
+We want to support that use case but this does not imply that users should be able to read or even write from/to local files like /etc/shadow or files in pgdata directory and bypass permissions (grants) or row-level security by using duckdb functions to read local operating system files (read_csv('/etc/shadow',...)  or postgres files (like wal or pgdata files).
+
+### To Reproduce
+
+```sql
+duckdb db2
+v1.1.3 19864453f7
+Enter ".help" for usage hints.
+D select version();
+┌─────────────┐
+│ "version"() │
+│   varchar   │
+├─────────────┤
+│ v1.1.3      │
+└─────────────┘
+D SET disabled_filesystems = 'LocalFileSystem';
+D LOAD httpfs;
+Permission Error: File system LocalFileSystem has been disabled by configuration
+```
+
+### OS:
+
+all
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+cli
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+peterbendel@neon.tech
+
+### Affiliation:
+
+neon.tech
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+Reproduced with latest commit 0024e5d4beba0185733df68642775e3f38e089cb
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

@@ -1,0 +1,72 @@
+ID: 24526
+Title: subquery be planned as paniced indexjoin
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+
+create two table and insert one row for each tables
+
+```
+CREATE TABLE `tbl_0` (   `col_0` text COLLATE utf8mb4_general_ci NOT NULL,   `col_1` date NOT NULL,   `col_2` datetime NOT NULL,   `col_3` tinyint(3) unsigned NOT NULL DEFAULT '141',   `col_4` time DEFAULT NULL,   PRIMARY KEY (`col_1`,`col_2`,`col_3`) nonclustered,   UNIQUE KEY `idx_1` (`col_4`,`col_3`),   UNIQUE KEY `idx_2` (`col_1`,`col_3`),   UNIQUE KEY `idx_3` (`col_1`,`col_3`) );
+
+CREATE TABLE `tbl_3` (   `col_15` time NOT NULL,   `col_16` datetime NOT NULL,   `col_17` tinyint(1) NOT NULL DEFAULT '1',   `col_18` blob NOT NULL,   `col_19` decimal(18,11) DEFAULT '8776.8683',   PRIMARY KEY (`col_17`) nonclustered ,   KEY `idx_11` (`col_15`,`col_18`(1),`col_19`) );
+
+insert into tbl_3 select '12:00:00', now(), 1, 'asdfasdf', "12";
+insert into tbl_0 select '111', now(), now(), 1, '11:00:00';
+```
+
+run 
+
+```
+explain select /*+ NTH_PLAN(2) */ tbl_0.col_2 from tbl_0 where col_4 in ( select col_15 from tbl_3 where tbl_3.col_18 <> 'jk' or tbl_0.col_0 in ( '' , '' , '' , 'WxHC' ) );
+```
+
+and change nth_plan value to get the plan like this:
+
+
+```
+explain select /*+ NTH_PLAN(2) */ tbl_0.col_2 from tbl_0 where col_4 in ( select col_15 from tbl_3 where tbl_3.col_18 <> 'jk' or tbl_0.col_0 in ( '' , '' , '' , 'WxHC' ) );
++----------------------------------+---------+-----------+---------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                               | estRows | task      | access object                                     | operator info                                                                                                                                                                                                                      |
++----------------------------------+---------+-----------+---------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| IndexJoin_13                     | 0.80    | root      |                                                   | semi join, inner:IndexLookUp_12, outer key:test.tbl_0.col_4, inner key:test.tbl_3.col_15, equal cond:eq(test.tbl_0.col_4, test.tbl_3.col_15), other cond:or(ne(test.tbl_3.col_18, "jk"), in(test.tbl_0.col_0, "", "", "", "WxHC")) |
+| ├─TableReader_32(Build)          | 1.00    | root      |                                                   | data:Selection_31                                                                                                                                                                                                                  |
+| │ └─Selection_31                 | 1.00    | cop[tikv] |                                                   | not(isnull(test.tbl_0.col_4))                                                                                                                                                                                                      |
+| │   └─TableFullScan_30           | 1.00    | cop[tikv] | table:tbl_0                                       | keep order:false, stats:pseudo                                                                                                                                                                                                     |
+| └─IndexLookUp_12(Probe)          | 1.00    | root      |                                                   |                                                                                                                                                                                                                                    |
+|   ├─IndexRangeScan_10(Build)     | 1.00    | cop[tikv] | table:tbl_3, index:idx_11(col_15, col_18, col_19) | range: decided by [eq(test.tbl_3.col_15, test.tbl_0.col_4)], keep order:false, stats:pseudo                                                                                                                                        |
+|   └─TableRowIDScan_11(Probe)     | 1.00    | cop[tikv] | table:tbl_3                                       | keep order:false, stats:pseudo                                                                                                                                                                                                     |
++----------------------------------+---------+-----------+---------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+7 rows in set (0.01 sec)
+```
+
+run SQL without explain
+
+
+```
+ select /*+ NTH_PLAN(2) */ tbl_0.col_2 from tbl_0 where col_4 in ( select col_15 from tbl_3 where tbl_3.col_18 <> 'jk' or tbl_0.col_0 in ( '' , '' , '' , 'WxHC' ) );
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+success and empty result
+
+### 3. What did you see instead (Required)
+
+paniced with
+
+```
+ERROR 1105 (HY000): runtime error: index out of range [2] with length 2
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+2021.5.10's master

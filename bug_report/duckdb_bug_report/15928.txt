@@ -1,0 +1,105 @@
+ID: 15928
+Title: CPU usage on AMD twice as high as on Mac
+Description:
+### What happens?
+
+When running the exact similar SQL query with exact similar input/output on a Mac versus running on an AMD based system we see quite a huge difference in CPU usage. Especially with regard to writing to parquet. On both systems we have run with 10 threads.
+
+Mac is based on M3 chip, has 40Gbyte of memory and the query is run with 10 threads. Memory is not the issue (so it seems).
+The AMD machine is a AMD EPYC 7763v (Genoa) [x86-64] with 16cores and 128Gbyte memory.
+
+IO does not seem to be the bottleneck as well.
+
+Enlosed the detailed explain plan info. As you can see there the CPU usage of the copy to file is significantly higher (almost twice as much).
+
+Is this a known difference between AMD versus ARM (M3) based systems?
+
+**Query**
+
+```sql
+copy (
+	with source as (
+		select 
+		  l_orderkey.value as _l_orderkey_value,
+		  l_linenumber.value as _l_linenumber_value,
+      _Base.hash_content as _hash_content
+		from   read_parquet(getvariable('DELIVERED_FILE'))
+	), target as (
+		select 
+		  l_orderkey.value as _l_orderkey_value,
+		  l_linenumber.value as _l_linenumber_value,
+      _Base.hash_content as _hash_content
+    from read_parquet('./tpch/actual/lineitem/lineitem.parquet')
+	)
+	select 
+	  coalesce(source._l_orderkey_value, target._l_orderkey_value) as _l_orderkey_value,
+		coalesce(source._l_linenumber_value, target._l_linenumber_value) as _l_linenumber_value,
+		case 
+			when source._l_orderkey_value is null then 0::tinyint --deletes
+		  when target._l_orderkey_value is null then 1::tinyint --inserts
+			else 2::tinyint --updates
+		end as record_operation  
+	from source
+	full outer join target
+	on source._l_orderkey_value = target._l_orderkey_value
+	and source._l_linenumber_value = target._l_linenumber_value
+	where
+	  target._l_orderkey_value is null 
+		or source._l_orderkey_value is null
+		or target._hash_content != source._hash_content
+)
+to './tpch/temp/lineitem/base_diff' (format parquet, partition_by record_operation)
+;
+```
+
+**Macos**
+[base_diff_macos.json](https://github.com/user-attachments/files/18556653/base_diff_macos.json)
+
+**AMD**
+
+[base_diff_amd.json](https://github.com/user-attachments/files/18556692/base_diff_amd.json)
+
+
+### To Reproduce
+
+See issue.
+
+### OS:
+
+See issue description
+
+### DuckDB Version:
+
+Latest build
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+See issue description
+
+### Full Name:
+
+Erik Jansen
+
+### Affiliation:
+
+I-Refact
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

@@ -1,0 +1,79 @@
+ID: 13274
+Title: Unexpected behavior with materialized columns filtering in joins
+Description:
+Is there a way to make filtering by right table materialized columns on join?
+
+**How to reproduce**
+Latest lts version
+```
+ClickHouse client version 20.3.15.133 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 20.3.15 revision 54433.
+```
+
+Queries for reproduce
+
+```
+CREATE TABLE test1 (time DateTime, foo String, dimension_1 String, dt Date MATERIALIZED toDate(time)) ENGINE = MergeTree() PARTITION BY toYYYYMM(dt) ORDER BY (dt, foo);
+CREATE TABLE test2 (time DateTime, bar String, dimension_2 String, dt Date MATERIALIZED toDate(time)) ENGINE = MergeTree() PARTITION BY toYYYYMM(dt) ORDER BY (dt, bar);
+INSERT INTO test1 VALUES ('2020-01-01 12:00:00', 'fact1', 'test1_val1'), ('2020-01-01 13:00:00', 'fact2', 'test1_val2');
+INSERT INTO test2 VALUES ('2020-01-01 12:00:00', 'fact1', 'test2_val2'), ('2019-01-01 12:00:00', 'fact3', 'test2_val2');
+```
+
+Following works
+```
+SELECT *
+FROM test1
+FULL OUTER JOIN test2 ON test1.foo = test2.bar
+
+┌────────────────time─┬─foo───┬─dimension_1─┬──────────test2.time─┬─bar───┬─dimension_2─┐
+│ 2020-01-01 12:00:00 │ fact1 │ test1_val1  │ 2020-01-01 12:00:00 │ fact1 │ test2_val2  │
+│ 2020-01-01 13:00:00 │ fact2 │ test1_val2  │ 0000-00-00 00:00:00 │       │             │
+└─────────────────────┴───────┴─────────────┴─────────────────────┴───────┴─────────────┘
+┌────────────────time─┬─foo─┬─dimension_1─┬──────────test2.time─┬─bar───┬─dimension_2─┐
+│ 0000-00-00 00:00:00 │     │             │ 2019-01-01 12:00:00 │ fact3 │ test2_val2  │
+└─────────────────────┴─────┴─────────────┴─────────────────────┴───────┴─────────────┘
+```
+
+But when I try to filter on `test2.dt` server throws an exception
+```
+SELECT *
+FROM test1
+FULL OUTER JOIN test2 ON test1.foo = test2.bar
+WHERE test2.dt >= '2020-01-01'
+
+
+Received exception from server (version 20.3.15):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: Missing columns: 'test2.dt' while processing query: 'SELECT time, foo, dimension_1, test2.time, bar, dimension_2 FROM test1 ALL FULL OUTER JOIN (SELECT * FROM test2) AS test2 ON foo = bar WHERE test2.dt >= '2020-01-01'', required columns: 'time' 'foo' 'test2.dt' 'test2.time' 'dimension_1' 'bar' 'dimension_2', source columns: 'dt' 'dimension_1' 'foo' 'time', joined columns: 'test2.time' 'bar' 'dimension_2'. 
+
+0 rows in set. Elapsed: 0.003 sec. 
+```
+
+I understand that joins works other way than in traditional SQL and I have option to move where clause and do separate select like following. 
+```
+SELECT *
+FROM test1
+FULL OUTER JOIN 
+(
+    SELECT *
+    FROM test2
+    WHERE dt >= '2020-01-01'
+) AS test2 ON test1.foo = test2.bar
+
+┌────────────────time─┬─foo───┬─dimension_1─┬──────────test2.time─┬─bar───┬─dimension_2─┐
+│ 2020-01-01 12:00:00 │ fact1 │ test1_val1  │ 2020-01-01 12:00:00 │ fact1 │ test2_val2  │
+│ 2020-01-01 13:00:00 │ fact2 │ test1_val2  │ 0000-00-00 00:00:00 │       │             │
+└─────────────────────┴───────┴─────────────┴─────────────────────┴───────┴─────────────┘
+```
+But what if main query contains some complicated where clause with `condition_from_left OR condition_from_right_materialized`, then I have no way to reduce right table to store less in memory and need to  do something like 
+```
+SELECT *
+FROM test1
+FULL OUTER JOIN 
+(
+    SELECT *, dt
+    FROM test2
+) AS test2 ON test1.foo = test2.bar
+WHERE test2.dt >= '2020-01-01'
+```
+which may load bunch of unnecessary data into RAM 

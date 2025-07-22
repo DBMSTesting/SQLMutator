@@ -1,0 +1,108 @@
+ID: 3583
+Title: range_hashed Dict wrong results ClickHouse 18.14.13
+Description:
+create table test.dict_test(k UInt64, a Date, b Date, v Int64) Engine = MergeTree() order by (k,a,b);
+insert into test.dict_test values(0, '2018-01-01','2018-01-01', 1),(0, '2018-01-02','2018-01-02', 2), (0, '2018-01-03','2018-01-03', 3);
+
+```
+<?xml version="1.0"?>
+<dictionaries>
+  <dictionary>
+    <name>dim_dict_test</name>
+    <source>
+      <clickhouse>
+        <host>localhost</host><port>9000</port>
+        <user>default</user><password/>
+        <db>test</db><table>dict_test</table>
+      </clickhouse>
+    </source>
+    <lifetime>60</lifetime>
+    <layout> <range_hashed/></layout>
+    <structure>
+      <id><name>k</name></id>
+      <range_min><name>a</name></range_min>
+      <range_max><name>b</name></range_max>
+      <attribute><name>v</name><type>Int64</type>
+      <null_value>1000</null_value>
+      </attribute>
+    </structure>
+  </dictionary>
+</dictionaries>
+```
+select * from dict.dim_dict_test;
+
+k | a | b | v
+-- | -- | -- | --
+0 | 2018-01-01 | 2018-01-01 | 1
+0 | 2018-01-02 | 2018-01-02 | 2
+0 | 2018-01-03 | 2018-01-03 | 3
+
+
+
+WRONG RESULT:
+
+select x, dictGetInt64('dim_dict_test', 'v', toUInt64(0), x) v from (select a x from test.dict_test)
+```
+┌──────────x─┬───────────────v─┐
+│ 2018-01-01 │               1 │
+│ 2018-01-02 │ 139919490342336 │
+│ 2018-01-03 │               0 │
+└────────────┴─────────────────┘
+```
+
+select a, dictGetInt64('dim_dict_test', 'v', toUInt64(0), a) v from test.dict_test;
+```
+┌──────────a─┬───────────────────v─┐
+│ 2018-01-01 │                   1 │
+│ 2018-01-02 │ 4920256737717875573 │
+│ 2018-01-03 │ 7022289608363959127 │
+└────────────┴─────────────────────┘
+```
+select a, dictGetInt64('dim_dict_test', 'v', toUInt64(0), a) zzz from test.dict_test;
+```
+┌──────────a─┬─────────────zzz─┐
+│ 2018-01-01 │               1 │
+│ 2018-01-02 │ 139919626448576 │
+│ 2018-01-03 │               0 │
+└────────────┴─────────────────┘
+```
+
+
+
+select toDate('2018-01-01')+number y, dictGetInt64('dim_dict_test', 'v', toUInt64(0), y) v from  (select  number from numbers(3))
+```
+┌──────────y─┬─v─┐
+│ 2018-01-01 │ 1 │
+│ 2018-01-02 │ 0 │
+│ 2018-01-03 │ 0 │
+└────────────┴───┘
+```
+
+CORRECT MAX_BLOCK_SIZE=1:
+
+select toDate('2018-01-01')+x y, dictGetInt64('dim_dict_test', 'v', toUInt64(0), y) v from  (select  number x from numbers(3) settings max_block_size =1)
+```
+┌──────────y─┬─v─┐
+│ 2018-01-01 │ 1 │
+└────────────┴───┘
+┌──────────y─┬─v─┐
+│ 2018-01-02 │ 2 │
+└────────────┴───┘
+┌──────────y─┬─v─┐
+│ 2018-01-03 │ 3 │
+└────────────┴───┘
+
+```
+
+select a, dictGetInt64('dim_dict_test', 'v', toUInt64(0), a) zzz from test.dict_test settings max_block_size =1;
+```
+┌──────────a─┬─zzz─┐
+│ 2018-01-01 │   1 │
+└────────────┴─────┘
+┌──────────a─┬─zzz─┐
+│ 2018-01-02 │   2 │
+└────────────┴─────┘
+┌──────────a─┬─zzz─┐
+│ 2018-01-03 │   3 │
+└────────────┴─────┘
+```

@@ -1,0 +1,59 @@
+ID: 14053
+Title: Aggregate functions on ALIAS fields containing length() return results different from the same expressions used directly without ALIAS
+Description:
+A table has alias containing `length` function. In SELECT statement it's value is returned differently then if requesting by it's source expression. Not sure if the issue with the underlying expression or the ALIAS feature itself.
+
+**How to reproduce**
+CH server version: 20.3.8.53
+
+```
+CREATE TABLE events.sessions (
+  `reporting_date` Date,
+  `site_id` UInt16,
+  `pageviews.pageview_reporting_date` Array(Date),
+  `pageviews.pageview_unique` Array(UInt64),
+  `pvcount` UInt16 ALIAS length(pageviews.pageview_reporting_date)
+) ENGINE = ReplicatedMergeTree(
+  '/clickhouse/tables/{shard}/events/sessions',
+  '{replica}'
+) PARTITION BY toMonday(reporting_date)
+ORDER BY
+  (reporting_date, site_id, visitor_device_type) SETTINGS index_granularity = 8192
+```
+
+Sample data sufficient to see the result:
+```
+"2020-08-24",7367,"['2020-08-24']","[3912895697579506]"
+"2020-08-24",7367,"['2020-08-24','2020-08-24']","[4066907006868079,2101947272754389]"
+```
+
+Then run the query:
+```
+SELECT 
+    count(), 
+    min(length(pageviews.pageview_reporting_date)) AS minExpr, 
+    min(pvcount) AS minAlias, 
+    max(length(pageviews.pageview_reporting_date)) AS maxExpr, 
+    max(pvcount) AS maxAlias, 
+    site_id
+FROM events.sessions
+WHERE site_id = 7367
+GROUP BY site_id
+
+
+┌─count()─┬─minExpr─┬─minAlias─┬─maxExpr─┬─maxAlias─┬─site_id─┐
+│       2 │       1 │        0 │       2 │        1 │    7367 │
+└─────────┴─────────┴──────────┴─────────┴──────────┴─────────┘
+
+```
+
+Notice that `min()` of the ALIAS field is different from `min()` of ALIAS's source expression.
+
+
+**Expected behavior**
+min(underlying expression) and min(the alias field) should return the same result. Same goes for max, etc.
+```
+┌─count()─┬─minExpr─┬─minAlias─┬─maxExpr─┬─maxAlias─┬─site_id─┐
+│       2 │       1 │        1 │       2 │        2 │    7367 │
+└─────────┴─────────┴──────────┴─────────┴──────────┴─────────┘
+```

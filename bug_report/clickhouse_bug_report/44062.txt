@@ -1,0 +1,174 @@
+ID: 44062
+Title: Right Join doesn't get expected result when set join_use_nulls=1
+Description:
+Result of right join is not expected in the following cases
+
+1. server environment:
+* OS: CentOS release 6.10
+* Server version: 22.11.2.30
+```
+SELECT version()
+
+Query id: e6a1cfcd-f1d2-4c1b-91be-71b6024e3a71
+
+┌─version()──┐
+│ 22.11.2.30 │
+└────────────┘
+```
+2. table setup:
+```
+ CREATE TABLE default.test1
+(
+    `col1` String,
+    `col2` Int8
+)
+ENGINE = MergeTree
+ORDER BY col1
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE default.test2
+(
+    `col1` String,
+    `col3` Int16
+)
+ENGINE = MergeTree
+ORDER BY col1
+SETTINGS index_granularity = 8192;
+```
+3. after inserting some data:
+```
+SELECT *
+FROM test1
+
+Query id: b40524e9-5f5b-4e60-b4fc-a6b9dcf6f8fd
+
+┌─col1──┬─col2─┐
+│ 123   │  123 │
+│ 12321 │  -30 │
+│ 321   │  -32 │
+└───────┴──────┘
+
+
+SELECT *
+FROM test2
+
+Query id: 4b384f94-0daf-45bd-a0a4-fa379a2be159
+
+┌─col1─┬─col3─┐
+│ 123  │ 5600 │
+│ 321  │ 5601 │
+└──────┴──────┘
+
+```
+4. compare left join and right join
+```
+SET join_use_nulls = 1
+
+Query id: f772b668-b902-4091-874d-92183de4f8e9
+
+Ok.
+
+SELECT *
+FROM test1
+LEFT JOIN test2 ON test1.col1 = test2.col1
+WHERE test2.col1 IS NULL
+
+Query id: bbc6e038-6deb-49d8-831e-0fabb4d0bbb5
+
+┌─col1──┬─col2─┬─test2.col1─┬─col3─┐
+│ 12321 │  -30 │ ᴺᵁᴸᴸ       │ ᴺᵁᴸᴸ │
+└───────┴──────┴────────────┴──────┘
+
+1 row in set. Elapsed: 0.004 sec. ✅
+
+SELECT *
+FROM test2
+RIGHT JOIN test1 ON test2.col1 = test1.col1
+WHERE test2.col1 IS NULL
+
+Query id: c0cf152d-199e-43f8-a5b3-1ae5eba87364
+
+Ok.
+
+0 rows in set. Elapsed: 0.003 sec. ❌
+
+SELECT *
+FROM test1
+LEFT JOIN test2 ON test1.col1 = test2.col1
+WHERE test2.col1 IS NOT NULL
+
+Query id: b062c7f0-e4d2-4f3d-be52-5cb893868199
+
+┌─col1─┬─col2─┬─test2.col1─┬─col3─┐
+│ 123  │  123 │ 123        │ 5600 │
+│ 321  │  -32 │ 321        │ 5601 │
+└──────┴──────┴────────────┴──────┘
+
+2 rows in set. Elapsed: 0.014 sec. ✅
+
+SELECT *
+FROM test2
+RIGHT JOIN test1 ON test2.col1 = test1.col1
+WHERE test2.col1 IS NOT NULL
+
+Query id: bc0aa813-6f08-4846-ac9d-a0949783fcf9
+
+┌─col1─┬─col3─┬─test1.col1─┬─col2─┐
+│ 123  │ 5600 │ 123        │  123 │
+│ 321  │ 5601 │ 321        │  -32 │
+└──────┴──────┴────────────┴──────┘
+┌─col1─┬─col3─┬─test1.col1─┬─col2─┐
+│ ᴺᵁᴸᴸ │ ᴺᵁᴸᴸ │ 12321      │  -30 │
+└──────┴──────┴────────────┴──────┘
+
+3 rows in set. Elapsed: 0.755 sec. ❌
+```
+
+5. select different columns in the result returning different row counts
+```
+SELECT
+    test2.col1,
+    test1.*
+FROM test2
+RIGHT JOIN test1 ON test2.col1 = test1.col1
+WHERE test2.col1 IS NOT NULL
+
+Query id: 1d654b42-a4b9-4ab8-92b4-92c165727290
+
+┌─col1─┬─test1.col1─┬─col2─┐
+│ 123  │ 123        │  123 │
+│ 321  │ 321        │  -32 │
+└──────┴────────────┴──────┘
+
+2 rows in set. Elapsed: 0.011 sec. ✅
+
+SELECT
+    test2.col3,
+    test1.*
+FROM test2
+RIGHT JOIN test1 ON test2.col1 = test1.col1
+WHERE test2.col1 IS NOT NULL
+
+Query id: 97a704c9-3e21-42d2-b1d9-1ad90a37b869
+
+┌─col3─┬─test1.col1─┬─col2─┐
+│ 5600 │ 123        │  123 │
+│ 5601 │ 321        │  -32 │
+└──────┴────────────┴──────┘
+┌─col3─┬─test1.col1─┬─col2─┐
+│ ᴺᵁᴸᴸ │ 12321      │  -30 │
+└──────┴────────────┴──────┘
+
+3 rows in set. Elapsed: 0.052 sec. ❌
+
+```
+
+> A clear and concise description of what works not as it is supposed to.
+1. is null/ is not null filter should work in right join
+2. which column is selected should not affect the number of rows in the final results
+
+**Does it reproduce on recent release?**
+Yes
+[The list of releases](https://github.com/ClickHouse/ClickHouse/blob/master/utils/list-versions/version_date.tsv)
+
+

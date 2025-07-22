@@ -1,0 +1,188 @@
+ID: 13861
+Title: UNNEST blocks filter pushdown into subquery / CTE
+Description:
+### What happens?
+
+### Intention, Background
+I try to use DuckDB for calculations on lists of values - basically window functions on the elements of lists. To be able to apply window functions, I use the UNNEST function to get elements out of lists. I prepare an unnested intermediate result using a subquery (or alternatively, a CTE). This subquery/CTE would later be used as a building block for more complicated aggregations.
+
+### Observed Behaviour
+When I use UNNEST within a subquery or CTE and filter the result of the subquery or CTE afterwards, the filter does not get pushed down to the scan of the source table. However, when no subquery or CTE is used, the filter pushdown works as intended.
+
+### Expected Behaviour
+I would expect the pushdown to happen no matter whether the UNNEST happens in a subquery, CTE, view or similar.
+
+### To Reproduce
+
+Create some test data:
+```sql
+CREATE TABLE tbl2 (id1 BIGINT, somelist BIGINT[]);
+INSERT INTO tbl2 SELECT i, [i-3, i+1, i+2] FROM generate_series(1, 10_000_000) s(i);
+```
+
+Query 1: very simple, no subquery or CTE
+
+```sql
+EXPLAIN 
+SELECT id1, UNNEST(somelist) AS element
+FROM tbl2
+WHERE id1=10;
+```
+```
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│            id1            │
+│          element          │
+│                           │
+│          ~1 Rows          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNNEST          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│    ────────────────────   │
+│            tbl2           │
+│                           │
+│        Projections:       │
+│            id1            │
+│          somelist         │
+│                           │
+│          Filters:         │
+│ id1=10 AND id1 IS NOT NULL│
+│                           │
+│          ~1 Rows          │
+└───────────────────────────┘
+```
+-> The filter id1=10 is pushed into the SEQ_SCAN as expected.
+
+Query 2: UNNEST in a subquery
+
+```sql
+EXPLAIN 
+SELECT id1, element
+FROM (
+      SELECT id1, UNNEST(somelist) AS element
+      FROM tbl2
+    ) tmp
+WHERE id1=10;
+```
+```
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #2            │
+│                           │
+│       ~2000000 Rows       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│         (id1 = 10)        │
+│                           │
+│       ~2000000 Rows       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNNEST          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│    ────────────────────   │
+│            tbl2           │
+│                           │
+│        Projections:       │
+│            id1            │
+│          somelist         │
+│                           │
+│       ~10000000 Rows      │
+└───────────────────────────┘
+```
+-> The filter is not pushed into the SEQ_SCAN.
+
+Query 3: UNNEST in a CTE
+
+```sql
+EXPLAIN 
+WITH tmp AS (
+      SELECT id1, generate_subscripts(somelist, 1) AS index, UNNEST(somelist) AS element
+      FROM tbl2
+)
+SELECT id1, index, element
+FROM tmp
+WHERE id1=10;
+```
+```
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #2            │
+│             #3            │
+│                           │
+│       ~2000000 Rows       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│         (id1 = 10)        │
+│                           │
+│       ~2000000 Rows       │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNNEST          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         SEQ_SCAN          │
+│    ────────────────────   │
+│            tbl2           │
+│                           │
+│        Projections:       │
+│            id1            │
+│          somelist         │
+│                           │
+│       ~10000000 Rows      │
+└───────────────────────────┘
+```
+-> The filter is not pushed into the SEQ_SCAN.
+
+### OS:
+
+Debian Linux 12 on x86_64
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+DuckDB CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Lukas Leitner
+
+### Affiliation:
+
+HVAC Enthusiast
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

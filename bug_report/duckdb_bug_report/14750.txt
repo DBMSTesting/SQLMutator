@@ -1,0 +1,50 @@
+ID: 14750
+Title: Add support for projection pushdown into struct fields
+Description:
+This PR adds support for projection pushdown into struct fields, allowing for scans to only partially scan structs - the parts that are required for the query. The way this is supported is that there is a new class - `ColumnIndex` - that supports recursively qualifying which columns are needed for the query:
+
+```cpp
+struct ColumnIndex {
+	idx_t index;
+	vector<ColumnIndex> child_indexes;
+};
+```
+
+For example, if we are querying a struct `STRUCT(a INT, b INT)`, and we only need to access the second struct element (`b`) - the child index would have `index = 1`.
+
+The child `ColumnIndexes` are set by the `RemoveUnusedColumns` optimizer - which looks for calls to `struct_extract` or `array_extract` and figures out which child indexes are required to complete the query.
+
+#### Backwards Compatibility
+
+The vectors that are returned by the scans are still in the same form - i.e. the scan still returns a `STRUCT(a INT, b INT)`. The only difference is that we don't scan the sub-columns we don't need - i.e. the column `a INT` is filled with a constant `NULL` value. In that way, scanning the sub-columns we don't need is actually optional. This allows for the struct projection pushdown to be fully backwards compatible.
+
+The table function receives the column indexes it needs as input in the `TableFunctionInitInput`. The old `column_ids` are still present as well, which can still be used by existing table functions.
+
+```cpp
+struct TableFunctionInitInput {
+	vector<column_t> column_ids;
+	vector<ColumnIndex> column_indexes;
+};
+```
+
+### Benchmarks
+
+Below are some benchmarks, running various TPC-H queries over SF10. For the `struct` case, we store the entire rows in a struct field, and then extract it using a view, e.g.:
+
+```sql
+CALL dbgen(sf=10, suffix='_normalized');
+CREATE TABLE lineitem_struct AS SELECT lineitem_normalized AS row_val FROM lineitem_normalized;
+CREATE VIEW lineitem AS SELECT UNNEST(row_val) FROM lineitem_struct;
+```
+
+| Query | Struct (v1.1) | Struct (new) | Regular |
+|-------|---------------|--------------|---------|
+| Q01   | 0.33s         | 0.15s        | 0.14s   |
+| Q06   | 0.26s         | 0.07s        | 0.04s   |
+| Q09   | 1.17s         | 0.62s        | 0.2s    |
+
+As we can see, with the projection pushdown the performance is mostly the same between a regular table scan and scanning unnested struct columns. There are still some differences in the generated query plans (different join order in Q09) - most likely caused by either some missing statistics or statistics not being propagated correctly, to be perhaps investigated in the future.
+
+### Future Work
+
+This PR only implements struct projection pushdown for DuckDB's native table scans - it still needs to be implemented for the parquet reader.

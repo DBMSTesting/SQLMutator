@@ -1,0 +1,120 @@
+ID: 13804
+Title: Python's `con.table` can deadlock if it triggers other calls to `con` mid-call
+Description:
+### What happens?
+
+It appears that `con.table` (through it's magic stackframe inspecting behavior) can trigger other python `__del__` methods to be called mid call to `con.table`. If those `__del__` methods call other methods on `con` this can lead to a deadlock.
+
+This was discovered while trying to automatically cleanup registered tables in ibis's duckdb backend (https://github.com/ibis-project/ibis/pull/10042).
+
+### To Reproduce
+
+A short script to reproduce:
+
+```python
+import duckdb
+import pandas as pd
+
+
+class Proxy:
+    def __init__(self, con, name, data):
+        self.con = con
+        self.name = name
+        self.data = data
+
+    def __del__(self):
+        print(f"- con.unregister({self.name!r})")
+        self.con.unregister(self.name)
+        print("unregistered {self.name}")
+
+
+def create_if_not_exists(proxy):
+    try:
+        print(f"- con.table({proxy.name!r})")
+
+        # The second time this is called triggers `proxy` to finally be
+        # collected mid-call, which results in `__del__` being called which
+        # deadlocks.
+        return proxy.con.table(proxy.name)
+    except Exception:
+        print(f"- con.register({proxy.name!r}, ...)")
+        proxy.con.register(proxy.name, proxy.data)
+
+
+def main():
+    con = duckdb.connect()
+    df = pd.DataFrame({"x": [1, 2, 3]})
+    proxy = Proxy(con, "test", df)
+    proxy2 = Proxy(con, "test2", df)
+
+    print("create_if_not_exists test")
+    create_if_not_exists(proxy)
+
+    print("deleting proxy")
+    del proxy
+
+    # Note that the `__del__` didn't run here, presumably since `con` is still
+    # holding on to a stackframe that references it.
+
+    print("create_if_not_exists test2")
+    create_if_not_exists(proxy2)
+
+
+main()
+```
+
+And the output:
+
+```
+$ python bug.py
+create_if_not_exists test
+- con.table('test')
+- con.register('test', ...)
+deleting proxy
+create_if_not_exists test2
+- con.table('test2')
+- con.unregister('test')
+# ^^ things hang here forever
+```
+
+Note that moving everything in `main` to a top-level call doesn't trigger the bug. The best theory I have for this bug is that the magic stackframe inspection thing `con.table` does keeps around a reference to values in the stackframe after the first call, but drops them in the second call (triggering `__del__` then).
+
+### OS:
+
+aarch64
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Jim Crist-Harif
+
+### Affiliation:
+
+Voltron Data
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

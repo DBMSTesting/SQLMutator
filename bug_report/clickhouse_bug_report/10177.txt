@@ -1,0 +1,109 @@
+ID: 10177
+Title: DB::Exception: Existing table metadata in ZooKeeper differs in TTL
+Description:
+**Describe the bug**
+Performed the update from version 20.1.2.4 to 20.3.5.21, after restart clickhouse does not start.
+Tried to upgrade to 20.1.6.30 or 20.1.9.54 versions, clickhouse also does not start but errors changed.
+
+**How to reproduce**
+* Version: 20.1.2.4
+* OS Version: Ubuntu 18.04.1 LTS
+* `CREATE TABLE` statements for all tables involved
+```
+CREATE DATABASE database ENGINE = Ordinary;
+CREATE TABLE database.table_rpl ('mdate' Date) ENGINE = ReplicatedMergeTree('/clickhouse/tables/database/{shard}/table_rpl', '{replica}') PARTITION BY mdate ORDER BY mdate TTL mdate + toIntervalMonth(6) TO VOLUME 'old_data_volume' SETTINGS storage_policy = 'main_policy', index_granularity = 8192;
+```
+* Update according to documentation: https://clickhouse.tech/docs/en/operations/update/#clickhouse-update
+
+**Expected behavior**
+Clickhouse updated and restarted.
+
+**Error message and/or stacktrace**
+After update from 20.1.2.4 to 20.3.5.21:
+```
+2020.04.10 16:49:40.116410 [ 6785 ] {} <Error> Application: DB::Exception: Existing table metadata in ZooKeeper differs in TTL. Stored in ZooKeeper: , local: mdate + toIntervalMonth(6) TO VOLUME 'old_data_volume': Cannot attach table `database`.`table_rpl` from metadata file /var/lib/clickhouse/metadata/database/table_rpl.sql from query ATTACH TABLE table_rpl (`mdate` Date) ENGINE = ReplicatedMergeTree('/clickhouse/tables/database/{shard}/table_rpl', '{replica}') PARTITION BY mdate ORDER BY mdate TTL mdate + toIntervalMonth(6) TO VOLUME 'old_data_volume' SETTINGS storage_policy = 'main_policy', index_granularity = 8192
+```
+And from 20.1.2.4 to 20.1.6.30 or 20.1.9.54:
+```
+2020.04.10 16:46:04.323697 [ 1 ] {} <Error> Application: Caught exception while loading metadata: Code: 62, e.displayText() = DB::Exception: Empty query, Stack trace (when copying this message, always include the lines below):
+2020.04.10 16:46:05.238882 [ 1 ] {} <Error> Application: DB::Exception: Empty query
+```
+Full logs: https://gist.github.com/erste/75c06f232225e03ae6fe29e1ba796381
+
+**Additional context**
+Clickhouse cluster configuration:
+```
+    <remote_servers incl="clickhouse_remote_servers" >
+        <production>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>10.1.200.1</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>10.1.200.2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>10.1.200.3</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </production>
+    </remote_servers>
+
+    <zookeeper>
+      <node index="1">
+        <host>10.1.200.4</host>
+        <port>2181</port>
+      </node>
+    </zookeeper>
+
+    <macros>
+        <replica>clickhouse1</replica>
+        <shard>1</shard>
+    </macros>
+```
+Zookeeper configuration:
+```
+tickTime=2000
+initLimit=30000
+syncLimit=10
+dataDir=/var/lib/zookeeper
+clientPort=2181
+server.1=10.1.200.4:2888:3888
+preAllocSize=131072
+snapCount=3000000
+leaderServes=yes
+maxClientCnxns=2000
+maxSessionTimeout=60000000
+autopurge.snapRetainCount=10
+autopurge.purgeInterval=1
+standaloneEnabled=false
+```
+
+Zookeeper metadata:
+```
+[zk: localhost:2181(CONNECTED) 16] get /clickhouse/tables/database/1/table_rpl/replicas/clickhouse1/metadata
+metadata format version: 1
+date column:
+sampling expression:
+index granularity: 8192
+mode: 0
+sign column:
+primary key: mdate
+data format version: 1
+partition key: mdate
+move ttl: mdate + toIntervalMonth(6) TO VOLUME 'old_data_volume'
+granularity bytes: 10485760
+```

@@ -1,0 +1,70 @@
+ID: 15285
+Title: Arrow Extension Type to be registered in DuckDB Extensions
+Description:
+This PR creates hooks to add Arrow Extension Types in DuckDB Extensions, allowing the possibility for types that only exist in extensions (e.g., Geometry types) to be registered outside the core of DuckDB.
+
+From an extension developer's perspective, this can be achieved by calling the `RegisterArrowExtension` method from the `DBConfig`. This method takes an `ArrowExtension` object as a parameter.
+
+There are two types of Arrow Type Extensions:
+
+1. **Single Transformation**  
+   In this case, the type has only one format transformation. For example, a UUID will always have the format `w:16`. It can be registered simply by providing the `extension_name`, the `format`, and the equivalent DuckDB type. For example:
+
+   ```cpp
+   config.RegisterArrowExtension({"arrow.uuid", "w:16", make_shared_ptr<ArrowType>(LogicalType::UUID)});
+   ```
+
+   It is also possible to register non-canonical types by providing the `vendor_name` and the `type_name` instead of an `extension_name`. Notice that the `extension_name` for these cases will always be `arrow.opaque`. For example:
+
+   ```cpp
+   config.RegisterArrowExtension({"DuckDB", "uhugeint", "w:16", make_shared_ptr<ArrowType>(LogicalType::UHUGEINT)});
+   ```
+
+2. **Multiple Transformations**  
+   This type applies to extensions that can be mapped to multiple different formats. For example, the `JSON` type. Here, the type can be either a string with multiple configurations or a string view. Instead of performing multiple registrations of the same type, you define functions to populate the Arrow schema when producing an Arrow object (`PopulateSchema`) and extract the correct type from a format when consuming an Arrow object (`GetType`).
+
+```cpp
+   struct ArrowJson {
+       static shared_ptr<ArrowType> GetType(const string &format, const ArrowSchemaMetadata &schema_metadata) {
+           if (format == "u") {
+               return make_shared_ptr<ArrowType>(LogicalType::JSON(),
+                                                make_uniq<ArrowStringInfo>(ArrowVariableSizeType::NORMAL));
+           } else if (format == "U") {
+               return make_shared_ptr<ArrowType>(LogicalType::JSON(),
+                                                make_uniq<ArrowStringInfo>(ArrowVariableSizeType::SUPER_SIZE));
+           } else if (format == "vu") {
+               return make_shared_ptr<ArrowType>(LogicalType::JSON(),
+                                                make_uniq<ArrowStringInfo>(ArrowVariableSizeType::VIEW));
+           }
+           throw InvalidInputException("Arrow extension type \"%s\" not supported for arrow.json", format.c_str());
+       }
+
+       static void PopulateSchema(DuckDBArrowSchemaHolder &root_holder, ArrowSchema &schema, const LogicalType &type,
+                                  ClientContext &context, ArrowExtension &extension) {
+           ArrowSchemaMetadata schema_metadata =
+               ArrowSchemaMetadata::ArrowCanonicalType(extension.GetInfo().GetExtensionName());
+           root_holder.metadata_info.emplace_back(schema_metadata.SerializeMetadata());
+           schema.metadata = root_holder.metadata_info.back().get();
+           auto options = context.GetClientProperties();
+           if (options.produce_arrow_string_view) {
+               schema.format = "vu";
+           } else {
+               if (options.arrow_offset_size == ArrowOffsetSize::LARGE) {
+                   schema.format = "U";
+               } else {
+                   schema.format = "u";
+               }
+           }
+       }
+   };
+   config.RegisterArrowExtension({"arrow.json", &ArrowJson::PopulateSchema, &ArrowJson::GetType,
+                                      make_shared_ptr<ArrowType>(LogicalType::VARCHAR)});
+```
+
+Arrow Extensions can also include code specific to performing transformations on the underlying data when consuming and producing Arrow Vectors
+
+This PR also includes support to the new Boolean-Arrow Canonical Type.
+
+Fix: https://github.com/duckdblabs/duckdb-internal/issues/3570
+Fix: https://github.com/duckdblabs/duckdb-internal/issues/3732
+Fix: https://github.com/duckdblabs/duckdb-internal/issues/2553

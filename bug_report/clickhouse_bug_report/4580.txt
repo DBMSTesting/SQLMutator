@@ -1,0 +1,76 @@
+ID: 4580
+Title: 19.1.10 crashes when it gets an empty response from invalidate_query while checking dictionaries
+Description:
+I have dictionaries on MergeTree tables, and their invalidate queries check the modification time in the system.parts table.
+If a table is empty and there is no rows in system.parts, then the invalidate query crashes ClickHouse.
+The dictionary gets created successfully, and after 'lifetime' of seconds ClickHouse crashes.
+
+The log (36 is the thread that is running the invalidate query):
+```
+2019.03.04 16:18:50.016833 [ 36 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.03.04 16:18:50.016954 [ 36 ] {} <Trace> Aggregator: Aggregating
+2019.03.04 16:18:50.017022 [ 36 ] {} <Trace> Aggregator: Aggregated. 0 to 0 rows (from 0.000 MiB) in 0.000 sec. (0.000 rows/sec., 0.000 MiB/sec.)
+2019.03.04 16:18:50.017035 [ 36 ] {} <Trace> Aggregator: Merging aggregated data
+2019.03.04 16:18:50.083563 [ 2 ] {} <Error> BaseDaemon: (from thread 36) Terminate called for uncaught exception:
+Code: 295, e.displayText() = DB::Exception: Empty response, e.what() = DB::Exception, Stack trace:
+
+0. clickhouse-server(StackTrace::StackTrace()+0x16) [0x6ce80e6]
+1. clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x22) [0x32ff582]
+2. clickhouse-server(DB::readInvalidateQuery[abi:cxx11](DB::IProfilingBlockInputStream&)+0xec9) [0x6954d39]
+3. clickhouse-server(DB::ClickHouseDictionarySource::doInvalidateQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) const+0xbc) [0x6922aec]
+4. clickhouse-server(DB::ClickHouseDictionarySource::isModified() const+0x71) [0x6922d61]
+5. clickhouse-server(DB::ExternalLoader::reloadAndUpdate(bool)+0x5bb) [0x575933b]
+6. clickhouse-server(DB::ExternalLoader::reloadPeriodically()+0x2a) [0x575a83a]
+7. clickhouse-server() [0xa9c9c7f]
+8. /lib/x86_64-linux-gnu/libpthread.so.0(+0x8064) [0x7f7512ea1064]
+9
+2019.03.04 16:18:50.083642 [ 2 ] {} <Error> BaseDaemon: ########################################
+2019.03.04 16:18:50.083674 [ 2 ] {} <Error> BaseDaemon: (from thread 36) Received signal Aborted (6).
+2019.03.04 16:18:50.094600 [ 2 ] {} <Error> BaseDaemon: 0. /lib/x86_64-linux-gnu/libc.so.6(gsignal+0x37) [0x7f7512416067]
+2019.03.04 16:18:50.094630 [ 2 ] {} <Error> BaseDaemon: 1. /lib/x86_64-linux-gnu/libc.so.6(abort+0x148) [0x7f7512417448]
+2019.03.04 16:18:50.094640 [ 2 ] {} <Error> BaseDaemon: 2. clickhouse-server() [0x3540abd]
+2019.03.04 16:18:50.094667 [ 2 ] {} <Error> BaseDaemon: 3. clickhouse-server(__cxxabiv1::__terminate(void (*)())+0x6) [0xa98d366]
+2019.03.04 16:18:50.094678 [ 2 ] {} <Error> BaseDaemon: 4. clickhouse-server() [0xa98d3b1]
+2019.03.04 16:18:50.094688 [ 2 ] {} <Error> BaseDaemon: 5. clickhouse-server() [0xa9c9cae]
+2019.03.04 16:18:50.094707 [ 2 ] {} <Error> BaseDaemon: 6. /lib/x86_64-linux-gnu/libpthread.so.0(+0x8064) [0x7f7512ea1064]
+```
+The definition of the dictionary:
+```
+    <dictionary>
+        <name>table</name>
+        <source>
+            <clickhouse>
+                <host>localhost</host>
+                <port>9000</port>
+                <user>default</user>
+                <password/>
+                <db>db</db>
+                <table>table</table>
+                <invalidate_query>select max(modification_time) from system.parts where database='db' and table='table'</invalidate_query>
+            </clickhouse>
+        </source>
+        <lifetime>60</lifetime>
+        <layout><flat/></layout>
+        <structure>
+            <id>
+                <name>key</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value/>
+            </attribute>
+        </structure>
+    </dictionary>
+```
+The definition of the source table:
+```
+CREATE TABLE db.table 
+(
+  key    Int64,
+  name   String
+)
+ENGINE = ReplacingMergeTree 
+PARTITION BY tuple ()
+ORDER BY key
+```

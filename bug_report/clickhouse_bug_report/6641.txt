@@ -1,0 +1,41 @@
+ID: 6641
+Title: max function does not behave as expected with nullable columns and aggregating merge tree
+Description:
+Consider the following queries:
+```
+CREATE TABLE test (
+    timestamp DateTime,
+    col1 Nullable(Float64),
+    col2 Nullable(Float64))
+ENGINE = MergeTree()
+ORDER BY timestamp
+
+CREATE MATERIALIZED VIEW test_view (
+    timestamp DateTime,
+    col1 AggregateFunction(avg, Float64),
+    col2 AggregateFunction (max, Float64))
+ENGINE = AggregatingMergeTree()
+ORDER BY timestamp
+AS
+    SELECT
+        toStartOfMinute(timestamp) AS timestamp,
+        avgState (col1) AS col1,
+        maxState (col2) AS col2
+    FROM test
+    GROUP BY timestamp
+    ORDER BY timestamp
+
+INSERT INTO test (timestamp, col1, col2) VALUES ('2019-08-22 15:01:00', null, null)
+
+SELECT timestamp, avgMerge(col1), maxMerge(col2) FROM test_view GROUP BY timestamp
+```
+We expect the results to be NaN for both aggregations due to this issue: [AggregatingMergeTree doesn't handle Null values correctly](https://github.com/yandex/ClickHouse/issues/3402)
+
+But for some reason, count behaves differently from the other aggregation functions.  This is the actual output:
+```
+┌───────────timestamp─┬─avgMerge(col1)─┬─maxMerge(col2)─┐
+│ 2019-08-22 15:01:00 │            nan │              0 │
+└─────────────────────┴────────────────┴────────────────┘
+```
+
+As a work-around, we can define col2 in the view as `maxState (ifnull(col2, nan))`.

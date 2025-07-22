@@ -1,0 +1,120 @@
+ID: 21168
+Title: Segmentation fault after mutation ALTER TABLE view ON CLUSTER DELETE
+Description:
+**Describe the bug**
+I accidentally started migration on view instead of table with `on cluster` statement. All nodes of cluster are down and failed to restart.
+
+**Does it reproduce on recent release?**
+met on 20.8.7.15
+reproduced on 21.2.4.6
+
+**How to reproduce**
+```sql
+create table test_shard on cluster ClusterName
+(f1 Int32, f2 Int32, pk Int32)
+engine=ReplicatedMergeTree('/clickhouse/tables/test_shard/{uuid}/{shard}/table_name','{replica}')
+order by f1
+partition by pk;
+
+create table test on cluster ClusterName
+(f1 Int32, f2 Int32, pk Int32)
+engine=Distributed(ClusterName,default,test_shard, f1);
+
+create view test_view on cluster ClusterName
+as 
+select f1, f2
+from test 
+where pk = 2;
+
+insert into test (f1,f2,pk)
+values (1,1,1)
+         , (1,1,2)
+         , (2,1,1)
+         , (2,1,2);
+
+select * from test_view;
+
+alter table test_view on cluster ClusterName delete where pk=2;
+```
+
+**Expected behavior**
+Clickhouse throws exception, cancel query, all nodes continue to work
+
+**Error message and/or stacktrace**
+<details>
+<summary>executing query logs</summary>
+
+```
+2021.02.25 09:02:20.312595 [ 11 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: POST, Address: 172.20.0.1:61666, User-Agent: Apache-HttpClient/4.5.2 (Java/11.0.5), Length: 59, Content Type: text/plain; charset=UTF-8, Transfer Encoding: identity, X-Forwarded-For: (none)
+2021.02.25 09:02:20.313232 [ 11 ] {} <Trace> DynamicQueryHandler: Request URI: /?user=default&max_result_rows=200&result_overflow_mode=break&extremes=0&database=default
+2021.02.25 09:02:20.314077 [ 11 ] {2b3df895-12ec-49dd-afc7-72fcf5d41cda} <Debug> executeQuery: (from 172.20.0.1:61666, using production parser) alter table test_view on cluster ClusterName delete where pk=2
+2021.02.25 09:02:20.314834 [ 11 ] {2b3df895-12ec-49dd-afc7-72fcf5d41cda} <Trace> ContextAccess (default): Access granted: ALTER DELETE ON default.test_view
+2021.02.25 09:02:20.360995 [ 27 ] {} <Debug> DDLWorker: Scheduling tasks
+2021.02.25 09:02:20.361195 [ 28 ] {} <Trace> DDLWorker: Too early to clean queue, will do it later.
+2021.02.25 09:02:20.371947 [ 11 ] {2b3df895-12ec-49dd-afc7-72fcf5d41cda} <Debug> executeQuery: Query pipeline:
+DDLQueryStatusInputStream
+
+2021.02.25 09:02:20.373201 [ 27 ] {} <Debug> DDLWorker: Waiting a watch
+2021.02.25 09:02:20.373223 [ 52 ] {d5011220-84ab-4fb1-a5a1-32e1cfa92d41} <Debug> DDLWorker: Processing task query-0000000003 (ALTER TABLE default.test_view ON CLUSTER ClusterName DELETE WHERE pk = 2)
+2021.02.25 09:02:20.407004 [ 52 ] {d5011220-84ab-4fb1-a5a1-32e1cfa92d41} <Debug> DDLWorker: Executing query: ALTER TABLE default.test_view DELETE WHERE pk = 2
+2021.02.25 09:02:20.407952 [ 52 ] {33d8f2f8-05bf-44bc-b03e-c20987229ad0} <Debug> executeQuery: (from 0.0.0.0:0, user: , using production parser) /* ddl_entry=query-0000000003 */ ALTER TABLE default.test_view DELETE WHERE pk = 2
+2021.02.25 09:02:20.408866 [ 8 ] {} <Trace> BaseDaemon: Received signal 11
+2021.02.25 09:02:20.409754 [ 56 ] {} <Fatal> BaseDaemon: ########################################
+2021.02.25 09:02:20.410437 [ 56 ] {} <Fatal> BaseDaemon: (version 21.2.4.6 (official build), build id: 6E2E926515F53BCF094B3D6BD7E9EB65BC5BCE6B) (from thread 52) (query_id: 33d8f2f8-05bf-44bc-b03e-c20987229ad0) Received signal Segmentation fault (11)
+2021.02.25 09:02:20.411206 [ 56 ] {} <Fatal> BaseDaemon: Address: 0x18 Access: read. Address not mapped to object.
+2021.02.25 09:02:20.411959 [ 56 ] {} <Fatal> BaseDaemon: Stack trace: 0xf1d67d9 0xf1d5e12 0xeb86e64 0xeb83645 0xeb85d54 0xed8073a 0xeb40752 0xeeb94f2 0xeebcbe2 0xe8733c6 0xe875d1c 0xe873ddd 0x84f9878 0x84fb82f 0x84f6e4f 0x84fa8e3 0x7f1889cd3ea5 0x7f18899fc8dd
+2021.02.25 09:02:20.412591 [ 56 ] {} <Fatal> BaseDaemon: 2. ? @ 0xf1d67d9 in /usr/bin/clickhouse
+2021.02.25 09:02:20.413159 [ 56 ] {} <Fatal> BaseDaemon: 3. DB::StorageView::replaceWithSubquery(DB::ASTSelectQuery&, std::__1::shared_ptr<DB::IAST>, std::__1::shared_ptr<DB::IAST>&) @ 0xf1d5e12 in /usr/bin/clickhouse
+2021.02.25 09:02:20.413676 [ 56 ] {} <Fatal> BaseDaemon: 4. ? @ 0xeb86e64 in /usr/bin/clickhouse
+2021.02.25 09:02:20.414234 [ 56 ] {} <Fatal> BaseDaemon: 5. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&) @ 0xeb83645 in /usr/bin/clickhouse
+2021.02.25 09:02:20.414802 [ 56 ] {} <Fatal> BaseDaemon: 6. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IStorage> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryOptions const&) @ 0xeb85d54 in /usr/bin/clickhouse
+2021.02.25 09:02:20.415334 [ 56 ] {} <Fatal> BaseDaemon: 7. DB::MutationsInterpreter::MutationsInterpreter(std::__1::shared_ptr<DB::IStorage>, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::MutationCommands, DB::Context const&, bool) @ 0xed8073a in /usr/bin/clickhouse
+2021.02.25 09:02:20.415822 [ 56 ] {} <Fatal> BaseDaemon: 8. DB::InterpreterAlterQuery::execute() @ 0xeb40752 in /usr/bin/clickhouse
+2021.02.25 09:02:20.416293 [ 56 ] {} <Fatal> BaseDaemon: 9. ? @ 0xeeb94f2 in /usr/bin/clickhouse
+2021.02.25 09:02:20.416956 [ 56 ] {} <Fatal> BaseDaemon: 10. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>) @ 0xeebcbe2 in /usr/bin/clickhouse
+2021.02.25 09:02:20.417594 [ 56 ] {} <Fatal> BaseDaemon: 11. DB::DDLWorker::tryExecuteQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DDLTask const&, DB::ExecutionStatus&) @ 0xe8733c6 in /usr/bin/clickhouse
+2021.02.25 09:02:20.418141 [ 56 ] {} <Fatal> BaseDaemon: 12. DB::DDLWorker::processTask(DB::DDLTask&) @ 0xe875d1c in /usr/bin/clickhouse
+2021.02.25 09:02:20.418611 [ 56 ] {} <Fatal> BaseDaemon: 13. DB::DDLWorker::enqueueTask(std::__1::unique_ptr<DB::DDLTask, std::__1::default_delete<DB::DDLTask> >) @ 0xe873ddd in /usr/bin/clickhouse
+2021.02.25 09:02:20.419147 [ 56 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x84f9878 in /usr/bin/clickhouse
+2021.02.25 09:02:20.419686 [ 56 ] {} <Fatal> BaseDaemon: 15. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() @ 0x84fb82f in /usr/bin/clickhouse
+2021.02.25 09:02:20.420368 [ 56 ] {} <Fatal> BaseDaemon: 16. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x84f6e4f in /usr/bin/clickhouse
+2021.02.25 09:02:20.420873 [ 56 ] {} <Fatal> BaseDaemon: 17. ? @ 0x84fa8e3 in /usr/bin/clickhouse
+2021.02.25 09:02:20.421427 [ 56 ] {} <Fatal> BaseDaemon: 18. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.02.25 09:02:20.421860 [ 56 ] {} <Fatal> BaseDaemon: 19. clone @ 0xfe8dd in /usr/lib64/libc-2.17.so
+2021.02.25 09:02:20.692197 [ 56 ] {} <Fatal> BaseDaemon: Checksum of the binary: 88E22F0584BA91872F2E9BE493E6985B, integrity check passed.
+2021.02.25 09:02:20.693673 [ 56 ] {} <Information> SentryWriter: Not sending crash report
+```
+</details>
+<details>
+<summary>reexecuting after restart logs</summary>
+
+```
+2021.02.25 09:02:24.969588 [ 43 ] {} <Debug> DDLWorker: Processing task query-0000000003 (ALTER TABLE default.test_view ON CLUSTER ClusterName DELETE WHERE pk = 2)
+2021.02.25 09:02:24.979387 [ 43 ] {} <Debug> DDLWorker: Executing query: ALTER TABLE default.test_view DELETE WHERE pk = 2
+2021.02.25 09:02:24.980222 [ 43 ] {91da6995-ade7-423e-9543-ed87b3d8e1e7} <Debug> executeQuery: (from 0.0.0.0:0, user: , using production parser) /* ddl_entry=query-0000000003 */ ALTER TABLE default.test_view DELETE WHERE pk = 2
+2021.02.25 09:02:24.982954 [ 8 ] {} <Trace> BaseDaemon: Received signal 11
+2021.02.25 09:02:24.988512 [ 44 ] {} <Fatal> BaseDaemon: ########################################
+2021.02.25 09:02:24.990487 [ 44 ] {} <Fatal> BaseDaemon: (version 21.2.4.6 (official build), build id: 6E2E926515F53BCF094B3D6BD7E9EB65BC5BCE6B) (from thread 43) (query_id: 91da6995-ade7-423e-9543-ed87b3d8e1e7) Received signal Segmentation fault (11)
+2021.02.25 09:02:25.003985 [ 44 ] {} <Fatal> BaseDaemon: Address: 0x18 Access: read. Address not mapped to object.
+2021.02.25 09:02:25.005288 [ 44 ] {} <Fatal> BaseDaemon: Stack trace: 0xf1d67d9 0xf1d5e12 0xeb86e64 0xeb83645 0xeb85d54 0xed8073a 0xeb40752 0xeeb94f2 0xeebcbe2 0xe8733c6 0xe875d1c 0xe873ddd 0x84f9878 0x84fb82f 0x84f6e4f 0x84fa8e3 0x7efeb307cea5 0x7efeb2da58dd
+2021.02.25 09:02:25.008766 [ 44 ] {} <Fatal> BaseDaemon: 2. ? @ 0xf1d67d9 in /usr/bin/clickhouse
+2021.02.25 09:02:25.009556 [ 44 ] {} <Fatal> BaseDaemon: 3. DB::StorageView::replaceWithSubquery(DB::ASTSelectQuery&, std::__1::shared_ptr<DB::IAST>, std::__1::shared_ptr<DB::IAST>&) @ 0xf1d5e12 in /usr/bin/clickhouse
+2021.02.25 09:02:25.010856 [ 44 ] {} <Fatal> BaseDaemon: 4. ? @ 0xeb86e64 in /usr/bin/clickhouse
+2021.02.25 09:02:25.011520 [ 44 ] {} <Fatal> BaseDaemon: 5. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&) @ 0xeb83645 in /usr/bin/clickhouse
+2021.02.25 09:02:25.012250 [ 44 ] {} <Fatal> BaseDaemon: 6. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IStorage> const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryOptions const&) @ 0xeb85d54 in /usr/bin/clickhouse
+2021.02.25 09:02:25.014873 [ 44 ] {} <Fatal> BaseDaemon: 7. DB::MutationsInterpreter::MutationsInterpreter(std::__1::shared_ptr<DB::IStorage>, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::MutationCommands, DB::Context const&, bool) @ 0xed8073a in /usr/bin/clickhouse
+2021.02.25 09:02:25.016880 [ 44 ] {} <Fatal> BaseDaemon: 8. DB::InterpreterAlterQuery::execute() @ 0xeb40752 in /usr/bin/clickhouse
+2021.02.25 09:02:25.017508 [ 44 ] {} <Fatal> BaseDaemon: 9. ? @ 0xeeb94f2 in /usr/bin/clickhouse
+2021.02.25 09:02:25.018150 [ 44 ] {} <Fatal> BaseDaemon: 10. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>) @ 0xeebcbe2 in /usr/bin/clickhouse
+2021.02.25 09:02:25.019532 [ 44 ] {} <Fatal> BaseDaemon: 11. DB::DDLWorker::tryExecuteQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DDLTask const&, DB::ExecutionStatus&) @ 0xe8733c6 in /usr/bin/clickhouse
+2021.02.25 09:02:25.022481 [ 44 ] {} <Fatal> BaseDaemon: 12. DB::DDLWorker::processTask(DB::DDLTask&) @ 0xe875d1c in /usr/bin/clickhouse
+2021.02.25 09:02:25.025294 [ 44 ] {} <Fatal> BaseDaemon: 13. DB::DDLWorker::enqueueTask(std::__1::unique_ptr<DB::DDLTask, std::__1::default_delete<DB::DDLTask> >) @ 0xe873ddd in /usr/bin/clickhouse
+2021.02.25 09:02:25.025916 [ 44 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x84f9878 in /usr/bin/clickhouse
+2021.02.25 09:02:25.026529 [ 44 ] {} <Fatal> BaseDaemon: 15. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() @ 0x84fb82f in /usr/bin/clickhouse
+2021.02.25 09:02:25.027217 [ 44 ] {} <Fatal> BaseDaemon: 16. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x84f6e4f in /usr/bin/clickhouse
+2021.02.25 09:02:25.028182 [ 44 ] {} <Fatal> BaseDaemon: 17. ? @ 0x84fa8e3 in /usr/bin/clickhouse
+2021.02.25 09:02:25.028754 [ 44 ] {} <Fatal> BaseDaemon: 18. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+2021.02.25 09:02:25.029768 [ 44 ] {} <Fatal> BaseDaemon: 19. clone @ 0xfe8dd in /usr/lib64/libc-2.17.so
+2021.02.25 09:02:25.282273 [ 44 ] {} <Fatal> BaseDaemon: Checksum of the binary: 88E22F0584BA91872F2E9BE493E6985B, integrity check passed.
+```
+</details>

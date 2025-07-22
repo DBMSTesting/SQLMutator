@@ -1,0 +1,101 @@
+ID: 52340
+Title: Read skew in REPEATABLE READ with SELECT FOR UPDATE
+Description:
+## Bug Report
+
+It appears that SELECT FOR UPDATE and SELECT return inconsistent views of the same row. This is a different variant of https://github.com/pingcap/tidb/issues/32142 - I suppose perhaps technically allowed under some interpretations of the MySQL docs/SI but definitely surprising. 
+
+### 1. Minimal reproduce step (Required)
+Transaction settings:
+```
+MySQL [streak]> SELECT @@tidb_txn_mode;
++-----------------+
+| @@tidb_txn_mode |
++-----------------+
+| pessimistic     |
++-----------------+
+1 row in set (0.013 sec)
+
+MySQL [streak]> SELECT @@transaction_isolation;
++-------------------------+
+| @@transaction_isolation |
++-------------------------+
+| REPEATABLE-READ         |
++-------------------------+
+1 row in set (0.002 sec)
+```
+
+
+You need two concurrent sessions, Session A and Session B. Execute the following steps:
+```
+CREATE TABLE `fred_tmp_local_gids` (
+  `gid` varchar(255) NOT NULL,
+  `a` int(11) DEFAULT NULL,
+  PRIMARY KEY (`gid`) /*T![clustered_index] CLUSTERED */,
+  KEY `a_idx` (`a`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+```
+
+In session A:
+```
+MySQL [streak]> BEGIN;
+Query OK, 0 rows affected (0.001 sec)
+```
+
+In session B:
+```
+MySQL [streak]> BEGIN;
+Query OK, 0 rows affected (0.001 sec)
+```
+
+In session A:
+```
+MySQL [streak]> INSERT fred_tmp_local_gids(gid, a) VALUES ('test10', 10);
+Query OK, 1 row affected (0.008 sec)
+```
+
+In session B:
+```
+MySQL [streak]> SELECT * FROM fred_tmp_local_gids WHERE gid = 'test10' FOR UPDATE;
+```
+
+Session B will block waiting on the lock.
+
+In session A:
+```
+MySQL [streak]> COMMIT;
+Query OK, 0 rows affected (0.003 sec)
+```
+
+In session B:
+```
++--------+------+
+| gid    | a    |
++--------+------+
+| test10 |   10 |
++--------+------+
+1 row in set (4.705 sec)
+
+MySQL [streak]> SELECT * FROM fred_tmp_local_gids WHERE a = 10;
+Empty set (0.003 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+The newly inserted record returned.
+
+### 3. What did you see instead (Required)
+
+No record returned.
+
+### 4. What is your TiDB version? (Required)
+
+Release Version: v7.5.0
+Edition: Community
+Git Commit Hash: 069631e2ecfedc000ffb92c67207bea81380f020
+Git Branch: heads/refs/tags/v7.5.0
+UTC Build Time: 2023-11-24 08:50:14
+GoVersion: go1.21.3
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv

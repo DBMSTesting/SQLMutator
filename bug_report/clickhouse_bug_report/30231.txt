@@ -1,0 +1,214 @@
+ID: 30231
+Title: Crash: Logical error: 'Bad cast from type DB::ColumnLowCardinality to DB::ColumnVector<char8_t>'.
+Description:
+**Describe what's wrong**
+
+CH crashing with the following query:
+
+Table structure:
+
+```
+DROP TABLE IF EXISTS data_guess SYNC;
+
+CREATE TABLE data_guess
+(
+    `user_id` LowCardinality(String),
+    `datasource_id` LowCardinality(String),
+    `timestamp` DateTime,
+    `path` LowCardinality(String),
+    `type` LowCardinality(String),
+    `num` Float32,
+    `str` String
+)
+ENGINE = MergeTree
+ORDER BY (user_id, datasource_id, timestamp)
+```
+
+Data
+```
+INSERT INTO data_guess VALUES
+    ('0','0','2021-10-15 09:38:51','$.extra_data.city','string',0,'Concord'),
+    ('0','0','2021-10-15 09:38:51','$.extra_data.city','string',0,'Hartford')
+```
+
+Query (it's minimized so it might not make sense as is, but it crashes anyway): 
+```
+SELECT
+    path,
+    argMax(advice_type, type_pct) AS recommended_type
+FROM
+(
+    SELECT
+        path,
+        count() AS cnt,
+        count() AS type_pct,
+        countIf(isNotNull(parseDateTimeBestEffortOrNull(str))) AS date_parseable,
+        countIf(isNotNull(parseDateTime64BestEffortOrNull(str))) AS date_parseable64,
+        multiIf(date_parseable < (cnt * 0.99), NULL, (date_parseable64 >= date_parseable), 'DateTime64', 'DateTime') AS advice_date_subtype,
+        path LIKE '%[:]%' AS is_array,
+        path LIKE '%[:]%[:]%' AS is_nested_array,
+        multiIf(isNotNull(advice_date_subtype), advice_date_subtype, NULL) AS advice_type_raw,
+        multiIf(is_nested_array, NULL, is_array, concat('Array(', advice_type_raw, ')'), advice_type_raw) AS advice_type
+    FROM data_guess
+    GROUP BY type, path
+)
+GROUP BY path
+```
+
+In some cases you get a crash (coredump below). Others you get a message like this:
+```
+Code: 49. DB::Exception: Too large size (9223372036854775839) passed to allocator. It indicates an error.: while receiving packet from localhost:9000. (LOGICAL_ERROR)
+```
+
+It seems to be necessary to mix argMax  and multiIf from a subquery. I wouldn't get it to crash by creating a table with the subquery structure and data and calling the external query.
+
+
+**Does it reproduce on recent release?**
+
+Results per release:
+* 21.6.9.7: OK
+* 21.8.7.22: OK
+* 21.9.4.35: KO
+* 21.9/HEAD (097f9b246139d3f05892ee4b4e154de05f1a7e2d): KO
+* 21.10.2.8264: KO
+* 21.11.1.8263: KO
+* master/HEAD (27fdeef4b6a2cf606bb47fceb83194cef8e0467b): KO
+
+
+** Fatal logs** (assert build of 21.9/HEAD):
+
+```
+[Mordor] 2021.10.15 11:54:48.018376 [ 307153 ] {e8c41ab8-6c02-4585-b5ef-63e25380bb30} <Fatal> : Logical error: 'Bad cast from type DB::ColumnLowCardinality to DB::ColumnVector<char8_t>'.
+[Mordor] 2021.10.15 11:54:48.019913 [ 307413 ] <Fatal> BaseDaemon: ########################################
+[Mordor] 2021.10.15 11:54:48.020935 [ 307413 ] <Fatal> BaseDaemon: (version 21.9.5.1, build id: E5D2FE159A62AB7007AF648E35D0D2A8048E3F44) (from thread 307153) (query_id: e8c41ab8-6c02-4585-b5ef-63e25380bb30) Received signal Aborted (6)
+[Mordor] 2021.10.15 11:54:48.021685 [ 307413 ] <Fatal> BaseDaemon: 
+[Mordor] 2021.10.15 11:54:48.022258 [ 307413 ] <Fatal> BaseDaemon: Stack trace: 0x7fa81fffad22 0x7fa81ffe4862 0x12cdd719 0x12cdd852 0x1301f080 0x1a203291 0x15a4920d 0x1dd24a88 0x1dd25689 0x1e6a5ff7 0x1e6a53c5 0x202aa0e3 0x1bb76002 0x1feb4cae 0x1ff26ce6 0x1ff26c2c 0x1ff26bbd 0x1ff26b7d 0x1ff26b55 0x1ff26b1d 0x12d33b06 0x12d32af5 0x1ff2540d 0x1ff25e72 0x1ff23aa1 0x1ff22d00 0x1ff45bfe 0x1ff45af0 0x1ff45a5d 0x1ff45a01 0x1ff45912 0x1ff457c1 0x1ff456bd 0x1ff4567d 0x1ff45655 0x1ff45620 0x12d33b06 0x12d32af5 0x12d5c1e7 0x12d63cb1 0x12d63c1d
+[Mordor] 2021.10.15 11:54:48.022642 [ 307413 ] <Fatal> BaseDaemon: 4. gsignal @ 0x3cd22 in /usr/lib/libc-2.33.so
+[Mordor] 2021.10.15 11:54:48.022754 [ 307413 ] <Fatal> BaseDaemon: 5. __GI_abort @ 0x26862 in /usr/lib/libc-2.33.so
+[Mordor] 2021.10.15 11:54:48.108122 [ 307413 ] <Fatal> BaseDaemon: 6. /mnt/ch/ClickHouse/src/Common/Exception.cpp:53: DB::handle_error_code(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool, std::__1::vector<void*, std::__1::allocator<void*> > const&) @ 0x12cdd719 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:48.183933 [ 307413 ] <Fatal> BaseDaemon: 7. /mnt/ch/ClickHouse/src/Common/Exception.cpp:60: DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0x12cdd852 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:48.391990 [ 307413 ] <Fatal> BaseDaemon: 8. /mnt/ch/ClickHouse/src/Common/assert_cast.h:47: DB::ColumnVector<char8_t> const& assert_cast<DB::ColumnVector<char8_t> const&, DB::IColumn const&>(DB::IColumn const&) @ 0x1301f080 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:48.572834 [ 307413 ] <Fatal> BaseDaemon: 9. /mnt/ch/ClickHouse/src/Functions/multiIf.cpp:238: DB::(anonymous namespace)::FunctionMultiIf::executeImpl(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x1a203291 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:48.633536 [ 307413 ] <Fatal> BaseDaemon: 10. /mnt/ch/ClickHouse/src/Functions/IFunctionAdaptors.h:21: DB::FunctionToExecutableFunctionAdaptor::executeImpl(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x15a4920d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:48.824906 [ 307413 ] <Fatal> BaseDaemon: 11. /mnt/ch/ClickHouse/src/Functions/IFunction.cpp:217: DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x1dd24a88 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:49.016387 [ 307413 ] <Fatal> BaseDaemon: 12. /mnt/ch/ClickHouse/src/Functions/IFunction.cpp:260: DB::IExecutableFunction::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> > const&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x1dd25689 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:49.353950 [ 307413 ] <Fatal> BaseDaemon: 13. /mnt/ch/ClickHouse/src/Interpreters/ExpressionActions.cpp:601: DB::executeAction(DB::ExpressionActions::Action const&, DB::(anonymous namespace)::ExecutionContext&, bool) @ 0x1e6a5ff7 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:49.643870 [ 307413 ] <Fatal> BaseDaemon: 14. /mnt/ch/ClickHouse/src/Interpreters/ExpressionActions.cpp:718: DB::ExpressionActions::execute(DB::Block&, unsigned long&, bool) const @ 0x1e6a53c5 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:49.745871 [ 307413 ] <Fatal> BaseDaemon: 15. /mnt/ch/ClickHouse/src/Processors/Transforms/ExpressionTransform.cpp:23: DB::ExpressionTransform::transform(DB::Chunk&) @ 0x202aa0e3 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:49.899506 [ 307413 ] <Fatal> BaseDaemon: 16. /mnt/ch/ClickHouse/src/Processors/ISimpleTransform.h:43: DB::ISimpleTransform::transform(DB::Chunk&, DB::Chunk&) @ 0x1bb76002 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:49.973623 [ 307413 ] <Fatal> BaseDaemon: 17. /mnt/ch/ClickHouse/src/Processors/ISimpleTransform.cpp:89: DB::ISimpleTransform::work() @ 0x1feb4cae in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:50.275223 [ 307413 ] <Fatal> BaseDaemon: 18. /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:88: DB::executeJob(DB::IProcessor*) @ 0x1ff26ce6 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:50.566473 [ 307413 ] <Fatal> BaseDaemon: 19. /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:105: DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0::operator()() const @ 0x1ff26c2c in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:50.861700 [ 307413 ] <Fatal> BaseDaemon: 20. /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676: decltype(std::__1::forward<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(fp)()) std::__1::__invoke<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&) @ 0x1ff26bbd in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:51.151374 [ 307413 ] <Fatal> BaseDaemon: 21. /mnt/ch/ClickHouse/contrib/libcxx/include/__functional_base:349: void std::__1::__invoke_void_return_wrapper<void>::__call<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&) @ 0x1ff26b7d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:51.438342 [ 307413 ] <Fatal> BaseDaemon: 22. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:1608: std::__1::__function::__default_alloc_func<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()>::operator()() @ 0x1ff26b55 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:51.725505 [ 307413 ] <Fatal> BaseDaemon: 23. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2089: void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()> >(std::__1::__function::__policy_storage const*) @ 0x1ff26b1d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:51.870772 [ 307413 ] <Fatal> BaseDaemon: 24. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2221: std::__1::__function::__policy_func<void ()>::operator()() const @ 0x12d33b06 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:52.013687 [ 307413 ] <Fatal> BaseDaemon: 25. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2560: std::__1::function<void ()>::operator()() const @ 0x12d32af5 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:52.292298 [ 307413 ] <Fatal> BaseDaemon: 26. /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:600: DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0x1ff2540d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:52.573646 [ 307413 ] <Fatal> BaseDaemon: 27. /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:485: DB::PipelineExecutor::executeSingleThread(unsigned long, unsigned long) @ 0x1ff25e72 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:52.846095 [ 307413 ] <Fatal> BaseDaemon: 28. /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:824: DB::PipelineExecutor::executeImpl(unsigned long) @ 0x1ff23aa1 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:53.130480 [ 307413 ] <Fatal> BaseDaemon: 29. /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:407: DB::PipelineExecutor::execute(unsigned long) @ 0x1ff22d00 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:53.295402 [ 307413 ] <Fatal> BaseDaemon: 30. /mnt/ch/ClickHouse/src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:80: DB::threadFunction(DB::PullingAsyncPipelineExecutor::Data&, std::__1::shared_ptr<DB::ThreadGroupStatus>, unsigned long) @ 0x1ff45bfe in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:53.458337 [ 307413 ] <Fatal> BaseDaemon: 31. /mnt/ch/ClickHouse/src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:107: DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0::operator()() const @ 0x1ff45af0 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:53.622970 [ 307413 ] <Fatal> BaseDaemon: 32. /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3682: decltype(std::__1::forward<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&>(fp)()) std::__1::__invoke_constexpr<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&) @ 0x1ff45a5d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:53.786151 [ 307413 ] <Fatal> BaseDaemon: 33. /mnt/ch/ClickHouse/contrib/libcxx/include/tuple:1415: decltype(auto) std::__1::__apply_tuple_impl<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&, std::__1::__tuple_indices<>) @ 0x1ff45a01 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:53.949338 [ 307413 ] <Fatal> BaseDaemon: 34. /mnt/ch/ClickHouse/contrib/libcxx/include/tuple:1424: decltype(auto) std::__1::apply<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&) @ 0x1ff45912 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:54.112337 [ 307413 ] <Fatal> BaseDaemon: 35. /mnt/ch/ClickHouse/src/Common/ThreadPool.h:182: ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'()::operator()() @ 0x1ff457c1 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:54.276926 [ 307413 ] <Fatal> BaseDaemon: 36. /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676: decltype(std::__1::forward<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(fp)()) std::__1::__invoke<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'()&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&) @ 0x1ff456bd in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:54.440192 [ 307413 ] <Fatal> BaseDaemon: 37. /mnt/ch/ClickHouse/contrib/libcxx/include/__functional_base:349: void std::__1::__invoke_void_return_wrapper<void>::__call<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'()&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&...) @ 0x1ff4567d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:54.603310 [ 307413 ] <Fatal> BaseDaemon: 38. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:1608: std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'(), void ()>::operator()() @ 0x1ff45655 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:54.768336 [ 307413 ] <Fatal> BaseDaemon: 39. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2089: void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1ff45620 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:54.916280 [ 307413 ] <Fatal> BaseDaemon: 40. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2221: std::__1::__function::__policy_func<void ()>::operator()() const @ 0x12d33b06 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:55.061996 [ 307413 ] <Fatal> BaseDaemon: 41. /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2560: std::__1::function<void ()>::operator()() const @ 0x12d32af5 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:55.114978 [ 307413 ] <Fatal> BaseDaemon: 42. /mnt/ch/ClickHouse/src/Common/ThreadPool.cpp:270: ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x12d5c1e7 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:55.173881 [ 307413 ] <Fatal> BaseDaemon: 43. /mnt/ch/ClickHouse/src/Common/ThreadPool.cpp:136: void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()::operator()() const @ 0x12d63cb1 in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:55.230133 [ 307413 ] <Fatal> BaseDaemon: 44. /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676: decltype(std::__1::forward<void>(fp)(std::__1::forward<void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(fp0)...)) std::__1::__invoke<void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...) @ 0x12d63c1d in /mnt/ch/ClickHouse/build_asserts/programs/clickhouse
+[Mordor] 2021.10.15 11:54:56.080817 [ 307413 ] <Fatal> BaseDaemon: Calculated checksum of the binary: 56FE7CBBF892216B8A9D6E066CEE9487. There is no information about the reference checksum.
+```
+
+
+Coredump backtrace (assert build of 21.9/HEAD):
+```
+#0  0x00007fa81fffad22 in raise () from /usr/lib/libc.so.6
+#1  0x00007fa81ffe4862 in abort () from /usr/lib/libc.so.6
+#2  0x0000000012cdd719 in DB::handle_error_code (msg=..., code=49, remote=false, trace=...)
+    at /mnt/ch/ClickHouse/src/Common/Exception.cpp:49
+#3  0x0000000012cdd852 in DB::Exception::Exception (this=0x7fa7134406c0, msg=..., code=49, 
+    remote_=false) at /mnt/ch/ClickHouse/src/Common/Exception.cpp:60
+#4  0x000000001301f080 in assert_cast<DB::ColumnVector<char8_t> const&, DB::IColumn const&> (from=...)
+    at /mnt/ch/ClickHouse/src/Common/assert_cast.h:47
+#5  0x000000001a203291 in DB::(anonymous namespace)::FunctionMultiIf::executeImpl (this=0x7fa70aa08f78, 
+    args=..., result_type=..., input_rows_count=1) at /mnt/ch/ClickHouse/src/Functions/multiIf.cpp:238
+#6  0x0000000015a4920d in DB::FunctionToExecutableFunctionAdaptor::executeImpl (this=0x7fa7638387c0, 
+    arguments=..., result_type=..., input_rows_count=1)
+    at /mnt/ch/ClickHouse/src/Functions/IFunctionAdaptors.h:21
+#7  0x000000001dd24a88 in DB::IExecutableFunction::executeWithoutLowCardinalityColumns (
+    this=0x7fa7638387c0, args=..., result_type=..., input_rows_count=1, dry_run=false)
+    at /mnt/ch/ClickHouse/src/Functions/IFunction.cpp:217
+#8  0x000000001dd25689 in DB::IExecutableFunction::execute (this=0x7fa7638387c0, arguments=..., 
+    result_type=..., input_rows_count=1, dry_run=false)
+    at /mnt/ch/ClickHouse/src/Functions/IFunction.cpp:260
+#9  0x000000001e6a5ff7 in DB::executeAction (action=..., execution_context=..., dry_run=false)
+    at /mnt/ch/ClickHouse/src/Interpreters/ExpressionActions.cpp:601
+#10 0x000000001e6a53c5 in DB::ExpressionActions::execute (this=0x7fa70aa4ab58, block=..., 
+    num_rows=@0x7fa762bf5618: 1, dry_run=false)
+    at /mnt/ch/ClickHouse/src/Interpreters/ExpressionActions.cpp:718
+#11 0x00000000202aa0e3 in DB::ExpressionTransform::transform (this=0x7fa70aa4af18, chunk=...)
+    at /mnt/ch/ClickHouse/src/Processors/Transforms/ExpressionTransform.cpp:23
+#12 0x000000001bb76002 in DB::ISimpleTransform::transform (this=0x7fa70aa4af18, input_chunk=..., 
+    output_chunk=...) at /mnt/ch/ClickHouse/src/Processors/ISimpleTransform.h:42
+#13 0x000000001feb4cae in DB::ISimpleTransform::work (this=0x7fa70aa4af18)
+    at /mnt/ch/ClickHouse/src/Processors/ISimpleTransform.cpp:89
+#14 0x000000001ff26ce6 in DB::executeJob (processor=0x7fa70aa4af18)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:88
+#15 0x000000001ff26c2c in DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0::operator()() const (this=0x7fa70a94cf30) at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:105
+#16 0x000000001ff26bbd in std::__1::__invoke<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&) (__f=...)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676
+#17 0x000000001ff26b7d in std::__1::__invoke_void_return_wrapper<void>::__call<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&>(DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0&) (
+    __args=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/__functional_base:348
+#18 0x000000001ff26b55 in std::__1::__function::__default_alloc_func<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()>::operator()() (this=0x7fa70a94cf30)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:1608
+#19 0x000000001ff26b1d in std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()> >(std::__1::__function::__policy_storage const*) (__buf=0x7fa70a94cf30)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2089
+#20 0x0000000012d33b06 in std::__1::__function::__policy_func<void ()>::operator()() const (
+    this=0x7fa70a94cf30) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2221
+#21 0x0000000012d32af5 in std::__1::function<void ()>::operator()() const (this=0x7fa70a94cf30)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2560
+#22 0x000000001ff2540d in DB::PipelineExecutor::executeStepImpl (this=0x7fa70a8ea598, thread_num=0, 
+    num_threads=1, yield_flag=0x0)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:597
+#23 0x000000001ff25e72 in DB::PipelineExecutor::executeSingleThread (this=0x7fa70a8ea598, thread_num=0, 
+    num_threads=1) at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:485
+#24 0x000000001ff23aa1 in DB::PipelineExecutor::executeImpl (this=0x7fa70a8ea598, num_threads=1)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:824
+#25 0x000000001ff22d00 in DB::PipelineExecutor::execute (this=0x7fa70a8ea598, num_threads=1)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PipelineExecutor.cpp:407
+#26 0x000000001ff45bfe in DB::threadFunction (data=..., thread_group=..., num_threads=1)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:80
+#27 0x000000001ff45af0 in DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0::operator()() const (this=0x7fa762bf6578)
+    at /mnt/ch/ClickHouse/src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:107
+#28 0x000000001ff45a5d in std::__1::__invoke_constexpr<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&) (
+    __f=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3682
+#29 0x000000001ff45a01 in std::__1::__apply_tuple_impl<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&, std::__1::__tuple_indices<>) (__f=..., __t=...)
+    at /mnt/ch/ClickHouse/contrib/libcxx/include/tuple:1415
+#30 0x000000001ff45912 in std::__1::apply<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&, std::__1::tuple<>&) (__f=..., __t=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/tuple:1424
+#31 0x000000001ff457c1 in ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::{lambda()#1}::operator()() (this=0x7fa70aa29910) at /mnt/ch/ClickHouse/src/Common/ThreadPool.h:182
+#32 0x000000001ff456bd in std::__1::__invoke<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::{lambda()#1}&>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&) (__f=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676
+#33 0x000000001ff4567d in std::__1::__invoke_void_return_wrapper<void>::__call<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::{lambda()#1}&>(ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::{lambda()#1}&) (__args=...)
+--Type <RET> for more, q to quit, c to continue without paging--
+   ontrib/libcxx/include/__functional_base:348
+#34 0x000000001ff45655 in std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::{lambda()#1}, void ()>::operator()() (this=0x7fa70aa29910) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:1608
+#35 0x000000001ff45620 in std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::{lambda()#1}, void ()> >(std::__1::__function::__policy_storage const*) (__buf=0x7fa762bf69b8) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2089
+#36 0x0000000012d33b06 in std::__1::__function::__policy_func<void ()>::operator()() const (this=0x7fa762bf69b8) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2221
+#37 0x0000000012d32af5 in std::__1::function<void ()>::operator()() const (this=0x7fa762bf69b8) at /mnt/ch/ClickHouse/contrib/libcxx/include/functional:2560
+#38 0x0000000012d5c1e7 in ThreadPoolImpl<std::__1::thread>::worker (this=0x7fa81f23ef00, thread_it=...) at /mnt/ch/ClickHouse/src/Common/ThreadPool.cpp:270
+#39 0x0000000012d63cb1 in ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}::operator()() const (this=0x7fa81f291808)
+    at /mnt/ch/ClickHouse/src/Common/ThreadPool.cpp:136
+#40 0x0000000012d63c1d in std::__1::__invoke<ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}>(ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}&&) (__f=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/type_traits:3676
+#41 0x0000000012d63b45 in std::__1::__thread_execute<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}>(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}>&, std::__1::__tuple_indices<>) (__t=...) at /mnt/ch/ClickHouse/contrib/libcxx/include/thread:280
+#42 0x0000000012d633f2 in std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#2}> >(void*) (__vp=0x7fa81f291800) at /mnt/ch/ClickHouse/contrib/libcxx/include/thread:291
+#43 0x00007fa8201a5259 in start_thread () from /usr/lib/libpthread.so.0
+#44 0x00007fa8200bc5e3 in clone () from /usr/lib/libc.so.6
+```
+

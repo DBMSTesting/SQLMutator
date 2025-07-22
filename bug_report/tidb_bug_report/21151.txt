@@ -1,0 +1,54 @@
+ID: 21151
+Title: buildIndexMergeReader doesn't refresh for update ts in RC isolation level
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table t (id int primary key, value int, a int not null, b int not null,
+    index ia (a),  index ib (b));
+
+insert into t values (1, 10, 2, 0), (2, 10, 4, 4), (3, 10, 0, 2), (4, 10, 0, 0);
+```
+```
+MySQL [test]> select * from t;
++----+-------+---+---+
+| id | value | a | b |
++----+-------+---+---+
+|  1 |    10 | 2 | 0 |
+|  2 |    10 | 4 | 4 |
+|  3 |    10 | 0 | 2 |
+|  4 |    10 | 0 | 0 |
++----+-------+---+---+
+```
+
+| session 1 | session 2 | comment |
+|-----------|-----------|---------|
+|`set transaction isolation level read committed; begin;`| | |
+|`select /*+ NO_INDEX_MERGE() */ * from t where a > 3 or b > 3;`| | Returns `(2, 10, 4, 4)` |
+|`select /*+ USE_INDEX_MERGE(t, ia, ib) */ * from t where a > 3 or b > 3;`| | Returns `(2, 10, 4, 4)` |
+| | `update t set value = 11 where id = 2;` | |
+|`select /*+ NO_INDEX_MERGE() */ * from t where a > 3 or b > 3;`| | Returns `(2, 11, 4, 4)` |
+|`select /*+ USE_INDEX_MERGE(t, ia, ib) */ * from t where a > 3 or b > 3;`| | Returns `(2, 10, 4, 4)`，latest write become invisible |
+
+### 2. What did you expect to see? (Required)
+
+The last statement above in session 1 should returns `(2, 11, 4, 4)`, because `value = 11` is set by session 2 and session 1 is in a RC transaction.
+
+### 3. What did you see instead (Required)
+
+The last write in session 2 is invisible to the last statement in session 1.
+
+### 4. What is your TiDB version? (Required)
+
+master (f9f44d0a492a85a9200d9ae476eedfd505db5d7e)
+
+
+
+**Note**:
+
+This is caused by not invoking `refreshForUpdateTSForRC` when building IndexMergeReader. It must be invoked when building executors that can access data without nesting other executor.
+We'd better have some mechanism to avoid forgetting invoking it.

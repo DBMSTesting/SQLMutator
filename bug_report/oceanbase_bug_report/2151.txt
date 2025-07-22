@@ -1,0 +1,238 @@
+ID: 2151
+Title: [Bug]: when `UNION` different types, OB behaves differently with MySQL
+Description:
+**Describe the bug**
+when `UNION` different types, OB behaves differently with MySQL
+
+
+**Environment**
+<!-- Environment Details sometimes important -->
+- OS Version and CPU Arch(`uname -a`):
+```
+Linux c0c380f80f1a 6.5.0-44-generic #44~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue Jun 18 14:36:16 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+```
+  
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+```
+observer (OceanBase_CE 4.3.3.0)
+
+REVISION: 1-77368f00e6612c47702fddfb6217f0cf864fb0a8
+BUILD_BRANCH: master
+BUILD_TIME: Sep 18 2024 12:38:51
+BUILD_FLAGS: RelWithDebInfo|Sanity
+BUILD_INFO: 
+
+Copyright (c) 2011-present OceanBase Inc.
+```
+
+**Fast Reproduce Steps(Required)**
+
+```sql
+select 'x' in (select 0);
+select 'x' in (select 0 union select '0');
+select 'x' in (select '0' union select 0);
+```
+
+**Expected behavior**
+same with MySQL:
+```
+mysql> select 'x' in (select 0);
+Field   1:  `'x' in (select 0)`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     1
+Max_length: 1
+Decimals:   0
+Flags:      NOT_NULL BINARY NUM 
+
+
++-------------------+
+| 'x' in (select 0) |
++-------------------+
+|                 1 |
++-------------------+
+1 row in set, 1 warning (0.00 sec)
+
+mysql> select 'x' in (select 0 union select '0');
+Field   1:  `'x' in (select 0 union select '0')`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     21
+Max_length: 1
+Decimals:   0
+Flags:      BINARY NUM 
+
+
++------------------------------------+
+| 'x' in (select 0 union select '0') |
++------------------------------------+
+|                                  1 |
++------------------------------------+
+1 row in set (0.01 sec)
+
+mysql> select 'x' in (select '0' union select 0);
+Field   1:  `'x' in (select '0' union select 0)`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONGLONG
+Collation:  binary (63)
+Length:     21
+Max_length: 1
+Decimals:   0
+Flags:      BINARY NUM 
+
+
++------------------------------------+
+| 'x' in (select '0' union select 0) |
++------------------------------------+
+|                                  1 |
++------------------------------------+
+1 row in set (0.00 sec)
+```
+
+**Actual Behavior**
+```
+mysql> select 'x' in (select 0);
+Field   1:  `'x' in (select 0)`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONG
+Collation:  binary (63)
+Length:     1
+Max_length: 1
+Decimals:   0
+Flags:      NOT_NULL BINARY NUM 
+
+
++-------------------+
+| 'x' in (select 0) |
++-------------------+
+|                 1 |
++-------------------+
+1 row in set (0.01 sec)
+
+mysql> select 'x' in (select 0 union select '0');
+Field   1:  `'x' in (select 0 union select '0')`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONG
+Collation:  binary (63)
+Length:     1
+Max_length: 1
+Decimals:   0
+Flags:      BINARY NUM 
+
+
++------------------------------------+
+| 'x' in (select 0 union select '0') |
++------------------------------------+
+|                                  0 |
++------------------------------------+
+1 row in set (0.01 sec)
+
+mysql> select 'x' in (select '0' union select 0);
+Field   1:  `'x' in (select '0' union select 0)`
+Catalog:    `def`
+Database:   ``
+Table:      ``
+Org_table:  ``
+Type:       LONG
+Collation:  binary (63)
+Length:     1
+Max_length: 1
+Decimals:   0
+Flags:      BINARY NUM 
+
+
++------------------------------------+
+| 'x' in (select '0' union select 0) |
++------------------------------------+
+|                                  0 |
++------------------------------------+
+1 row in set (0.01 sec)
+```
+
+#### tenant config
+```sql
+CREATE RESOURCE UNIT 4c8g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '8G';
+create resource pool pool_test unit='4c8g', unit_num=1, zone_list=('zone1' ,'zone2', 'zone3');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF;
+```
+
+#### deploy config
+```yaml
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.11
+    - name: server2
+      ip: 10.0.10.12
+    - name: server3
+      ip: 10.0.10.13
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+  server2:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer2
+    zone: zone2
+  server3:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer3
+    zone: zone3
+  tag: latest
+  include: obd/observer.include.yaml
+  global: 
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '40G'
+    # diag_syslog_per_error_limit: '4'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+obproxy-ce:
+  servers:
+    - 10.0.10.8
+  global:
+    listen_port: 10004
+    prometheus_listen_port: 10005
+    syslog_level: 'WARN'
+    home_path: /root/data/obproxy
+    root_password: ''
+  include: obd/obproxy.include.yaml
+  depends:
+    - oceanbase-ce
+```
+
+#### about us
+We are the BASS team from the School of Cyber Science and Technology at Beihang University. Our main focus is on system software security, operating systems, and program analysis research, as well as the development of automated program testing frameworks for detecting software defects. Using our self-developed database vulnerability testing tool, we have identified the potential vulnerabilities.

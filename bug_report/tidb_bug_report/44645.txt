@@ -1,0 +1,76 @@
+ID: 44645
+Title: inl_join hint doesn't take effect after changing table order in SQL statement
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+mysql> create table t(id int not null primary key,name varchar(100));
+mysql> create table t2 like t;
+mysql> create table t3 like t;
+mysql> create table t4 like t;
+
+mysql> explain select /*+ inl_join(t1, t2) */ * from (select distinct id, name from t where name<>'test') t1, t2, t3, t4 where t1.id=t2.id and t2.id=t3.id and t3.id=t4.id;
++--------------------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------+
+| id                                   | estRows  | task      | access object | operator info                                                                                                     |
++--------------------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------+
+| Projection_20                        | 13001.30 | root      |               | test.t.id, test.t.name, test.t2.id, test.t2.name, test.t3.id, test.t3.name, test.t4.id, test.t4.name              |
+| └─HashJoin_31                        | 13001.30 | root      |               | inner join, equal:[eq(test.t3.id, test.t4.id)]                                                                    |
+|   ├─TableReader_79(Build)            | 10000.00 | root      |               | data:TableFullScan_78                                                                                             |
+|   │ └─TableFullScan_78               | 10000.00 | cop[tikv] | table:t4      | keep order:false, stats:pseudo                                                                                    |
+|   └─HashJoin_65(Probe)               | 10401.04 | root      |               | inner join, equal:[eq(test.t2.id, test.t3.id)]                                                                    |
+|     ├─IndexJoin_71(Build)            | 8320.83  | root      |               | inner join, inner:TableReader_68, outer key:test.t.id, inner key:test.t2.id, equal cond:eq(test.t.id, test.t2.id) |
+|     │ ├─TableReader_48(Build)        | 6656.67  | root      |               | data:Selection_47                                                                                                 |
+|     │ │ └─Selection_47               | 6656.67  | cop[tikv] |               | ne(test.t.name, "test")                                                                                           |
+|     │ │   └─TableFullScan_46         | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                                                    |
+|     │ └─TableReader_68(Probe)        | 6656.67  | root      |               | data:TableRangeScan_67                                                                                            |
+|     │   └─TableRangeScan_67          | 6656.67  | cop[tikv] | table:t2      | range: decided by [test.t.id], keep order:false, stats:pseudo                                                     |
+|     └─TableReader_77(Probe)          | 10000.00 | root      |               | data:TableFullScan_76                                                                                             |
+|       └─TableFullScan_76             | 10000.00 | cop[tikv] | table:t3      | keep order:false, stats:pseudo                                                                                    |
++--------------------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------------------------------------------+
+13 rows in set (0.00 sec)
+
+mysql> explain select /*+ inl_join(t1, t2) */ * from (select distinct id, name from t where name<>'test') t1, t3, t4, t2 where t1.id=t2.id and t2.id=t3.id and t3.id=t4.id;
++-------------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------+
+| id                                  | estRows  | task      | access object | operator info                                                                                                       |
++-------------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------+
+| Projection_20                       | 13001.30 | root      |               | test.t.id, test.t.name, test.t3.id, test.t3.name, test.t4.id, test.t4.name, test.t2.id, test.t2.name                |
+| └─HashJoin_22                       | 13001.30 | root      |               | inner join, equal:[eq(test.t2.id, test.t.id)]                                                                       |
+|   ├─TableReader_82(Build)           | 6656.67  | root      |               | data:Selection_81                                                                                                   |
+|   │ └─Selection_81                  | 6656.67  | cop[tikv] |               | ne(test.t.name, "test")                                                                                             |
+|   │   └─TableFullScan_80            | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                                                      |
+|   └─IndexJoin_74(Probe)             | 15625.00 | root      |               | inner join, inner:TableReader_71, outer key:test.t3.id, inner key:test.t2.id, equal cond:eq(test.t3.id, test.t2.id) |
+|     ├─MergeJoin_35(Build)           | 12500.00 | root      |               | inner join, left key:test.t3.id, right key:test.t4.id                                                               |
+|     │ ├─TableReader_59(Build)       | 10000.00 | root      |               | data:TableFullScan_58                                                                                               |
+|     │ │ └─TableFullScan_58          | 10000.00 | cop[tikv] | table:t4      | keep order:true, stats:pseudo                                                                                       |
+|     │ └─TableReader_57(Probe)       | 10000.00 | root      |               | data:TableFullScan_56                                                                                               |
+|     │   └─TableFullScan_56          | 10000.00 | cop[tikv] | table:t3      | keep order:true, stats:pseudo                                                                                       |
+|     └─TableReader_71(Probe)         | 12500.00 | root      |               | data:TableRangeScan_70                                                                                              |
+|       └─TableRangeScan_70           | 12500.00 | cop[tikv] | table:t2      | range: decided by [test.t3.id], keep order:false, stats:pseudo                                                      |
++-------------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------+
+13 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+------------------------------------------------------------------------------------+
+| Level   | Code | Message                                                                            |
++---------+------+------------------------------------------------------------------------------------+
+| Warning | 1815 | Optimizer Hint /*+ INL_JOIN(t1, t2) */ or /*+ TIDB_INLJ(t1, t2) */ is inapplicable |
++---------+------+------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+After changing the table order from `t1, t2, t3, t4` to `t1, t3, t4, t2`, the hint `inl_join(t1, t2)` can work.
+
+### 3. What did you see instead (Required)
+
+The warning shows the hint is inapplicable.
+
+### 4. What is your TiDB version? (Required)
+
+master
+

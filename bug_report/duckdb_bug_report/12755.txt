@@ -1,0 +1,87 @@
+ID: 12755
+Title: Swap build side and probe side base on cardinality AND width of build side.
+Description:
+If you have a join between a tall skinny table and a short and wide table table, it is possible that building on the skinny probe results in faster execution.
+
+I have a micro benchmark to test this. There is no timed regression on tpch but the plan cost runner does have a regression. In this case we can ignore it. There is also some speed up in the timed regression test.
+
+plan_cost_runner output shows plans for q09 and q10 changed.
+
+```
+====================================================
+===========     IMPROVEMENTS DETECTED     ==========
+====================================================
+
+Query: q10
+Old total cost: 321773
+Old build cost: 207093
+Old probe cost: 1685938
+New total cost: 321773
+New build cost: 114163
+New probe cost: 1778868
+
+====================================================
+===========     REGRESSIONS DETECTED     ===========
+====================================================
+
+Query: q09
+Old total cost: 734120
+Old build cost: 382749
+Old probe cost: 8353871
+New total cost: 734120
+New build cost: 1563345
+New probe cost: 7173275
+```
+
+If we look at the time for sf=100 (tested locally on my M3 PRO)
+
+q09&q10, on tpch sf=100
+With improvement
+```
+name	run	timing
+benchmark/tpch/sf1/q09.benchmark	1	4.829506
+benchmark/tpch/sf1/q09.benchmark	2	3.734380
+benchmark/tpch/sf1/q09.benchmark	3	3.713738
+benchmark/tpch/sf1/q09.benchmark	4	3.734865
+benchmark/tpch/sf1/q09.benchmark	5	3.680134
+
+benchmark/tpch/sf1/q10.benchmark	1	1.757271
+benchmark/tpch/sf1/q10.benchmark	2	1.767766
+benchmark/tpch/sf1/q10.benchmark	3	1.770326
+benchmark/tpch/sf1/q10.benchmark	4	1.745570
+benchmark/tpch/sf1/q10.benchmark	5	1.753519
+```
+
+without improvement
+```
+name	run	timing
+benchmark/tpch/sf1/q09.benchmark	1	3.994728
+benchmark/tpch/sf1/q09.benchmark	2	3.484799
+benchmark/tpch/sf1/q09.benchmark	3	3.481430
+benchmark/tpch/sf1/q09.benchmark	4	3.462732
+benchmark/tpch/sf1/q09.benchmark	5	3.504314
+
+
+benchmark/tpch/sf1/q10.benchmark	1	2.013824
+benchmark/tpch/sf1/q10.benchmark	2	2.060592
+benchmark/tpch/sf1/q10.benchmark	3	1.998462
+benchmark/tpch/sf1/q10.benchmark	4	2.011148
+benchmark/tpch/sf1/q10.benchmark	5	2.004287
+```
+
+Looks like there is not a huge effect on q9, but q10 has a noticeable improvement.
+
+
+Extra notes. we did not include the size of the pointer table as that does not have a major effect on the size of the build side compared to the width of the build side. The size of the validity mask is also not included since both sides will have the same size validity masks for each row.
+
+The plot below shows a quick test I ran to test my `MAGIC_BUILD_SIDE_SWAP` variable. It tests joining orders at multiple scale factors with lineitem at sf=5. The join order optimizer is always off in this case. Vertically the scale factor for the orders table changes, horizontally the wide of the orders table changes. As the width of the orders table grows, the time it takes to finish the join also grows, the moment it takes longer to build on order than on line item is the moment this swap should take effect. 
+
+To estimate the size of building on orders, Laurens and I used the following function
+
+`card * (sizeof(build_columns) + pointer + validity mask) + (next_power_of_2(card) * 8)`
+
+In the plot below, the build/probe switch should happen at sf=5 & 6 orders columns, sf=6 & 5 orders columns, sf=7 & 4 orders columns, sf=8 & 3 orders columns. 
+
+When analyzing the ration of build size of lineitem vs build size of orders in these cases, the ratio goes from 1.22 (sf=8 & 3 order columns) to  1.5 (sf=6 & 5 order columns). To remain close to the current functionality, we chose a smaller ratio of 1.2. 
+
+[Build-side-probe-side-swap-test.pdf](https://github.com/user-attachments/files/16127232/Build-side-probe-side-swap-test.pdf)

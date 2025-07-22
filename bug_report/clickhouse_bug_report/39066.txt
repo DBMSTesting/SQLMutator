@@ -1,0 +1,86 @@
+ID: 39066
+Title: Use implementation_buffer which is ReadBufferFromS3 without calling setReadUntilPosition in CachedReadBufferFromRemoteFS
+Description:
+> You have to provide the following information whenever possible.
+
+**Describe what's wrong**
+
+Hi, @kssenii, I use object storage data cache and encounter a bug.
+I debug into it, and find out root cause seemingly.
+
+In function CachedReadBufferFromRemoteFS::predownload, if enter the branch:
+
+```
+                bytes_to_predownload = 0;
+                file_segment->complete(FileSegment::State::PARTIALLY_DOWNLOADED_NO_CONTINUATION);
+
+                read_type = ReadType::REMOTE_FS_READ_BYPASS_CACHE;
+
+                swap(*implementation_buffer);
+                working_buffer.resize(0);
+                position() = working_buffer.end();
+
+                implementation_buffer = getRemoteFSReadBuffer(file_segment, read_type);
+
+                swap(*implementation_buffer);
+
+                implementation_buffer->seek(file_offset_of_buffer_end, SEEK_SET);
+
+                LOG_TEST(
+                    log,
+                    "Predownload failed because of space limit. Will read from remote filesystem starting from offset: {}",
+                    file_offset_of_buffer_end);
+
+                break;
+```
+
+Maybe `implementation_buffer` is a new created `ReadBufferFromS3`, so seek it without calling setReadUntilPosition, will lead to buffer exceeds range of `file_segment`
+
+```
+SeekableReadBufferPtr CachedReadBufferFromRemoteFS::getRemoteFSReadBuffer
+
+            if (remote_file_reader && remote_file_reader->getFileOffsetOfBufferEnd() == file_offset_of_buffer_end)
+                return remote_file_reader;
+
+            remote_file_reader = remote_file_reader_creator();
+            return remote_file_reader;
+```
+
+
+> A clear and concise description of what works not as it is supposed to.
+
+**Does it reproduce on recent release?**
+
+[The list of releases](https://github.com/ClickHouse/ClickHouse/blob/master/utils/list-versions/version_date.tsv)
+
+**Enable crash reporting**
+
+> If possible, change "enabled" to true in "send_crash_reports" section in `config.xml`:
+
+```
+<send_crash_reports>
+        <!-- Changing <enabled> to true allows sending crash reports to -->
+        <!-- the ClickHouse core developers team via Sentry https://sentry.io -->
+        <enabled>false</enabled>
+```
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+* Which interface to use, if matters
+* Non-default settings, if any
+* `CREATE TABLE` statements for all tables involved
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+* Queries to run that lead to unexpected result
+
+**Expected behavior**
+
+> A clear and concise description of what you expected to happen.
+
+**Error message and/or stacktrace**
+
+> If applicable, add screenshots to help explain your problem.
+
+**Additional context**
+
+> Add any other context about the problem here.

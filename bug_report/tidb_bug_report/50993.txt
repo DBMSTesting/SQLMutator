@@ -1,0 +1,76 @@
+ID: 50993
+Title: TiDB can insert duplicate key by `insert ingore` statements during modify column
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+modify code:
+
+```
+ var TestReorgGoroutineRunning = make(chan interface{})
+
++var MockDMLExec func()
++
+ // updateCurrentElement update the current element for reorgInfo.
+ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error {
+        failpoint.Inject("mockInfiniteReorgLogic", func(val failpoint.Value) {
+@@ -1146,6 +1148,9 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
+                if err != nil {
+                        return errors.Trace(err)
+                }
++               if MockDMLExec != nil {
++                       MockDMLExec()
++               }
+                err = w.addTableIndex(t, reorgInfo)
+```
+Then tests:
+
+```
+func TestIssueInsertIngore(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomainWithSchemaLease(t, dbTestLease)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (a double, b int, c int, unique key (a));")
+
+	j := 0
+	var cerr error
+	ddl.MockDMLExec = func() {
+		j++
+		logutil.BgLogger().Info("mock dml", zap.Int("j", j))
+		if j == 1 {
+			_, cerr = tk1.Exec("insert ignore into t values (200, 1, 1), (300, 1, 1), (400, 1, 1);")
+		}
+	}
+
+	done := make(chan error, 1)
+	// test transaction on add column.
+	go backgroundExec(store, "alter table t modify column a tinyint;", done)
+	err := <-done
+	require.NoError(t, err)
+	require.NoError(t, cerr)
+	tk.MustExec("admin check table t")
+}
+```
+
+### 2. What did you expect to see? (Required)
+test pass
+### 3. What did you see instead (Required)
+test failed with 
+```
+Received unexpected error:
+        	            	[admin:8223]data inconsistency in table: t, index: a, handle: 1, index-values:"" != record-values:"handle: 1, values: [KindInt64 127]"
+        	            	github.com/pingcap/errors.AddStack
+```
+### 4. What is your TiDB version? (Required)
+v6.5.8
+<!-- Paste the output of SELECT tidb_version() -->
+

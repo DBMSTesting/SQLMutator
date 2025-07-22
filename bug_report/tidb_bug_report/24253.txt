@@ -1,0 +1,102 @@
+ID: 24253
+Title: ddl: reorg panic when altering column type from `int` to `bit`
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+log
+[reorgPanic.txt](https://github.com/pingcap/tidb/files/6369735/reorgPanic.txt)
+
+
+sql
+```
+mysql> show create table t;
++-------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                                                                                                                                   |
++-------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t     | CREATE TABLE `t` (
+  `a` int(11) DEFAULT NULL,
+  `b` varchar(10) DEFAULT NULL,
+  `c` decimal(10,2) DEFAULT NULL,
+  KEY `idx1` (`a`),
+  UNIQUE KEY `idx2` (`a`),
+  KEY `idx3` (`a`,`b`),
+  KEY `idx4` (`a`,`b`,`c`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin |
++-------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+
+alter table t modify a bit(5) not null
+```
+data
+```
+mysql> select * from t;
++------+------+------+
+| a    | b    | c    |
++------+------+------+
+|   19 | 1    | 1.00 |
+|   17 | 2    | 2.00 |
+|   18 | 3    | 3.00 |
+|    4 | 4    | 4.00 |
+|    5 | 5    | 5.00 |
+|    6 | 6    | 6.00 |
+|    7 | 7    | 7.00 |
+|    8 | 8    | 8.00 |
+|    9 | 9    | 9.00 |
++------+------+------+
+9 rows in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+No panic
+
+### 3. What did you see instead (Required)
+(From reorgPanic.txt)
+```
+[2021/04/24 21:46:13.017 +08:00] [ERROR] [misc.go:113] ["panic in the recoverable goroutine"] [label=ddl] [funcInfo=backfillWorker.run] [r={}] [stack="goroutine 104957 [running]:
+github.com/pingcap/tidb/util.GetStack(...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/util/misc.go:74
+github.com/pingcap/tidb/util.Recover(0x35ce628, 0x3, 0x35f2abe, 0x12, 0x0, 0x0)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/util/misc.go:117 +0x2d5
+panic(0x33f81a0, 0xc000353f08)
+	/usr/lib/go/src/runtime/panic.go:965 +0x1b9
+github.com/pingcap/tidb/util/chunk.setMutRowBytes(...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/util/chunk/mutrow.go:328
+github.com/pingcap/tidb/util/chunk.MutRow.SetValue(0xc00f95b220, 0x0, 0x3, 0x3317ae0, 0xc00fac4948)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/util/chunk/mutrow.go:261 +0xa56
+github.com/pingcap/tidb/util/rowDecoder.(*RowDecoder).DecodeAndEvalRowWithMap(0xc00f8eaa00, 0x3ada738, 0xc011094ea0, 0x3ac7f78, 0x51ebc28, 0xc00fb54960, 0x1c, 0x20, 0x4d68e40, 0xc00037bab0, ...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/util/rowDecoder/decoder.go:108 +0x325
+github.com/pingcap/tidb/ddl.(*updateColumnWorker).getRowRecord(0xc0110950e0, 0x3ac7f78, 0x51ebc28, 0xc000353ef0, 0x13, 0x13, 0xc00fb54960, 0x1c, 0x20, 0x8, ...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/column.go:1259 +0xc5
+github.com/pingcap/tidb/ddl.(*updateColumnWorker).fetchRowColVals.func1(0x3ac7f78, 0x51ebc28, 0xc000353ef0, 0x13, 0x13, 0xc00fb54960, 0x1c, 0x20, 0xc02af0ec98, 0x0, ...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/column.go:1238 +0x20d
+github.com/pingcap/tidb/ddl.iterateSnapshotRows(0x3accdb0, 0xc012c60280, 0x0, 0x3acce38, 0xc0184565a0, 0x5e41085e2640001, 0xc0126f0a08, 0x13, 0x18, 0xc0126f0a38, ...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/backfilling.go:700 +0x4b1
+github.com/pingcap/tidb/ddl.(*updateColumnWorker).fetchRowColVals(0xc0110950e0, 0x3ad77e0, 0xc00f8e3fe0, 0x75be, 0xc0126f0a08, 0x13, 0x18, 0xc0126f0a38, 0x13, 0x18, ...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/column.go:1226 +0x20d
+github.com/pingcap/tidb/ddl.(*updateColumnWorker).BackfillDataInTxn.func1(0x3a9c9a8, 0xc000052100, 0x3ad77e0, 0xc00f8e3fe0, 0x0, 0xc00f8e3fb0)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/column.go:1341 +0x13e
+github.com/pingcap/tidb/kv.RunInNewTxn(0x3a9c9a8, 0xc000052100, 0x3accdb0, 0xc012c60280, 0x1, 0xc00fbf3540, 0x3399fa0, 0x107b405)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/kv/txn.go:46 +0x103
+github.com/pingcap/tidb/ddl.(*updateColumnWorker).BackfillDataInTxn(0xc0110950e0, 0x75be, 0xc0126f0a08, 0x13, 0x18, 0xc0126f0a38, 0x13, 0x18, 0x0, 0x0, ...)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/column.go:1336 +0x16f
+github.com/pingcap/tidb/ddl.(*backfillWorker).handleBackfillTask(0xc011095080, 0xc0001a7380, 0xc0199c1bc0, 0x3a78a68, 0xc0110950e0, 0x2)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/backfilling.go:244 +0x1df
+github.com/pingcap/tidb/ddl.(*backfillWorker).run(0xc011095080, 0xc0001a7380, 0x3a78a68, 0xc0110950e0)
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/backfilling.go:312 +0x2d7
+created by github.com/pingcap/tidb/ddl.(*worker).writePhysicalTableRecord
+	/home/arenatlx/go/src/github.com/pingcap/tidb/ddl/backfilling.go:608 +0x8a5
+"]
+[2021/04/24 21:46:13.017 +08:00] [WARN] [backfilling.go:399] ["[ddl] backfill worker handle batch tasks failed"] [elementType=_col_] [elementID=4] [totalAddedCount=0] [startHandle=1] [nextHandle=1] [batchAddedCount=0] [taskFailedError="[ddl:8211]Reorg worker panic"] [takeTime=202.656µs] []
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master
+

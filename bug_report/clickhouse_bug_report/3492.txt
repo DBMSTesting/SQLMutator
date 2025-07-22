@@ -1,0 +1,107 @@
+ID: 3492
+Title: Merge engine tables issues after server restart
+Description:
+Hello,
+
+For quite a lot of time I used an Clickhouse version 1.1.54236 and Merge engine tables.
+After recent update to latest version, for some reason, merge tables stops to work after Clickhouse server ( process ) restart.
+
+To reproduce the issue I use example 2 from https://clickhouse.yandex/docs/en/operations/table_engines/merge/
+
+Initially I do have a n clean server install with no custom databases:
+```
+f5-c7 :) show databases
+SHOW DATABASES
+┌─name────┐
+│ default │
+│ system  │
+└─────────┘
+2 rows in set. Elapsed: 0.002 sec.
+```
+
+Create **merge_test** table with tables form example 2:
+```
+f5-c7 :) create database merge_test
+CREATE DATABASE merge_test
+Ok.
+0 rows in set. Elapsed: 0.003 sec.
+
+f5-c7 :) use merge_test
+USE merge_test
+Ok.
+0 rows in set. Elapsed: 0.004 sec.
+
+f5-c7 :) show tables
+SHOW TABLES
+┌─name─────────┐
+│ WatchLog     │
+│ WatchLog_new │
+│ WatchLog_old │
+└──────────────┘
+3 rows in set. Elapsed: 0.002 sec.
+```
+
+Now I select from merge table and I get the data:
+```f5-c7 :) select * from WatchLog
+SELECT * FROM WatchLog
+┌───────date─┬─UserId─┬─EventType─┬─Cnt─┐
+│ 2018-01-01 │      1 │ hit       │   3 │
+└────────────┴────────┴───────────┴─────┘
+┌───────date─┬─UserId─┬─EventType─┬─Cnt─┐
+│ 2018-01-02 │      2 │ hit       │   3 │
+└────────────┴────────┴───────────┴─────┘
+2 rows in set. Elapsed: 0.014 sec.
+```
+
+Then stop and start back server:
+```
+[root@f5-c7 ~]# systemctl stop clickhouse-server
+[root@f5-c7 ~]# systemctl start clickhouse-server
+[root@f5-c7 ~]# systemctl status clickhouse-server
+● clickhouse-server.service - LSB: Yandex clickhouse-server daemon
+   Loaded: loaded (/etc/rc.d/init.d/clickhouse-server; bad; vendor preset: disabled)
+   Active: active (exited) since Mon 2018-10-29 20:33:03 EET; 9min ago
+     Docs: man:systemd-sysv-generator(8)
+  Process: 15812 ExecStop=/etc/rc.d/init.d/clickhouse-server stop (code=exited, status=0/SUCCESS)
+  Process: 15832 ExecStart=/etc/rc.d/init.d/clickhouse-server start (code=exited, status=0/SUCCESS)
+
+Oct 29 20:33:03 f5-c7 systemd[1]: Starting LSB: Yandex clickhouse-server daemon...
+Oct 29 20:33:03 f5-c7 su[15840]: (to clickhouse) root on none
+Oct 29 20:33:03 f5-c7 su[15842]: (to clickhouse) root on none
+Oct 29 20:33:03 f5-c7 clickhouse-server[15832]: Start clickhouse-server service: Path to data directory in /etc/clickhouse-server/config.xml: /var/lib/clickhouse/
+Oct 29 20:33:03 f5-c7 su[15849]: (to clickhouse) root on none
+Oct 29 20:33:03 f5-c7 su[15852]: (to clickhouse) root on none
+Oct 29 20:33:03 f5-c7 su[15858]: (to clickhouse) root on none
+Oct 29 20:33:03 f5-c7 su[15861]: (to clickhouse) root on none
+Oct 29 20:33:03 f5-c7 clickhouse-server[15832]: DONE
+Oct 29 20:33:03 f5-c7 systemd[1]: Started LSB: Yandex clickhouse-server daemon.
+```
+
+After this, merge table start to return nothing:
+```[root@f5-c7 ~]# clickhouse-client
+ClickHouse client version 18.14.10.
+Connecting to localhost:9000.
+Connected to ClickHouse server version 18.14.10 revision 54409.
+
+f5-c7 :) use merge_test
+USE merge_test
+Ok.
+0 rows in set. Elapsed: 0.001 sec.
+
+f5-c7 :) select * from WatchLog
+SELECT * FROM WatchLog
+Ok.
+0 rows in set. Elapsed: 0.020 sec.
+```
+To "fix" this I have to re-create merge tables.
+
+With some help from peoples in Russian Telegram channel It was found that the issue is cause by function **currentDatabase()**. If I explicitly indicate database name during merge table creation everything works fine and as expected.
+
+It seems that the issue is present also in older versions. I tried almost all version available for CentOS 7 from Altinity repository down to latest from 1.1.X. For sure the issue is not present in 1.1.54236
+Also, If I create the tables in 1.1.54236 version and then update Clickhouse to latest version, without changing or altering tables, everything also works fine.
+
+If this helps:
+OS: CentOS 7 x86_64
+Clickhouse version: 18.14.10
+
+Thank you.

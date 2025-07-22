@@ -1,0 +1,94 @@
+ID: 31532
+Title: query use hashjoin + enum, tidb panic
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+set @@session.tidb_enable_list_partition = ON; 
+drop table if exists t1, t2; 
+create table t1  (c_int int, c_str varchar(40) character set utf8mb4 collate utf8mb4_general_ci, c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6), c_enum enum('blue','green','red','yellow','white','orange','purple'), primary key (c_datetime) , key(c_int)  , key(c_decimal)  ) partition by range (to_days(c_datetime)) ( partition p0 values less than (to_days('2020-02-01')), partition p1 values less than (to_days('2020-04-01')), partition p2 values less than (to_days('2020-06-01')), partition p3 values less than maxvalue);
+create table t2  like t1 ;
+insert into t1 values (2, 'recursing tesla', '2020-02-27 14:04:06', '2020-02-28 13:50:37', 62.488836, 2.609, 'green');
+insert into t2 select * from t1 ;
+update t1 set c_enum='blue';
+select  * from t1, t2 where  t1.c_enum <> t2.c_enum for update;
+begin;
+select  * from t1, t2 where  t1.c_enum <> t2.c_enum for update;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> select  /*+ HASH_JOIN(t1, t2) */ * from t1, t2 where  t1.c_enum <> t2.c_enum for update;        
++-------+-----------------+---------------------+---------------------+-----------+-----------+--------+-------+-----------------+---------------------+---------------------+-----------+-----------+--------+
+| c_int | c_str           | c_datetime          | c_timestamp         | c_double  | c_decimal | c_enum | c_int | c_str           | c_datetime          | c_timestamp         | c_double  | c_decimal | c_enum |
++-------+-----------------+---------------------+---------------------+-----------+-----------+--------+-------+-----------------+---------------------+---------------------+-----------+-----------+--------+
+|     2 | recursing tesla | 2020-02-27 14:04:06 | 2020-02-28 13:50:37 | 62.488836 |  2.609000 | blue   |     2 | recursing tesla | 2020-02-27 14:04:06 | 2020-02-28 13:50:37 | 62.488836 |  2.609000 | green  |
++-------+-----------------+---------------------+---------------------+-----------+-----------+--------+-------+-----------------+---------------------+---------------------+-----------+-----------+--------+
+1 row in set (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> begin;
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> select  * from t1, t2 where  t1.c_int <> t2.c_int for update;
+ERROR 1105 (HY000): runtime error: index out of range [8] with length 8
+
+mysql> explain select  * from t1, t2 where  t1.c_int <> t2.c_int for update;
++--------------------------------------+--------------+-----------+------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                   | estRows      | task      | access object          | operator info                                                                                                                                                                                                                                          |
++--------------------------------------+--------------+-----------+------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_20                        | 898260781.06 | root      |                        | test.t1.c_int, test.t1.c_str, test.t1.c_datetime, test.t1.c_timestamp, test.t1.c_double, test.t1.c_decimal, test.t1.c_enum, test.t2.c_int, test.t2.c_str, test.t2.c_datetime, test.t2.c_timestamp, test.t2.c_double, test.t2.c_decimal, test.t2.c_enum |
+| └─SelectLock_21                      | 898260781.06 | root      |                        | for update 0                                                                                                                                                                                                                                           |
+|   └─HashJoin_22                      | 898260781.06 | root      |                        | CARTESIAN inner join, other cond:ne(test.t1.c_int, test.t2.c_int)                                                                                                                                                                                      |
+|     ├─PartitionUnion_49(Build)       | 29971.00     | root      |                        |                                                                                                                                                                                                                                                        |
+|     │ ├─TableReader_52               | 9990.00      | root      |                        | data:Selection_51                                                                                                                                                                                                                                      |
+|     │ │ └─Selection_51               | 9990.00      | cop[tikv] |                        | not(isnull(test.t2.c_int))                                                                                                                                                                                                                             |
+|     │ │   └─TableFullScan_50         | 10000.00     | cop[tikv] | table:t2, partition:p0 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|     │ ├─TableReader_58               | 1.00         | root      |                        | data:Selection_57                                                                                                                                                                                                                                      |
+|     │ │ └─Selection_57               | 1.00         | cop[tikv] |                        | not(isnull(test.t2.c_int))                                                                                                                                                                                                                             |
+|     │ │   └─TableFullScan_56         | 1.00         | cop[tikv] | table:t2, partition:p1 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|     │ ├─TableReader_64               | 9990.00      | root      |                        | data:Selection_63                                                                                                                                                                                                                                      |
+|     │ │ └─Selection_63               | 9990.00      | cop[tikv] |                        | not(isnull(test.t2.c_int))                                                                                                                                                                                                                             |
+|     │ │   └─TableFullScan_62         | 10000.00     | cop[tikv] | table:t2, partition:p2 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|     │ └─TableReader_70               | 9990.00      | root      |                        | data:Selection_69                                                                                                                                                                                                                                      |
+|     │   └─Selection_69               | 9990.00      | cop[tikv] |                        | not(isnull(test.t2.c_int))                                                                                                                                                                                                                             |
+|     │     └─TableFullScan_68         | 10000.00     | cop[tikv] | table:t2, partition:p3 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|     └─PartitionUnion_24(Probe)       | 29971.00     | root      |                        |                                                                                                                                                                                                                                                        |
+|       ├─TableReader_27               | 9990.00      | root      |                        | data:Selection_26                                                                                                                                                                                                                                      |
+|       │ └─Selection_26               | 9990.00      | cop[tikv] |                        | not(isnull(test.t1.c_int))                                                                                                                                                                                                                             |
+|       │   └─TableFullScan_25         | 10000.00     | cop[tikv] | table:t1, partition:p0 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|       ├─TableReader_33               | 1.00         | root      |                        | data:Selection_32                                                                                                                                                                                                                                      |
+|       │ └─Selection_32               | 1.00         | cop[tikv] |                        | not(isnull(test.t1.c_int))                                                                                                                                                                                                                             |
+|       │   └─TableFullScan_31         | 1.00         | cop[tikv] | table:t1, partition:p1 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|       ├─TableReader_39               | 9990.00      | root      |                        | data:Selection_38                                                                                                                                                                                                                                      |
+|       │ └─Selection_38               | 9990.00      | cop[tikv] |                        | not(isnull(test.t1.c_int))                                                                                                                                                                                                                             |
+|       │   └─TableFullScan_37         | 10000.00     | cop[tikv] | table:t1, partition:p2 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
+|       └─TableReader_45               | 9990.00      | root      |                        | data:Selection_44                                                                                                                                                                                                                                      |
+|         └─Selection_44               | 9990.00      | cop[tikv] |                        | not(isnull(test.t1.c_int))                                                                                                                                                                                                                             |
+|           └─TableFullScan_43         | 10000.00     | cop[tikv] | table:t1, partition:p3 | keep order:false, stats:pseudo                                                                                                                                                                                                                         |
++--------------------------------------+--------------+-----------+------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+29 rows in set (0.01 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.0.0-nightly
+Edition: Community
+Git Commit Hash: 6416f8d601472892d245b950dfd5547e857a1a33
+Git Branch: heads/refs/tags/v5.0.0-nightly
+UTC Build Time: 2022-01-10 05:41:28
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

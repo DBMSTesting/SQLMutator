@@ -1,0 +1,104 @@
+ID: 17491
+Title: constant is not changed in filter when plan cache is hit
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Create a [`BATCH_JOB_EXECUTION`](https://docs.spring.io/spring-batch/docs/current/reference/html/schema-appendix.html#metaDataBatchJobExecution)table and insert two records:
+
+```sql
+DROP TABLE IF EXISTS BATCH_JOB_EXECUTION;
+
+CREATE TABLE BATCH_JOB_EXECUTION  (
+  JOB_EXECUTION_ID BIGINT PRIMARY KEY ,
+  VERSION BIGINT,
+  JOB_INSTANCE_ID BIGINT NOT NULL,
+  CREATE_TIME TIMESTAMP NOT NULL,
+  START_TIME TIMESTAMP DEFAULT NULL,
+  END_TIME TIMESTAMP DEFAULT NULL,
+  STATUS VARCHAR(10),
+  EXIT_CODE VARCHAR(20),
+  EXIT_MESSAGE VARCHAR(2500),
+  LAST_UPDATED TIMESTAMP,
+  JOB_CONFIGURATION_LOCATION VARCHAR(2500) NULL,
+  constraint JOB_INSTANCE_EXECUTION_FK foreign key (JOB_INSTANCE_ID)
+  references BATCH_JOB_INSTANCE(JOB_INSTANCE_ID)
+);
+INSERT INTO BATCH_JOB_EXECUTION VALUES(69, 1, 0, now(), now(), now(), '', '', '', now(), '');
+INSERT INTO BATCH_JOB_EXECUTION VALUES(70, 1, 0, now(), now(), now(), '', '', '', now(), '');
+```
+
+Prepare an `update` statement:
+
+```sql
+prepare stmt from 'UPDATE BATCH_JOB_EXECUTION set START_TIME = ?, END_TIME = ?,  STATUS = ?, EXIT_CODE = ?, EXIT_MESSAGE = ?, VERSION = ?, CREATE_TIME = ?, LAST_UPDATED = ? where JOB_EXECUTION_ID = ? and VERSION = ?';
+```
+
+Set the variables for executing:
+
+```sql
+set @START_TIME = '2020-05-20 11:29:05.274000';
+set @END_TIME = '2020-05-20 11:29:05.274000';
+set @STATUS = 'STARTED';
+set @EXIT_CODE = 'UNKNOWN';
+set @EXIT_MESSAGE = '';
+set @CREATE_TIME = '2020-05-20 11:29:05.240000';
+set @LAST_UPDATED = '2020-05-20 11:29:05.275000';
+set @OLD_VERSION = '1';
+set @NEW_VERSION = '0';
+```
+
+Executes the statement with different `JOB_EXECUTION_ID` in different explicit transactions:
+
+```sql
+SET @JOB_EXECUTION_ID = '69';
+BEGIN;
+EXECUTE stmt USING @START_TIME, @END_TIME, @STATUS, @EXIT_CODE, @EXIT_MESSAGE, @NEW_VERSION, @CREATE_TIME, @LAST_UPDATED, @JOB_EXECUTION_ID, @OLD_VERSION;
+-- select @@last_plan_from_cache;
+EXPLAIN FOR CONNECTION 1;
+ROLLBACK;
+
+SET @JOB_EXECUTION_ID = '70';
+BEGIN;
+EXECUTE stmt USING @START_TIME, @END_TIME, @STATUS, @EXIT_CODE, @EXIT_MESSAGE, @NEW_VERSION, @CREATE_TIME, @LAST_UPDATED, @JOB_EXECUTION_ID, @OLD_VERSION;
+-- select @@last_plan_from_cache;
+EXPLAIN FOR CONNECTION 1;
+ROLLBACK;
+```
+
+- You can use `select @@last_plan_from_cache` to check that the first update statement can not utilize plan cache, while the second one can.
+- connection id `1` should be modified to the current connection id which connected to a TiDB server. You can obverse this info by `select connection_id()`.
+
+**You can see the full step in [plan-cache.txt](https://github.com/pingcap/tidb/files/4695541/plan-cache.txt), and execute `source plan-cache.txt` to reproduce the problem.**
+
+
+### 2. What did you expect to see? (Required)
+
+the constant `69` in `Selection_7` should be changed to `70`.
+
+### 3. What did you see instead (Required)
+
+The execution plan for the second one is incorrect:
+
+```sql
++---------------------------+----------+-----------+---------------------------+--------------------------------------------------------------------------------------------------------+
+| id                        | estRows  | task      | access object             | operator info                                                                                          |
++---------------------------+----------+-----------+---------------------------+--------------------------------------------------------------------------------------------------------+
+| Update_4                  | N/A      | root      |                           | N/A                                                                                                    |
+| └─TableReader_8           | 8000.00  | root      |                           | data:Selection_7                                                                                       |
+|   └─Selection_7           | 8000.00  | cop[tikv] |                           | eq(cast(test.batch_job_execution.job_execution_id), 69), eq(cast(test.batch_job_execution.version), 1) |
+|     └─TableFullScan_6     | 10000.00 | cop[tikv] | table:BATCH_JOB_EXECUTION | keep order:false, stats:pseudo                                                                         |
++---------------------------+----------+-----------+---------------------------+--------------------------------------------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+```
+
+### 4. Affected version (Required)
+
+v4.0.0 GA release.
+
+### 5. Root Cause Analysis
+
+> should be filled by the investigator before it's closed 

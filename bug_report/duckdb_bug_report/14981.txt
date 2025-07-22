@@ -1,0 +1,48 @@
+ID: 14981
+Title: Serialization compatibility version to be encoded in the Database file
+Description:
+This PR change the `serialization_compatibility_version` from being a setting set on every session to be written on creation in the database file (and so persisted across versions).
+
+Basic example, works both in older and newer DuckDB versions:
+```sql
+ATTACH 'file1.db';
+  --- write something, to be serialized targeting version v0.10.0
+SET serialization_compatibility_version = 'v1.0.0';
+ATTACH 'file2.db';
+  --- write something, to be serialized targeting v1.0.0
+```
+But in older DuckDB versions the setting influenced how the file is written right now, with this PR this is persisted, example:
+```
+DETACH file2;
+ATTACH 'file2.db';
+  --- write something, to be serialized targeting v1.0.0 after this PR, v0.10.0 before this PR
+```
+
+There is also an ATTACH option:
+```sql
+ATTACH 'file3.db' (COMPATIBILITY_VERSION 'v1.1.0');
+   --- file will target COMPATIBILITY_VERSION v1.1.0
+```
+
+Note that for a given DuckDB database file, compatibility_version is a property of the file itself that is only set on initialisation.
+
+This PR should allow to convert database files, like:
+```sql
+ATTACH 'file_from_the_future.db'; --- assume there are some newer compression methods in this file
+ATTACH 'compatible_file.db' (COMPATIBILITY_VERSION 'v1.0.0');
+COPY DATABASE FROM file_from_the_future TO compatible_file;
+```
+
+Where `file_from_the_future.db` might support better encoding, `compatible_file.db` will contain the same actual logical content but encoded differently.
+
+### Implementation details
+* Serializer, and class derived from it, needs to initialize explicitly what's the target serialization they need to support. This is cumbersome, and might break extensions relying on old API, but I think it's better to require explicit serialization target
+* The more relevant changes are:
+   - in [src/storage/single_file_block_manager.cpp](https://github.com/duckdb/duckdb/compare/main...carlopi:duckdb:serialization_compatibility_to_db_option?expand=1#diff-2394eca9e55d311346da3ca2aa50864c3112279aa4b66f67145e55514a68d0a9) where there is the logic to read and write versions to the DuckDB database file
+   - in [src/storage/storage_manager.cpp](https://github.com/duckdb/duckdb/compare/main...carlopi:duckdb:serialization_compatibility_to_db_option?expand=1#diff-e7011d3b462dceef33c2e4ac4cade5f4e69cabdd18eb3dc3c89b61d059deb9a3) where there is the logic that decides what compatibility_version to use, that is `latest` when in memory, the one from the DB file when opening an existing file, or the one either from the AttachOption or the setting when creating a new file
+
+### Follow up:
+* expose this to SQL, possibly by adding a tag so that it can be queried via `duckdb_databases()` 
+* add switch on `compatibility_version` on whether to serialize ZSTD segments or other changes
+* adding more tests
+* adding more testing across DuckDB versions

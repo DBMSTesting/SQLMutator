@@ -1,0 +1,51 @@
+ID: 58279
+Title: ttlManager of transaction may not work when the first statement retries in fair locking mode
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t (id int primary key, v int);
+/* init */ insert into t values (1, 1);
+
+/* t2 */ begin;
+/* t2 */ update t set v = v + 1 where id = 1;
+
+/* t1 */ begin;
+/* t1 */ update t set v = v + 1 where id = 1;
+
+/* t2 */ commit;
+
+/* t1 */ select sleep(30);
+/* t1 */ rollback;
+
+```
+
+### 2. What did you expect to see? (Required)
+
+See the logs in TiDB. It's expected to see the logs about sending transaction heartbeats:
+
+```
+[2024/12/16 11:59:11.106 +08:00] [INFO] [2pc.go:1241] ["send TxnHeartBeat"] [startTS=454641983437930512] [newTTL=40000] [isPipelinedTxn=false]
+```
+
+### 3. What did you see instead (Required)
+
+The logs about heartbeating is not shown.
+
+In production, this may cause the transaction to be unexpectedly rolled back by other transactions, making the current transaction fail when committing.
+
+The reason is:
+
+* When the first statement is retried in fair locking mode, TiDB calls `RetryAggressiveLocking` which internally resets the ttlManager, as the primary may change after retrying.
+* When retrying a statement in fair locking mode, it skips acquiring the lock if it's already locked in the previous attempt, and the primary actually didn't change
+* The code to start the ttlManager is executed when sending the pessimistic lock requests. If the step to acquiring the pessimistic lock is skipped, it will never start the ttlManager again.
+
+### 4. What is your TiDB version? (Required)
+
+The problem is found on v8.1.0, but should exist for all versions with fair locking.
+

@@ -1,0 +1,57 @@
+ID: 67549
+Title: `ProtobufSingle` format doesn't complain when writing multiple messages to Kafka, but it cannot read it
+Description:
+**Describe what's wrong**
+
+When using `ProtobufSingle` as a format for a Kafka table, then multiple rows can be written to a single message. `ProtobufSingle` format [should](https://github.com/ClickHouse/ClickHouse/blob/3332faa014f1a4486642212e391b2a5e0928541f/src/Processors/Formats/Impl/ProtobufRowOutputFormat.cpp#L43-L45) complain about this, but it doesn't. Probably the root cause of the issue [here](https://github.com/ClickHouse/ClickHouse/blob/601c9d9694af8542d977636cb3bc8cc8d141d570/src/Storages/MessageQueueSink.cpp#L32). However just removing that setting makes it impossible to use `ProtobufSingle` with Kafka even when `kafka_max_rows_per_message` is set to `1`.
+
+The above linked setting, `allow_multiple_rows_without_delimiter` is probably a remnant of [legacy behavior](https://github.com/ClickHouse/ClickHouse/blob/08ecf6c6642f7fba6f5503f5121c832b982de945/src/Formats/FormatSettings.h#L317-L323) when streaming engines were using callbacks to write messages.
+
+**Does it reproduce on the most recent release?**
+
+Yes.
+
+**How to reproduce**
+
+Proto file:
+```proto
+syntax = "proto3";
+
+message StringKeyValuePair {
+  string key = 1;
+  string value = 2;
+}
+```
+
+Queries:
+```sql
+DROP TABLE IF EXISTS kafka_writer;
+DROP TABLE IF EXISTS kafka;
+DROP TABLE IF EXISTS view;
+
+CREATE TABLE kafka_writer (key String, value String)
+                ENGINE = Kafka
+                SETTINGS kafka_broker_list = 'localhost:19092',
+                        kafka_topic_list = 'tmp_test',
+                        kafka_group_name = 'group',
+                        kafka_format = 'ProtobufSingle',
+                        kafka_schema = 'string_key_value.proto:StringKeyValuePair',
+                        kafka_max_rows_per_message = 3;
+
+CREATE TABLE kafka (key String, value String)
+                ENGINE = Kafka
+                SETTINGS kafka_broker_list = 'localhost:19092',
+                        kafka_topic_list = 'tmp_test',
+                        kafka_group_name = 'reader',
+                        kafka_format = 'ProtobufSingle',
+                        kafka_schema = 'string_key_value.proto:StringKeyValuePair';
+
+CREATE MATERIALIZED VIEW view Engine=MergeTree() ORDER BY key AS
+SELECT key, value FROM kafka;
+
+INSERT INTO kafka_writer VALUES ('a', 'b'), ('aa','bb'), ('aaa','bbb');
+```
+
+**Expected behavior**
+
+It only allows to write a single message and can parse the written message.

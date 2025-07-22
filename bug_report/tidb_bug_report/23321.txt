@@ -1,0 +1,52 @@
+ID: 23321
+Title: ddl: rollingback add index meets panic will lead json unmarshal object error
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+https://internal.pingcap.net/idc-jenkins/blue/organizations/jenkins/tidb_ghpr_check/detail/tidb_ghpr_check/75909/pipeline/
+
+On every occasional way, when I cherry-pick the pr to release-4.0, I meet a very strange test failure with message info like 
+```
+[2021-03-15T07:13:17.203Z] db_integration_test.go:1308:
+[2021-03-15T07:13:17.203Z]     s.tk.MustGetErrCode(sql, errno.ErrDupEntry)
+[2021-03-15T07:13:17.203Z] /home/jenkins/agent/workspace/tidb_ghpr_check/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:300:
+[2021-03-15T07:13:17.203Z]     tk.c.Assert(int(sqlErr.Code), check.Equals, errCode, check.Commentf("Assertion failed, origin err:\n  %v", sqlErr))
+[2021-03-15T07:13:17.203Z] ... obtained int = 1105
+[2021-03-15T07:13:17.203Z] ... expected int = 1062
+[2021-03-15T07:13:17.203Z] ... Assertion failed, origin err:
+[2021-03-15T07:13:17.203Z]   ERROR 1105 (HY000): json: cannot unmarshal object into Go value of type bool
+``` 
+At the first beginning, I thought it has nothing to do with my PR. After several hours of investigating it, I found it is a quite rare test case triggered by my global failpoint panic in the DDL's drop index logic, which should only be used in the serialTestSuite but I forgot.
+
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+**Anyway, thanks to the misused failpoint, we found a very wired DDL problem, caused by two different canceling DDL entrances.**
+
+Here is the error's triggering logic.
+
+1: when add-index meets error in reorg state (which could be [kv:1062]Duplicate entry )
+
+2: since this error could **NOT** be ignored, we convert this add-index to a rollingback job (which will rewrite the `job.args` and `schema-state` for drop-index logic, and set the `job.state` as `JobStateRollingback` )
+
+3: In the next DDL round, the add-index job with `JobStateRollingback` state will walk through the rollingback logic in `onCreateIndex` function, which will step into `onDropIndex`.
+
+4: If there is panic in the drop-index logic, this ddl job will be pulled up and set the `job.state` as canceling (but its `job.args` has already been rewritten for rollingback logic)
+
+5: in the next DDL round, this half-way rollingback job will be recognized as a brand-new canceling job again, which will step into unified canceling entrance `convertJob2RollbackJob` and it will take it for granted that it's args is what it used to be, because it's job.Type is add-index. The decoding error is finally stored as a job error here.
+
+
+### 2. What did you expect to see? (Required)
+A job that has been pulled up from a panic should be handled correctly. Maybe we should unify the canceling entrance.
+
+### 3. What did you see instead (Required)
+A very strange decoding error for DDL failure and the remained index hasn't been cleaned either, which is hard to locate and reproduced. 
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master, 4.0...
+

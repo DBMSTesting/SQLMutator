@@ -1,0 +1,89 @@
+ID: 5243
+Title: sub SELECT not working in MV for use with Kafka Engine?
+Description:
+**Describe the bug**
+I followed the [ClickHouse Kafka document](https://clickhouse.yandex/docs/en/operations/table_engines/kafka/) to make sure my Kafka + ClickHouse works  together as intended.   Then modified the SELECT statement in MV to use sub SELECT.   The regular table `daily` doesn't get populated.  It remained empty.  I believe MV should accept any valid queries.
+
+**How to reproduce**
+* Which ClickHouse server version to use - 19.5.3.8
+* Which interface to use, if matters - Kafka Engine
+* `CREATE TABLE` statements for all tables involved
+```
+CREATE TABLE queue (
+    timestamp UInt64,
+    level String,
+    message String
+  ) ENGINE = Kafka('localhost:9092', 'topic', 'group1', 'JSONEachRow');
+
+  CREATE TABLE daily (
+    day Date,
+    level String,
+    total UInt64
+  ) ENGINE = SummingMergeTree(day, (day, level), 8192);
+
+CREATE MATERIALIZED VIEW consumer TO daily AS
+SELECT
+    day,
+    level,
+    count() AS total
+FROM
+(
+    SELECT
+        toDate(toDateTime(timestamp)) AS day,
+        level
+    FROM queue
+)
+GROUP BY
+    day,
+    level
+```
+
+The original CREATE TABLE statement from the document is
+```
+ CREATE MATERIALIZED VIEW consumer TO daily
+    AS SELECT toDate(toDateTime(timestamp)) AS day, level, count() as total
+    FROM queue GROUP BY day, level;
+```
+
+* Queries to run that lead to unexpected result
+Open a terminal and publish test data to Kafka.
+```
+while true; do (date; echo "{\"timestamp\": $(date +%s), \"level\": \"INFO\", \"message\": \"hello\"}" | kafka-console-producer --broker-list localhost:9092 --topic topic); done
+```
+Then run query.
+```
+SELECT level, sum(total) FROM daily GROUP BY level;
+```
+**Expected behavior**
+It should return a row where sum(total) is a positive number.
+
+**Error message and/or stacktrace**
+
+```
+2019.05.11 06:05:27.367722 [ 36 ] {} <Error> void DB::StorageKafka::streamThread(): Code: 393, e.displayText() = DB::Exception: There is no query: while pushing to view default.consumer, Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x73fd046]
+1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x22) [0x377e942]
+2. /usr/bin/clickhouse-server(DB::Context::getSampleBlockCache[abi:cxx11]() const+0x79) [0x68599d9]
+3. /usr/bin/clickhouse-server(DB::InterpreterSelectWithUnionQuery::getSampleBlock(std::shared_ptr<DB::IAST> const&, DB::Context const&)+0x3b) [0x68c16cb]
+4. /usr/bin/clickhouse-server(DB::getNamesAndTypeListFromTableExpression(DB::ASTTableExpression const&, DB::Context const&)+0x74) [0x6e3f3e4]
+5. /usr/bin/clickhouse-server(DB::getDatabaseAndTablesWithColumnNames[abi:cxx11](DB::ASTSelectQuery const&, DB::Context const&)+0x10e) [0x6e50c0e]
+6. /usr/bin/clickhouse-server(DB::SyntaxAnalyzer::analyze(std::shared_ptr<DB::IAST>&, DB::NamesAndTypesList const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, std::shared_ptr<DB::IStorage>) const+0xb21) [0x6998511]
+7. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, std::shared_ptr<DB::IBlockInputStream> const&, std::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&)+0x55f) [0x68b409f]
+8. /usr/bin/clickhouse-server(DB::InterpreterSelectQuery::InterpreterSelectQuery(std::shared_ptr<DB::IAST> const&, DB::Context const&, std::shared_ptr<DB::IBlockInputStream> const&, DB::SelectQueryOptions const&)+0x65) [0x68b5045]
+9. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::process(DB::Block const&, unsigned long)+0x51a) [0x6d4f9ca]
+10. /usr/bin/clickhouse-server(DB::PushingToViewsBlockOutputStream::write(DB::Block const&)+0x5fa) [0x6d5056a]
+11. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::finalize()+0x13e) [0x6d591be]
+12. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::writeSuffix()+0x11) [0x6d593e1]
+13. /usr/bin/clickhouse-server(DB::copyData(DB::IBlockInputStream&, DB::IBlockOutputStream&, std::atomic<bool>*)+0x6af) [0x679812f]
+14. /usr/bin/clickhouse-server(DB::StorageKafka::streamToViews()+0x5cd) [0x73d652d]
+15. /usr/bin/clickhouse-server(DB::StorageKafka::streamThread()+0x1ba) [0x73d6afa]
+16. /usr/bin/clickhouse-server(DB::BackgroundSchedulePool::TaskInfo::execute()+0xfa) [0x6ce7fea]
+17. /usr/bin/clickhouse-server(DB::BackgroundSchedulePool::threadFunction()+0x6a) [0x6ce86ba]
+18. /usr/bin/clickhouse-server() [0x6ce8739]
+19. /usr/bin/clickhouse-server(ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>)+0x1ab) [0x7402fdb]
+20. /usr/bin/clickhouse-server() [0xb27522f]
+21. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7f9d221136db]
+22. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7f9d2169288f]
+ (version 19.5.3.8 (official build))
+```

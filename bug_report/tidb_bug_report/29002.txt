@@ -1,0 +1,75 @@
+ID: 29002
+Title: tidb-lightning reports "schema not found" when it cannot connect to tidb-server status report
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+tidb-lightning has different strategies for getting schema information depending on the backend chosen (maybe that should be its own bug!).
+
+If you choose the "tidb" backend, tidb-lightning connects to the MySQL-protocol port and executes SQL statements to get schema information.
+
+If you choose the "local" or "importer" backend, tidb-lightning connects to the HTTP status port of tidb-server and consults the /schema endpoint to get schema information.
+
+Many deployments that use a load balancer for tidb-server nodes/pods may only expose/export port 4000, the MySQL-protocol port that is typically used by client applications.
+
+If tidb-lightning uses the "tidb" backend and is invoked with --tidb-host set to the address of a load balancer that only exposes the MySQL-protocol port, and --tidb-port points to the port exported by the load balancer, tidb-lightning will be able to get schema information.
+
+If tidb-lightning uses the "local" or "importer" backend and is invokved with --tidb-host set to the address of a load balancer that only exposes the MySQL-protocol port, it will *ignore* the --tidb-port setting and use the value of the --tidb-status setting (default 10080) to get schema information from the HTTP API.
+
+Here's the problem:
+
+If tidb-lightning cannot connect to the --tidb-status on --tidb-host, it gives a "schema not found" error instead of reporting "connection refused".
+
+### 2. What did you expect to see? (Required)
+
+```
+$ curl 127.0.0.1:10080/schema/test
+curl: (7) Failed to connect to 127.0.0.1 port 10080: Connection refused
+```
+
+### 3. What did you see instead (Required)
+
+```
+Starting component `tidb-lightning`: /home/ubuntu/.tiup/components/tidb-lightning/v5.2.1/tidb-lightning --tidb-host 127.0.0.1 --tidb-port 4000 --tidb-user root --backend local -d ./data/ --no-schema --config tidb-lightning.toml --pd-urls 10.0.113.210:2379 --check-requirements=false
+Verbose debug logs will be written to /tmp/lightning.log.2021-10-21T03.35.15Z
+
+Error: table `test`.`t1` schema not found
+tidb lightning encountered error:  table `test`.`t1` schema not found
+```
+
+```
+$ cat /tmp/lightning.log.2021-10-21T03.35.15Z
+[2021/10/21 03:35:15.942 +00:00] [INFO] [config.go:710] ["adjust scan concurrency success"] [DistSQLScanConcurrency=15]
+[2021/10/21 03:35:15.942 +00:00] [INFO] [info.go:49] ["Welcome to TiDB-Lightning"] [release-version=v5.2.1] [git-hash=cd8fb24c5f7ebd9d479ed228bb41848bd5e97445] [git-branch=heads/refs/tags/v5.2.1] [go-version=go1.16.4] [utc-build-time="2021-09-07 16:19:29"] [race-enabled=false]
+[2021/10/21 03:35:15.942 +00:00] [INFO] [lightning.go:217] [cfg] [cfg="{\"id\":1634787315942503462,\"lightning\":{\"table-concurrency\":6,\"index-concurrency\":2,\"region-concurrency\":16,\"io-concurrency\":5,\"check-requirements\":false,\"meta-schema-name\":\"lightning_metadata\"},\"tidb\":{\"host\":\"127.0.0.1\",\"port\":4000,\"user\":\"root\",\"status-port\":10080,\"pd-addr\":\"10.0.113.210:2379\",\"sql-mode\":\"ONLY_FULL_GROUP_BY,NO_AUTO_CREATE_USER\",\"tls\":\"false\",\"security\":{\"ca-path\":\"\",\"cert-path\":\"\",\"key-path\":\"\",\"redact-info-log\":false},\"max-allowed-packet\":67108864,\"distsql-scan-concurrency\":15,\"build-stats-concurrency\":20,\"index-serial-scan-concurrency\":20,\"checksum-table-concurrency\":2},\"checkpoint\":{\"schema\":\"tidb_lightning_checkpoint\",\"driver\":\"file\",\"enable\":true,\"keep-after-success\":false},\"mydumper\":{\"read-block-size\":65536,\"batch-size\":0,\"batch-import-ratio\":0,\"data-source-dir\":\"file:///home/ubuntu/data\",\"character-set\":\"auto\",\"csv\":{\"separator\":\",\",\"delimiter\":\"\\\"\",\"terminator\":\"\",\"null\":\"\\\\N\",\"header\":false,\"trim-last-separator\":false,\"not-null\":false,\"backslash-escape\":true},\"max-region-size\":268435456,\"filter\":[\"*.*\",\"!mysql.*\",\"!sys.*\",\"!INFORMATION_SCHEMA.*\",\"!PERFORMANCE_SCHEMA.*\",\"!METRICS_SCHEMA.*\",\"!INSPECTION_SCHEMA.*\"],\"files\":null,\"no-schema\":true,\"case-sensitive\":false,\"strict-format\":false,\"default-file-rules\":true,\"ignore-data-columns\":null},\"tikv-importer\":{\"addr\":\"\",\"backend\":\"local\",\"on-duplicate\":\"replace\",\"max-kv-pairs\":4096,\"send-kv-pairs\":32768,\"region-split-size\":100663296,\"sorted-kv-dir\":\"/tmp/tikv-sorted-kv-dir\",\"disk-quota\":9223372036854775807,\"range-concurrency\":16,\"duplicate-detection\":false,\"engine-mem-cache-size\":536870912,\"local-writer-mem-cache-size\":134217728},\"post-restore\":{\"checksum\":\"required\",\"analyze\":\"optional\",\"level-1-compact\":false,\"post-process-at-last\":true,\"compact\":false},\"cron\":{\"switch-mode\":\"5m0s\",\"log-progress\":\"5m0s\",\"check-disk-quota\":\"1m0s\"},\"routes\":null,\"security\":{\"ca-path\":\"\",\"cert-path\":\"\",\"key-path\":\"\",\"redact-info-log\":false},\"black-white-list\":{\"do-tables\":null,\"do-dbs\":null,\"ignore-tables\":null,\"ignore-dbs\":null}}"]
+[2021/10/21 03:35:15.946 +00:00] [INFO] [lightning.go:280] ["load data source start"]
+[2021/10/21 03:35:15.949 +00:00] [INFO] [lightning.go:283] ["load data source completed"] [takeTime=3.17154ms] []
+[2021/10/21 03:35:15.955 +00:00] [INFO] [local.go:1003] ["multi ingest support"]
+[2021/10/21 03:35:15.955 +00:00] [INFO] [restore.go:401] ["the whole procedure start"]
+[2021/10/21 03:35:15.957 +00:00] [INFO] [restore.go:705] ["restore all schema start"]
+[2021/10/21 03:35:15.958 +00:00] [ERROR] [restore.go:724] ["restore all schema failed"] [takeTime=820.338µs] [error="table `test`.`t1` schema not found"]
+[2021/10/21 03:35:15.958 +00:00] [ERROR] [restore.go:420] ["run failed"] [step=1] [error="table `test`.`t1` schema not found"]
+[2021/10/21 03:35:15.958 +00:00] [ERROR] [restore.go:431] ["the whole procedure failed"] [takeTime=2.275174ms] [error="table `test`.`t1` schema not found"]
+[2021/10/21 03:35:15.958 +00:00] [ERROR] [main.go:89] ["tidb lightning encountered error stack info"] [error="table `test`.`t1` schema not found"] [errorVerbose="table `test`.`t1` schema not found\ngithub.com/pingcap/tidb/br/pkg/lightning/restore.(*restoreSchemaWorker).makeJobs\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/pkg/lightning/restore/restore.go:520\ngithub.com/pingcap/tidb/br/pkg/lightning/restore.(*Controller).restoreSchema\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/pkg/lightning/restore/restore.go:723\ngithub.com/pingcap/tidb/br/pkg/lightning/restore.(*Controller).Run\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/pkg/lightning/restore/restore.go:407\ngithub.com/pingcap/tidb/br/pkg/lightning.(*Lightning).run\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/pkg/lightning/lightning.go:310\ngithub.com/pingcap/tidb/br/pkg/lightning.(*Lightning).RunOnce\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/pkg/lightning/lightning.go:190\nmain.main.func2\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/cmd/tidb-lightning/main.go:85\nmain.main\n\t/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/br/br/cmd/tidb-lightning/main.go:86\nruntime.main\n\t/usr/local/go/src/runtime/proc.go:225\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1371"]
+[2021/10/21 03:35:15.958 +00:00] [ERROR] [main.go:90] ["tidb lightning encountered error"] [error="table `test`.`t1` schema not found"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+$ tiup tidb-lightning -V
+Starting component `tidb-lightning`: /home/ubuntu/.tiup/components/tidb-lightning/v5.2.1/tidb-lightning -V
+Release Version: v5.2.1
+Git Commit Hash: cd8fb24c5f7ebd9d479ed228bb41848bd5e97445
+Git Branch: heads/refs/tags/v5.2.1
+Go Version: go1.16.4
+UTC Build Time: 2021-09-07 16:19:29
+Race Enabled: false
+```

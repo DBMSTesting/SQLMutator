@@ -1,0 +1,27 @@
+ID: 9666
+Title: HTTP interface INSERT atomicity bug
+Description:
+**Describe the bug**
+HTTP interface INSERT does not distinguish between EOF and unexpected EOF (connection lost/etc.).
+HTTP POST with `Content-Length`  - rows are inserted even if less than  `Content-Length` bytes have been received.
+HTTP POST with `Transfer-Encoding: chunked`  - rows are inserted even if zero-length chunk  hasn't been received.
+
+**This makes it impossible to rely on block deduplication** with `Replicated*MergeTree` because  ClickHouse will still form a block (with less rows than intended) even if the connection is lost before receiving all of the data.
+
+**How to reproduce**
+`create table values(value Int64) engine = Log()`
+
+For chunked encoding:
+```
+# send 10 rows per second.
+$ (echo 'insert into values format CSV';  seq 100) | pv -lbar -L10 | curl -s  localhost:8123 -X POST -T -
+Ctrl-C after few seconds
+```
+This will close the connection without sending the last zero-length chunk.
+The rows will still be inserted though
+
+**Expected behavior**
+ClickHouse does not insert rows when an unexpected EOF observed
+
+**Additional context**
+Looks like  Poco's `HTTPChunkedStreamBuf` and `HTTPFixedLengthStreamBuf` just don't handle this. 

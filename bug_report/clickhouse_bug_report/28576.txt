@@ -1,0 +1,100 @@
+ID: 28576
+Title: UUID conversion on insert to MySQL storage engine is broken in some cases
+Description:
+Clickhouse: 21.3.15.4
+MySQL: 8.0.17
+
+In some cases UUID conversion is incorrect while inserting to the MySQL storage engine and it's not available for selection after insert.
+
+**How to reproduce**
+
+Create MySQL table:
+```
+create database test;
+create table mysql_uuid (
+ id binary(16) PRIMARY KEY
+) Engine=InnoDB CHARACTER SET latin1;
+```
+
+Create Clickhouse table:
+```
+CREATE TABLE mysql_uuid
+(
+    `id` FixedString(16)
+)
+ENGINE = MySQL('mysql', 'test', 'mysql_uuid', 'root', 'dev', 0)
+```
+
+Insert test data with broken UUID:
+```
+insert into mysql_uuid values(UUIDStringToNum('3c6f395f-c759-450c-8f18-0de417be064f'))
+```
+Insert test data with working UUID:
+```
+insert into mysql_uuid values(UUIDStringToNum('625cf527-1484-460b-a27f-b0b5f0537ca4'))
+```
+
+Check data with broken UUID:
+```
+SELECT 1
+FROM mysql_uuid
+WHERE id = UUIDStringToNum('3c6f395f-c759-450c-8f18-0de417be064f')
+
+Query id: 5669870d-838f-457e-8d93-4855f5e859a4
+
+Ok.
+
+0 rows in set. Elapsed: 0.006 sec. 
+```
+
+Check data with working UUID:
+```
+SELECT 1
+FROM mysql_uuid
+WHERE id = UUIDStringToNum('625cf527-1484-460b-a27f-b0b5f0537ca4')
+
+Query id: de695d78-91eb-4b0d-b055-7b2fb2b7e113
+
+┌─1─┐
+│ 1 │
+└───┘
+
+1 rows in set. Elapsed: 0.013 sec. 
+```
+
+**Expected behavior**
+
+Query with broken UUID must return same result:
+```
+SELECT 1
+FROM mysql_uuid
+WHERE id = UUIDStringToNum('3c6f395f-c759-450c-8f18-0de417be064f')
+
+Query id: de695d78-91eb-4b0d-b055-7b2fb2b7e113
+
+┌─1─┐
+│ 1 │
+└───┘
+
+1 rows in set. Elapsed: 0.013 sec. 
+```
+
+
+**Error message and/or stacktrace**
+After insert sample data MySQL contains two rows:
+
+```
+select BIN_TO_UUID(id) from mysql_uuid
+
+
+BIN_TO_UUID(id)
+--
+3c6f395f-c759-4566-8f18-0de417be064f
+625cf527-1484-460b-a27f-b0b5f0537ca4
+
+```
+
+Where UUID `625cf527-1484-460b-a27f-b0b5f0537ca4` was converted as expected and in UUID `3c6f395f-c759-450c-8f18-0de417be064f` was changed third part of UUID:
+
+3c6f395f-c759-**450c**-8f18-0de417be064f
+3c6f395f-c759-**4566**-8f18-0de417be064f

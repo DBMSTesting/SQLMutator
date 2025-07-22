@@ -1,0 +1,127 @@
+ID: 13067
+Title: hllDenseRegHisto counts for a significant number of my cpu cycles, not using an aggregate
+Description:
+### What happens?
+
+I am currently profiling a python application which in its minimal form iterates over a result set, and does point-queries in between. The function hyperloglog hllDenseRegHisto is called. In my regular code this function accounts for 6% of CPU cycles (top n-2).
+
+When reading on it, [it should solve the count-distinct problem](https://en.wikipedia.org/wiki/HyperLogLog). I don't see how this (should) happen for a point query (id=something).
+
+![image](https://github.com/user-attachments/assets/aaa70dbc-a93f-4329-95a7-830616bb2b7a)
+
+@Tishj 
+
+### To Reproduce
+
+```python
+from typing import List
+
+import duckdb
+
+def load_generator(con, type, limit=None, filter=None):
+  cur = con.cursor()
+  try:
+    if filter is not None:
+      cur.execute(f"SELECT object FROM {type} WHERE id = ?;", (filter,))
+    elif limit is not None:
+      cur.execute(f"SELECT object FROM {type} LIMIT {limit};")
+    else:
+      cur.execute(f"SELECT object FROM {type};")
+  except:
+    return
+
+  while True:
+    xml = cur.fetchone()
+    if xml is None:
+      break
+    yield xml[0]
+
+def load_local(con, type, limit=None, filter=None) -> List:
+  # cur = con.cursor()
+  cur = con
+  try:
+    if filter is not None:
+      cur.execute(f"SELECT object FROM {type} WHERE id = ?;", (filter,))
+    elif limit is not None:
+      cur.execute(f"SELECT object FROM {type} LIMIT {limit};")
+    else:
+      cur.execute(f"SELECT object FROM {type};")
+  except:
+    return []
+
+  objs: List = []
+  for xml, in cur.fetchall():
+    obj = xml
+    objs.append(obj)
+
+  return objs
+
+def write_objects(con, objs, objectname):
+  if len(objs) == 0:
+    return
+
+  # cur = con.cursor()
+  cur = con
+
+  for i in range(0, len(objs)):
+    obj = objs[i]
+    cur.execute(f'INSERT INTO {objectname} (id, version, object) VALUES (?, ?, ?);',
+                (obj[0], obj[1], obj[2].replace('\n', '')))
+
+with duckdb.connect(":memory:") as con:
+  con.execute("DROP TABLE IF EXISTS test;")
+  con.execute("CREATE TABLE test (id VARCHAR, version VARCHAR, object VARCHAR NOT NULL, PRIMARY KEY(id, version));")
+
+  con.execute("DROP TABLE IF EXISTS test2;")
+  con.execute("CREATE TABLE test2 (id VARCHAR, version VARCHAR, object VARCHAR NOT NULL, PRIMARY KEY(id, version));")
+
+  for i in range(0, 1000):
+    con.execute("INSERT INTO test VALUES (?, 1, ?);", (str(i), str(i)))
+
+  for x in load_generator(con, "test", limit=1000):
+    results = load_local(con, "test2",1, x)
+    if len(results) == 0:
+      # Notice, this is required to trigger it the write, after load
+      write_objects(con, [[x, '1', 'test']], "test2")
+```
+
+```sh
+perf record  python duckdb-performance-cursor2.py
+hotspot
+```
+
+### OS:
+
+Linux amd64
+
+### DuckDB Version:
+
+latest head
+
+### DuckDB Client:
+
+Python
+
+### Full Name:
+
+Stefan de Konink
+
+### Affiliation:
+
+Stichting OpenGeo
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

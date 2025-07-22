@@ -1,0 +1,87 @@
+ID: 16171
+Title: Exception with combination of FINAL, PREWHERE, WHERE, and LowCardinality on ReplicatedReplacingMergeTree.
+Description:
+**Disclaimer:** I (we) know that the combination of all.... six(?) of these factors is a pretty far edge case. We also know that the usage of `FINAL` and `PREWHERE` is actively discouraged. We can circumvent this issue by figuring out a different query strategy but would prefer this to work nonetheless.
+
+When applying a `SELECT` like the following, we receive an exception:
+```sql
+SELECT toTypeName(level)
+FROM errors_local
+FINAL
+PREWHERE isNotNull(level)
+WHERE isNotNull(level)
+LIMIT 1
+
+↑ Progress: 151.99 thousand rows, 6.99 MB (1.48 million rows/s., 68.20 MB/s.)  19%
+Received exception from server (version 20.7.2):
+Code: 44. DB::Exception: Received from localhost:9000. DB::Exception: Expected ColumnLowCardinality, gotUInt8: While executing ReplacingSorted.
+```
+Other combinations of the query can produce expected results. Usage of `toTypeName(level)` is purely for the example:
+```sql
+SELECT toTypeName(level)
+FROM errors_local
+FINAL
+PREWHERE isNotNull(level)
+LIMIT 1
+
+┌─toTypeName(level)──────┐
+│ LowCardinality(String) │
+└────────────────────────┘
+```
+```sql
+SELECT toTypeName(level)
+FROM errors_local
+PREWHERE isNotNull(level)
+WHERE isNotNull(level)
+LIMIT 1
+
+┌─toTypeName(level)──────┐
+│ LowCardinality(String) │
+└────────────────────────┘
+```
+```sql
+SELECT toTypeName(level)
+FROM errors_local
+FINAL
+WHERE isNotNull(level)
+LIMIT 1
+
+┌─toTypeName(level)──────┐
+│ LowCardinality(String) │
+└────────────────────────┘
+```
+
+**Additional context**
+Version is `20.7.2.30`.
+Column info is as such:
+```sql
+SELECT *
+FROM system.columns
+WHERE (name = 'level') AND (table = 'errors_local')
+FORMAT Vertical
+
+Row 1:
+──────
+database:                default
+table:                   errors_local
+name:                    level
+type:                    LowCardinality(String)
+position:                39
+default_kind:
+default_expression:
+data_compressed_bytes:   xxx
+data_uncompressed_bytes: xxx
+marks_bytes:             xxx
+comment:
+is_in_partition_key:     0
+is_in_sorting_key:       0
+is_in_primary_key:       0
+is_in_sampling_key:      0
+compression_codec:
+```
+Possibly relevant table settings: ```min_bytes_for_wide_part = '10000000'```
+
+---
+Let me know if you'd prefer any extra detail or if there's a duplicate issue. I didn't have any luck searching.
+
+**Edit:** I had spoken too soon about the `min_bytes_for_wide_part` being the culprit. We're still seeing this exception after it's disabled.

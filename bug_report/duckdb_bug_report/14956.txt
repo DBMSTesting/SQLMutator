@@ -1,0 +1,216 @@
+ID: 14956
+Title: Implement Logical Compaction in Hash Join Operator
+Description:
+## Description  
+One year ago, I identified an opportunity to optimize the data chunk compaction mechanism in DuckDB. In vectorized execution, processing one chunk at a time is a key to high performance. However, chunk-reducing operators, such as filters and hash joins, can produce smaller chunks, leading to performance bottlenecks. To address this issue, I proposed two solutions: Dynamic Compaction and Logical Compaction. The research on this topic resulted in the paper "*[Data Chunk Compaction in Vectorized Execution](https://yimingqiao.github.io/files/data-chunk-compaction-sigmod25.pdf)*," which has been accepted for SIGMOD 2025.
+
+This pull request implements **Logical Compaction**, which aims to reduce the number of resulting chunks from the hash join operator. 
+
+---
+
+## Design Overview  
+In Logical Compaction, the key design changes are as follows:  
+- **For the LHS vectors:** The selection vectors of result chunks are concatenated into a single selection vector.  
+- **For the RHS vectors:** All payloads are gathered sequentially into the same vector, instead of being spread across multiple vectors.  
+
+This implementation ensures fewer chunks are produced, improving query performance by reducing overhead in subsequent operations. I have a [sample code repository](https://github.com/YimingQiao/Chunk-Compaction-in-Vectorized-Execution), describing the idea of how to implement Logical Compaction.
+
+---
+
+## Implementation Notes  
+The current implementation of Logical Compaction differs slightly from the method described in the SIGMOD paper due to a limitation in DuckDB's `gather` function. Currently, the `gather` function cannot be used multiple times on the same vector, as subsequent gathers overwrite the results of earlier ones. Modifying this behavior in DuckDB would require significant changes. (I have attempted to modify the gather function. It currently works for List and common data types but fails for Array).
+
+As a workaround:  
+1. Payload pointers are buffered first.  
+2. The `gather` function is called once per result chunk to populate the final vector.  
+
+Although this approach is suboptimal compared to the method in the paper, it simplifies integration into DuckDB and achieves considerable performance gains.
+
+---
+
+## Performance Evaluation  
+The following query was used to evaluate the impact of Logical Compaction:
+
+```sql
+-- DuckDB Settings
+SET threads TO 1;
+
+-- Generate Tables
+CREATE OR REPLACE TABLE student AS
+SELECT
+    CAST(stu_id AS INT) AS stu_id,
+    CAST((RANDOM() * 5e6) AS INT) AS major_id,
+    CAST((RANDOM() * 100) AS TINYINT) AS age
+FROM generate_series(1, CAST(5e7 AS INT)) vals(stu_id);
+
+CREATE OR REPLACE TABLE department AS
+SELECT
+    CAST(major_id * 8 % 5e6 AS INT) AS major_id,
+    '_' || (major_id) AS name
+FROM generate_series(1, CAST(5e6 AS INT)) vals(major_id);
+
+CREATE OR REPLACE TABLE room AS
+SELECT
+    room_id AS room_id,
+    CAST(room_id * 8 % 5e6 AS INT) AS stu_id,
+    CAST((RANDOM() * 5e6) AS INT) AS type
+FROM generate_series(1, CAST(5e7 AS INT)) vals(room_id);
+
+CREATE OR REPLACE TABLE type AS
+SELECT
+    CAST(type * 8 % 5e6 AS INT) AS type,
+    'room_type_' || type AS info
+FROM generate_series(1, CAST(5e6 AS INT)) vals(type);
+
+-- Query Execution
+EXPLAIN ANALYZE
+SELECT student.stu_id, department.name, room.room_id, type.type
+FROM student, room, department, type
+WHERE student.stu_id = room.stu_id
+AND student.major_id = department.major_id
+AND room.type = type.type
+AND student.stu_id <= 5e6;
+```
+
+The query execution time improved, reducing from 6.43 seconds to 3.7 seconds on my server. The paper shows more results compared to an old DuckDB version. 
+
+In the CI Regression, we have the following table, which shows Logical Compaction gives clear performance improvements, especially for real-world, slow queries. 
+
+| Query                   | Old Timing (s) | New Timing (s) | Improvement (%) |
+|-------------------------|----------------|----------------|-----------------|
+| benchmark/imdb/08c.benchmark | 1.017919       | 0.560908       | 44.91%          |
+| benchmark/imdb/19d.benchmark | 0.955442       | 0.548989       | 42.54%          |
+| benchmark/imdb/11d.benchmark | 0.540551       | 0.322425       | 40.33%          |
+| benchmark/imdb/16b.benchmark | 1.554320       | 0.961637       | 38.13%          |
+| benchmark/imdb/09d.benchmark | 0.803197       | 0.510499       | 36.45%          |
+| benchmark/imdb/17f.benchmark | 0.964745       | 0.747265       | 22.57%          |
+
+<details>
+  <summary>Benchmark Timings (click to expand)</summary>
+
+  ## Benchmark Timings
+
+  **Old timing geometric mean:** 0.2531835115136215  
+  **New timing geometric mean:** 0.2408143682450458, roughly 4% faster
+
+  | Benchmark | Old Timing | New Timing |
+  |-----------|------------|------------|
+  | benchmark/imdb/01a.benchmark | 0.043681 | 0.043175 |
+  | benchmark/imdb/01b.benchmark | 0.040174 | 0.039215 |
+  | benchmark/imdb/01c.benchmark | 0.039642 | 0.039333 |
+  | benchmark/imdb/01d.benchmark | 0.039626 | 0.039122 |
+  | benchmark/imdb/02a.benchmark | 0.102309 | 0.101181 |
+  | benchmark/imdb/02b.benchmark | 0.100355 | 0.097957 |
+  | benchmark/imdb/02c.benchmark | 0.038246 | 0.039249 |
+  | benchmark/imdb/02d.benchmark | 0.116405 | 0.106457 |
+  | benchmark/imdb/03a.benchmark | 0.445492 | 0.449350 |
+  | benchmark/imdb/03b.benchmark | 0.236118 | 0.236478 |
+  | benchmark/imdb/03c.benchmark | 0.497335 | 0.500031 |
+  | benchmark/imdb/04a.benchmark | 0.181051 | 0.179749 |
+  | benchmark/imdb/04b.benchmark | 0.108675 | 0.107279 |
+  | benchmark/imdb/04c.benchmark | 0.251081 | 0.254869 |
+  | benchmark/imdb/05a.benchmark | 0.126614 | 0.126705 |
+  | benchmark/imdb/05b.benchmark | 0.144621 | 0.145443 |
+  | benchmark/imdb/05c.benchmark | 0.502001 | 0.508974 |
+  | benchmark/imdb/06a.benchmark | 0.313514 | 0.310456 |
+  | benchmark/imdb/06b.benchmark | 0.167483 | 0.166588 |
+  | benchmark/imdb/06c.benchmark | 0.180314 | 0.182169 |
+  | benchmark/imdb/06d.benchmark | 0.258445 | 0.259490 |
+  | benchmark/imdb/06e.benchmark | 0.311185 | 0.312304 |
+  | benchmark/imdb/06f.benchmark | 0.677598 | 0.668415 |
+  | benchmark/imdb/07a.benchmark | 0.189304 | 0.191126 |
+  | benchmark/imdb/07b.benchmark | 0.099941 | 0.102394 |
+  | benchmark/imdb/07c.benchmark | 1.231640 | 1.285998 |
+  | benchmark/imdb/08a.benchmark | 0.251444 | 0.250210 |
+  | benchmark/imdb/08b.benchmark | 0.356850 | 0.358471 |
+  | benchmark/imdb/08c.benchmark | 1.017919 | 0.560908 |
+  | benchmark/imdb/08d.benchmark | 0.293274 | 0.207396 |
+  | benchmark/imdb/09a.benchmark | 0.417307 | 0.419412 |
+  | benchmark/imdb/09b.benchmark | 0.338588 | 0.338327 |
+  | benchmark/imdb/09c.benchmark | 0.348556 | 0.344113 |
+  | benchmark/imdb/09d.benchmark | 0.803197 | 0.510499 |
+  | benchmark/imdb/10a.benchmark | 0.327576 | 0.325416 |
+  | benchmark/imdb/10b.benchmark | 0.240671 | 0.240521 |
+  | benchmark/imdb/10c.benchmark | 0.799302 | 0.780687 |
+  | benchmark/imdb/11a.benchmark | 0.035521 | 0.034902 |
+  | benchmark/imdb/11b.benchmark | 0.081509 | 0.080152 |
+  | benchmark/imdb/11c.benchmark | 0.154565 | 0.104310 |
+  | benchmark/imdb/11d.benchmark | 0.540551 | 0.322425 |
+  | benchmark/imdb/12a.benchmark | 0.131111 | 0.128683 |
+  | benchmark/imdb/12b.benchmark | 0.138778 | 0.137550 |
+  | benchmark/imdb/12c.benchmark | 0.144818 | 0.144490 |
+  | benchmark/imdb/13a.benchmark | 0.103671 | 0.101706 |
+  | benchmark/imdb/13b.benchmark | 0.126249 | 0.124516 |
+  | benchmark/imdb/13c.benchmark | 0.107131 | 0.106331 |
+  | benchmark/imdb/13d.benchmark | 0.143617 | 0.135341 |
+  | benchmark/imdb/14a.benchmark | 0.107089 | 0.105852 |
+  | benchmark/imdb/14b.benchmark | 0.073266 | 0.073448 |
+  | benchmark/imdb/14c.benchmark | 0.202832 | 0.198988 |
+  | benchmark/imdb/15a.benchmark | 0.277285 | 0.278600 |
+  | benchmark/imdb/15b.benchmark | 0.261421 | 0.264472 |
+  | benchmark/imdb/15c.benchmark | 0.301965 | 0.293352 |
+  | benchmark/imdb/15d.benchmark | 0.280168 | 0.261043 |
+  | benchmark/imdb/16a.benchmark | 0.229687 | 0.228467 |
+  | benchmark/imdb/16b.benchmark | 1.554320 | 0.961637 |
+  | benchmark/imdb/16c.benchmark | 0.407621 | 0.335952 |
+  | benchmark/imdb/16d.benchmark | 0.380356 | 0.328095 |
+  | benchmark/imdb/17a.benchmark | 0.476803 | 0.426871 |
+  | benchmark/imdb/17b.benchmark | 0.441097 | 0.432279 |
+  | benchmark/imdb/17c.benchmark | 0.415455 | 0.418353 |
+  | benchmark/imdb/17d.benchmark | 0.748762 | 0.620555 |
+  | benchmark/imdb/17e.benchmark | 0.634876 | 0.537770 |
+  | benchmark/imdb/17f.benchmark | 0.964745 | 0.747265 |
+  | benchmark/imdb/18a.benchmark | 0.569301 | 0.568479 |
+  | benchmark/imdb/18b.benchmark | 0.617539 | 0.618055 |
+  | benchmark/imdb/18c.benchmark | 0.662235 | 0.658834 |
+  | benchmark/imdb/19a.benchmark | 0.459483 | 0.454348 |
+  | benchmark/imdb/19b.benchmark | 0.427318 | 0.426930 |
+  | benchmark/imdb/19c.benchmark | 0.465054 | 0.447845 |
+  | benchmark/imdb/19d.benchmark | 0.955442 | 0.548989 |
+  | benchmark/imdb/20a.benchmark | 0.452661 | 0.446614 |
+  | benchmark/imdb/20b.benchmark | 0.509117 | 0.504108 |
+  | benchmark/imdb/20c.benchmark | 0.466371 | 0.459996 |
+  | benchmark/imdb/21a.benchmark | 0.064302 | 0.063688 |
+  | benchmark/imdb/21b.benchmark | 0.045051 | 0.044562 |
+  | benchmark/imdb/21c.benchmark | 0.064550 | 0.063900 |
+  | benchmark/imdb/22a.benchmark | 0.260247 | 0.249736 |
+  | benchmark/imdb/22b.benchmark | 0.224557 | 0.225105 |
+  | benchmark/imdb/22c.benchmark | 0.446244 | 0.390012 |
+  | benchmark/imdb/22d.benchmark | 0.618760 | 0.496860 |
+  | benchmark/imdb/23a.benchmark | 0.168295 | 0.168516 |
+  | benchmark/imdb/23b.benchmark | 0.177455 | 0.179521 |
+  | benchmark/imdb/23c.benchmark | 0.208595 | 0.209348 |
+  | benchmark/imdb/24a.benchmark | 0.506897 | 0.500765 |
+  | benchmark/imdb/24b.benchmark | 0.393881 | 0.395797 |
+  | benchmark/imdb/25a.benchmark | 0.703704 | 0.695778 |
+  | benchmark/imdb/25b.benchmark | 0.182402 | 0.181753 |
+  | benchmark/imdb/25c.benchmark | 0.821965 | 0.808019 |
+  | benchmark/imdb/26a.benchmark | 0.467797 | 0.468111 |
+  | benchmark/imdb/26b.benchmark | 0.354909 | 0.355233 |
+  | benchmark/imdb/26c.benchmark | 0.481127 | 0.476174 |
+  | benchmark/imdb/27a.benchmark | 0.088871 | 0.088990 |
+  | benchmark/imdb/27b.benchmark | 0.128338 | 0.126330 |
+  | benchmark/imdb/27c.benchmark | 0.091887 | 0.092153 |
+  | benchmark/imdb/28a.benchmark | 0.712119 | 0.673981 |
+  | benchmark/imdb/28b.benchmark | 0.482710 | 0.475537 |
+  | benchmark/imdb/28c.benchmark | 0.731527 | 0.683727 |
+  | benchmark/imdb/29a.benchmark | 0.231854 | 0.230645 |
+  | benchmark/imdb/29b.benchmark | 0.355586 | 0.353445 |
+  | benchmark/imdb/29c.benchmark | 0.827057 | 0.811782 |
+  | benchmark/imdb/30a.benchmark | 0.670720 | 0.674279 |
+  | benchmark/imdb/30b.benchmark | 0.485744 | 0.484797 |
+  | benchmark/imdb/30c.benchmark | 0.760956 | 0.758264 |
+  | benchmark/imdb/31a.benchmark | 0.549163 | 0.551532 |
+  | benchmark/imdb/31b.benchmark | 0.238005 | 0.238503 |
+  | benchmark/imdb/31c.benchmark | 0.665119 | 0.663540 |
+  | benchmark/imdb/32a.benchmark | 0.007082 | 0.007162 |
+  | benchmark/imdb/32b.benchmark | 0.087455 | 0.084125 |
+  | benchmark/imdb/33a.benchmark | 0.116290 | 0.116334 |
+  | benchmark/imdb/33b.benchmark | 0.150770 | 0.149144 |
+  | benchmark/imdb/33c.benchmark | 0.150506 | 0.150706 |
+
+</details>
+
+
+This is my first time submitting a PR. Please let me know if there are any issues or if anything is unclear.
+

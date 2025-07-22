@@ -1,0 +1,191 @@
+ID: 14330
+Title: Nesting structs - Out of Memory Error: failed to allocate data error when memory_limit exceeds dataset size.
+Description:
+### What happens?
+
+I am creating a table with lists of multi level nested structs built from child tables (ultimately to create a nested json -> xml) where the input/final tables should all fit within the available memory but receive error like:
+
+duckdb.duckdb.OutOfMemoryException: Out of Memory Error: failed to allocate data of size 16.0 MiB ...
+
+I've included a example dataset below to illustrate the issue which is around 250MB and hits the above error when available memory is lower than ~2GB. 
+I'm hoping there is a way to create such nested result sets on real input datasets that are closer to the available memory.
+
+Looking at other issues regarding mem allocation when aggregating structs (and seems like there has already been lots of enhancements) I can see the datasets I'm facing are prone to such issues (lots of small groups, relatively large list entry, lists not spilling to disk) so maybe it's a current limit or just a bad approach on my part (quite likely) but hoping either query restructure or somehow lower allocation might be possible.
+
+As a workaround I’m batching the root table via pyarrow and writing out the corresponding query results in batches to parquet  since the root row fully defines it’s children. It's not ideal but does allow creation of the output datasets. (I think it could be solved in pyarrrow completely in this way due to the top down nature but pyarrow doesn’t seem to support structs in the list aggregate at this time - will follow up there too. )
+
+
+### To Reproduce
+
+
+I included a simple example below with root -> child1 -> child2. Each child belongs to a single parent so the output data size will be approx the sum of the input data size. In the example the input data is around 250MB (based off csv size) the memory needed is around 2GB. Each nested entry in the final table appears to be around 100kb.
+The memory limit and the example row ratios are somewhat arbitrary as i think the issue is general.
+
+In practice the real data has <4 depths but is larger, has more fields at each level and can have multiple children at each level e.g. root -> [child1 -> [child1_1, child1_2], child2 -> child2_2... ]. there are generally 0-70 children for a given parent but mostly 0-10. when there are multiple sub tables being aggregated at a given parent the issue the memory issue appears sooner.
+
+
+```sql
+SET threads=1;
+SET memory_limit='2GB';
+--SET enable_profiling='query_tree';
+SET preserve_insertion_order = false;
+
+
+-- the parent rows
+CREATE OR REPLACE TABLE root_table AS 
+SELECT 
+  printf('account_%d', i) account, 
+  t.* 
+FROM 
+  generate_series(1, 1000) s(i) CROSS 
+  JOIN (
+    SELECT 
+      'uname' as uname, 
+      'utype' as utype, 
+      100 as num1, 
+      0.99 as num2, 
+      'text1' as text1, 
+      'text2' as text2, 
+      'text3' as text3, 
+      'text4' as text4, 
+      'text5' as text5
+) t;
+
+-- each parent node has n child nodes.
+-- each child belongs to only one parent
+CREATE OR REPLACE TABLE child1_table AS 
+SELECT 
+  printf('sub_%s_%d',t.account , i) child1_account, 
+  t.* 
+FROM 
+  generate_series(1, 700) s(i) CROSS 
+  JOIN root_table t;
+
+  
+-- add data for extra level.
+CREATE OR REPLACE TABLE child2_table AS 
+SELECT 
+  printf('%s_%d',t.child1_account , i)  child2_account, 
+  t.* 
+FROM 
+  generate_series(1, 3) s(i) CROSS 
+  JOIN (
+    select 
+      * EXCLUDE(account) 
+    FROM 
+      child1_table
+  ) t;
+
+
+FROM duckdb_memory();
+
+-- to check size
+COPY root_table to 'root_table.csv';
+COPY child1_table to 'child1_table.csv';
+COPY child2_table to 'child2_table.csv';
+
+
+-- nest the tables
+-- create the full nested data set
+SELECT 
+    r.*, 
+    c1.*, 
+  FROM 
+    root_table r, 
+    LATERAL (
+      SELECT 
+        LIST(s) child1
+      FROM 
+        (
+          SELECT 
+            ic1.*, 
+            ic2.* 
+          FROM 
+            child1_table ic1, 
+            LATERAL (
+              SELECT 
+                LIST(t) child2 
+              FROM 
+                child2_table t 
+              WHERE 
+                child1_account = ic1.child1_account
+            ) as ic2
+        ) s 
+      where 
+        account = r.account
+    ) c1;
+
+```
+
+Out of Memory Error: failed to allocate data of size 16.0 MiB (1.8 GiB/1.8 GiB used)
+
+Grouping and using intermediate tables does help but still needs multiples of memory vs the data set size which is not available for real world datasets.
+e.g.
+
+```sql
+-- group with intermediate tables 
+CREATE OR REPLACE TEMPORARY TABLE child2_table_gp AS 
+SELECT child1_account, list(t) AS child2
+FROM child2_table t
+GROUP BY ALL;
+
+
+CREATE OR REPLACE TEMPORARY TABLE child1_table_j AS 
+SELECT t.*, c2.child2 AS child2
+FROM child1_table t
+LEFT JOIN
+child2_table_gp c2 on t.child1_account = c2.child1_account;
+
+CREATE OR REPLACE TEMPORARY TABLE child1_table_g AS 
+SELECT t.account, list(t) AS child1
+FROM child1_table_j t
+GROUP BY ALL;
+
+
+SELECT r.*, c1.child1 FROM
+root_table r
+LEFT JOIN
+child1_table_g c1 on r.account = c1.account;
+
+
+```
+
+### OS:
+
+Mac OS Sonoma 14.7
+
+### DuckDB Version:
+
+1.1.1
+
+### DuckDB Client:
+
+Python 3.11
+
+### Hardware:
+
+Intel i7 16GB
+
+### Full Name:
+
+Rob Hodgson
+
+### Affiliation:
+
+SSC
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

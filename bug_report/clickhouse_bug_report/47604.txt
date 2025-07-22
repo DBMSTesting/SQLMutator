@@ -1,0 +1,174 @@
+ID: 47604
+Title: "Block" node does not exist when running many concurrent inserts
+Description:
+> You have to provide the following information whenever possible.
+
+Hello, I've got the following problem while running data structure change migrations over a set of ClickHouse databases.
+So, in order to simplify, let's say we have a few hundreds of databases, each containing a table and a materialized view of the following structure:
+
+```
+CREATE TABLE `db_2087`.articles
+(
+    `internal_id` String,
+    `timestamp` Nullable(DateTime('UTC')),
+    `content` String,
+    `headline` Nullable(String),
+    `url` Nullable(String),
+    `data_provider` String,
+    `document_length` UInt32,
+    `domain_name` String,
+    `is_near_duplicate` UInt8,
+    `publish_date` DateTime('UTC'),
+    `lang` Nullable(String),
+    `data_provider_id` Nullable(UInt32),
+    `document_type_id` Nullable(UInt32),
+    `tags.id` Array(UInt32),
+    `tags.name` Array(String),
+    `tags.score` Array(Float64),
+    `tags.tagger` Array(String),
+    `tags.checksum` Array(Nullable(String)),
+    `tags.type` Array(String),
+    `kpis.entity_id` Array(UInt32),
+    `kpis.salience_score` Array(Float64),
+    `kpis.evidences` Array(Array(Tuple(Int32, Int32))),
+    `frames.label` Array(String),
+    `frames.score` Array(Float64),
+    `frames.version` Array(UInt32),
+    `frames.role` Array(Array(String)),
+    `frames.value` Array(Array(String)),
+    `frames.entity_id` Array(Array(UInt32)),
+    `frames.salience_score` Array(Array(Float64)),
+    `frames.mentions` Array(Array(Tuple(Int32, Int32))),
+    `entities.type` Array(String),
+    `entities.name` Array(String),
+    `entities.evidences` Array(Tuple(Int32, Int32)),
+    `entities.linked` Array(UInt8)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/replicated/db_2087/articles', '{replica}')
+PARTITION BY toYYYYMMDD(publish_date)
+ORDER BY cityHash64(internal_id)
+SAMPLE BY cityHash64(internal_id)
+SETTINGS index_granularity = 64
+```
+
+```
+CREATE MATERIALIZED VIEW `db_2087`.articles_kpis
+(
+    `internal_id` String,
+    `timestamp` Nullable(DateTime('UTC')),
+    `url` Nullable(String),
+    `data_provider` String,
+    `document_length` UInt32,
+    `domain_name` String,
+    `is_near_duplicate` UInt8,
+    `document_type_id` Nullable(UInt32),
+    `data_provider_id` Nullable(UInt32),
+    `publish_date` DateTime('UTC'),
+    `lang` Nullable(String),
+    `kpi_entity_id` UInt32,
+    `salience_score` Float64,
+    `kpis_num` UInt64,
+    `evidences_num` UInt64,
+    `tags.id` Array(UInt32),
+    `tags.name` Array(String),
+    `tags.score` Array(Float64),
+    `tags.tagger` Array(String),
+    `tags.checksum` Array(Nullable(String)),
+    `tags.type` Array(String)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/replicated/db_2087/{uuid}', '{replica}')
+PARTITION BY toYYYYMMDD(publish_date)
+ORDER BY cityHash64(internal_id)
+SAMPLE BY cityHash64(internal_id)
+SETTINGS index_granularity = 8192 AS
+SELECT
+    internal_id,
+    timestamp,
+    url,
+    data_provider,
+    document_length,
+    domain_name,
+    is_near_duplicate,
+    document_type_id,
+    data_provider_id,
+    publish_date,
+    lang,
+    kpi.entity_id AS kpi_entity_id,
+    kpi.salience_score AS salience_score,
+    kpis_num,
+    length(kpi.evidences) AS evidences_num,
+    `tags.id`,
+    `tags.name`,
+    `tags.score`,
+    `tags.tagger`,
+    `tags.checksum`,
+    `tags.type`
+FROM
+(
+    SELECT
+        t.*,
+        length(kpis.entity_id) AS kpis_num
+    FROM `db_2087`.articles AS t
+)
+ARRAY JOIN kpis AS kpi
+```
+
+The migration I got troubles with is:
+
+```
+DROP VIEW IF EXISTS articles_kpis ON CLUSTER my_cluster;
+
+ALTER TABLE articles ON CLUSTER my_cluster
+    ADD COLUMN IF NOT EXISTS `data_provider_id` Nullable(UInt32) AFTER `lang`,
+    ADD COLUMN IF NOT EXISTS `document_type_id` Nullable(UInt32) AFTER `data_provider_id`
+;
+
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS articles_kpis ON CLUSTER my_cluster
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/replicated/db_2087/{uuid}', '{replica}')
+    PARTITION BY toYYYYMMDD(publish_date)
+    SAMPLE BY cityHash64(internal_id)
+    ORDER BY cityHash64(internal_id)
+    POPULATE
+    AS
+        SELECT
+            internal_id, timestamp, url, data_provider, document_length, domain_name, is_near_duplicate, document_type_id, data_provider_id, publish_date, lang,
+            kpi.entity_id AS kpi_entity_id, kpi.salience_score AS salience_score, kpis_num, length(kpi.evidences) AS evidences_num,
+            `tags.id`, `tags.name`, `tags.score`, `tags.tagger`, `tags.checksum`, `tags.type`
+        FROM (
+            SELECT t.*, length(kpis.entity_id) kpis_num FROM db_2087.articles t
+        ) ARRAY JOIN kpis AS kpi;
+```
+
+Usually, for a record in `articles` we have from 1 to 10 records in `articles_kpis`, so let's say `articles_kpis` has 5x more records in average.
+Now, when I migrate relatively small databases (less than 100K records in `articles`), everything is OK, no issues at all.
+However, I'm currently stuck with a database, where articles contains ~300K records and `articles_kpis` has ~1.6M rows. After fixing a number of issues caused by insufficient timeouts (either on a client or on a server side), we are stuck with the following error:
+
+```
+Error Code : 1002
+Message    : ClickHouse exception, code: 1002, host: clickhouse-db-01.dmetrics.internal, port: 8123; Code: 999. DB::Exception: There was an error on [clickhouse-db-01.dm.internal:9000]: Code: 999. Coordination::Exception: Can't get data for node /clickhouse/tables/replicated/db_2087/f70fd7d9-6180-49f2-80af-6acd9f951aa2/blocks/20090514_3788163478716447759_5675115574442604762: node doesn't exist (No node). (KEEPER_EXCEPTION) (version 22.7.5.13 (official build)). (KEEPER_EXCEPTION) (version 22.7.5.13 (official build))
+
+Line       : 13
+Statement  : CREATE MATERIALIZED VIEW IF NOT EXISTS db_2087.articles_ext ON CLUSTER my_cluster
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/replicated/db_2087/{uuid}', '{replica}')
+    PARTITION BY toYYYYMMDD(publish_date)
+    SAMPLE BY cityHash64(internal_id)
+    ORDER BY cityHash64(internal_id)
+    POPULATE
+    AS
+        SELECT
+            internal_id, timestamp, url, data_provider, document_length, domain_name, is_near_duplicate, document_type_id, data_provider_id, publish_date, lang,
+            `frames.label`, `frames.score`, `frames.version`, `frames.role`, `frames.value`, `frames.entity_id`,
+            `frames.salience_score`, `frames.mentions`, arrayMap(x -> length(x), `frames.mentions`) AS `frames.num_mentions`,
+            `tags.id`, `tags.name`, `tags.score`, `tags.tagger`, `tags.checksum`, `tags.type`,
+            `kpis.entity_id`, `kpis.salience_score`, `kpis.evide
+```
+
+This happens after ClickHouse re-creates the MV and populates the majority of data into it.
+
+ClickHouse version: 22.7.5
+
+It's probably worth to admit that we partition our data by days and the table `articles` contains data for seven years (i.e around 2.3K partitions).
+
+If any other information is needed, please LMK.
+Thanks in advance

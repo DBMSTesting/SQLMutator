@@ -1,0 +1,214 @@
+ID: 22711
+Title: clickhouse-copier could not copy data - stayed stuck in discoverPartitionsTable
+Description:
+I wanted to change partition settings for a large table (450M rows)  from a daily partition to a monthly partition scheme
+
+Use of insert into select lead to an error due to number of partitions involved in the data to be copied
+I then tried to use clickhouse-copier
+afeter several minutes I used CTRL+Z to get a status of the copier process
+it looks like stuck in:
+```
+This is a signal used for debugging purposes by the user.
+Stack trace: 0x7ff9353f6376 0x86534eb 0x874b11a 0x874cc3d 0x874112c 0x874169d 0x11f9b6a3 0x8741940 0x860ff3e 0x7ff93521b0b3 0x85da4ae
+1. pthread_cond_wait @ 0x10376 in /lib/libpthread.so.0
+2. ThreadPoolImpl<ThreadFromGlobalPool>::wait() @ 0x86534eb in /usr/bin/clickhouse
+3. DB::ClusterCopier::discoverTablePartitions(DB::ConnectionTimeouts const&, DB::TaskTable&, unsigned long) @ 0x874b11a in /usr/bin/clickhouse
+4. DB::ClusterCopier::process(DB::ConnectionTimeouts const&) @ 0x874cc3d in /usr/bin/clickhouse
+5. DB::ClusterCopierApp::mainImpl() @ 0x874112c in /usr/bin/clickhouse
+6. DB::ClusterCopierApp::main(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x874169d in /usr/bin/clickhouse
+7. Poco::Util::Application::run() @ 0x11f9b6a3 in /usr/bin/clickhouse
+8. mainEntryClickHouseClusterCopier(int, char**) @ 0x8741940 in /usr/bin/clickhouse
+9. main @ 0x860ff3e in /usr/bin/clickhouse
+```
+Looking at logs on the clikchouse-servers If found this 
+```
+2021.04.06 13:32:35.299423 [ 16461 ] {0efc6c3a-675e-430a-b666-4a60fbc8ae9e} <Debug> executeQuery: (from [::ffff:127.0.0.1]:39340, using production parser) SELECT 1 FROM dailyhistory.yellow_tripdata WHERE ((pickup_location_id, toYYYYMM(tpep_pickup_datetime)) = (('1', 202001) AS partition_key)) AND ((cityHash64(tpep_pickup_datetime, id) % 10) = 6) LIMIT 1
+2021.04.06 13:32:35.300850 [ 16461 ] {0efc6c3a-675e-430a-b666-4a60fbc8ae9e} <Debug> InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "(pickup_location_id, toYYYYMM(tpep_pickup_datetime)) = (('1', 202001) AS partition_key)" moved to PREWHERE
+2021.04.06 13:32:35.319170 [ 16404 ] {e2c3f2fc-3274-4fd7-9de4-64d261ee817c} <Error> executeQuery: Code: 210, e.displayText() = DB::NetException: I/O error: Broken pipe, while writing to socket ([::ffff:127.0.0.1]:39260) (version 21.3.4.25 (official build)) (from [::ffff:127.0.0.1]:39260) (in query: SELECT 1 FROM dailyhistory.yellow_tripdata WHERE ((pickup_location_id, toYYYYMM(tpep_pickup_datetime)) = (('1', 202001) AS partition_key)) AND ((cityHash64(tpep_pickup_datetime, id) % 10) = 5) LIMIT 1), Stack trace (when copying this message, always include the lines below):
+
+0. DB::WriteBufferFromPocoSocket::nextImpl() @ 0xeb615b2 in /usr/bin/clickhouse
+1. DB::TCPHandler::sendProgress() @ 0xf8cb150 in /usr/bin/clickhouse
+2. DB::TCPHandler::processOrdinaryQueryWithProcessors() @ 0xf8c6d00 in /usr/bin/clickhouse
+3. DB::TCPHandler::runImpl() @ 0xf8c00d5 in /usr/bin/clickhouse
+4. DB::TCPHandler::run() @ 0xf8d1529 in /usr/bin/clickhouse
+5. Poco::Net::TCPServerConnection::start() @ 0x11f84caf in /usr/bin/clickhouse
+6. Poco::Net::TCPServerDispatcher::run() @ 0x11f866c1 in /usr/bin/clickhouse
+7. Poco::PooledThread::run() @ 0x120bcde9 in /usr/bin/clickhouse
+8. Poco::ThreadImpl::runnableEntry(void*) @ 0x120b8c4a in /usr/bin/clickhouse
+9. start_thread @ 0x9609 in /lib/libpthread.so.0
+10. __clone @ 0x122293 in /lib/libc.so.6
+
+2021.04.06 13:32:35.319494 [ 16404 ] {e2c3f2fc-3274-4fd7-9de4-64d261ee817c} <Error> TCPHandler: Code: 210, e.displayText() = DB::Exception: I/O error: Broken pipe, while writing to socket ([::ffff:127.0.0.1]:39260), Stack trace:
+
+0. DB::WriteBufferFromPocoSocket::nextImpl() @ 0xeb615b2 in /usr/bin/clickhouse
+1. DB::TCPHandler::sendProgress() @ 0xf8cb150 in /usr/bin/clickhouse
+2. DB::TCPHandler::processOrdinaryQueryWithProcessors() @ 0xf8c6d00 in /usr/bin/clickhouse
+3. DB::TCPHandler::runImpl() @ 0xf8c00d5 in /usr/bin/clickhouse
+4. DB::TCPHandler::run() @ 0xf8d1529 in /usr/bin/clickhouse
+5. Poco::Net::TCPServerConnection::start() @ 0x11f84caf in /usr/bin/clickhouse
+6. Poco::Net::TCPServerDispatcher::run() @ 0x11f866c1 in /usr/bin/clickhouse
+7. Poco::PooledThread::run() @ 0x120bcde9 in /usr/bin/clickhouse
+8. Poco::ThreadImpl::runnableEntry(void*) @ 0x120b8c4a in /usr/bin/clickhouse
+9. start_thread @ 0x9609 in /lib/libpthread.so.0
+10. __clone @ 0x122293 in /lib/libc.so.6
+
+2021.04.06 13:32:35.319811 [ 16404 ] {e2c3f2fc-3274-4fd7-9de4-64d261ee817c} <Warning> TCPHandler: Client has gone away.
+2021.04.06 13:32:35.341351 [ 16461 ] {0efc6c3a-675e-430a-b666-4a60fbc8ae9e} <Debug> dailyhistory.yellow_tripdata_staging (SelectExecutor): Key condition: unknown, unknown, and, unknown, and
+2021.04.06 13:32:35.341403 [ 16461 ] {0efc6c3a-675e-430a-b666-4a60fbc8ae9e} <Debug> dailyhistory.yellow_tripdata_staging (SelectExecutor): MinMax index condition: unknown, unknown, and, unknown, and
+2021.04.06 13:32:35.347329 [ 16461 ] {0efc6c3a-675e-430a-b666-4a60fbc8ae9e} <Debug> dailyhistory.yellow_tripdata_staging (SelectExecutor): Selected 3728/3728 parts by partition key, 3728 parts by primary key, 20778/24506 marks by primary key, 20778 marks to read from 3728 ranges
+```
+
+The cluster is installed on an azure cluster with 3 Zookeeper nodes spread accross 3 aKS nodes
+and 3 clickhouse servers (running on the same nodes as the zookeeper ones) 
+Table is distributed accross the 3 servers 
+
+TO replicate my initial issue I was able to find the same symptoms using yellow cab dataset
+daily partition database is as follows
+```SQL
+CREATE DATABASE dailyhistory on cluster events
+CREATE TABLE dailyhistory.yellow_tripdata_staging ON CLUSTER events (  id UUID DEFAULT generateUUIDv4(),  vendor_id String,  tpep_pickup_datetime DateTime('UTC'),  tpep_dropoff_datetime DateTime('UTC'),  passenger_count Nullable(Float64),  trip_distance String,  pickup_longitude Float64,  pickup_latitude Float64,  rate_code_id String,  store_and_fwd_flag String,  dropoff_longitude Float64,  dropoff_latitude Float64,  payment_type String,  fare_amount String,  extra String,  mta_tax String,  tip_amount String,  tolls_amount String,  improvement_surcharge String,  total_amount String,  pickup_location_id String,  dropoff_location_id String,  congestion_surcharge String,  junk1 String,  junk2 String) Engine = ReplacingMergeTree() PRIMARY KEY (tpep_pickup_datetime, id) ORDER BY (tpep_pickup_datetime, id) PARTITION BY (toYYYYMMDD(tpep_pickup_datetime))
+CREATE TABLE dailyhistory.yellow_tripdata ON CLUSTER events AS dailyhistory.yellow_tripdata_staging ENGINE = Distributed('events', 'dailyhistory', yellow_tripdata_staging, rand())
+```
+
+monthly partition database is as follows
+```SQL
+create database monthlyhistory on cluster events
+CREATE TABLE monthlyhistory.yellow_tripdata_staging ON CLUSTER events (  id UUID DEFAULT generateUUIDv4(),  vendor_id String,  tpep_pickup_datetime DateTime('UTC'),  tpep_dropoff_datetime DateTime('UTC'),  passenger_count Nullable(Float64),  trip_distance String,  pickup_longitude Float64,  pickup_latitude Float64,  rate_code_id String,  store_and_fwd_flag String,  dropoff_longitude Float64,  dropoff_latitude Float64,  payment_type String,  fare_amount String,  extra String,  mta_tax String,  tip_amount String,  tolls_amount String,  improvement_surcharge String,  total_amount String,  pickup_location_id String,  dropoff_location_id String,  congestion_surcharge String,  junk1 String,  junk2 String) Engine = ReplacingMergeTree() PRIMARY KEY (tpep_pickup_datetime, id) ORDER BY (tpep_pickup_datetime, id) PARTITION BY (pickup_location_id, toYYYYMM(tpep_pickup_datetime))
+CREATE TABLE monthlyhistory.yellow_tripdata ON CLUSTER events AS monthlyhistory.yellow_tripdata_staging ENGINE = Distributed('events', 'monthlyhistory', yellow_tripdata_staging, rand())
+```
+to copy data from one database to the other Is used the following config
+```sh
+zkCli.sh create /clickhouse/copytasks ""
+zkCli.sh create /clickhouse/copytasks/task1 ""
+zkCli.sh create /clickhouse/copytasks/task1/description "`cat /tmp/task.xml`"
+```
+/tmp/task.xml contains 
+```XML
+ <yandex>
+   <remote_servers>
+         <events>
+             <shard>
+                 <internal_replication>false</internal_replication>
+                 <replica>
+                     <host>chi-clickhouse-events-0-0</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+             <shard>
+                 <internal_replication>false</internal_replication>
+                 <replica>
+                     <host>chi-clickhouse-events-1-0</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+             <shard>
+                 <internal_replication>false</internal_replication>
+                 <replica>
+                     <host>chi-clickhouse-events-2-0</host>
+                     <port>9000</port>
+                 </replica>
+             </shard>
+         </events>
+   </remote_servers>
+
+   <max_workers>2</max_workers>
+
+   <tables>
+     <table_events>
+         <cluster_pull>events</cluster_pull>
+         <database_pull>dailyhistory</database_pull>
+         <table_pull>yellow_tripdata</table_pull>
+         <cluster_push>events</cluster_push>
+         <database_push>monthlyhistory</database_push>
+         <table_push>yellow_tripdata</table_push>
+         <engine>Engine=ReplacingMergeTree() PRIMARY KEY (tpep_pickup_datetime, id) ORDER BY (tpep_pickup_datetime, id) PARTITION BY (pickup_location_id, toYYYYMM(tpep_pickup_datetime))</engine>
+         <sharding_key>rand()</sharding_key>
+     </table_events>
+   </tables>
+ </yandex>
+```
+
+on one of the clickhouse server I run
+```sh
+cp  /etc/clickhouse-server/conf.d/chop-generated-zookeeper.xml /tmp/zookeeper.xml
+clickhouse-copier --config-file=/tmp/zookeeper.xml --task-path=/clickhouse/copytasks/task1
+```
+
+I'm using: 
+- zookeper 3.7.0 deployment from bitnami
+- 0.13.5 clickhouse operator to deploy clickhouse (3 shards - 0 replications used for tests)
+- 21.03 clickhouse image
+
+table for the daily partitionning we populated using the following commands
+```sh
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-12.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-11.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-10.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-09.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-08.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-07.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-06.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-05.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-04.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-03.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-02.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2020-01.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-12.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-11.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-10.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-09.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-08.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-07.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-06.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-05.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-04.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-03.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-02.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2019-01.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge) FORMAT CSV"
+
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-12.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-11.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-10.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-09.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-08.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-07.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-06.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-05.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-04.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-03.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-02.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2018-01.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-12.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-11.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-10.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-09.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-08.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-07.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-06.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-05.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-04.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-03.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-02.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2017-01.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount) FORMAT CSV"
+
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-12.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-11.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-10.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-09.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-08.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-07.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-06.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-05.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-04.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-03.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-02.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+wget -O - https://s3.amazonaws.com/nyc-tlc/trip+data/yellow_tripdata_2016-01.csv 2> /dev/null | tail -n +3 | clickhouse-client --query="INSERT INTO dailyhistory.yellow_tripdata(vendor_id,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,rate_code_id,store_and_fwd_flag,pickup_location_id,dropoff_location_id,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,junk1,junk2) FORMAT CSV"
+```
+
+**Expected behavior**
+- Insertion of the daily partition table takes a fews minutes on a the 3 nodes cluster
+- I would have expected the copy process to take at most a few hours
+
+Hoping this is clear enough feel free to ask if any more info is required

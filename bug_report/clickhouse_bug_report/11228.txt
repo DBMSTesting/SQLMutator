@@ -1,0 +1,96 @@
+ID: 11228
+Title: Exception in dictGetUInt32 when using in GROUP BY clause
+Description:
+**Describe the bug**
+ClickHouse throws an error when the function dictGetUInt32 is used inside GROUP BY clause with first parameter passed as function if(...). On the other hand, it works normally when dictGetUInt32 is used inside SELECT clause with the same parameters. 
+
+**How to reproduce**
+ClickHouse server version 20.4.4.18
+
+Structure of 'weekendsday' dictionary ('weeksday' the same):
+```
+    <dictionary>
+        <name>weekendsday</name>
+        <source>
+            <file>
+                <path>weekendsday.tsv</path>
+                <format>TabSeparated</format>
+            </file>
+        </source>
+        <layout>
+            <complex_key_hashed />
+        </layout>
+        <structure>
+            <key>
+                <attribute>
+                    <name>wdate</name>
+                    <type>Date</type>
+                </attribute>
+            </key>
+            <attribute>
+                <name>id</name>
+                <type>UInt32</type>
+                <null_value>0</null_value>
+            </attribute>
+        </structure>
+        <lifetime>300</lifetime>
+    </dictionary>
+```
+ 
+This doesn't work:
+```
+CREATE TABLE aaa (
+    col1 Int32,
+    col2 Date
+)
+Engine = Memory
+
+INSERT into aaa(col1, col2)
+select 1, toDate('2020-02-01') + number FROM system.numbers limit toUInt64(toDate('2020-02-10') - toDate('2020-02-01')) + 1
+
+with 'weekend' as grouping
+SELECT sum(col1)
+from aaa
+group by dictGetUInt32(if(grouping = 'weekend', 'weekendsday', 'weeksday'), 'id', tuple(col2))
+```
+This works well:
+```
+with 'weekend' as grouping
+SELECT sum(col1)
+from aaa
+group by dictGetUInt32('weekendsday', 'id', tuple(col2))
+```
+and
+```
+with 'weekend' as grouping
+SELECT *, dictGetUInt32(if(grouping = 'weekend', 'weekendsday', 'weeksday'), 'id', tuple(col2))
+from aaa
+```
+
+**Error message and/or stacktrace**
+```
+2020.05.27 15:41:41.504288 [ 21712 ] {} <Error> DynamicQueryHandler: Code: 368, e.displayText() = DB::Exception: Bad cast from type DB::ASTFunction to DB::ASTLiteral, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x104191d0 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8fff8ad in /usr/bin/clickhouse
+2. std::__1::enable_if<is_reference_v<DB::ASTLiteral&>, DB::ASTLiteral&>::type typeid_cast<DB::ASTLiteral&, DB::IAST>(DB::IAST&) @ 0x9144848 in /usr/bin/clickhouse
+3. ? @ 0xd4de863 in /usr/bin/clickhouse
+4. DB::SyntaxAnalyzer::analyzeSelect(std::__1::shared_ptr<DB::IAST>&, DB::SyntaxAnalyzerResult&&, DB::SelectQueryOptions const&, std::__1::vector<DB::TableWithColumnNamesAndTypes, std::__1::allocator<DB::TableWithColumnNamesAndTypes> > const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::TableJoin>) const @ 0xd4e284f in /usr/bin/clickhouse
+5. ? @ 0xd236379 in /usr/bin/clickhouse
+6. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd2398ef in /usr/bin/clickhouse
+7. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd23afe9 in /usr/bin/clickhouse
+8. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xd40c421 in /usr/bin/clickhouse
+9. DB::InterpreterFactory::get(std::__1::shared_ptr<DB::IAST>&, DB::Context&, DB::QueryProcessingStage::Enum) @ 0xd1a8804 in /usr/bin/clickhouse
+10. ? @ 0xd54951e in /usr/bin/clickhouse
+11. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>) @ 0xd54d430 in /usr/bin/clickhouse
+12. DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&) @ 0x90e47fc in /usr/bin/clickhouse
+13. DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&) @ 0x90e8256 in /usr/bin/clickhouse
+14. Poco::Net::HTTPServerConnection::run() @ 0x102c9b83 in /usr/bin/clickhouse
+15. Poco::Net::TCPServerConnection::start() @ 0x10304f4b in /usr/bin/clickhouse
+16. Poco::Net::TCPServerDispatcher::run() @ 0x103053db in /usr/bin/clickhouse
+17. Poco::PooledThread::run() @ 0x104b2fa6 in /usr/bin/clickhouse
+18. Poco::ThreadImpl::runnableEntry(void*) @ 0x104ae260 in /usr/bin/clickhouse
+19. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+20. __clone @ 0x12188f in /lib/x86_64-linux-gnu/libc-2.27.so
+ (version 20.4.4.18 (official build)) 
+```

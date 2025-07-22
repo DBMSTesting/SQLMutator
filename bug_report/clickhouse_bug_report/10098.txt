@@ -1,0 +1,83 @@
+ID: 10098
+Title: 20.3 index_granularity_bytes for replicated tables can be written into ZK incorrectly
+Description:
+When a new replica is created, the default value for `index granularity bytes` gets written in its metadata in ZK.
+
+**Describe the bug**
+I have replicated tables that were created a few years ago, before adaptive granularity was invented.
+Their metadata in ZK looks like this:
+```
+/clickhouse/tables/apps/metadata
+metadata format version: 1
+date column:
+sampling expression: 
+index granularity: 8192
+mode: 5
+sign column: 
+primary key: apps_key
+/clickhouse/tables/apps/metadata/ctime: 2019-06-04 08:51:20
+
+/clickhouse/tables/apps/replicas/r1/metadata:
+metadata format version: 1
+date column:
+sampling expression: 
+index granularity: 8192
+mode: 5
+sign column: 
+primary key: apps_key
+/clickhouse/tables/apps/replicas/r1/metadata/ctime: 2019-06-17 08:51:19
+```
+I upgraded the cluster to 20.3, and then added another replica for the table.
+The metadata for the new replica looks like this:
+```
+/clickhouse/tables/apps/replicas/r2/metadata:
+metadata format version: 1
+date column:
+sampling expression: 
+index granularity: 8192
+mode: 5
+sign column: 
+primary key: apps_key
+granularity bytes: 10485760
+/clickhouse/tables/apps/replicas/r2/metadata/ctime: 2020-04-07 12:10:54
+```
+Everything works well until a restart.
+ClickHouse cannot start up with an exception `Existing table metadata in ZooKeeper differs in index granularity bytes. Stored in ZooKeeper: 10485760, local: 0`:
+```
+2020.04.06 07:24:25.380164 [ 719 ] {} <Error> ThreadPool: Exception in ThreadPool(max_threads: 4, max_free_threads: 4, queue_size: 4, shutdown_on_exception: 1).: Code: 342, e.displayText() = DB::Exception: Existing table metadata in ZooKeeper differs in index granularity bytes. Stored in ZooKeeper: 10485760, local: 0: Cannot attach table `db`.`apps` from metadata file /var/lib/clickhouse/metadata/db/apps.sql from query ATTACH TABLE apps (...) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/apps', '{replica}') PARTITION BY tuple() ORDER BY apps_key SETTINGS index_granularity = 8192, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x102e0d8c in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8f2d989 in /usr/bin/clickhouse
+2. ? @ 0xd94d5ee in /usr/bin/clickhouse
+3. DB::StorageReplicatedMergeTree::checkTableStructure(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0xd5b4c8b in /usr/bin/clickhouse
+4. DB::StorageReplicatedMergeTree::StorageReplicatedMergeTree(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, bool, DB::StorageID const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::StorageInMemoryMetadata const&, DB::Context&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::MergeTreeData::MergingParams const&, std::__1::unique_ptr<DB::MergeTreeSettings, std::__1::default_delete<DB::MergeTreeSettings> >, bool) @ 0xd5da56b in /usr/bin/clickhouse
+5. ? @ 0xd9585da in /usr/bin/clickhouse
+6. std::__1::__function::__func<std::__1::shared_ptr<DB::IStorage> (*)(DB::StorageFactory::Arguments const&), std::__1::allocator<std::__1::shared_ptr<DB::IStorage> (*)(DB::StorageFactory::Arguments const&)>, std::__1::shared_ptr<DB::IStorage> (DB::StorageFactory::Arguments const&)>::operator()(DB::StorageFactory::Arguments const&) @ 0xd95baf3 in /usr/bin/clickhouse
+7. DB::StorageFactory::get(DB::ASTCreateQuery const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, DB::Context&, DB::ColumnsDescription const&, DB::ConstraintsDescription const&, bool) const @ 0xd4fc66c in /usr/bin/clickhouse
+8. DB::createTableFromAST(DB::ASTCreateQuery, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool) @ 0xcedc88e in /usr/bin/clickhouse
+9. ? @ 0xced33bf in /usr/bin/clickhouse
+10. ? @ 0xced3b71 in /usr/bin/clickhouse
+11. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x8f51c4b in /usr/bin/clickhouse
+12. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() const @ 0x8f528c4 in /usr/bin/clickhouse
+13. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8f50b4b in /usr/bin/clickhouse
+14. ? @ 0x8f4f00f in /usr/bin/clickhouse
+15. start_thread @ 0x74a4 in /lib/x86_64-linux-gnu/libpthread-2.24.so
+16. clone @ 0xe8d0f in /lib/x86_64-linux-gnu/libc-2.24.so
+ (version 20.3.4.10 (official build))
+```
+CH was able to start up after a downgrade to 19.16.
+When a table like this gets attached by 19.16, the replica's `metadata` in ZK gets changed to the same value as the table's `metadata`.
+Alternatively CH 20.3 could be brought up by deleting the table's data folders.
+
+**How to reproduce**
+1. Set `index_granularity_bytes` to 0.
+2. Restart 20.3
+3. Create a replicated table without specifying `index_granularity_bytes`.
+4. Insert some data into the table.
+5. Set `index_granularity_bytes` to 10485760 (or remove the setting form config files).
+6. Restart 20.3
+7. Create another replica for the same table without specifying `index_granularity_bytes`.
+8. Restart 20.3
+
+**Expected behavior**
+The correct `index granularity bytes` should be written to `metadata` for a new table, not the default.

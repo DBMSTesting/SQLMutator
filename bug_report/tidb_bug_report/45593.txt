@@ -1,0 +1,145 @@
+ID: 45593
+Title: order-by clause should be resolved to grouping set item
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+CREATE TABLE `t` (
+  `year` int(11) DEFAULT NULL,
+  `country` varchar(20) DEFAULT NULL,
+  `product` varchar(32) DEFAULT NULL,
+  `profit` int(11) DEFAULT NULL
+) 
+alter table t set tiflash replica 1;
+explain SELECT year+2, SUM(profit) AS profit FROM t GROUP BY year+2, year+profit WITH ROLLUP order by year+2;
+// explain SELECT SUM(profit) AS profit FROM t GROUP BY year+2, year+profit WITH ROLLUP order by year+2;
+```
+
+### 2. What did you expect to see? (Required)
+```
++--------------------------------------------+----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                         | estRows  | task         | access object | operator info                                                                                                                                                                                                            |
++--------------------------------------------+----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_8                               | 8000.00  | root         |               | Column#6->Column#10, Column#9                                                                                                                                                                                            |
+| └─Sort_10                                  | 8000.00  | root         |               | Column#6                                                                                                                                                                                                                 |
+|   └─TableReader_28                         | 8000.00  | root         |               | MppVersion: 2, data:ExchangeSender_27                                                                                                                                                                                    |
+|     └─ExchangeSender_27                    | 8000.00  | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                |
+|       └─Projection_26                      | 8000.00  | mpp[tiflash] |               | Column#9, Column#6                                                                                                                                                                                                       |
+|         └─HashAgg_15                       | 8000.00  | mpp[tiflash] |               | group by:Column#20, Column#21, Column#22, funcs:sum(Column#18)->Column#9, funcs:firstrow(Column#19)->Column#6                                                                                                            |
+|           └─Projection_39                  | 10000.00 | mpp[tiflash] |               | cast(test.t.profit, decimal(10,0) BINARY)->Column#18, Column#6->Column#19, Column#6->Column#20, Column#7->Column#21, gid->Column#22                                                                                      |
+|             └─ExchangeReceiver_25          | 10000.00 | mpp[tiflash] |               |                                                                                                                                                                                                                          |
+|               └─ExchangeSender_24          | 10000.00 | mpp[tiflash] |               | ExchangeType: HashPartition, Compression: FAST, Hash Cols: [name: Column#6, collate: binary], [name: Column#7, collate: binary], [name: gid, collate: binary]                                                            |
+|                 └─Expand_23                | 10000.00 | mpp[tiflash] |               | level-projection:[test.t.profit, <nil>->Column#6, <nil>->Column#7, 0->gid],[test.t.profit, Column#6, <nil>->Column#7, 1->gid],[test.t.profit, Column#6, Column#7, 3->gid]; schema: [test.t.profit,Column#6,Column#7,gid] |
+|                   └─Projection_19          | 10000.00 | mpp[tiflash] |               | test.t.profit, plus(test.t.year, 2)->Column#6, plus(test.t.year, test.t.profit)->Column#7                                                                                                                                |
+|                     └─TableFullScan_20     | 10000.00 | mpp[tiflash] | table:t       | keep order:false, stats:pseudo                                                                                                                                                                                           |
++--------------------------------------------+----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+12 rows in set (0.002 sec)
++--------+--------+
+| year+2 | profit |
++--------+--------+
+|   NULL |   7535 |
+|   2002 |    900 |
+|   2002 |   1000 |
+|   2002 |   1100 |
+|   2002 |   1525 |
+|   2002 |   4525 |
+|   2003 |    800 |
+|   2003 |   1010 |
+|   2003 |   1200 |
+|   2003 |   3010 |
++--------+--------+
++------------------------------------------------+---------+--------------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                             | estRows | task         | access object | operator info                                                                                                                                                                                                                                                                                               |
++------------------------------------------------+---------+--------------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_8                                   | 5.60    | root         |               | Column#9                                                                                                                                                                                                                                                                                                    |
+| └─Projection_40                                | 5.60    | root         |               | Column#9, test.sales.year                                                                                                                                                                                                                                                                                   |
+|   └─Sort_10                                    | 5.60    | root         |               | Column#22                                                                                                                                                                                                                                                                                                   |
+|     └─Projection_41                            | 5.60    | root         |               | Column#9, test.sales.year, plus(test.sales.year, 2)->Column#22                                                                                                                                                                                                                                              |
+|       └─TableReader_28                         | 5.60    | root         |               | MppVersion: 2, data:ExchangeSender_27                                                                                                                                                                                                                                                                       |
+|         └─ExchangeSender_27                    | 5.60    | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                                                                                                   |
+|           └─Projection_26                      | 5.60    | mpp[tiflash] |               | Column#9, test.sales.year                                                                                                                                                                                                                                                                                   |
+|             └─HashAgg_15                       | 5.60    | mpp[tiflash] |               | group by:Column#19, Column#20, Column#21, funcs:sum(Column#17)->Column#9, funcs:firstrow(Column#18)->test.sales.year, stream_count: 10                                                                                                                                                                      |
+|               └─Projection_39                  | 7.00    | mpp[tiflash] |               | cast(test.sales.profit, decimal(10,0) BINARY)->Column#17, test.sales.year->Column#18, Column#6->Column#19, Column#7->Column#20, gid->Column#21, stream_count: 10                                                                                                                                            |
+|                 └─ExchangeReceiver_25          | 7.00    | mpp[tiflash] |               | stream_count: 10                                                                                                                                                                                                                                                                                            |
+|                   └─ExchangeSender_24          | 7.00    | mpp[tiflash] |               | ExchangeType: HashPartition, Compression: FAST, Hash Cols: [name: Column#6, collate: binary], [name: Column#7, collate: binary], [name: gid, collate: binary], stream_count: 10                                                                                                                             |
+|                     └─Expand_23                | 7.00    | mpp[tiflash] |               | level-projection:[test.sales.year, test.sales.profit, <nil>->Column#6, <nil>->Column#7, 0->gid],[test.sales.year, test.sales.profit, Column#6, <nil>->Column#7, 1->gid],[test.sales.year, test.sales.profit, Column#6, Column#7, 3->gid]; schema: [test.sales.year,test.sales.profit,Column#6,Column#7,gid] |
+|                       └─Projection_19          | 7.00    | mpp[tiflash] |               | test.sales.year, test.sales.profit, plus(test.sales.year, 2)->Column#6, plus(test.sales.year, test.sales.profit)->Column#7                                                                                                                                                                                  |
+|                         └─TableFullScan_20     | 7.00    | mpp[tiflash] | table:sales   | keep order:false, stats:pseudo                                                                                                                                                                                                                                                                              |
++------------------------------------------------+---------+--------------+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+14 rows in set (0.029 sec)
+
+
+```
+
+### 3. What did you see instead (Required)
+```
++------------------------------------------------+----------+--------------+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                             | estRows  | task         | access object | operator info                                                                                                                                                                                                                                                               |
++------------------------------------------------+----------+--------------+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_8                                   | 8000.00  | root         |               | Column#6->Column#10, Column#9                                                                                                                                                                                                                                               |
+| └─Projection_40                                | 8000.00  | root         |               | Column#9, test.t.year, Column#6                                                                                                                                                                                                                                             |
+|   └─Sort_10                                    | 8000.00  | root         |               | Column#26                                                                                                                                                                                                                                                                   |
+|     └─Projection_41                            | 8000.00  | root         |               | Column#9, test.t.year, Column#6, plus(test.t.year, 2)->Column#26                                                                                                                                                                                                            |
+|       └─TableReader_28                         | 8000.00  | root         |               | MppVersion: 2, data:ExchangeSender_27                                                                                                                                                                                                                                       |
+|         └─ExchangeSender_27                    | 8000.00  | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                                                                   |
+|           └─Projection_26                      | 8000.00  | mpp[tiflash] |               | Column#9, test.t.year, Column#6                                                                                                                                                                                                                                             |
+|             └─HashAgg_15                       | 8000.00  | mpp[tiflash] |               | group by:Column#23, Column#24, Column#25, funcs:sum(Column#20)->Column#9, funcs:firstrow(Column#21)->test.t.year, funcs:firstrow(Column#22)->Column#6                                                                                                                       |
+|               └─Projection_39                  | 10000.00 | mpp[tiflash] |               | cast(test.t.profit, decimal(10,0) BINARY)->Column#20, test.t.year->Column#21, Column#6->Column#22, Column#6->Column#23, Column#7->Column#24, gid->Column#25                                                                                                                 |
+|                 └─ExchangeReceiver_25          | 10000.00 | mpp[tiflash] |               |                                                                                                                                                                                                                                                                             |
+|                   └─ExchangeSender_24          | 10000.00 | mpp[tiflash] |               | ExchangeType: HashPartition, Compression: FAST, Hash Cols: [name: Column#6, collate: binary], [name: Column#7, collate: binary], [name: gid, collate: binary]                                                                                                               |
+|                     └─Expand_23                | 10000.00 | mpp[tiflash] |               | level-projection:[test.t.year, test.t.profit, <nil>->Column#6, <nil>->Column#7, 0->gid],[test.t.year, test.t.profit, Column#6, <nil>->Column#7, 1->gid],[test.t.year, test.t.profit, Column#6, Column#7, 3->gid]; schema: [test.t.year,test.t.profit,Column#6,Column#7,gid] |
+|                       └─Projection_19          | 10000.00 | mpp[tiflash] |               | test.t.year, test.t.profit, plus(test.t.year, 2)->Column#6, plus(test.t.year, test.t.profit)->Column#7                                                                                                                                                                      |
+|                         └─TableFullScan_20     | 10000.00 | mpp[tiflash] | table:t       | keep order:false, stats:pseudo                                                                                                                                                                                                                                              |
++------------------------------------------------+----------+--------------+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+14 rows in set (0.001 sec)
++--------+--------+
+| year+2 | profit |
++--------+--------+
+|   2002 |   1100 |
+|   NULL |   7535 |
+|   2002 |   1000 |
+|   2002 |   1525 |
+|   2002 |   4525 |
+|   2002 |    900 |
+|   2003 |   1200 |
+|   2003 |   3010 |
+|   2003 |   1010 |
+|   2003 |    800 |
++--------+--------+
++--------------------------------------------+----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                         | estRows  | task         | access object | operator info                                                                                                                                                                                                            |
++--------------------------------------------+----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_8                               | 8000.00  | root         |               | Column#9                                                                                                                                                                                                                 |
+| └─Sort_10                                  | 8000.00  | root         |               | Column#6                                                                                                                                                                                                                 |
+|   └─TableReader_28                         | 8000.00  | root         |               | MppVersion: 2, data:ExchangeSender_27                                                                                                                                                                                    |
+|     └─ExchangeSender_27                    | 8000.00  | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                |
+|       └─Projection_26                      | 8000.00  | mpp[tiflash] |               | Column#9, Column#6                                                                                                                                                                                                       |
+|         └─HashAgg_15                       | 8000.00  | mpp[tiflash] |               | group by:Column#19, Column#20, Column#21, funcs:sum(Column#17)->Column#9, funcs:firstrow(Column#18)->Column#6                                                                                                            |
+|           └─Projection_39                  | 10000.00 | mpp[tiflash] |               | cast(test.t.profit, decimal(10,0) BINARY)->Column#17, Column#6->Column#18, Column#6->Column#19, Column#7->Column#20, gid->Column#21                                                                                      |
+|             └─ExchangeReceiver_25          | 10000.00 | mpp[tiflash] |               |                                                                                                                                                                                                                          |
+|               └─ExchangeSender_24          | 10000.00 | mpp[tiflash] |               | ExchangeType: HashPartition, Compression: FAST, Hash Cols: [name: Column#6, collate: binary], [name: Column#7, collate: binary], [name: gid, collate: binary]                                                            |
+|                 └─Expand_23                | 10000.00 | mpp[tiflash] |               | level-projection:[test.t.profit, <nil>->Column#6, <nil>->Column#7, 0->gid],[test.t.profit, Column#6, <nil>->Column#7, 1->gid],[test.t.profit, Column#6, Column#7, 3->gid]; schema: [test.t.profit,Column#6,Column#7,gid] |
+|                   └─Projection_19          | 10000.00 | mpp[tiflash] |               | test.t.profit, plus(test.t.year, 2)->Column#6, plus(test.t.year, test.t.profit)->Column#7                                                                                                                                |
+|                     └─TableFullScan_20     | 10000.00 | mpp[tiflash] | table:t       | keep order:false, stats:pseudo                                                                                                                                                                                           |
++--------------------------------------------+----------+--------------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+12 rows in set (0.002 sec)
+
+
+```
+
+explanation:
+group item (year+2) is projected to a new column#6 under expand, and since it's nullability is changed above Expand, it is not strictly semantically equal to plus(year , 2) any more.
+
+that means, any expression year+2 in select-fields/order-by clause/having clause should be exactly resolved to column#6 here.
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master
+

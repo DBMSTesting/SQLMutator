@@ -1,0 +1,37 @@
+ID: 1492
+Title: [Bug]: mysql8.0 驱动连接ob3.1执行batch操作会报错。
+Description:
+OB batch 问题排查。
+
+1.	用户报修batch删除会空指针，触发条件：OB的版本为3.1，mysql java驱动8.0.26。降级到5.1.48后正常。
+Exception in thread "main" java.sql.SQLException
+       at com.mysql.cj.jdbc.exceptions.SQLError.createSQLException(SQLError.java:129)
+       at com.mysql.cj.jdbc.exceptions.SQLExceptionsMapping.translateException(SQLExceptionsMapping.java:122)
+       at com.mysql.cj.jdbc.StatementImpl.executeUpdateInternal(StatementImpl.java:1337)
+       at com.mysql.cj.jdbc.StatementImpl.executeLargeUpdate(StatementImpl.java:2112)
+       at com.mysql.cj.jdbc.StatementImpl.executeUpdate(StatementImpl.java:1247)
+
+Caused by: java.lang.NullPointerException
+       at com.mysql.cj.protocol.a.NativeProtocol.readNextResultset(NativeProtocol.java:1609)
+       at com.mysql.cj.protocol.a.NativeProtocol.readAllResults(NativeProtocol.java:1645)
+       at com.mysql.cj.protocol.a.NativeProtocol.sendQueryPacket(NativeProtocol.java:983)
+       at com.mysql.cj.protocol.a.NativeProtocol.sendQueryString(NativeProtocol.java:916)
+       at com.mysql.cj.NativeSession.execSQL(NativeSession.java:660)
+       at com.mysql.cj.jdbc.StatementImpl.executeUpdateInternal(StatementImpl.java:1306)
+
+2.	排查下来发现是JAVA 8.0.26以上的驱动会从服务器端获取multi-results这个状态位。
+
+public static final int CLIENT_MULTI_RESULTS = 0x00020000; // Enable/disable multi-results
+
+
+3.	用8.0的驱动测试了一下，连接OB 4.0没有问题，抓包看下了下4.0的multi-results的状态位为1.
+
+![1](https://github.com/oceanbase/oceanbase/assets/48710720/507e9a35-7d07-490c-9eb4-1cf053ec388d)
+
+
+4.	看下一下Proxy的代码，4.0硬编码了1，3.0状态位没赋值，默认为0，将这几行代码移植到3.0的proxy，重新编译后，测试5.1和8.0的驱动都正常。
+https://github.com/oceanbase/obproxy/blob/4.0/src/rpc/obmysql/packet/ompk_handshake.cpp#L59
+![2](https://github.com/oceanbase/oceanbase/assets/48710720/c414d20f-2876-4578-b22a-d84cb3f8ec66)
+https://github.com/oceanbase/obproxy/blob/3.1/src/rpc/obmysql/packet/ompk_handshake.cpp
+
+目前我们环境中是大量的mysq8.0和ob3.1，能否做下8.0驱动对ob3.1兼容性的全面测试。

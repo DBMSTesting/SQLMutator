@@ -1,0 +1,119 @@
+ID: 27178
+Title: Stuck DDL worker on replica down
+Description:
+**Describe the bug**
+
+What happened:
+- Replicated tables in a cluster of 2 machines (XX.XX.0.16 and XX.XX.0.19)
+- One machine was shutdown (XX.XX.0.16).
+- The remaining database cluster config was updated to reflect this (and leave only itself in the cluster)
+- CREATE TABLE on CLUSTER works fine.
+- After a while the database stops processing TRUNCATE, DROP or CREATE TABLES queries in a cluster, both for new or old tables.
+
+The requests thow errors like with a message like this:
+```
+2021.08.04 10:03:02.382690 [ 45014 ] {0e2854bd-d09c-4fc5-8d1d-4f5ef0bb9ff3} <Error> executeQuery: Code: 159, e.displayText() 
+= DB::Exception: Watching task /clickhouse/task_queue/ddl/query-0003100348 is executing longer than distributed_ddl_task_time
+out (=180) seconds. There are 1 unfinished hosts (0 of them are currently active), they are going to execute the query in bac
+kground (version 21.7.4.18 (official build)) (from XX.XX.0.3:56244) (in query: DROP TABLE IF EXISTS d_0c4408.t_64082aa0f09c4
+136a8afc5638078df44 ON CLUSTER XXXXXXX), Stack trace (when copying this message, always include the lines below):
+```
+
+Which says that there is one host (itself by the way) but it's not responding.
+
+The issue was that after shutting down a server, the one remaining (0.19) received a truncate operation on a replicated table and the DDL worked got stuck there:
+
+```
+2021.08.04 09:43:22.202405 [ 41556 ] {} <Debug> DDLWorker: Processing task query-0003100288 (TRUNCATE TABLE d_0c4408.t_80e389b432124fba955b6297fafd9a1e ON CLUSTER XXXXXXX)
+2021.08.04 09:43:22.204670 [ 41556 ] {} <Debug> DDLWorker: Executing query: TRUNCATE TABLE d_0c4408.t_80e389b432124fba955b6297fafd9a1e
+2021.08.04 09:43:22.216361 [ 41556 ] {5abe229f-98e6-49a7-86d9-135829617163} <Debug> executeQuery: (from 0.0.0.0:0, user: , using production parser) /* ddl_entry=query-0003100288 */ TRUNCATE TABLE d_0c4408.t_80e389b432124fba955b6297fafd9a1e
+2021.08.04 09:43:22.220869 [ 41556 ] {5abe229f-98e6-49a7-86d9-135829617163} <Trace> d_0c4408.t_80e389b432124fba955b6297fafd9a1e (f521700c-247b-45dc-b521-700c247b95dc): Deleted 1 deduplication block IDs in partition ID 48c8af0fe722d69a2343d55c1bed4d36
+2021.08.04 09:43:22.220931 [ 41556 ] {5abe229f-98e6-49a7-86d9-135829617163} <Debug> d_0c4408.t_80e389b432124fba955b6297fafd9a1e (f521700c-247b-45dc-b521-700c247b95dc): Disabled merges covered by range 48c8af0fe722d69a2343d55c1bed4d36_0_0_999999999_999999999
+2021.08.04 09:43:22.222000 [ 41556 ] {5abe229f-98e6-49a7-86d9-135829617163} <Debug> d_0c4408.t_80e389b432124fba955b6297fafd9a1e (f521700c-247b-45dc-b521-700c247b95dc): Waiting for all replicas to process log-0000000001
+2021.08.04 09:43:22.222343 [ 41556 ] {5abe229f-98e6-49a7-86d9-135829617163} <Debug> d_0c4408.t_80e389b432124fba955b6297fafd9a1e (f521700c-247b-45dc-b521-700c247b95dc): Waiting for XX.XX.0.16 to pull log-0000000001 to queue
+```
+
+After these logs, the DDLWorker is forever waiting for the other database to process the entry and won't process any new request in the meantime. To make things worse, there is no error message about it so it's not obvious what's going on unless you know where to look (find the DDL worker thread and find out what it doing).
+
+The way to get out of this is to start the other machine again and drop the tables there or to mark the replica as inactive manually in ZK (or drop the table locally, which is not what we wanted). Changing settings without stopping the database won't work since they won't reach the loop.
+
+**Expected behavior**
+
+In my opinion it the logs and error messages should be more clear about what's going on and what steps you can take to fix it.
+
+The DDL worker shouldn't wait indefinitely and, at some point, start either printing errors or throwing an error (or both) with a clear message about what happened and how to address it:
+
+`
+Waited too long (XX seconds) for replica XX.XX to process log entry XX but it's not responding. Try again or mark it as inactive manually: "./zkCli.sh deleteall /clickhouse/tables/01-01/d_0c4408.t_80e389b432124fba955b6297fafd9a1e/replicas/XX.XX.0.16/is_active"
+`
+
+In case of an down replica I think it would be ok to mark the affected table as read-only and continue other operations normally.
+
+Maybe there is already a way to do this automatically and I don't know about it, but it would be nice to have some kind of command to mark a replica as inactive for all tables and use it during the process shutdown (or manually before you shutdown the server).
+
+For new queries, the error message in this case is also suboptimal (`is executing longer than distributed_ddl_task_time`) as in that case it was waiting on itself (!) but that thread was stuck in a loop and not listening to ZK anymore.
+
+**Additional context**
+
+Status of the table in ZK:
+
+```sql
+SELECT *
+FROM system.zookeeper
+WHERE path = '/clickhouse/tables/01-01/d_0c4408.t_80e389b432124fba955b6297fafd9a1e/replicas/'
+FORMAT Vertical
+
+Query id: 405585a7-20da-4180-9555-9850158e69d5
+
+Row 1:
+──────
+name:           XX.XX.0.16
+value:          
+czxid:          1074056712
+mzxid:          1074056712
+ctime:          2021-07-15 11:15:15
+mtime:          2021-07-15 11:15:15
+version:        0
+cversion:       21
+aversion:       0
+ephemeralOwner: 0
+dataLength:     0
+numChildren:    13
+pzxid:          1352506011
+path:           /clickhouse/tables/01-01/d_0c4408.t_80e389b432124fba955b6297fafd9a1e/replicas/
+
+Row 2:
+──────
+name:           XX.XX.0.19
+value:          
+czxid:          1254244736
+mzxid:          1254244736
+ctime:          2021-07-28 15:22:23
+mtime:          2021-07-28 15:22:23
+version:        0
+cversion:       29
+aversion:       0
+ephemeralOwner: 0
+dataLength:     0
+numChildren:    13
+pzxid:          1342830057
+path:           /clickhouse/tables/01-01/d_0c4408.t_80e389b432124fba955b6297fafd9a1e/replicas/
+
+2 rows in set. Elapsed: 0.004 sec.
+```
+
+System cluster only showed the active database as the file had been modified:
+
+```
+SELECT *
+FROM system.clusters
+
+Query id: afba6d29-b46a-4f6e-8a10-6c4676d28692
+
+┌─cluster──┬─shard_num─┬─shard_weight─┬─replica_num─┬─host_name───┬─host_address─┬─port─┬─is_local─┬─user────┬─default_database─┬─errors_count─┬─slowdowns_count─┬─estimated_recovery_time─┐
+│ XXXX │         1 │            1 │           1 │ XX.XX.0.19 │ XX.XX.0.19  │ 9000 │        1 │ default │                  │            0 │               0 │                       0 │
+└──────────┴───────────┴──────────────┴─────────────┴─────────────┴──────────────┴──────┴──────────┴─────────┴──────────────────┴──────────────┴─────────────────┴─────────────────────────┘
+
+```
+
+This is a mixture of bug report + feature request so feel free to retag it to something more appropiate.

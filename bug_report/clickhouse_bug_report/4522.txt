@@ -1,0 +1,32 @@
+ID: 4522
+Title: ALTER MODIFY COLUMN concurrently with selects
+Description:
+**Describe the bug**
+
+While trying to add a new enum element to a column
+```sql
+ALTER TABLE table MODIFY COLUMN action Enum8(
+   'unknown'         = 0,
+   'known'           = 1
+);
+```
+
+under production workload, queries started to fail with the following exception
+```
+DB::Exception: Type mismatch for column action. Column has type Enum8('unknown' = 0, 'known' = 1), got type Enum8('unknown' = 0).
+```
+
+Inspecting the code led me to the following lines: https://github.com/yandex/ClickHouse/blob/e24af1d765770507ee0297625649568e625d1d61/dbms/src/Storages/ITableDeclaration.cpp#L190-L224
+
+called from https://github.com/yandex/ClickHouse/blob/e24af1d765770507ee0297625649568e625d1d61/dbms/src/Storages/MergeTree/MergeTreeReadPool.cpp#L236
+
+Seems that structure of MergeTreeData was modified, but MergeTreeDataPart structure not yet.
+
+Inspecting `alter` and `select` implementation I found that alter gets a data lock first (a1) and after modifying MergeTreeData columns (`data.checkAlter(params);` call) it locks data structure (a2). `select` just locks the structure. (b1)
+
+If we have the following execution sequence: a1, b1, a2 which seems possible, then we have a concurrency bug.
+
+**Additional context**
+Version: 18.14.17
+
+Let me know if this makes sense.

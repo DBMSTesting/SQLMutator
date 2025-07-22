@@ -1,0 +1,90 @@
+ID: 52747
+Title: DDL job state change might be overridden
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+below is the step when `cancel` operation is overridden. in real, any state change might be overridden on owner change cases where 2 owner might tries to change at same time, if the TXNs don't cross with each other, the prior one is overridden.
+- apply below batch
+- cancel the job before we start running it
+```diff
+diff --git a/pkg/ddl/ddl.go b/pkg/ddl/ddl.go
+index 51fb9a9434..129f9cc00a 100644
+--- a/pkg/ddl/ddl.go
++++ b/pkg/ddl/ddl.go
+@@ -1724,6 +1724,8 @@ func resumePausedJob(_ *sess.Session, job *model.Job,
+ 	return nil
+ }
+ 
++var GLOBAL = make(chan struct{})
++
+ // processJobs command on the Job according to the process
+ func processJobs(process func(*sess.Session, *model.Job, model.AdminCommandOperator) (err error),
+ 	sessCtx sessionctx.Context,
+@@ -1794,6 +1796,8 @@ func processJobs(process func(*sess.Session, *model.Job, model.AdminCommandOpera
+ 		if err = ns.Commit(); err != nil {
+ 			continue
+ 		}
++		fmt.Println("after cancel job-------------------")
++		GLOBAL <- struct{}{}
+ 
+ 		for id, idx := range jobMap {
+ 			jobErrs[idx] = dbterror.ErrDDLJobNotFound.GenWithStackByArgs(id)
+diff --git a/pkg/ddl/ddl_worker.go b/pkg/ddl/ddl_worker.go
+index 6f6084fa61..dc84e45f05 100644
+--- a/pkg/ddl/ddl_worker.go
++++ b/pkg/ddl/ddl_worker.go
+@@ -853,6 +853,12 @@ func (w *worker) HandleJobDone(d *ddlCtx, job *model.Job, t *meta.Meta) error {
+ }
+ 
+ func (w *worker) prepareTxn(job *model.Job) (kv.Transaction, error) {
++	if job.Type == model.ActionTruncateTable && job.State == model.JobStateQueueing {
++		fmt.Println("before truncate -------------------", job.ID)
++		<-GLOBAL
++		time.Sleep(10 * time.Second)
++		fmt.Println("start truncate -------------------", job.ID)
++	}
+ 	err := w.sess.Begin()
+ 	if err != nil {
+ 		return nil, err
+
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+job cancelled
+### 3. What did you see instead (Required)
+job cancel success, but the job keeps running as the meta is overridden
+```sql
+mysql> admin cancel ddl jobs 136;
++--------+------------+
+| JOB_ID | RESULT     |
++--------+------------+
+| 136    | successful |
++--------+------------+
+1 row in set (0.00 sec)
+
+mysql> admin show ddl jobs 1;
++--------+---------+------------+----------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+------------+
+| JOB_ID | DB_NAME | TABLE_NAME | JOB_TYPE       | SCHEMA_STATE | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE      |
++--------+---------+------------+----------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+------------+
+|    136 | test    | t          | truncate table | none         |         2 |      133 |         0 | 2024-04-18 23:30:30 | NULL                | NULL                | cancelling |
+|    134 | test    | t          | truncate table | public       |         2 |      131 |         0 | 2024-04-18 23:26:27 | 2024-04-18 23:26:54 | 2024-04-18 23:30:40 | synced     |
++--------+---------+------------+----------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+------------+
+2 rows in set (0.00 sec)
+
+mysql> admin show ddl jobs 1;
++--------+---------+------------+----------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+| JOB_ID | DB_NAME | TABLE_NAME | JOB_TYPE       | SCHEMA_STATE | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE  |
++--------+---------+------------+----------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+|    136 | test    | t          | truncate table | public       |         2 |      133 |         0 | 2024-04-18 23:30:30 | 2024-04-18 23:31:34 | 2024-04-18 23:31:34 | synced |
++--------+---------+------------+----------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+1 row in set (0.01 sec)
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,103 @@
+ID: 32339
+Title: error returned by EXECUTE stmt incorrectly includes a result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Consider the following test:
+
+```sql
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+func main() {
+
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:4001)/test")
+	//db, err := sql.Open("mysql", "root@tcp(127.0.0.1:8028)/test")
+	if err != nil {
+		panic(err)
+	}
+	db.SetMaxOpenConns(1)
+
+	fmt.Println("starting test")
+
+	db.Exec("DROP TABLE IF EXISTS t1, t2;")
+
+	db.Exec(`CREATE TABLE t1 (
+		  pk INTEGER NOT NULL,
+		  col_varchar VARCHAR(64) DEFAULT NULL,
+		  col_blob BLOB,
+		  PRIMARY KEY (pk)
+		);`)
+
+	db.Exec(`CREATE TABLE t2 (
+		  pk INTEGER NOT NULL,
+		  col_int INTEGER DEFAULT NULL,
+		  col_blob BLOB,
+		  PRIMARY KEY (pk)
+		);`)
+
+	db.Exec("INSERT INTO t2 VALUES (7,8, 0xEFBFBDEFBFBDEFBFBDEFBFBD004A);")
+
+	db.Exec(`PREPARE stmt FROM
+		"INSERT INTO t1 (col_blob, pk, col_varchar)
+		 SELECT col_blob, col_int, col_blob
+		 FROM t2
+		 WHERE pk BETWEEN 7 AND 8
+		 LIMIT 1";`)
+
+	db.Exec("EXECUTE stmt;")
+
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rows, _ := tx.Query("EXECUTE stmt")
+
+	if rows != nil {
+		fmt.Printf("A result was returned (not expected!): %#v\n", rows)
+	}
+}
+```
+
+When using MySQL 8.0.28 or TiDB+TiKV there is no result. However, when using just tidb, there is a result (incorrect).
+
+This is breaking the `insert` mysql test (can't use the same results file against tidb-server only and with tikv).
+
+### 2. What did you expect to see? (Required)
+
+No result
+
+### 3. What did you see instead (Required)
+
+A result (with tidb and NO tikv server) only
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+tidb> select tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v5.5.0-alpha-305-gc0244a380
+Edition: Community
+Git Commit Hash: c0244a380b2e0f63c1f9a813011ce87f97740ac4
+Git Branch: HEAD
+UTC Build Time: 2022-02-14 16:08:55
+GoVersion: go1.16.9
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

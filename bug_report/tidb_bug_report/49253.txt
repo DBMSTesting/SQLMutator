@@ -1,0 +1,82 @@
+ID: 49253
+Title: Unclear range scope in the execution plan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+create table t1 (a varchar(20), b int, index (a)) collate utf8mb4_general_ci;
+insert into t1 values ('南京', 1 ), ('南海', 2 );
+explain select * from t1 use index (a) where a like '南%';
+explain select * from t1 use index (a) where a = '南海';
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+[16:13:38]TiDB root:test> explain select * from t1 use index (a) where a like '南%';
++---------------------------+---------+-----------+----------------------+----------------------------+
+| id                        | estRows | task      | access object        | operator info              |
++---------------------------+---------+-----------+----------------------+----------------------------+
+| IndexLookUp_8             | 1.60    | root      |                      |                            |
+| ├─Selection_7(Build)      | 1.60    | cop[tikv] |                      | like(test.t1.a, "南%", 92) |
+| │ └─IndexFullScan_5       | 2.00    | cop[tikv] | table:t1, index:a(a) | keep order:false           |
+| └─TableRowIDScan_6(Probe) | 1.60    | cop[tikv] | table:t1             | keep order:false           |
++---------------------------+---------+-----------+----------------------+----------------------------+
+4 rows in set
+Time: 0.007s
+[16:13:45]TiDB root:test> explain select * from t1 use index (a) where a = '南海';
++---------------------------+---------+-----------+----------------------+-----------------------------------------+
+| id                        | estRows | task      | access object        | operator info                           |
++---------------------------+---------+-----------+----------------------+-----------------------------------------+
+| IndexLookUp_7             | 1.00    | root      |                      |                                         |
+| ├─IndexRangeScan_5(Build) | 1.00    | cop[tikv] | table:t1, index:a(a) | range:["南海","南海"], keep order:false |
+| └─TableRowIDScan_6(Probe) | 1.00    | cop[tikv] | table:t1             | keep order:false                        |
++---------------------------+---------+-----------+----------------------+-----------------------------------------+
+3 rows in set
+Time: 0.004s
+```
+### 3. What did you see instead (Required)
+After support like range scan, the not correspond to legal characters sort keys will appear in the range.
+you can see the `range:["SW","SW"]` is not easy to correlate with filter conditions
+```sql
+[15:48:41]TiDB root:test> explain select * from t1 use index (a) where a like '南';
++---------------------------+---------+-----------+----------------------+---------------------------------------------------+
+| id                        | estRows | task      | access object        | operator info                                     |
++---------------------------+---------+-----------+----------------------+---------------------------------------------------+
+| IndexLookUp_8             | 0.00    | root      |                      |                                                   |
+| ├─Selection_7(Build)      | 0.00    | cop[tikv] |                      | like(test.t1.a, "南", 92)                         |
+| │ └─IndexRangeScan_5      | 0.00    | cop[tikv] | table:t1, index:a(a) | range:["SW","SW"], keep order:false, stats:pseudo |
+| └─TableRowIDScan_6(Probe) | 0.00    | cop[tikv] | table:t1             | keep order:false, stats:pseudo                    |
++---------------------------+---------+-----------+----------------------+---------------------------------------------------+
+
+[15:54:13]TiDB root:test> explain select * from t1 use index (a) where a = '南海';
++---------------------------+---------+-----------+----------------------+-----------------------------------------+
+| id                        | estRows | task      | access object        | operator info                           |
++---------------------------+---------+-----------+----------------------+-----------------------------------------+
+| IndexLookUp_7             | 1.00    | root      |                      |                                         |
+| ├─IndexRangeScan_5(Build) | 1.00    | cop[tikv] | table:t1, index:a(a) | range:["SWmw","SWmw"], keep order:false |
+| └─TableRowIDScan_6(Probe) | 1.00    | cop[tikv] | table:t1             | keep order:false                        |
++---------------------------+---------+-----------+----------------------+-----------------------------------------+
+```
+### 4. What is your TiDB version? (Required)
+```sql
+[15:50:20]TiDB root:test> select tidb_version();
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v7.6.0-alpha                             |
+| Edition: Community                                        |
+| Git Commit Hash: 8fc13dadb250139694d608144219fb1ded041412 |
+| Git Branch: heads/refs/tags/v7.6.0-alpha                  |
+| UTC Build Time: 2023-12-07 02:50:32                       |
+| GoVersion: go1.21.4                                       |
+| Race Enabled: false                                       |
+| Check Table Before Drop: false                            |
+| Store: tikv                                               |
++-----------------------------------------------------------+
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

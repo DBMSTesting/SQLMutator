@@ -1,0 +1,111 @@
+ID: 13870
+Title: Avoid automatic decompression on server side when importing files from Google Cloud Storage
+Description:
+### What happens?
+
+We store gzip compressed CSV files in Google Cloud Storage. Files has '.csv' extension, metadata is set to `Content-Type: text/csv`, `Content-Encoding: gzip`. These files gets imported into DuckDB using httpfs extension.
+
+We observe that import of such files is 2-3 times slower than '.csv.gz' files stored with `Content-Type: gzip` because:
+
+1) DuckDB doesn't announce that it supports gzip, doesn't set `Accept-Encoding: gzip` header in requests to GCS.
+2) Google Cloud Storage decompresses the file before sending it back. This feature is called "decompressive transcoding" and it is documented in https://cloud.google.com/storage/docs/transcoding.
+3) Google Cloud Storage doesn't support range requests on transcoded results so DuckDB can't parallelize downloads.
+
+Storing files as `.csv.gz` and `Content-Type: gzip` is a little inconvenient because they require additional decompression step when downloading files with the browser or when coding using Google SDKs.
+
+Could you please add support for `Accept-Encoding` header into httpfs extension?
+
+Here is an example based on open data from https://www.rijdendetreinen.nl/en/open-data.
+
+* url: https://storage.googleapis.com/nm-duckdb-transcoding-test/services-2023-06-truncated-with-transcoding.csv
+* gsutil url: gs://nm-duckdb-transcoding-test/services-2023-06-truncated-with-transcoding.csv'
+* number of rows: 500000
+* compressed size: 7.8 MB
+* uncompressed size 67.7 MB
+
+Sending HEAD request without `Accept-Encoding` header gets no `Content-Encoding` and `Content-Length` headers in response.
+
+```
+% curl -I http://storage.googleapis.com/nm-duckdb-transcoding-test/services-2023-06-truncated-with-transcoding.csv
+
+HTTP/1.1 200 OK
+Expires: Wed, 11 Sep 2024 10:33:45 GMT
+Date: Wed, 11 Sep 2024 09:33:45 GMT
+Cache-Control: public, max-age=3600
+Last-Modified: Tue, 10 Sep 2024 13:18:46 GMT
+ETag: W/"9f0e40741d1902d369b748a8d1a94869"
+Vary: Accept-Encoding
+Content-Type: text/csv
+Server: UploadServer
+Transfer-Encoding: chunked
+```
+
+Sending HEAD requests with `Accept-Encoding: gzip` gets `Content-Encoding`, `Content-Length`, `Accept-Ranges` headers in response.
+
+```
+% curl -H 'Accept-Encoding: gzip' -I http://storage.googleapis.com/nm-duckdb-transcoding-test/services-2023-06-truncated-with-transcoding.csv
+
+HTTP/1.1 200 OK
+Expires: Wed, 11 Sep 2024 10:35:22 GMT
+Date: Wed, 11 Sep 2024 09:35:22 GMT
+Cache-Control: public, max-age=3600
+Last-Modified: Tue, 10 Sep 2024 13:18:46 GMT
+ETag: "9f0e40741d1902d369b748a8d1a94869"
+Vary: Accept-Encoding
+Content-Type: text/csv
+Content-Encoding: gzip
+Accept-Ranges: bytes
+Content-Length: 8213591
+Server: UploadServer
+```
+
+### To Reproduce
+
+Run the following SQL query and observe that httpfs is transferring 67.6MB in one GET request instead of 7.8MB in multiple GET requests. The total number of records must be 500000.
+
+```
+CREATE SECRET (TYPE GCS);
+
+EXPLAIN ANALYZE
+SELECT count(1) FROM read_csv('gs://nm-duckdb-transcoding-test/services-2023-06-truncated-with-transcoding.csv');
+```
+
+### OS:
+
+macOS
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+duckdb shell
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Nikita Maruniak
+
+### Affiliation:
+
+Railsware
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

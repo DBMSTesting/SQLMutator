@@ -1,0 +1,86 @@
+ID: 11308
+Title: Materialized view pulling from Kafka topic ignores `SETTINGS`
+Description:
+When using materialized views to pump events from a Kafka topic into another CH table, the `SETTINGS` clause of the MV's SELECT appears to be ignored. At least for the `input_format_import_nested_json` setting -- I haven't tested any other settings.
+
+**How to reproduce**
+* Which ClickHouse server version to use: 20.3.10.75
+* `CREATE TABLE` statements for all tables involved
+
+```sql
+CREATE TABLE kafka (
+    `t` UInt64,
+    `e.x` String
+)
+ENGINE = Kafka()
+SETTINGS
+    kafka_broker_list = 'broker:29092',
+    kafka_topic_list = 'topic-name',
+    kafka_group_name = 'group-name',
+    kafka_format = 'JSONEachRow';
+
+CREATE TABLE persistent_kafka (
+    time UInt64,
+    some_string String
+)
+ENGINE = MergeTree()
+ORDER BY time;
+
+CREATE MATERIALIZED VIEW persistent_kafka_mv TO persistent_kafka AS
+SELECT * FROM (
+    SELECT
+        `t` AS `time`,
+        `e.x` AS `some_string`
+    FROM kafka
+    SETTINGS input_format_import_nested_json = 1
+)
+```
+
+Insert a few test messages to Kafka:
+```
+kafkacat -P -b 127.0.0.1:29092 -t topic-name
+{"t": 123, "e": {"x": "woof"}}
+{"t": 123, "e": {"x": "woof"}}
+{"t": 123, "e": {"x": "woof"}}
+{"t": 123, "e": {"x": "woof"}}
+{"t": 123, "e": {"x": "woof"}}
+```
+
+When querying the `kafka` table directly, without the MV, it works as expected:
+
+```
+SELECT
+    t AS time,
+    `e.x` AS some_string
+FROM kafka
+SETTINGS input_format_import_nested_json = 1
+
+┌─time─┬─some_string─┐
+│  123 │ woof        │
+│  123 │ woof        │
+│  123 │ woof        │
+│  123 │ woof        │
+└──────┴─────────────┘
+```
+
+In the `persistent_kafka` filled from the MV however, the `SETTINGS` clause is ignored.
+```
+:) select * from persistent_kafka;
+
+SELECT *
+FROM persistent_kafka
+
+┌─time─┬─some_string─┐
+│  123 │             │
+│  123 │             │
+│  123 │             │
+│  123 │             │
+│  123 │             │
+└──────┴─────────────┘
+
+5 rows in set. Elapsed: 0.009 sec.
+```
+
+When setting `input_format_import_nested_json=1` globally in `users.xml`, the MV works fine. I also tried the MV without the subquery -- same result.
+
+As a more general critique, I feel like it would be smarter if one could set `input_format_import_nested_json = 1` on the kafka table directly rather than having to specify it for each query, but I guess that should probably be discussed elsewhere.

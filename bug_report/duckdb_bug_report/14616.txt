@@ -1,0 +1,48 @@
+ID: 14616
+Title: Avoiding unnecessary rebinding
+Description:
+Before this PR, various codepaths would internally use a separate call to `Connection::Prepare` followed by `PreparedStatement::Execute` even though they would be executed right after eachother. This could lead to expensive rebinding in queries on tables in Catalogs like the new Delta Catalog.
+
+## Background
+
+The Prepare - Execute model as DuckDB uses is it sensible when called by a users, but not always the best option when they immediately follow eachother. The reason for this is that in most cases, duckdb will be running in so-called auto-commit mode. This mode means that DuckDB will wrap each query in a transaction for automatically. What this mean the the Prepare Execute model is that the prepare and execute will each run in their own transaction. To properly understand lets consider the following:
+
+```c++
+DuckDB db(nullptr);
+Connection con1(db);
+Connection con2(db);
+
+// Create some test table
+con->Query("CREATE TABLE a(i TINYINT)");
+con->Query("INSERT INTO a VALUES (11), (12), (13)");
+
+// We prepare our statement
+auto prepared = con->Prepare("SELECT * FROM a WHERE i=$1");
+
+// The table is altered in the meantime by a different connection
+con2->Query("ALTER TABLE a ADD COLUMN b VARCHAR");
+
+// Now during execution, our binding from prepare is incorrect! However DuckDB will rebind to fix this.
+auto result = prepared->Execute(12);
+```
+So as we can see in the example rebinding is used to recover from situations where the binding has become invalidated between preparing and executing.
+
+## The problem
+Rebinding is in general a good thing: it allows recovery from situations like the one above. However, it can get expensive. For the (draft) implementation of the new Delta Catalog feature (see https://github.com/duckdb/duckdb_delta/pull/110), I would like to ensure that we don't bind delta tables more than absolutely necessary, because we currently can't efficiently verify if the table version we have read in the bind phase is still the latest during execution phase. This means for every delta table you would need to bind twice (unless we use aggressive and user-unfriendly caching mechanisms). I verified that the sqlite extension also suffer from the same problem.
+
+## Solution
+The fix is to ensure we use a single transaction across the Prepare and Execute step where possible. This means we need to be careful with implementing `Query` functions in clients using the `Prepare` and `Execute`, and instead going through `Connection::SendQuery`, `Connection::Query`,  and `Connection::PendingQuery` as much as possible.
+
+This allows Catalogs to cache state in their transactions avoiding expensive rebinds. In the case of Delta this allows me to cache the Delta Snapshot in the DeltaTransaction: a safe and unobtrusive way to ensure the snapshot stays pinned for the duration of the transaction. Even if a rebind would be triggered, the delta catalog can simply use the cached snapshot and avoid redoing IO.
+
+In the end I added the following in this PR:
+- Added new `Connection::PendingQuery` methods that allow passing parameters
+- Python clients `Connection::Execute` by using the new `PendingQuery` method
+- Fixed the CLI by switching to use `PendingQuery` instead of prepare execute when there are no parameters in the statement
+- Fixed C++ APIs variadic `Connection::QueryParamsRecursive` by using new `PendingQuery` method
+
+## Testing
+I wrote some minor extra tests for the C++ API, I've also built the aforementioned draft delta catalog PR with this branch and can confirm that this allows us fetch the delta snapshot only once per table per query.
+
+## Todo's
+- double check other clients

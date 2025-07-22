@@ -1,0 +1,108 @@
+ID: 64564
+Title: Tokenbf_v1  filter drops granules which are positive when we make use of match function to find a regex pattern
+Description:
+Tokenbf_v1 bloom filter index is skipping the granules which are positives when searched for a regex match.
+Steps to reproduce:
+```
+CREATE TABLE hackernews (
+    id UInt64,
+    deleted UInt8,
+    type String,
+    author String,
+    timestamp DateTime,
+    comment String,
+    dead UInt8,
+    parent UInt64,
+    poll UInt64,
+    children Array(UInt32),
+    url String,
+    score UInt32,
+    title String,
+    parts Array(UInt32),
+    descendants UInt32
+)
+ENGINE = MergeTree
+ORDER BY (type, author);
+
+INSERT INTO hackernews
+    SELECT * FROM s3Cluster(
+        'default',
+        'https://datasets-documentation.s3.eu-west-3.amazonaws.com/hackernews/hacknernews.parquet',
+        'Parquet',
+        '
+    id UInt64,
+    deleted UInt8,
+    type String,
+    by String,
+    time DateTime,
+    text String,
+    dead UInt8,
+    parent UInt64,
+    poll UInt64,
+    kids Array(UInt32),
+    url String,
+    score UInt32,
+    title String,
+    parts Array(UInt32),
+    descendants UInt32');
+
+SELECT count()
+FROM hackernews
+WHERE match(comment, 'clickho[u]se'); ---> result = 334
+
+SELECT count()
+FROM hackernews
+WHERE match(comment, 'clickhouse'); ---> result = 334
+```
+Add the tokenbf index
+```
+ALTER TABLE hackernews ADD INDEX idx_comment comment TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1;
+ALTER TABLE hackernews MATERIALIZE INDEX idx_comment;
+```
+Wait for a few minutes for the index to build
+```
+SELECT count()
+FROM hackernews
+WHERE match(comment, 'clickho[u]se'); ---> result = 4. The expectation is both the results should be same i.e. this result should have been 334
+```
+When the explain statement is run
+```
+ Expression ((Project names + Projection))                          │
+ 2. │   Aggregating                                                      │
+ 3. │     Expression (Before GROUP BY)                                   │
+ 4. │       Filter ((WHERE + Change column names to column identifiers)) │
+ 5. │         ReadFromMergeTree (default.hackernews)                     │
+ 6. │         Indexes:                                                   │
+ 7. │           PrimaryKey                                               │
+ 8. │             Condition: true                                        │
+ 9. │             Parts: 5/5                                             │
+10. │             Granules: 3528/3528                                    │
+11. │           Skip                                                     │
+12. │             Name: idx_comment                                      │
+13. │             Description: tokenbf_v1 GRANULARITY 1                  │
+14. │             Parts: 3/5                                             │
+15. │             Granules: 11/3528 
+```
+Why are these granules being dropped. I assume this incorrect dropping of the granules is the reason for the incorrect result.
+```
+SELECT count()
+FROM hackernews
+WHERE match(comment, 'clickhouse'); ---> result = 334
+
+ 1. │ Expression ((Project names + Projection))                          │
+ 2. │   Aggregating                                                      │
+ 3. │     Expression (Before GROUP BY)                                   │
+ 4. │       Filter ((WHERE + Change column names to column identifiers)) │
+ 5. │         ReadFromMergeTree (default.hackernews)                     │
+ 6. │         Indexes:                                                   │
+ 7. │           PrimaryKey                                               │
+ 8. │             Condition: true                                        │
+ 9. │             Parts: 5/5                                             │
+10. │             Granules: 3528/3528                                    │
+11. │           Skip                                                     │
+12. │             Name: idx_comment                                      │
+13. │             Description: tokenbf_v1 GRANULARITY 1                  │
+14. │             Parts: 4/5                                             │
+15. │             Granules: 215/3528                                     │
+```
+Clickhouse version used: 24.4.1.2088

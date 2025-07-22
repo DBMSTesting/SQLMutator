@@ -1,0 +1,75 @@
+ID: 30512
+Title: IT mysqltest `delete` failed with the plan changed
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+in ci https://ci.pingcap.net/blue/organizations/jenkins/tikv_ghpr_integration_common_test/detail/tikv_ghpr_integration_common_test/3248/pipeline
+the case is 
+```sql
+CREATE TABLE t1 (a int not null,b int not null);
+CREATE TABLE t2 (a int not null, b int not null, primary key (a,b));
+CREATE TABLE t3 (a int not null, b int not null, primary key (a,b));
+insert into t1 values (1,1),(2,1),(1,3);
+insert into t2 values (1,1),(2,2),(3,3);
+insert into t3 values (1,1),(2,1),(1,3);
+select * from t1,t2,t3 where t1.a=t2.a AND t2.b=t3.a and t1.b=t3.b order by t1.a,t1.b;
+a	b	a	b	a	b
+1	1	1	1	1	1
+1	3	1	1	1	3
+2	1	2	2	2	1
+analyze table t1;
+analyze table t2;
+analyze table t3;
+explain select * from t1,t2,t3 where t1.a=t2.a AND t2.b=t3.a and t1.b=t3.b;
+id	estRows	task	access object	operator info
+HashJoin_21	3.00	root		inner join, equal:[eq(delete.t2.b, delete.t3.a) eq(delete.t1.b, delete.t3.b)]
+├─TableReader_41(Build)	3.00	root		data:TableFullScan_40
+│ └─TableFullScan_40	3.00	cop[tikv]	table:t3	keep order:false
+└─HashJoin_32(Probe)	3.00	root		inner join, equal:[eq(delete.t1.a, delete.t2.a)]
+  ├─TableReader_37(Build)	3.00	root		data:TableFullScan_36
+  │ └─TableFullScan_36	3.00	cop[tikv]	table:t2	keep order:false
+  └─TableReader_35(Probe)	3.00	root		data:TableFullScan_34
+    └─TableFullScan_34	3.00	cop[tikv]	table:t1	keep order:false
+
+```
+```bash
+run test [delete] err: sql:explain select * from t1,t2,t3 where t1.a=t2.a AND t2.b=t3.a and t1.b=t3.b;: failed to run query
+"explain select * from t1,t2,t3 where t1.a=t2.a AND t2.b=t3.a and t1.b=t3.b;"
+ around line 100,
+we need(743):
+explain select * from t1,t2,t3 where t1.a=t2.a AND t2.b=t3.a and t1.b=t3.b;
+id	estRows	task	access object	operator info
+HashJoin_21	3.00	root		inner join, equal:[eq(delete.t2.b, delete.t3.a) eq(delete.t1.b, delete.t3.b)]
+├─TableReader_41(Build)	3.00	root		data:TableFullScan_40
+│ └─TableFullScan_40	3.00	cop[tikv]	table:t3	keep order:false
+└─HashJoin_32(Probe)	3.00	root		inner join, equal:[eq(delete.t1.a, delete.t2.a)]
+  ├─TableReader_37(Build)	3.00	root		data:TableFullScan_36
+  │ └─TableFullScan_36	3.00	cop[tikv]	table:t2	keep order:false
+  └─TableReader_35(Probe)	3.00	root		data:TableFullScan_34
+    └─TableFullScan_34	3.00	cop[tikv]	table:t1	keep order:false
+delete t2.*,t3.* from t1,t2,t3 where t1.a=t2
+but got(743):
+explain select * from t1,t2,t3 where t1.a=t2.a AND t2.b=t3.a and t1.b=t3.b;
+id	estRows	task	access object	operator info
+HashJoin_21	3.00	root		inner join, equal:[eq(delete.t2.b, delete.t3.a) eq(delete.t1.b, delete.t3.b)]
+├─IndexReader_43(Build)	3.00	root		index:IndexFullScan_42
+│ └─IndexFullScan_42	3.00	cop[tikv]	table:t3, index:PRIMARY(a, b)	keep order:false
+└─HashJoin_32(Probe)	3.00	root		inner join, equal:[eq(delete.t1.a, delete.t2.a)]
+  ├─IndexReader_39(Build)	3.00	root		index:IndexFullScan_38
+  │ └─IndexFullScan_38	3.00	cop[tikv]	table:t2, index:PRIMARY(a, b)	keep order:false
+  └─TableReader_35(Probe)	3.00	root		data:TableFullScan_34
+    └─TableFullScan_34	3.00	cop[tikv]	table:t1	keep order:false
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

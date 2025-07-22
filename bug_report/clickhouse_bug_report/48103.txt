@@ -1,0 +1,28 @@
+ID: 48103
+Title: 200% constant CPU usage while using RabbitMQ intergation on 23.2.4 revision 54461 (docker image)
+Description:
+I reproduce the problem as follows.
+
+1. Start docker image (latest from here https://hub.docker.com/r/clickhouse/clickhouse-server)
+docker run -d  --link rabbit1 --hostname clicktest1 clickhouse/clickhouse-server # rabbit1 is a real host with RabbitMQ
+docker run -it --rm  --link clicktest1 yandex/clickhouse-client --host clicktest1 # connect with client
+
+The client prints the following about version numbers:
+_ClickHouse client version 22.1.3.7 (official build).
+Connecting to clicktest1:9000 as user default.
+Connected to ClickHouse server version 23.2.4 revision 54461._
+
+2. Create test database and tables:
+
+```
+CREATE DATABASE test1;
+USE test1;
+CREATE TABLE rabbitmq_test ( `test` String ) ENGINE = RabbitMQ SETTINGS rabbitmq_host_port = 'rabbit1:5672', rabbitmq_username='guest', rabbitmq_password='guest',rabbitmq_exchange_name = 'pmacct', rabbitmq_routing_key_list = 'nonexistant', rabbitmq_format = 'JSONEachRow', rabbitmq_exchange_type = 'direct', rabbitmq_num_consumers = 1, rabbitmq_queue_settings_list = 'x-max-length=1048545,x-overflow=reject-publish', rabbitmq_max_block_size = 1024;
+CREATE TABLE test_events ( `test` String ) ENGINE = MergeTree ORDER BY (test);
+CREATE MATERIALIZED VIEW event_view TO test_events ( `test` String ) AS SELECT `test` FROM rabbitmq_test;
+```
+
+3. Immediately after that, I see CPU usage of the `clickhouse-server` process of about 200%, or when using `top` with thread info, two threads with `BgMBSchPool` name using each about 100% CPU. This is with no events, as I use nonexistant routing key. I see the same behavior with production data - it seems to work, but uses two 100% CPU threads for each rabbitmq queue.
+
+Older version ( https://hub.docker.com/r/yandex/clickhouse-server latest) doesn't use any noticeable amount of CPU when there are no events,  so I guess it's a regression.
+

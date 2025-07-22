@@ -1,0 +1,37 @@
+ID: 15301
+Title: Add `get_partition_stats` callback to TableFunction to get a list of all row group metadata, and use this to speed up `COUNT(*)`
+Description:
+This PR adds the `get_partition_stats` callback that can be used to get partition info. This can be used by the optimizer layer to make decisions on how to best process a dataset. Currently we only return counts, but the idea is that we can extend this in the future to add min/max or sortedness information.
+
+```cpp
+enum class CountType { COUNT_EXACT, COUNT_APPROXIMATE };
+
+struct PartitionStatistics {
+	PartitionStatistics();
+
+	//! The row id start
+	idx_t row_start;
+	//! The amount of rows in the partition
+	idx_t count;
+	//! Whether or not the count is exact or approximate
+	CountType count_type;
+};
+
+typedef vector<PartitionStatistics> (*table_function_get_partition_stats_t)(ClientContext &context, GetPartitionStatsInput &input);
+```
+
+###### COUNT(*)
+
+In the statistics propagation optimizer, we use this new callback to speed up `COUNT(*)` queries over tables provided they do not have deletes or transaction-local data. When a row group has no deletes or transaction information, it returns `CountType::COUNT_EXACT`. We can then use this to compute the `COUNT(*)` correctly using only the row group metadata during optimization time. This speeds up simple queries like `SELECT COUNT(*) FROM tbl` which previously emitted row id vectors and counted them to obtain the count.
+
+While that is reasonably fast, reading the count directly from the metadata is much faster.
+
+Here is `COUNT(*)` over `lineitem` with TPC-H SF10.
+
+```sql
+SELECT COUNT(*) FROM lineitem;
+```
+
+| v1.1.3 |  new   |
+|--------|--------|
+| 0.008s | 0.001s |

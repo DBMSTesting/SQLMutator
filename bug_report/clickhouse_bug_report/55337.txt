@@ -1,0 +1,62 @@
+ID: 55337
+Title: Parquet DATE parse to DateTime64(0)
+Description:
+**Describe the issue**
+Recently, we updated from version `23.3.8.21` to `23.8.2.7` and encountered an incompatibility issue.
+
+When inserting data from a Parquet file with a field type of `DATE` into a ClickHouse table where the column is defined as `DateTime64(0)`, the dates are not parsed correctly. Instead, the dates are parsed as Unix timestamps, resulting in incorrect data being inserted.
+
+**How to reproduce**
+```sql
+CREATE TABLE test
+(
+    `DATE` DateTime64(0),
+    `CREATED_AT` DateTime64(0)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(DATE)
+ORDER BY DATE;
+
+INSERT INTO test SELECT *
+FROM s3('https://dev-propel.s3.us-east-2.amazonaws.com/temp/dateColumn.snappy.parquet', 'Parquet');
+
+SELECT DATE, CREATED_AT FROM test;
+```
+
+Results:
+```
+1970-01-01 05:21:05	1970-01-01 05:21:36
+1970-01-01 05:21:06	1970-01-01 05:21:37
+1970-01-01 05:21:07	1970-01-01 05:21:38
+```
+
+Expected results:
+```
+2022-10-01 00:00:00	2022-11-01 00:00:00
+2022-10-02 00:00:00	2022-11-02 00:00:00
+2022-09-30 00:00:00	2022-10-31 00:00:00
+```
+
+* Which ClickHouse server versions are incompatible
+It works in the version [23.3.8.21](https://fiddle.clickhouse.com/2f413c9e-585f-4f10-8c99-eb0d33c741cd) (See example online).
+It is failing since the version [23.4](https://fiddle.clickhouse.com/5c94b07a-5656-4bd5-ba18-7ef2098edf67) (See example online).
+
+**Workaround**
+We have made a workaround in our side to prevent continue inserting wrong data.
+
+```sql
+INSERT INTO test 
+SELECT toDateTime64("DATE", 0), toDateTime64("CREATED_AT", 0) 
+FROM s3('https://dev-propel.s3.us-east-2.amazonaws.com/temp/dateColumn.snappy.parquet', 'Parquet', '"DATE" Nullable(Date32), "CREATED_AT" Nullable(Date32)');
+
+SELECT DATE, CREATED_AT FROM test;
+```
+
+Result
+```
+2022-10-01 00:00:00	2022-11-01 00:00:00
+2022-10-02 00:00:00	2022-11-02 00:00:00
+2022-09-30 00:00:00	2022-10-31 00:00:00
+```
+
+Works https://fiddle.clickhouse.com/0813b422-20cc-4bfe-aad5-c7c8b1f848ea

@@ -1,0 +1,116 @@
+ID: 19408
+Title: Incorrect result when using IndexMergeJoin on partitioned tables
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```sql
+drop table if exists t1, t2;
+create table t1  (c_int int, primary key(c_int));
+create table t2  (c_int int, unique key (c_int)) partition by hash (c_int) partitions 4;
+insert into t1 values (1), (2), (3), (4), (5);
+insert into t2 select * from t1;
+begin;
+delete from t1 where c_int = 1;
+select /*+ INL_MERGE_JOIN(t1,t2) */ * from t1, t2 where t1.c_int = t2.c_int;
+commit;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++-------+-------+
+| c_int | c_int |
++-------+-------+
+|     2 |     2 |
+|     3 |     3 |
+|     4 |     4 |
+|     5 |     5 |
++-------+-------+
+```
+
+### 3. What did you see instead (Required)
+
+```
++-------+-------+
+| c_int | c_int |
++-------+-------+
+|     4 |     4 |
+|     5 |     5 |
++-------+-------+
+```
+
+<details>
+
+```
+mysql> begin;
+Query OK, 0 rows affected (0.05 sec)
+
+mysql> delete from t1 where c_int = 1;
+Query OK, 1 row affected (0.04 sec)
+
+mysql> select * from t1, t2 where t1.c_int = t2.c_int;
++-------+-------+
+| c_int | c_int |
++-------+-------+
+|     2 |     2 |
+|     3 |     3 |
+|     4 |     4 |
+|     5 |     5 |
++-------+-------+
+4 rows in set (0.05 sec)
+
+mysql> explain select * from t1, t2 where t1.c_int = t2.c_int;
++-------------------------------+----------+-----------+------------------------------+------------------------------------------------------+
+| id                            | estRows  | task      | access object                | operator info                                        |
++-------------------------------+----------+-----------+------------------------------+------------------------------------------------------+
+| Projection_8                  | 12487.50 | root      |                              | test.t1.c_int, test.t2.c_int                         |
+| └─HashJoin_27                 | 12487.50 | root      |                              | inner join, equal:[eq(test.t2.c_int, test.t1.c_int)] |
+|   ├─IndexReader_29(Build)     | 9990.00  | root      | partition:all                | index:IndexFullScan_28                               |
+|   │ └─IndexFullScan_28        | 9990.00  | cop[tikv] | table:t2, index:c_int(c_int) | keep order:false, stats:pseudo                       |
+|   └─UnionScan_30(Probe)       | 10000.00 | root      |                              |                                                      |
+|     └─TableReader_32          | 10000.00 | root      |                              | data:TableFullScan_31                                |
+|       └─TableFullScan_31      | 10000.00 | cop[tikv] | table:t1                     | keep order:false, stats:pseudo                       |
++-------------------------------+----------+-----------+------------------------------+------------------------------------------------------+
+7 rows in set (0.04 sec)
+
+mysql> select /*+ INL_MERGE_JOIN(t1,t2) */ * from t1, t2 where t1.c_int = t2.c_int;
++-------+-------+
+| c_int | c_int |
++-------+-------+
+|     4 |     4 |
+|     5 |     5 |
++-------+-------+
+2 rows in set (0.05 sec)
+
+mysql> explain select /*+ INL_MERGE_JOIN(t1,t2) */ * from t1, t2 where t1.c_int = t2.c_int;
++------------------------------+----------+-----------+------------------------------+-------------------------------------------------------------------------------------+
+| id                           | estRows  | task      | access object                | operator info                                                                       |
++------------------------------+----------+-----------+------------------------------+-------------------------------------------------------------------------------------+
+| IndexMergeJoin_18            | 12487.50 | root      |                              | inner join, inner:IndexReader_16, outer key:test.t1.c_int, inner key:test.t2.c_int  |
+| ├─UnionScan_25(Build)        | 10000.00 | root      |                              |                                                                                     |
+| │ └─TableReader_27           | 10000.00 | root      |                              | data:TableFullScan_26                                                               |
+| │   └─TableFullScan_26       | 10000.00 | cop[tikv] | table:t1                     | keep order:false, stats:pseudo                                                      |
+| └─IndexReader_16(Probe)      | 1.00     | root      | partition:all                | index:Selection_15                                                                  |
+|   └─Selection_15             | 1.00     | cop[tikv] |                              | not(isnull(test.t2.c_int))                                                          |
+|     └─IndexRangeScan_14      | 1.00     | cop[tikv] | table:t2, index:c_int(c_int) | range: decided by [eq(test.t2.c_int, test.t1.c_int)], keep order:true, stats:pseudo |
++------------------------------+----------+-----------+------------------------------+-------------------------------------------------------------------------------------+
+7 rows in set (0.05 sec)
+
+mysql> commit;
+Query OK, 0 rows affected (0.05 sec)
+
+```
+
+</details>
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master @ 6831e487a84c8bde625de8c73feec9e6ec02f426

@@ -1,0 +1,100 @@
+ID: 24962
+Title: ALTER TABLE INPLACE is failing for tables with set field in MySQL 8.0
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+```
+mysql> CREATE DATABASE test;
+
+Query OK, 1 row affected (0.00 sec)
+
+mysql> USE test;
+Database changed
+mysql> CREATE TABLE `test_table` (
+    -> `id` int(11) NOT NULL AUTO_INCREMENT,
+    -> `app_id` int(11) NOT NULL DEFAULT '0',
+    -> `app_type` varchar(255) NOT NULL DEFAULT '',
+    -> `flags` set('shortashowshortbshowshortcshowshortdshowshorteshowshortfshowshortgshowshorthshowshort_') DEFAULT NULL,
+    -> PRIMARY KEY (`id`)
+    -> ) ENGINE=InnoDB AUTO_INCREMENT=846329 DEFAULT CHARSET=utf8;
+
+Query OK, 0 rows affected, 3 warnings (0.02 sec)
+
+mysql> ALTER TABLE test_table DROP COLUMN app_id, DROP COLUMN app_type, ALGORITHM=INPLACE, LOCK=NONE;
+
+ERROR 1846 (0A000): ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY.
+```
+
+### 2. What did you expect to see? (Required)
+```
+mysql> ALTER TABLE test_table DROP COLUMN app_id, DROP COLUMN app_type, ALGORITHM=INPLACE, LOCK=NONE;
+
+Query OK, 0 rows affected (0.03 sec)
+Records: 0  Duplicates: 0  Warnings: 0
+```
+### 3. What did you see instead (Required)
+```
+mysql> ALTER TABLE test_table DROP COLUMN app_id, ALGORITHM=INPLACE, LOCK=NONE;
+
+ERROR 1846 (0A000): ALGORITHM=INPLACE is not supported. Reason: Cannot change column type INPLACE. Try ALGORITHM=COPY.
+```
+
+### 4. What is your TiDB version? (Required)
+```
+mysql> SELECT tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v5.1.0-alpha-13-gd5e0ed0aa-dirty
+Edition: Community
+Git Commit Hash: d5e0ed0aaed72d2f2dfe24e9deec31cb6cb5fdf0
+Git Branch: master
+UTC Build Time: 2021-05-24 14:39:20
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```
+
+### 5. Research results
+**It doesn't matter what options `set` field consists of.** E.g. the same issue occurs if the table looks like this:
+```
+CREATE TABLE `test_table` (
+--
+`id` int(11) NOT NULL AUTO_INCREMENT,
+`app_id` int(11) NOT NULL DEFAULT '0',
+`app_type` varchar(255) NOT NULL DEFAULT '',
+`flags` set('short_show','short_click','no_cookie','users_diff','time_back','no_rtb_info','bad_data','bldsp_info_') DEFAULT NULL,
+PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=846329 DEFAULT CHARSET=utf8;
+```
+
+**But it matters what length of the `set` field is!**
+The `set` field has minimal length when the issue still occurs for these 2 cases.
+If the length will be lower at least 1 character the issue has gone:
+```
+CREATE TABLE `test_table` (
+--
+`id` int(11) NOT NULL AUTO_INCREMENT,
+`app_id` int(11) NOT NULL DEFAULT '0',
+`app_type` varchar(255) NOT NULL DEFAULT '',
+`flags` set('shortashowshortbshowshortcshowshortdshowshorteshowshortfshowshortgshowshorthshowshort') DEFAULT NULL,
+PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=846329 DEFAULT CHARSET=utf8;
+```
+OR
+```
+CREATE TABLE `test_table` (
+--
+`id` int(11) NOT NULL AUTO_INCREMENT,
+`app_id` int(11) NOT NULL DEFAULT '0',
+`app_type` varchar(255) NOT NULL DEFAULT '',
+`flags` set('short_show','short_click','no_cookie','users_diff','time_back','no_rtb_info','bad_data','bldsp_info') DEFAULT NULL,
+PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=846329 DEFAULT CHARSET=utf8;
+```
+
+The critical length of the `set` field when the issue is not reproduced is **86** characters - the number of options characters plus the number of commas.
+
+**This issue is not reproduced for MySQL 5.7 and lower!**

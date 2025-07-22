@@ -1,0 +1,75 @@
+ID: 34682
+Title: Planner generates wrong 2 phase aggregate plan for TiFlash
+Description:
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+create table customer2(c_id bigint primary key);
+create table orders2(o_id bigint primary key, c_id bigint);
+insert into customer2 values(1),(2),(3),(4),(5);
+insert into orders2 values(1,1),(2,1),(3,2),(4,2),(5,2);
+alter table customer2 set tiflash replica 1;
+alter table orders2 set tiflash replica 1;
+set @@tidb_enforce_mpp=1;
+set @@tidb_opt_agg_push_down=1;
+select count(*) from customer2 c, orders2 o where c.c_id=o.c_id;
+```
+
+### 2. What did you expect to see? (Required)
+```sql
+tidb> select count(*) from customer2 c, orders2 o where c.c_id=o.c_id;
++----------+
+| count(*) |
++----------+
+|        5 |
++----------+
+1 row in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+```sql
+mysql> select count(*) from customer2 c, orders2 o where c.c_id=o.c_id;
++----------+
+| count(*) |
++----------+
+|        2 |
++----------+
+1 row in set (0.19 sec)
+
+mysql> explain select count(*) from customer2 c, orders2 o where c.c_id=o.c_id;
++--------------------------------------------------+---------+--------------+---------------+-----------------------------------------------------------------------------------------------------------------+
+| id                                               | estRows | task         | access object | operator info                                                                                                   |
++--------------------------------------------------+---------+--------------+---------------+-----------------------------------------------------------------------------------------------------------------+
+| HashAgg_81                                       | 1.00    | root         |               | funcs:count(Column#14)->Column#4                                                                                |
+| └─TableReader_83                                 | 1.00    | root         |               | data:ExchangeSender_82                                                                                          |
+|   └─ExchangeSender_82                            | 1.00    | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                       |
+|     └─HashAgg_13                                 | 1.00    | mpp[tiflash] |               | funcs:count(Column#5)->Column#14                                                                                |
+|       └─HashJoin_80                              | 5.00    | mpp[tiflash] |               | inner join, equal:[eq(test.customer2.c_id, test.orders2.c_id)]                                                  |
+|         ├─ExchangeReceiver_43(Build)             | 4.00    | mpp[tiflash] |               |                                                                                                                 |
+|         │ └─ExchangeSender_42                    | 4.00    | mpp[tiflash] |               | ExchangeType: Broadcast                                                                                         |
+|         │   └─Projection_38                      | 4.00    | mpp[tiflash] |               | Column#5, test.orders2.c_id                                                                                     |
+|         │     └─HashAgg_39                       | 4.00    | mpp[tiflash] |               | group by:test.orders2.c_id, funcs:sum(Column#6)->Column#5, funcs:firstrow(test.orders2.c_id)->test.orders2.c_id |
+|         │       └─ExchangeReceiver_41            | 4.00    | mpp[tiflash] |               |                                                                                                                 |
+|         │         └─ExchangeSender_40            | 4.00    | mpp[tiflash] |               | ExchangeType: HashPartition, Hash Cols: [name: test.orders2.c_id, collate: N/A]                                 |
+|         │           └─HashAgg_28                 | 4.00    | mpp[tiflash] |               | group by:test.orders2.c_id, funcs:count(1)->Column#6                                                            |
+|         │             └─Selection_37             | 5.00    | mpp[tiflash] |               | not(isnull(test.orders2.c_id))                                                                                  |
+|         │               └─TableFullScan_36       | 5.00    | mpp[tiflash] | table:o       | keep order:false, stats:pseudo                                                                                  |
+|         └─TableFullScan_26(Probe)                | 5.00    | mpp[tiflash] | table:c       | keep order:false, stats:pseudo                                                                                  |
++--------------------------------------------------+---------+--------------+---------------+-----------------------------------------------------------------------------------------------------------------+
+15 rows in set (0.18 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql> select version();
++--------------------------+
+| version()                |
++--------------------------+
+| 5.7.25-TiDB-v6.1.0-alpha |
++--------------------------+
+1 row in set (0.17 sec)
+```

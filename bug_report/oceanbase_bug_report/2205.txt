@@ -1,0 +1,144 @@
+ID: 2205
+Title: [Bug]: S3 Retrieval Error: Observer Crash from Invalid Memory & Read Size Mismatch
+Description:
+**Describe the bug**
+When attempting to retrieve an object from S3, an anomaly occurs where the intended read size (read_size) does not match the actual amount of data read (real_read_size). At this moment, the variable "index_trailer" should be NULL. However, an illegal operation of attempting to access the "last_block_length" member of the supposed-to-be-NULL "index_trailer" is carried out, which leads to an invalid memory access and ultimately results in the crashing of the observer process.
+
+**Environment**
+- OS Version and CPU Arch(`uname -a`):
+   Linux  4.18.20-2.el7.x86_64 SMP Mon Dec 23 17:24:31 CST 2019 x86_64 x86_64 x86_64 GNU/Linux
+- OB Version(`LD_LIBRARY_PATH=../lib:$LD_LIBRARY_PATH ./observer -V`):
+  ./observer -V
+  observer (OceanBase_CE 4.2.5.0)
+
+**Fast Reproduce Steps(Required)**
+
+Steps to reproduce the behavior:
+
+**In backup, Get object from S3, S3 return content-length mismatch read size**
+
+```
+./observer.log:774040:[2024-12-17 15:23:29.549284] WDIAG [STORAGE] pread_file_ (ob_backup_iterator.cpp:227) [83923][T1002_BACKUP_IN][T1002][YB420A8705D6-0006296ED0177D31-0-0] [lt=25][errcode=-4016] not read enough file(ret=-4016, read_size=88, real_read_size=3986121, backup_path=s3://testxzh/backup/2881-2/oms_meta/backup_set_2_full/logstream_1/sys_data_turn_1_retry_0/macro_block_data.0.obbak)
+
+./observer.log:774041:[2024-12-17 15:23:29.549305] WDIAG [STORAGE] read_data_file_trailer_ (ob_backup_iterator.cpp:250) [83923][T1002_BACKUP_IN][T1002][YB420A8705D6-0006296ED0177D31-0-0] [lt=17][errcode=-4016] failed to pread file(ret=-4016, backup_path={cur_pos:118, path:"s3://test/backup/2881-2/oms_meta/backup_set_2_full/logstream_1/sys_data_turn_1_retry_0/macro_block_data.0.obbak"}, storage_info=0x7f3768d6a470, file_length=3986121, trailer_len=88)
+
+./observer.log:774101:CRASH ERROR!!! IP=7f38559ed1d7, RBP=7f37d2d6f430, sig=6, sig_code=-6, sig_addr=0x3ea00014495, RLIMIT_CORE=unlimited, timestamp=1734420209552566, tid=83923, tname=T1002_BACKUP_IN, trace_id=YB420A8705D6-0006296ED0177D31-0-0, lbt=0x16969cd8 0x1694854d 0x7f3855d8836f 0x7f38559ed1d7 0x7f38559ee8c7 0x161fcc10 0x5cfdbb1 0x5da526a 0x82e8672 0x12140553 0x12105eb4 0x12142ac7 0x12105a36 0x1215a3f6 0x12209a9f 0x132f7616 0x1695f07e 0x1695afad 0x7f3855d80dc4 0x7f3855aaf73c, SQL_ID=, SQL_STRING=
+```
+
+**Expected behavior**
+When mismatch read size, should fail instead of crashing the observer.
+> Under normal circumstances, S3 will not return a mismatched read size, so this problem will not be caused. However, in case S3 returns incorrect data by any chance, it may lead to a crash and bring about serious accident issues. Therefore, it is still recommended to fix it.
+
+**Actual Behavior**
+When mismatch read size, crashing the observer.
+
+**Additional context**
+
+In `read_index_file_trailer_`, `pread_file_` failed, return `OB_SUCCESS`, but `file_trailer` has not been assigned a value. 
+In `ObBackupMacroRangeIndexIterator::init`, `index_trailer` is null, invalid access `index_trailer.last_block_length_`.
+The wrong operation causes invalid memory access, crash observer.
+
+```
+int ObIBackupIndexIterator::read_index_file_trailer_(const ObBackupPath &backup_path,
+    const share::ObBackupStorageInfo *storage_info, const ObStorageIdMod &mod,
+    ObBackupMultiLevelIndexTrailer &file_trailer)
+{
+  int ret = OB_SUCCESS;
+  file_trailer.reset();
+  char *buf = NULL;
+  int64_t file_length = 0;
+  ObArenaAllocator allocator;
+  const int64_t trailer_len = sizeof(ObBackupMultiLevelIndexTrailer);
+  if (OB_FAIL(get_backup_file_length_(backup_path, storage_info, file_length))) {
+    LOG_WARN("failed to get file length", K(ret), K(backup_path), KP(storage_info));
+  } else if (OB_UNLIKELY(file_length <= trailer_len)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("backup index file too small", K(ret), K(file_length), K(trailer_len));
+  } else if (OB_ISNULL(buf = static_cast<char *>(allocator.alloc(trailer_len)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("failed to alloc memory", K(ret), K(trailer_len));
+  } else if (OB_FAIL(pread_file_(backup_path.get_obstr(), storage_info, mod, file_length - trailer_len, trailer_len, buf))) {
+    LOG_WARN("failed to pread file", K(ret), K(backup_path), KP(storage_info), K(file_length), K(trailer_len));
+  } else {
+    blocksstable::ObBufferReader buffer_reader(buf, trailer_len);
+    const ObBackupMultiLevelIndexTrailer *trailer = NULL;
+    if (OB_FAIL(buffer_reader.get(trailer))) {
+      LOG_WARN("failed to get file trailer", K(ret));
+    } else if (OB_ISNULL(trailer)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("backup data file trailer is null", K(ret));
+    } else if (OB_FAIL(trailer->check_valid())) {
+      LOG_WARN("failed to check is valid", K(ret), K(*trailer));
+    } else {
+      file_trailer = *trailer;
+    }
+  }
+  return ret;
+}
+
+int ObBackupMacroRangeIndexIterator::init(const int64_t task_id, const ObBackupDest &backup_dest,
+    const uint64_t tenant_id, const share::ObBackupSetDesc &backup_set_desc, const share::ObLSID &ls_id,
+    const share::ObBackupDataType &backup_data_type, const int64_t turn_id, const int64_t retry_id, const int64_t dest_id)
+{
+  int ret = OB_SUCCESS;
+  ObBackupPath backup_path;
+  int64_t file_length = 0;
+  if (IS_INIT) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("range index iterator init twice", K(ret));
+  } else if (!backup_dest.is_valid() || OB_INVALID_ID == tenant_id || !backup_set_desc.is_valid() ||
+             !backup_data_type.is_valid() || turn_id < 0 || retry_id < 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("get invalid args",
+        K(ret),
+        K(backup_dest),
+        K(tenant_id),
+        K(backup_set_desc),
+        K(ls_id),
+        K(backup_data_type),
+        K(turn_id),
+        K(retry_id));
+  } else if (OB_FAIL(backup_dest_.deep_copy(backup_dest))) {
+    LOG_WARN("failed to deep copy backup dest", K(ret), K(backup_dest));
+  } else {
+    task_id_ = task_id;
+    tenant_id_ = tenant_id;
+    backup_set_desc_ = backup_set_desc;
+    ls_id_ = ls_id;
+    backup_data_type_ = backup_data_type;
+    turn_id_ = turn_id;
+    retry_id_ = retry_id;
+    cur_idx_ = 0;
+    cur_index_list_.reset();
+    mod_.storage_id_ = dest_id;
+    mod_.storage_used_mod_ = ObStorageUsedMod::STORAGE_USED_BACKUP;
+    ObBackupMultiLevelIndexTrailer index_trailer;
+    if (OB_FAIL(get_range_index_backup_path_(backup_path))) {
+      LOG_WARN("failed to get range index backup path", K(ret));
+    } else if (OB_FAIL(get_backup_file_length_(backup_path, backup_dest_.get_storage_info(), file_length))) {
+      LOG_WARN("failed to get file length", K(ret), K(backup_path), K_(backup_dest));
+    } else if (OB_FAIL(read_index_file_trailer_(backup_path, backup_dest_.get_storage_info(), mod_, index_trailer))) {
+      LOG_WARN("failed to read index file trailer", K(ret), K(backup_path), K(backup_dest), K_(mod));
+    } else {
+      backup_path_ = backup_path;
+      file_length_ = file_length;
+      read_offset_ = DIO_READ_ALIGN_SIZE;  // file header skipped // TODO(yangyi.yyy): align by length record in header
+      // last_block_length is 0 means no index exist
+      if (0 != index_trailer.last_block_length_) {
+        if (OB_FAIL(do_fetch_new_())) {
+          LOG_WARN("failed to do fetch new", K(ret));
+        }
+      } else {
+        // if last_block_length is 0, then means no index exists
+        meet_end_ = true;
+        cur_idx_ = 0;
+        cur_index_list_.reset();
+      }
+      if (OB_SUCC(ret)) {
+        is_inited_ = true;
+      }
+    }
+  }
+  return ret;
+}
+```

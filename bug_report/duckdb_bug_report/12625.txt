@@ -1,0 +1,27 @@
+ID: 12625
+Title: [Python] Rework internals of object registration
+Description:
+Previously we would create TEMP VIEWs for every registered object.
+This is unintuitive behavior and could also silently cause DuckDB to overwrite temporary views created by users.
+
+In <https://github.com/duckdb/duckdb/pull/12161> we cleaned up how replacement scans take place and fix the issues around lifetime of referenced python objects.
+
+This enables us to use this same mechanism for registered objects, everywhere that a replacement scan can be used, registered objects can also be used[1].
+
+### Internal details:
+Through a ClientContextState we create a bridge between the DuckDBPyConnection and the PythonReplacementScan.
+The `registered_objects` are now stored inside the (new) `PythonContextState`.
+
+`DuckDBPyConnection.register` adds to this map.
+`DuckDBPyConnection.unregister` removes from this map.
+`PythonReplacementScan` now tries to find a suitable registered object before any frames are scanned.
+
+### Other changes
+- `DuckDBPyConnection.from_df` and `DuckDBPyConnection.from_arrow` had weird implementations that were handrolling the replacement, causing a couple issues.
+These have been simplified to just do a replacement into a TableRef and a TableFunctionRelation is created from that.
+
+- `Bind(BaseTableRef &ref)` handrolled logic to concatenate catalog+schema+table names, this has been unified with `ParseInfo::QualifierToString`
+
+- The `external_dependencies` from `ClientContext` was removed, this was only used in the python client and was needed because created VIEWs could not contain ExternalDependencies, so the Connection was responsible for keeping the objects that the VIEWs relied on alive - this is no longer necessary because of <https://github.com/duckdb/duckdb/pull/12161>
+
+[1] One place where this isn't true is DESCRIBE, as it only supports VIEWs and TABLEs at the moment, support would need to be added for replacement scans there to enable the behavior we lost here.

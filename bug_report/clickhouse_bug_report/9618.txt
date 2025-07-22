@@ -1,0 +1,165 @@
+ID: 9618
+Title: query trigger semaphore unlimited waiting when high cpu
+Description:
+**Describe the bug or unexpected behaviour**
+Because many queries are in the pendding state for a long time, the limit of the maximum number of queries is triggered, the clickhouse server rejects subsequent requests.
+After I traced the stack, it was because many query waited for the semaphore indefinitely, which resulted in the structure_lock read lock being never released. The next few hundred queries are all blocked waiting for the read lock.
+
+**Which ClickHouse server version to use**
+v18.14.13-stable
+
+**stacktrace**
+#0  pthread_cond_wait@@GLIBC_2.3.2 () at ../sysdeps/unix/sysv/linux/x86_64/pthread_cond_wait.S:185
+#1  0x000000000a3c7efc in std::condition_variable::wait(std::unique_lock<std::mutex>&) ()
+#2  0x0000000009c707b3 in std::condition_variable::wait<Poco::Semaphore::wait()::<lambda()>> (__p=..., __lock=..., this=0x7fa8afb7deb8) at /usr/include/c++/7/condition_variable:99
+#3  Poco::Semaphore::wait (this=this@entry=0x7fa8afb7de88) at ../contrib/poco/Foundation/src/Semaphore.cpp:61
+#4  0x00000000075fcbe6 in ConcurrentBoundedQueue<DB::(anonymous namespace)::OutputData<(DB::StreamUnionMode)0> >::pop (x=..., this=0x7fa8afb7de10)
+    at ../dbms/src/Common/ConcurrentBoundedQueue.h:82
+**#5  DB::UnionBlockInputStream<(DB::StreamUnionMode)0>::finalize (this=this@entry=0x7fa8afb7dc10) at ../dbms/src/DataStreams/UnionBlockInputStream.h:153**
+#6  0x00000000075fd5f8 in DB::UnionBlockInputStream<(DB::StreamUnionMode)0>::~UnionBlockInputStream (this=0x7fa8afb7dc10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/UnionBlockInputStream.h:104
+#7  0x00000000079d7c6c in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7fa8afb7dc00) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#8  std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#9  std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#10 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#11 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#12 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa197a37850) at /usr/include/c++/7/bits/stl_construct.h:108
+#13 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#14 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa197a37860, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:206
+#15 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7fa957276e18, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/stl_vector.h:434
+#16 DB::IBlockInputStream::~IBlockInputStream (this=0x7fa957276e10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#17 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7fa957276e10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#18 DB::MergingAggregatedBlockInputStream::~MergingAggregatedBlockInputStream (this=0x7fa957276e10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/MergingAggregatedBlockInputStream.h:14
+#19 0x0000000007833cfa in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7fa957276e00) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#20 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#21 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#22 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#23 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#24 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa197a37860) at /usr/include/c++/7/bits/stl_construct.h:108
+#25 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#26 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa197a37870, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:206
+#27 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7f9ea46b2018, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/stl_vector.h:434
+#28 DB::IBlockInputStream::~IBlockInputStream (this=0x7f9ea46b2010, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#29 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7f9ea46b2010, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#30 DB::ExpressionBlockInputStream::~ExpressionBlockInputStream (this=0x7f9ea46b2010, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/ExpressionBlockInputStream.h:16
+#31 0x0000000007833cfa in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f9ea46b2000) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#32 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#33 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#34 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#35 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#36 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa197a37870) at /usr/include/c++/7/bits/stl_construct.h:108
+#37 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#38 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa197a37880, __first=<optimized out>)
+    at /usr/include/c++/7/bits/stl_construct.h:206
+#39 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7f9ea46b2298, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/stl_vector.h:434
+#40 DB::IBlockInputStream::~IBlockInputStream (this=0x7f9ea46b2290, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#41 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7f9ea46b2290, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#42 DB::ExpressionBlockInputStream::~ExpressionBlockInputStream (this=0x7f9ea46b2290, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/ExpressionBlockInputStream.h:16
+#43 0x0000000007997b0a in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f9ea46b2280) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#44 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#45 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#46 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#47 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#48 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa197a37890) at /usr/include/c++/7/bits/stl_construct.h:108
+#49 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#50 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa197a378a0, __first=<optimized out>)
+    at /usr/include/c++/7/bits/stl_construct.h:206
+#51 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7f9ea46b2798, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/stl_vector.h:434
+#52 DB::IBlockInputStream::~IBlockInputStream (this=0x7f9ea46b2790, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#53 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7f9ea46b2790, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#54 DB::ConvertingBlockInputStream::~ConvertingBlockInputStream (this=0x7f9ea46b2790, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/ConvertingBlockInputStream.h:23
+#55 0x0000000007833cfa in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f9ea46b2780) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#56 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#57 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#58 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#59 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#60 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa8ae861ec0) at /usr/include/c++/7/bits/stl_construct.h:108
+#61 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#62 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa8ae861ed0, __first=<optimized out>)
+    at /usr/include/c++/7/bits/stl_construct.h:206
+#63 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7f9ea46b2c98, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/stl_vector.h:434
+#64 DB::IBlockInputStream::~IBlockInputStream (this=0x7f9ea46b2c90, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#65 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7f9ea46b2c90, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#66 DB::ExpressionBlockInputStream::~ExpressionBlockInputStream (this=0x7f9ea46b2c90, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/ExpressionBlockInputStream.h:16
+#67 0x0000000003087df2 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f9ea46b2c80) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#68 0x0000000003098182 in std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#69 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#70 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#71 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#72 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa8b09ad7d0) at /usr/include/c++/7/bits/stl_construct.h:108
+#73 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#74 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa8b09ad7e0, __first=<optimized out>)
+    at /usr/include/c++/7/bits/stl_construct.h:206
+#75 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7fa95727c818, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/stl_vector.h:434
+#76 DB::IBlockInputStream::~IBlockInputStream (this=0x7fa95727c810, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#77 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7fa95727c810, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#78 0x00000000079ee386 in DB::ParallelAggregatingBlockInputStream::~ParallelAggregatingBlockInputStream (this=0x7fa95727c810, __in_chrg=<optimized out>)
+    at ../dbms/src/DataStreams/ParallelAggregatingBlockInputStream.h:19
+#79 0x0000000007833cfa in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7fa95727c800) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#80 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#81 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#82 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#83 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#84 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa197a378c0) at /usr/include/c++/7/bits/stl_construct.h:108
+#85 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#86 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa197a378d0, __first=<optimized out>)
+    at /usr/include/c++/7/bits/stl_construct.h:206
+#87 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7f9ea46b2f18, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/stl_vector.h:434
+#88 DB::IBlockInputStream::~IBlockInputStream (this=0x7f9ea46b2f10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#89 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7f9ea46b2f10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#90 DB::ExpressionBlockInputStream::~ExpressionBlockInputStream (this=0x7f9ea46b2f10, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/ExpressionBlockInputStream.h:16
+#91 0x0000000007833cfa in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f9ea46b2f00) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#92 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#93 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#94 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#95 std::_Destroy<std::shared_ptr<DB::IBlockInputStream> > (__pointer=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:98
+#96 std::_Destroy_aux<false>::__destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=0x7fa197a378e0) at /usr/include/c++/7/bits/stl_construct.h:108
+#97 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*> (__last=<optimized out>, __first=<optimized out>) at /usr/include/c++/7/bits/stl_construct.h:137
+#98 std::_Destroy<std::shared_ptr<DB::IBlockInputStream>*, std::shared_ptr<DB::IBlockInputStream> > (__last=0x7fa197a378f0, __first=<optimized out>)
+    at /usr/include/c++/7/bits/stl_construct.h:206
+#99 std::vector<std::shared_ptr<DB::IBlockInputStream>, std::allocator<std::shared_ptr<DB::IBlockInputStream> > >::~vector (this=0x7f9ea46b3198, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/stl_vector.h:434
+#100 DB::IBlockInputStream::~IBlockInputStream (this=0x7f9ea46b3190, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IBlockInputStream.h:81
+#101 DB::IProfilingBlockInputStream::~IProfilingBlockInputStream (this=0x7f9ea46b3190, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/IProfilingBlockInputStream.h:35
+#102 DB::ExpressionBlockInputStream::~ExpressionBlockInputStream (this=0x7f9ea46b3190, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/ExpressionBlockInputStream.h:16
+#103 0x0000000003087df2 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7f9ea46b3180) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#104 0x000000000761189c in std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<synthetic pointer>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#105 std::__shared_ptr<DB::IBlockInputStream, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<synthetic pointer>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#106 std::shared_ptr<DB::IBlockInputStream>::~shared_ptr (this=<synthetic pointer>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#107 DB::QueryStatus::releaseQueryStreams (this=0x7fa8b0a48710) at ../dbms/src/Interpreters/ProcessList.cpp:309
+#108 DB::ProcessListEntry::~ProcessListEntry (this=0x7fac0e404970, __in_chrg=<optimized out>) at ../dbms/src/Interpreters/ProcessList.cpp:220
+#109 0x0000000006acfc99 in std::_Sp_counted_base<(__gnu_cxx::_Lock_policy)2>::_M_release (this=0x7fac0e404960) at /usr/include/c++/7/bits/shared_ptr_base.h:154
+#110 std::__shared_count<(__gnu_cxx::_Lock_policy)2>::~__shared_count (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr_base.h:684
+#111 std::__shared_ptr<DB::ProcessListEntry, (__gnu_cxx::_Lock_policy)2>::~__shared_ptr (this=<optimized out>, __in_chrg=<optimized out>)
+    at /usr/include/c++/7/bits/shared_ptr_base.h:1123
+#112 std::shared_ptr<DB::ProcessListEntry>::~shared_ptr (this=<optimized out>, __in_chrg=<optimized out>) at /usr/include/c++/7/bits/shared_ptr.h:93
+#113 DB::BlockIO::~BlockIO (this=<optimized out>, __in_chrg=<optimized out>) at ../dbms/src/DataStreams/BlockIO.h:12
+**#114 0x0000000007692ae8 in DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::function<void (std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&)>) (istr=..., ostr=..., allow_into_outfile=allow_into_outfile@entry=false, context=..., set_content_type=...)
+    at ../dbms/src/Interpreters/executeQuery.cpp:448**
+#115 0x00000000030a2809 in DB::HTTPHandler::processQuery (this=this@entry=0x7fa8ae4e3920, request=..., params=..., response=..., used_output=...)
+    at ../dbms/programs/server/HTTPHandler.cpp:566
+#116 0x00000000030a4e2e in DB::HTTPHandler::handleRequest (this=0x7fa8ae4e3920, request=..., response=...) at ../dbms/programs/server/HTTPHandler.cpp:675
+#117 0x0000000009b703e2 in Poco::Net::HTTPServerConnection::run (this=0x7fa965f3b420) at ../contrib/poco/Net/src/HTTPServerConnection.cpp:85
+#118 0x0000000009b68c8f in Poco::Net::TCPServerConnection::start (this=<optimized out>) at ../contrib/poco/Net/src/TCPServerConnection.cpp:43
+#119 0x0000000009b6906a in Poco::Net::TCPServerDispatcher::run (this=0x7fac10fdb280) at ../contrib/poco/Net/src/TCPServerDispatcher.cpp:114
+#120 0x0000000009c85e47 in Poco::PooledThread::run (this=0x7fa626ce7100) at ../contrib/poco/Foundation/src/ThreadPool.cpp:214
+#121 0x0000000009c819b8 in Poco::ThreadImpl::runnableEntry (pThread=<optimized out>) at ../contrib/poco/Foundation/src/Thread_STD.cpp:139
+#122 0x000000000a3db80f in execute_native_thread_routine ()
+#123 0x00007fac11e296fa in start_thread (arg=0x7f542161b700) at pthread_create.c:333
+#124 0x00007fac1144ab5d in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:109
+
+**quesion**:
+1.unlimited waiting when poping queue. print **size of output_queue is  0**
+https://github.com/ClickHouse/ClickHouse/blob/v18.14.13-stable/dbms/src/DataStreams/UnionBlockInputStream.h#L153

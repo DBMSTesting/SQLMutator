@@ -1,0 +1,51 @@
+ID: 7948
+Title: Partition pruning not working as expected
+Description:
+**How to reproduce**
+* Which ClickHouse server version to use: v19.17.2.4-testing
+
+```sql
+DROP TABLE IF EXISTS test_partition_filtering;
+
+CREATE TABLE test_partition_filtering (
+    `timestamp` DateTime,
+    zoneId UInt64
+) ENGINE = MergeTree() 
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY (zoneId, timestamp);
+
+INSERT INTO test_partition_filtering
+SELECT
+  toUInt64(now())-1000*number/1000 as timestamp,
+  number/1000 as zone
+FROM numbers(1000000);
+
+OPTIMIZE TABLE test_partition_filtering final;
+
+SELECT count() FROM test_partition_filtering WHERE toDate(toStartOfDay(timestamp)) = today() and zoneId=42;
+SELECT count() FROM test_partition_filtering WHERE toDate(timestamp) = today() AND zoneId = 42;
+```
+
+**Expected behavior**
+Expect both SELECTS to prune partitions and to read just a single part.
+
+**Actual behavior**
+First query reads one part. Second query reads 12 parts.
+
+**Logs**
+
+```
+executeQuery: (from 127.0.0.1:48812) SELECT count() FROM test_partition_filtering WHERE (toDate(toStartOfDay(timestamp)) = today()) AND (zoneId = 42)
+InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "toDate(toStartOfDay(timestamp)) = today()" moved to PREWHERE
+default.test_partition_filtering (SelectExecutor): Key condition: (column 0 in [42, 42]), (toDate(toStartOfDay(column 1)) in [18227, 18227]), and
+default.test_partition_filtering (SelectExecutor): MinMax index condition: unknown, (toDate(toStartOfDay(column 0)) in [18227, 18227]), and
+default.test_partition_filtering (SelectExecutor): Selected 1 parts by date, 1 parts by key, 1 marks to read from 1 ranges
+
+
+
+executeQuery: (from 127.0.0.1:48812) SELECT count() FROM test_partition_filtering WHERE (toDate(timestamp) = today()) AND (zoneId = 42)
+InterpreterSelectQuery: MergeTreeWhereOptimizer: condition "toDate(timestamp) = today()" moved to PREWHERE
+default.test_partition_filtering (SelectExecutor): Key condition: (column 0 in [42, 42]), (toDate(column 1) in [18227, 18227]), and
+default.test_partition_filtering (SelectExecutor): MinMax index condition: unknown, (toDate(column 0) in [18227, 18227]), and
+default.test_partition_filtering (SelectExecutor): Selected 12 parts by date, 1 parts by key, 1 marks to read from 1 ranges
+```

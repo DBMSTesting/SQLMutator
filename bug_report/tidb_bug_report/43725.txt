@@ -1,0 +1,114 @@
+ID: 43725
+Title: DDL lost history jobs after batch creating tables
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Prepare a terminal with 4 tabs.
+Start mysql client in tab 4 connecting to the (upstream) TiDB server 127.0.0.1:4000
+
+```
+# CONSOLE 1: start playground instance
+tiup playground v6.5.2 --db 1 --kv 1 --pd 1 --tiflash 0 --without-monitor
+```
+
+```
+# CONSOLE 3: create some tables with huge metadata
+printf "create table a(a int, b longtext as ('%0567890d')); insert into a (a) values (1), (2), (3);" 0 | mysql -uroot -h127.0.0.1 -P4000 test
+for i in $(seq 1 8); do
+mysql -uroot -h127.0.0.1 -P4000 test -e "create table a$i like a; insert into a$i (a) values (1$i), (2$i), (3$i);"
+done
+# CONSOLE 3: backup
+rm -rf /tmp/ticket-2085-test/
+tiup br:v6.5.2 backup db --db test -s 'local:///tmp/ticket-2085-test/'
+```
+
+```
+# CONSOLE 1: Ctrl+C to kill tiup playground
+# CONSOLE 1: then create a new instance with pump
+tiup playground v6.5.2 --db 1 --kv 1 --pd 1 --tiflash 0 --pump 1 --without-monitor
+```
+
+```
+# CONSOLE 3: restore
+tiup br:v6.5.2 restore full -s 'local:///tmp/ticket-2085-test/'
+# (we can verify the log contains the keyword "entry too large, split batch create table")
+```
+
+```
+mysql> -- CONSOLE 4: Check if restore to upstream is successful. Repeat until there are 9 tables.
+mysql> show tables;
++----------------+
+| Tables_in_test |
++----------------+
+| a              |
+| a1             |
+| a2             |
+| a3             |
+| a4             |
+| a5             |
+| a6             |
+| a7             |
+| a8             |
++----------------+
+9 rows in set (0.01 sec)
+
+mysql> admin show ddl jobs;
++--------+---------+-----------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+-----------+
+| JOB_ID | DB_NAME | TABLE_NAME            | JOB_TYPE      | SCHEMA_STATE | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE     |
++--------+---------+-----------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+-----------+
+|    144 | test    | a5                    | create tables | none         |         2 |       90 |         0 | 2023-05-09 16:20:49 | 2023-05-09 16:20:49 | 2023-05-09 16:20:49 | cancelled |
+|    141 | test    | a4                    | create tables | public       |         2 |       88 |         0 | 2023-05-09 16:20:46 | 2023-05-09 16:20:47 | 2023-05-09 16:20:48 | synced    |
+|    133 | test    | a3                    | create tables | none         |         2 |       86 |         0 | 2023-05-09 16:20:44 | 2023-05-09 16:20:45 | 2023-05-09 16:20:45 | cancelled |
+|    123 | test    | a                     | create tables | none         |         2 |       80 |         0 | 2023-05-09 16:20:43 | 2023-05-09 16:20:43 | 2023-05-09 16:20:43 | cancelled |
+|    121 | test    | a7                    | create tables | none         |         2 |       94 |         0 | 2023-05-09 16:20:34 | 2023-05-09 16:20:41 | 2023-05-09 16:20:41 | cancelled |
+|    117 | test    | a1                    | create tables | none         |         2 |       82 |         0 | 2023-05-09 16:20:32 | 2023-05-09 16:20:33 | 2023-05-09 16:20:33 | cancelled |
+|    115 | test    | a2                    | create tables | none         |         2 |       84 |         0 | 2023-05-09 16:20:31 | 2023-05-09 16:20:31 | 2023-05-09 16:20:31 | cancelled |
+|     79 | mysql   | tidb_ttl_table_status | create table  | public       |         1 |       78 |         0 | 2023-05-09 16:20:23 | 2023-05-09 16:20:23 | 2023-05-09 16:20:23 | synced    |
+|     77 | mysql   | stats_table_locked    | create table  | public       |         1 |       76 |         0 | 2023-05-09 16:20:23 | 2023-05-09 16:20:23 | 2023-05-09 16:20:23 | synced    |
+|     75 | mysql   | plan_replayer_task    | create table  | public       |         1 |       74 |         0 | 2023-05-09 16:20:23 | 2023-05-09 16:20:23 | 2023-05-09 16:20:23 | synced    |
++--------+---------+-----------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+-----------+
+10 rows in set (0.36 sec)
+```
+
+```
+# CONSOLE 2: start downstream tidb
+rm -rf /tmp/tidb
+tiup tidb:v6.5.2 -P 4001 -status 10081
+```
+
+```
+# CONSOLE 3: pre-populate downstream with the same data as upstream
+printf "create table a(a int, b longtext as ('%0567890d')); insert into a (a) values (1), (2), (3);" 0 | mysql -uroot -h127.0.0.1 -P4001 test
+for i in $(seq 1 8); do
+mysql -uroot -h127.0.0.1 -P4001 test -e "create table a$i like a; insert into a$i (a) values (1$i), (2$i), (3$i);"
+done
+# CONSOLE 3: start drainer
+echo 'syncer={replicate-do-db=["test"],to={port=4001}}' > drainer.toml
+mysql -uroot -h127.0.0.1 -P4001 test -e 'drop schema if exists tidb_binlog;'
+tiup drainer:v6.5.2 -config drainer.toml
+```
+
+```
+mysql> -- CONSOLE 4: Execute a DDL that presumes a table should already exist.
+mysql> alter table a comment '';
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Driainer should not be killed.
+
+### 3. What did you see instead (Required)
+
+Drainer is killed.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+v6.5.2

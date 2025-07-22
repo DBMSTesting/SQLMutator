@@ -1,0 +1,17 @@
+ID: 15825
+Title: Many reclaim storage fixes
+Description:
+These changes affect bugs related to optimistically writing blocks via the partial block manager.
+
+- `LocalTableStorage::Rollback` has to `row_groups->CommitDropTable()`; otherwise, we'll have no way to figure out which blocks have to be marked modified on rollback if the partial block manager is already destroyed.
+- `PartialBlockManager::Rollback(const bool mark_modified);`: The top-level optimistic writer directly rolls back its row groups (now). Child writers (and their partial block managers) need to mark their written blocks as modified.
+- `LocalTableStorage` + `ALTER TYPE`: `row_groups->CommitDropColumn` the (old) altered column to add its optimistically written blocks to the modified list.
+- `LocalTableStorage` + `DROP COLUMN`: `row_groups->CommitDropColumn` the dropped column to add its optimistically written blocks to the modified list.
+- `PartialBlockManager::FlushPartialBlocks` needs to add its partial flushed blocks to `written_blocks`. Otherwise, in some rare cases (successful insert, constraint violation on other data, then rollback in a transaction), we cannot know that a written block must be marked as modified. That situation is also why we keep the written blocks alive (and thus, the entire partial block manager) in `OptimisticDataWriter::FinalFlush`.
+
+The tests cover all these cases, and often, a combination of these fixes is necessary to fix the test.
+
+`insert_order_preserving_odd_sized_batches.test_slow` has a `FIXME`, as I am unsure if we expect the different block counts?
+
+Fixes https://github.com/duckdblabs/duckdb-internal/issues/2453.
+Fixes https://github.com/duckdblabs/duckdb-internal/issues/3931.

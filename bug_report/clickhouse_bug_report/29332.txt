@@ -1,0 +1,140 @@
+ID: 29332
+Title: Pushdown of predicate may produce wrong queries with subqueries to distributed tables.
+Description:
+**How to reproduce**
+
+```sql
+create table t_local(id UInt32, s String) engine = MergeTree order by id;
+create table t_dist (id UInt32, s String) engine = Distributed(test_cluster_two_shards, currentDatabase(), t_local);
+```
+
+```sql
+SELECT *
+FROM
+(
+    SELECT
+        id,
+        count()
+    FROM t_dist
+    GROUP BY id
+)
+WHERE id IN (
+    SELECT id
+    FROM t_dist
+    WHERE notEmpty(s)
+)
+SETTINGS enable_optimize_predicate_expression = 1, distributed_product_mode = 'deny'
+
+Query id: c7e63a5c-a5d9-43d3-a057-62bab34074b1
+
+
+0 rows in set. Elapsed: 0.002 sec. 
+
+Received exception from server (version 21.11.1):
+Code: 288. DB::Exception: Received from localhost:9000. DB::Exception: Double-distributed IN/JOIN subqueries is denied (distributed_product_mode = 'deny'). You may rewrite query to use local tables in subqueries, or use GLOBAL keyword, or set distributed_product_mode to suitable value.: While processing  t_dist: While processing id IN (SELECT id FROM t_dist WHERE notEmpty(s)). (DISTRIBUTED_IN_JOIN_SUBQUERY_DENIED)
+```
+
+```sql
+SELECT *
+FROM
+(
+    SELECT
+        id,
+        count()
+    FROM t_dist
+    GROUP BY id
+)
+WHERE id IN (
+    SELECT id
+    FROM t_dist
+    WHERE notEmpty(s)
+)
+SETTINGS enable_optimize_predicate_expression = 0, distributed_product_mode = 'deny'
+
+Query id: d56c20ea-d375-4308-8785-149f4527717f
+
+Ok.
+
+0 rows in set. Elapsed: 0.007 sec. 
+```
+
+It's because of rewriting:
+
+```sql
+┌─explain────────────────────────────────────────────────────────────────────────────────┐
+│ SELECT                                                                                 │
+│     id,                                                                                │
+│     `count()`                                                                          │
+│ FROM                                                                                   │
+│ (                                                                                      │
+│     SELECT                                                                             │
+│         id,                                                                            │
+│         count()                                                                        │
+│     FROM t_dist                                                                        │
+│     WHERE id GLOBAL IN ((                                                              │
+│         SELECT id                                                                      │
+│         FROM t_dist AS dist                                                            │
+│         WHERE notEmpty(s)                                                              │
+│     ) AS _subquery19)                                                                  │
+│     GROUP BY id                                                                        │
+│ )                                                                                      │
+│ WHERE id IN ((                                                                         │
+│     SELECT id                                                                          │
+│     FROM t_dist AS dist                                                                │
+│     WHERE notEmpty(s)                                                                  │
+│ ) AS _subquery18)                                                                      │
+│ SETTINGS enable_optimize_predicate_expression = 1, distributed_product_mode = 'global' │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+However, pushdown predicate should be disable also for `distributed_product_mode = 'local'`, because in some cases wrong queries may be produced:
+
+```sql
+EXPLAIN SYNTAX
+SELECT *
+FROM
+(
+    SELECT
+        id,
+        count()
+    FROM t_dist
+    GROUP BY id
+        WITH TOTALS
+)
+WHERE id IN (
+    SELECT id
+    FROM t_dist AS dist
+    WHERE notEmpty(s)
+)
+SETTINGS enable_optimize_predicate_expression = 1, distributed_product_mode = 'local'
+
+Query id: 787466de-0223-4673-ac5c-a81362b15197
+
+┌─explain───────────────────────────────────────────────────────────────────────────────┐
+│ SELECT                                                                                │
+│     id,                                                                               │
+│     `count()`                                                                         │
+│ FROM                                                                                  │
+│ (                                                                                     │
+│     SELECT                                                                            │
+│         id,                                                                           │
+│         count()                                                                       │
+│     FROM t_dist                                                                       │
+│     GROUP BY id                                                                       │
+│         WITH TOTALS                                                                   │
+│     HAVING id IN ((                                                                   │
+│         SELECT id                                                                     │
+│         FROM default.t_local AS dist                                                  │
+│         WHERE notEmpty(s)                                                             │
+│     ) AS _subquery23)                                                                 │
+│ )                                                                                     │
+│ WHERE id IN ((                                                                        │
+│     SELECT id                                                                         │
+│     FROM t_dist AS dist                                                               │
+│     WHERE notEmpty(s)                                                                 │
+│ ) AS _subquery22)                                                                     │
+│ SETTINGS enable_optimize_predicate_expression = 1, distributed_product_mode = 'local' │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+In this query predicate can't be converted from `HAVING` to `WHERE`, because of `WITH TOTALS` and table identifier is rewritten to local because of `distributed_product_mode = 'local'`. But `HAVING` is executing on initiator unlike of `WHERE` and it's not correct.

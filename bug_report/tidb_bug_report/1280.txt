@@ -1,0 +1,130 @@
+ID: 1280
+Title: sql.Open failed on windows when use absolute path
+Description:
+go version:
+
+```
+go version go1.6.2 windows/amd64
+```
+
+go env
+
+```
+set GOARCH=amd64
+set GOBIN=
+set GOEXE=.exe
+set GOHOSTARCH=amd64
+set GOHOSTOS=windows
+set GOOS=windows
+set GOPATH=D:\go;D:\code\analyzer\
+set GORACE=
+set GOROOT=D:\devtool\go64
+set GOTOOLDIR=D:\devtool\go64\pkg\tool\windows_amd64
+set GO15VENDOREXPERIMENT=1
+set CC=gcc
+set GOGCCFLAGS=-m64 -mthreads -fmessage-length=0
+set CXX=g++
+set CGO_ENABLED=1
+```
+
+I test this code on windows:
+
+```
+package main
+
+import (
+    "database/sql"
+    "fmt"
+
+    "github.com/ngaut/log"
+    _ "github.com/pingcap/tidb"
+)
+
+func main() {
+    // Default log level is debug, set it to error to turn off debug log.
+    log.SetLevelByString("error")
+
+    // DriverName is 'tidb', dataSourceName is in the form of "<engine>://<dbPath>/<dbName>".
+    // dbPath is the directory that stores the data files if you use a local storage engine.
+    // dbName is the name of the database which you want to use.
+    dbPath := "D:\\temp\\tidb"
+    dbName := "tidb"
+    db, err := sql.Open("tidb", "goleveldb://"+dbPath+"/"+dbName)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    _, err = db.Exec("CREATE TABLE IF NOT EXISTS t (a INT)")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    _, err = db.Exec("INSERT INTO t VALUES (?)", 1)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    row := db.QueryRow("SELECT * FROM t WHERE a = ?", 1)
+    var val int
+    err = row.Scan(&val)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("value is %d\n", val)
+
+    _, err = db.Exec("DROP TABLE t")
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+```
+
+the output is:
+
+```
+2016/06/01 12:55:40 main2.go:28: [fatal] parse goleveldb://D:\temp\tidb/tidb: invalid character "\\" in host name
+```
+
+when I change the dbPath to "D:/temp/tidb"
+the output is:
+
+```
+2016/06/01 12:56:30 main2.go:28: [fatal] parse goleveldb://D:%5Ctemp%5Ctidb: invalid URL escape "%5C"
+```
+
+I modify the parseDriverDSN func in driver.go, and it seems all ok
+
+```
+func parseDriverDSN(dsn string) (params *driverParams, err error) {
+    u, err := url.Parse(dsn)
+    if err != nil {
+        return nil, errors.Trace(err)
+    }
+    path := filepath.Join(u.Host, u.Path)
+    dbName := filepath.Clean(filepath.Base(path))
+    if dbName == "" || dbName == "." || dbName == string(filepath.Separator) {
+        return nil, errors.Errorf("invalid DB name %q", dbName)
+    }
+    // cut off dbName
+    path = filepath.Clean(filepath.Dir(path))
+    if path == "" || path == "." || path == string(filepath.Separator) {
+        return nil, errors.Errorf("invalid dsn %q", dsn)
+    }
+    u.Path, u.Host = path, ""
+    u.Path = strings.Replace(u.Path, "\\", "/", -1)
+    params = &driverParams{
+        storePath: u.String(),
+        dbName:    dbName,
+    }
+    // parse additional driver params
+    query := u.Query()
+    if parseTime := query.Get("parseTime"); parseTime == "true" {
+        params.parseTime = true
+    }
+
+    return params, nil
+}
+```

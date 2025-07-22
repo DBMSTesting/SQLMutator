@@ -1,0 +1,91 @@
+ID: 8821
+Title: ALTER DELETE doesn't strictly respect WHERE clause
+Description:
+Hello Clickhouse team,
+
+We are in a workflow where we constantly stream data into Clickhouse (using custom 5s batch INSERTs, no issue there), and we encountered a streaming issue where wrong data was injected for a few hours (bug in our code, still no issue for Clickhouse there)
+The table creation statement is this one (cut down to a few fields to be easier to read, there are roughly 60 of them, including nested stuff, but I don't think that's relevent here):
+
+```sql
+CREATE TABLE database_shard_1.T_AuctionsLocal
+(
+`date` DateTime('UTC'),
+`network_id` Int32,
+`unique_log_id` Int64,
+ -- [ADD 60 MORE FIELDS HERE]
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{first_shard}/T_AuctionsLocal', '01')
+PARTITION BY toYYYYMMDD(date)
+ORDER BY (toStartOfHour(date), network_id, unique_log_id)
+SETTINGS index_granularity = 8192_
+```
+Since we only had a few hours to fix, I thought I would not drop the whole "day" partition, but try the "DELETE" feature using this specific query:
+```sql
+alter table database_shard_1.T_AuctionsLocal
+ delete where date >= toDateTime('2020-01-22T16:00:00') and date < toDateTime('2020-01-22T17:00:00')
+```
+
+First thing to note is that there were no other INSERT/UPDATE/DELETE query launched during the test.
+The delete itself ran quite fast (it was a matter of minutes). A bit slower that a simple "drop partition", which is expected and totally acceptable for us as it also makes data re-import MUCH faster.
+
+What was not that pleasant, however, was that data OUTSIDE of the min/max dates had been removed:
+Test query:
+```sql
+SELECT
+    count(),
+    toStartOfHour(date) AS Hour
+FROM database_shard_1.T_AuctionsLocal
+WHERE (date >= toDateTime('2020-01-22T10:00:00')) AND (date < toDateTime('2020-01-22T23:00:00'))
+GROUP BY Hour
+ORDER BY Hour DESC
+FORMAT CSV
+```
+
+Result before:
+```
+37,"2020-01-22 22:00:00"
+31,"2020-01-22 21:00:00"
+22,"2020-01-22 20:00:00"
+18,"2020-01-22 19:00:00"
+11496071,"2020-01-22 18:00:00"
+115732490,"2020-01-22 17:00:00"
+103281293,"2020-01-22 16:00:00"
+132782947,"2020-01-22 15:00:00"
+28679108,"2020-01-22 14:00:00"
+30673686,"2020-01-22 13:00:00"
+32623841,"2020-01-22 12:00:00"
+25340999,"2020-01-22 11:00:00"
+26804509,"2020-01-22 10:00:00"
+
+13 rows in set. Elapsed: 0.452 sec. Processed 507.42 million rows, 2.03 GB (1.12 billion rows/s., 4.49 GB/s.)
+```
+
+Result after:
+```
+37,"2020-01-22 22:00:00"
+31,"2020-01-22 21:00:00"
+22,"2020-01-22 20:00:00"
+18,"2020-01-22 19:00:00"
+11496071,"2020-01-22 18:00:00"
+11143,"2020-01-22 17:00:00"
+132782947,"2020-01-22 15:00:00"
+28679108,"2020-01-22 14:00:00"
+30673686,"2020-01-22 13:00:00"
+32623841,"2020-01-22 12:00:00"
+25340999,"2020-01-22 11:00:00"
+26804509,"2020-01-22 10:00:00"
+
+12 rows in set. Elapsed: 6.826 sec. Processed 288.42 million rows, 1.15 GB (42.25 million rows/s., 169.01 MB/s.)
+```
+
+As you can see, the "16th hour" data is correctly deleted... along with most of the "17th hour", which was not at all included in the WHERE clause
+Interestingly, there are still a few thousand rows present for 17th hour. Note that in other tests, we have tried to drop several hours of data and the result is always the same: it drops the right logs + most of the following hour
+
+We are using Clickhouse  19.17.5.18, and the command was launched both in the command-line client and a few times on DBeaver, with the exact same effect (all logs concerned by the Where clause + most of the following hour)
+
+Surprinsingly the DELETE feature seems way faster than what we expected, and appart from this bug, it would be really interesting for us to be able to count on it as an error recovery mecanism.
+
+It has already been discouraged in many threads, but I am forced to ask the question: since we will most of the time recover full hours of data, would it be reasonnable to partition by hour instead?
+
+Thanks for your time!
+Jean-Denis COSTA

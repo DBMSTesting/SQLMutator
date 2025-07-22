@@ -1,0 +1,23 @@
+ID: 41792
+Title: `for_update_ts` collision may cause unexpected pessimistic rollback in aggressive locking mode.
+Description:
+When `WakeUpModeForceLock` is used and a key is locked with conflict, (which means, the latest version of the key have its `commit_ts` greater than the current pessimistic lock request's `for_update_ts`), the actual written lock will have its `for_update_ts` equal to the `commit_ts` of the previously latest version of the key. Since a `commit_ts` may be calculated by Async Commit / 1PC transactions instead of allocated from PD, there's such problem as shown in the following example:
+
+Consider a key `k1`'s latest version have `commit_ts = 10`, and the value 10 is a calculated ts:
+
+1. A transaction `T1` tries to lock the key with `for_update_ts = 8`, and meets write conflict (8 < 10).
+2. The pessimistic lock is forcedly acquired as `WakeUpModeForceLock` is used, and a lock with `for_update_ts = 10` is written down.
+3. The transaction `T1` retries the statement, it updates its `for_update_ts` with a new ts allocated from PD, gets value `10`.
+4. Retrying on the newer data, the statement now locks `k2` and needn't lock `k1`.
+5. The statement executes to another step that needs to perform lock acquiring again. This time, it needs to lock two keys, thus it triggers the fallback logic that exits aggressive locking.
+    *  When exiting aggressive locking, the locks that's already acquired but not needed will be performed async pessimistic rollback. In this case, `k1` will be rolled back with `for_update_ts = 10`, since the largest `lock_with_conflict_ts` we've seen is 10.
+6. However, the statement need to lock `k1` at this step. Since it will acquire the lock at `for_update_ts = 10` too, it's possible that the lock is then rolled back by the async pessimistic rollback operation mentioned above.
+7. Try to commit transaction `T1` and meets `PessimisticLockNotFound` error.
+
+The root reason is that the `for_update_ts` field of a previously written lock and the new-acquired `for_update_ts` after statement retry may collide. Ways to fix the problem:
+
+1. When updating `for_update_ts`, allocated two timestamps at once, and use the greater one. This is correct since the calculated commit ts in async commit / 1PC is guaranteed never exceeding PD's max allocated ts + 1. However this approach looks too tricky and it requires code change to PD client.
+2. When updating `for_update_ts`, if the new for_update_ts is not greater than the ts used in the most recent pessimistic rollback, update `for_update_ts` again. It's possible to introduce more latency in cases that it takes effect.
+3. Save the statement ID as a field in the lock. Statement ID need to be incremented when retrying the same statement. When performing pessimistic rollback, carries the current largest statement ID in the request, and it doesn't rollback the locks that has a greater statement ID. Though adding the statement ID have many other benefits, it's very risky as it needs to change the data format.
+
+Currently we prefer the second way for the time being, since it's the simplest way to fix the problem.

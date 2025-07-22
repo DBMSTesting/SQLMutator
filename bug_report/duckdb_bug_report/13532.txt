@@ -1,0 +1,58 @@
+ID: 13532
+Title: Disallow ordering by non-integer literal by default - and add the setting order_by_non_integer_literal to revert to the previous behavior
+Description:
+
+Ordering by non-integer literals has no effect. Postgres does not allow it:
+
+```sql
+postgres=# select 42 order by 'hello world';
+-- ERROR:  non-integer constant in ORDER BY
+-- LINE 1: select 42 order by 'hello world';
+--                            ^
+```
+
+We currently follow SQLite and allow it by discarding the literal. However, this can lead to confusing situations, particularly in ordered aggregates. See #13520
+
+This PR modifies the system to by default reject this:
+
+```sql
+select 42 order by 'hello world';
+-- Binder Error: ORDER BY non-integer literal has no effect.
+-- * SET order_by_non_integer_literal=true to allow this behavior.
+-- LINE 1: select 42 order by 'hello world';
+--                            ^
+
+```
+
+When using an `ORDER BY` in an aggregate we also additionally provide information about what likely went wrong:
+
+
+```sql
+D select string_agg(str order by str, '_') from (values ('hello'), ('abc')) t(str);
+-- Binder Error: ORDER BY non-integer literal has no effect.
+-- * SET order_by_non_integer_literal=true to allow this behavior.
+
+-- Perhaps you misplaced ORDER BY; ORDER BY must appear after all regular arguments of the aggregate.
+-- LINE 1: select string_agg(str order by str, '_') from (values ('hello'), ('abc')) t...
+--                                             ^
+```
+
+The `order_by_non_integer_literal`  setting can be used to revert the previous behavior:
+
+```sql
+SET order_by_non_integer_literal=true;
+SELECT 42 ORDER BY 'hello world';
+┌───────┐
+│  42   │
+│ int32 │
+├───────┤
+│    42 │
+└───────┘
+SELECT string_agg(str ORDER BY str, '_') AS result FROM (values ('hello'), ('abc')) t(str);
+┌───────────┐
+│  result   │
+│  varchar  │
+├───────────┤
+│ abc,hello │
+└───────────┘
+```

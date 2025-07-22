@@ -1,0 +1,61 @@
+ID: 20027
+Title: TiKV panicked during query in a transaction
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+drop table if exists t1, t2;
+-- init
+create table t1 (c_int int, c_str varchar(40), c_datetime datetime, c_timestamp timestamp, primary key (c_int, c_datetime)  , key(c_str), key(c_timestamp)) partition by range (to_days(c_datetime)) ( partition p0 values less than (to_days('2020-02-01')), partition p1 values less than (to_days('2020-04-01')), partition p2 values less than (to_days('2020-06-01')), partition p3 values less than maxvalue) ;
+create table t2 like t1 ;
+insert into t1 values (1, 'elastic borg', '2020-04-11 01:01:02', '2020-01-13 17:17:47'), (2, 'hopeful swanson', '2020-06-01 21:48:06', '2020-01-14 11:55:42'), (3, 'fervent nightingale', '2020-01-25 05:03:12', '2020-01-15 20:24:00');
+insert into t2 values (1, 'agitated chandrasekhar', '2020-03-26 00:38:16', '2020-06-13 07:44:39'), (2, 'optimistic mclaren', '2020-01-17 11:06:35', '2020-03-27 12:53:29'), (3, 'clever nobel', '2020-03-28 10:06:23', '2020-03-26 18:29:45');
+-- txn
+begin;
+delete from t2 where c_int = 2;
+select * from t1 where c_timestamp in (select c_timestamp from t2 where t1.c_int = t2.c_int or t1.c_int = t2.c_int and t1.c_str <= t2.c_str); -- ERROR 9002 (HY000): TiKV server timeout
+commit;
+```
+
+### 2. What did you expect to see? (Required)
+
+No error reported.
+
+### 3. What did you see instead (Required)
+
+```
+mysql> begin;
+Query OK, 0 rows affected (0.05 sec)
+
+mysql> delete from t2 where c_int = 2;
+Query OK, 1 row affected (0.06 sec)
+
+mysql> select * from t1 where c_timestamp in (select c_timestamp from t2 where t1.c_int = t2.c_int or t1.c_int = t2.c_int and t1.c_str <= t2.c_str) ;
+ERROR 9002 (HY000): TiKV server timeout
+
+```
+
+tikv panicked with
+```
+[2020/09/15 12:27:04.318 +00:00] [FATAL] [lib.rs:483] ["Cannot call `as_date_time_slice` over a Int column"] [backtrace="stack backtrace:\n   0: tikv_util::set_panic_hook::{{closure}}\n             at components/tikv_util/src/lib.rs:482\n   1: std::panicking::rust_panic_with_hook\n             at src/libstd/panicking.rs:475\n   2: rust_begin_unwind\n             at src/libstd/panicking.rs:375\n   3: std::panicking::begin_panic_fmt\n             at src/libstd/panicking.rs:326\n   4: <tidb_query::rpn_expr::types::function::ArgConstructor<A,E> as tidb_query::rpn_expr::types::function::Evaluator>::eval\n             at components/tidb_query/src/codec/data_type/vector.rs:0\n      tidb_query::rpn_expr::impl_op::is_null_fn_meta::run\n             at components/tidb_query/src/rpn_expr/impl_op.rs:104\n   5: tidb_query::rpn_expr::types::expr_eval::<impl tidb_query::rpn_expr::types::expr::RpnExpression>::eval_decoded\n             at components/tidb_query/src/rpn_expr/types/expr_eval.rs:257\n   6: tidb_query::batch::executors::selection_executor::BatchSelectionExecutor<Src>::handle_src_result\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/components/tidb_query/src/batch/executors/selection_executor.rs:82\n      <tidb_query::batch::executors::selection_executor::BatchSelectionExecutor<Src> as tidb_query::batch::interface::BatchExecutor>::next_batch\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/components/tidb_query/src/batch/executors/selection_executor.rs:175\n      <tidb_query::execute_stats::WithSummaryCollector<C,T> as tidb_query::batch::interface::BatchExecutor>::next_batch\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/components/tidb_query/src/batch/interface.rs:106\n   7: <alloc::boxed::Box<T> as tidb_query::batch::interface::BatchExecutor>::next_batch\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/components/tidb_query/src/batch/interface.rs:75\n      tidb_query::batch::runner::BatchExecutorsRunner<SS>::handle_request::{{closure}}\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/components/tidb_query/src/batch/runner.rs:362\n      <std::future::GenFuture<T> as core::future::future::Future>::poll\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:43\n      std::future::poll_with_tls_context\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:99\n      <tikv::coprocessor::dag::BatchDAGHandler as tikv::coprocessor::RequestHandler>::handle_request::__handle_request::{{closure}}\n             at src/coprocessor/dag/mod.rs:171\n      <std::future::GenFuture<T> as core::future::future::Future>::poll\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:43\n   8: <core::pin::Pin<P> as core::future::future::Future>::poll\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libcore/future/future.rs:119\n      <tikv::coprocessor::interceptors::tracker::Tracker<F> as core::future::future::Future>::poll\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/src/coprocessor/interceptors/tracker.rs:45\n      <tikv::coprocessor::interceptors::concurrency_limiter::ConcurrencyLimiter<PF,F> as core::future::future::Future>::poll\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/src/coprocessor/interceptors/concurrency_limiter.rs:101\n      std::future::poll_with_tls_context\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:99\n      tikv::coprocessor::endpoint::Endpoint<E>::handle_unary_request_impl::{{closure}}\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/src/coprocessor/endpoint.rs:341\n      <std::future::GenFuture<T> as core::future::future::Future>::poll\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:43\n      std::future::poll_with_tls_context\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:99\n      tikv::read_pool::ReadPoolHandle::spawn_handle::{{closure}}\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/src/read_pool.rs:139\n      <std::future::GenFuture<T> as core::future::future::Future>::poll\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:43\n      std::future::poll_with_tls_context\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:99\n   9: tikv::read_pool::ReadPoolHandle::spawn::{{closure}}\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/src/read_pool.rs:115\n      <std::future::GenFuture<T> as core::future::future::Future>::poll\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/future.rs:43\n  10: <yatp::task::future::Runner as yatp::pool::runner::Runner>::handle\n             at rust/git/checkouts/yatp-e704b73c3ee279b6/3894a86/src/task/future.rs:254\n  11: <tikv::read_pool::ReadPoolRunner<E,R> as yatp::pool::runner::Runner>::handle\n             at home/jenkins/agent/workspace/ld_tikv_multi_branch_release-4.0/tikv/src/read_pool.rs:168\n      <yatp::queue::multilevel::MultilevelRunner<R> as yatp::pool::runner::Runner>::handle\n             at rust/git/checkouts/yatp-e704b73c3ee279b6/3894a86/src/queue/multilevel.rs:245\n      yatp::pool::worker::WorkerThread<T,R>::run\n             at rust/git/checkouts/yatp-e704b73c3ee279b6/3894a86/src/pool/worker.rs:48\n      yatp::pool::builder::LazyBuilder<T>::build::{{closure}}\n             at rust/git/checkouts/yatp-e704b73c3ee279b6/3894a86/src/pool/builder.rs:91\n      std::sys_common::backtrace::__rust_begin_short_backtrace\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/sys_common/backtrace.rs:136\n  12: std::thread::Builder::spawn_unchecked::{{closure}}::{{closure}}\n             at rustc/0de96d37fbcc54978458c18f5067cd9817669bc8/src/libstd/thread/mod.rs:469\n      <std::panic::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once ...
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+release-4.0
+```
++------+------------------------------------------+
+| type | git_hash                                 |
++------+------------------------------------------+
+| tidb | 51d365fc45fdfc039eb204a96268c5bd1c55075f |
+| tikv | fff05823ed90d50e129e88373db2ca5209d5c650 |
+| pd   | aeaac2489d52ba5c591eeb6418df408193bfd9db |
++------+------------------------------------------+
+```

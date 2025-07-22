@@ -1,0 +1,104 @@
+ID: 49306
+Title: Use of CTE results in "find table failed" warning
+Description:
+## Bug Report
+
+The "find table failed" warning appears with CTEs. This has the following issues:
+
+1. It is not clear for a user how to fix this or to make a decision on whether it is safe to ignore or not.
+2. This seems to affect the plan cache (it only happens if `tidb_enable_prepared_plan_cache` is set to `ON`). Maybe we could use the plan cache but don't. This could impact performance (but likely very minimal).
+3. What happens if the table name of CTE also exists as a real table. Would it then enable the plan cache where it might not be safe to do so?
+
+It might be good to replace "find table failed" with something more informative like "failed to find a table in the system catalog, disabling plan cache for this query."
+
+I think this warning should be suppressed for CTE table names.
+
+Note that this message caps the `sql` field of the log message to 256 characters, which might be too short for some queries to identify them.
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Run this program and check the logs from `tidb-server`.
+
+```go
+package main
+
+import (
+	"log/slog"
+	"os"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+)
+
+const (
+	queryWithUUID = `WITH _users AS (SELECT 1 WHERE 1 <> :accountUUID) SELECT * FROM _users`
+)
+
+func main() {
+	db, err := sqlx.Connect("mysql", "root@tcp(127.0.0.1:4000)/test")
+	if err != nil {
+		slog.Error("Failed to connect", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	query, args, err := sqlx.Named(queryWithUUID, map[string]interface{}{
+		"accountUUID": uuid.MustParse("00000000-1111-2222-3333-444444444444"),
+	})
+	if err != nil {
+		slog.Error("Failed to create query", slog.Any("error", err.Error()))
+		os.Exit(2)
+	}
+
+	userIDs := []int64{}
+
+	if err := db.Select(&userIDs, query, args...); err != nil {
+		slog.Error("Failed to select", slog.Any("error", err.Error()))
+		os.Exit(3)
+	}
+
+	slog.Info("results", slog.Any("userIDs", userIDs))
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+Logs without warnings/errors
+
+### 3. What did you see instead (Required)
+
+```
+[2023/12/08 14:53:44.926 +01:00] [WARN] [plan_cacheable_checker.go:650] ["find table failed"] [error="[schema:1146]Table 'test._users' doesn't exist"] [sql="WITH _users AS (SELECT 1 WHERE 1 <> ?) SELECT * FROM _users"] [table_schema=test] [table_name=_users]
+```
+
+Or with JSON log format:
+```json
+{
+  "level": "WARN",
+  "time": "2023/12/08 14:54:57.425 +01:00",
+  "caller": "plan_cacheable_checker.go:650",
+  "message": "find table failed",
+  "error": "[schema:1146]Table 'test._users' doesn't exist",
+  "errorVerbose": "[schema:1146]Table 'test._users' doesn't exist\ngithub.com/pingcap/errors.AddStack\n\t/home/dvaneeden/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/errors.go:174\ngithub.com/pingcap/errors.(*Error).GenWithStackByArgs\n\t/home/dvaneeden/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20221009092201-b66cddb77c32/normalize.go:164\ngithub.com/pingcap/tidb/pkg/infoschema.(*infoSchema).TableByName\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/infoschema/infoschema.go:208\ngithub.com/pingcap/tidb/pkg/infoschema.(*SessionExtendedInfoSchema).TableByName\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/infoschema/infoschema.go:699\ngithub.com/pingcap/tidb/pkg/planner/core.checkTableCacheable\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/planner/core/plan_cacheable_checker.go:641\ngithub.com/pingcap/tidb/pkg/planner/core.(*cacheableChecker).Enter\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/planner/core/plan_cacheable_checker.go:201\ngithub.com/pingcap/tidb/pkg/parser/ast.(*TableName).Accept\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/parser/ast/dml.go:433\ngithub.com/pingcap/tidb/pkg/parser/ast.(*TableSource).Accept\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/parser/ast/dml.go:604\ngithub.com/pingcap/tidb/pkg/parser/ast.(*Join).Accept\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/parser/ast/dml.go:244\ngithub.com/pingcap/tidb/pkg/parser/ast.(*TableRefsClause).Accept\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/parser/ast/dml.go:805\ngithub.com/pingcap/tidb/pkg/parser/ast.(*SelectStmt).Accept\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/parser/ast/dml.go:1477\ngithub.com/pingcap/tidb/pkg/planner/core.IsASTCacheable\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/planner/core/plan_cacheable_checker.go:75\ngithub.com/pingcap/tidb/pkg/planner/core.GeneratePlanCacheStmtWithAST\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/planner/core/plan_cache_utils.go:141\ngithub.com/pingcap/tidb/pkg/executor.(*PrepareExec).Next\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/executor/prepared.go:120\ngithub.com/pingcap/tidb/pkg/session.(*session).PrepareStmt\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/session/session.go:2510\ngithub.com/pingcap/tidb/pkg/server.(*TiDBContext).Prepare\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/server/driver_tidb.go:340\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).HandleStmtPrepare\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/server/conn_stmt.go:71\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).dispatch\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/server/conn.go:1347\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).Run\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/server/conn.go:1101\ngithub.com/pingcap/tidb/pkg/server.(*Server).onConn\n\t/home/dvaneeden/dev/pingcap/tidb/pkg/server/server.go:701\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1650",
+  "sql": "WITH _users AS (SELECT 1 WHERE 1 <> ?) SELECT * FROM _users",
+  "table_schema": "test",
+  "table_name": "_users"
+}
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+Release Version: v7.6.0-alpha-406-gd23e1c379a
+Edition: Community
+Git Commit Hash: d23e1c379a520d02d2510f3786cb7138b55887d1
+Git Branch: master
+UTC Build Time: 2023-12-08 13:52:08
+GoVersion: go1.21.0
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore
+```

@@ -1,0 +1,141 @@
+ID: 2645
+Title: DB::Exception: Sizes of columns doesn't match
+Description:
+I'm seeing a lot of error when trying to use SummingMergeTree
+
+```
+2018.07.13 17:12:28.242090 [ 6 ] <Error> void DB::BackgroundProcessingPool::threadFunction(): Code: 9, e.displayText() = DB::Exception: Sizes of columns doesn't match: date: 8192, clientipv4_state: 8193, e.what() = DB::Exception, Stack trace:
+
+0. ./clickhouse-server(StackTrace::StackTrace()+0x16) [0x49f1136]
+1. ./clickhouse-server(DB::Exception::Exception(std::string const&, int)+0x1f) [0x2576b8f]
+2. ./clickhouse-server(DB::Block::checkNumberOfRows() const+0x1d8) [0x3cc7538]
+3. ./clickhouse-server(DB::MergedBlockOutputStream::write(DB::Block const&)+0x22) [0x45cdd42]
+4. ./clickhouse-server(DB::MergeTreeDataMergerMutator::mergePartsToTemporaryPart(DB::MergeTreeDataMergerMutator::FuturePart const&, DB::MergeListEntry&, unsigned long, long, DB::DiskSpaceMonitor::Reservation*, bool)+0x2eb8) [0x457cff8]
+5. ./clickhouse-server(DB::StorageMergeTree::merge(unsigned long, bool, std::string const&, bool, bool, std::string*)+0x511) [0x44e1421]
+6. ./clickhouse-server(DB::StorageMergeTree::mergeTask()+0x9a) [0x44e194a]
+7. ./clickhouse-server(DB::BackgroundProcessingPool::threadFunction()+0x436) [0x4538636]
+8. ./clickhouse-server() [0x50013cf]
+9. /lib64/libpthread.so.0(+0x7e25) [0x7fd6c140ee25]
+10. /lib64/libc.so.6(clone+0x6d) [0x7fd6c0c32bad]
+```
+
+```
+CREATE TABLE vme4
+(
+    date Date,
+    datetime DateTime,
+    request_method Enum8('GET'=1, 'POST'=2, 'HEAD'=3, 'PUT'=4, 'DELETE'=5, 'OPTIONS'=6, 'TRACE'=7, 'CONNECT'=8),
+    request_host String,
+    server String,
+    user_agent String,
+    clientipv4 Nullable(UInt32),
+    clientipv6 Nullable(FixedString(16)),
+
+    backend String,
+    response_code UInt16,
+    mime String,
+    response_time UInt32,
+    response_size UInt32,
+
+    request_type Nullable(Enum8('live'=1, 'nPVR'=2, 'vod'=3)),
+    request_asset Nullable(String),
+    request_file Nullable(String),
+    request_uri Nullable(String),
+    stream_protocol Nullable(Enum8('unknow'=0, 'hls'=1, 'dash'=2, 'ss'=3, 'fmp4'=4)),
+    video_bitrate Nullable(UInt32),
+    is_hit Nullable(UInt8),
+
+    geoip_geoname_id Nullable(UInt32),
+    hub Nullable(String)
+)
+ENGINE = MergeTree
+PARTITION BY date
+ORDER BY (date, user_agent)
+SETTINGS index_granularity = 8192;
+```
+
+```
+DROP TABLE vmeagg;
+
+CREATE TABLE vmeagg
+(
+    date Date,
+    datetime DateTime,
+    request_method Enum8('GET'=1, 'POST'=2, 'HEAD'=3, 'PUT'=4, 'DELETE'=5, 'OPTIONS'=6, 'TRACE'=7, 'CONNECT'=8),
+    request_host String,
+    server String,
+    user_agent String,
+    clientipv4_state AggregateFunction(uniqCombined, UInt32),
+    clientipv6_state AggregateFunction(uniqCombined, FixedString(16)),
+
+    backend String,
+    response_code UInt16,
+    mime String,
+    response_time_td AggregateFunction(quantilesTDigest(0.5,0.9,0.99), UInt32),
+    response_size_td AggregateFunction(quantilesTDigest(0.5,0.9,0.99), UInt32),
+    response_time_tot UInt64,
+    response_size_tot UInt64,
+
+    request_type Enum8('live'=1, 'nPVR'=2, 'vod'=3),
+    request_asset String,
+    stream_protocol Enum8('unknow'=0, 'hls'=1, 'dash'=2, 'ss'=3, 'fmp4'=4),
+    video_bitrate UInt32,
+    is_hit UInt8,
+
+    geoip_geoname_id UInt32,
+
+    count UInt32
+)
+ENGINE = SummingMergeTree
+PARTITION BY date
+ORDER BY (date, datetime, request_method, response_code, backend, user_agent, server, request_host, mime, request_type, request_asset, stream_protocol, video_bitrate, is_hit, geoip_geoname_id)
+SETTINGS index_granularity = 8192;
+
+
+INSERT INTO vmeagg SELECT
+date,
+toStartOfMinute(datetime),
+request_method,
+request_host,
+server,
+user_agent,
+uniqCombinedState(clientipv4),
+uniqCombinedState(clientipv6),
+backend,
+response_code,
+mime,
+quantilesTDigestState(0.5,0.9,0.99)(response_time),
+quantilesTDigestState(0.5,0.9,0.99)(response_size),
+sum(response_time),
+sum(response_size),
+request_type,
+request_asset,
+stream_protocol,
+video_bitrate,
+is_hit,
+geoip_geoname_id,
+count(*)
+FROM vme4
+WHERE toStartOfMinute(datetime) = '2018-07-09 03:00:00' AND geoip_geoname_id IS NOT NULL AND video_bitrate IS NOT NULL
+GROUP BY date,
+toStartOfMinute(datetime),
+request_method,
+request_host,
+server,
+user_agent,
+backend,
+response_code,
+mime,
+request_type,
+request_asset,
+stream_protocol,
+video_bitrate,
+is_hit,
+geoip_geoname_id;
+```
+
+With the data currently loaded in table `vme4` I can reproduce the issue 100% of the time     (DROP / CREATE / INSERT error)
+I'm using Clickhouse 1.1.54390 (stable branch) on CentOS7
+
+I'll try to make a minimal repro case next week
+

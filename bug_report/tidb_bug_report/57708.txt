@@ -1,0 +1,46 @@
+ID: 57708
+Title: TTL scan task will leak when down scaling the scan workers if it failed to cancel the task.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+If the scan worker failed to cancel the task, the `task.result` will always be `nil`, and it'll never be regarded as finished. See the following function:
+
+```go
+func (m *taskManager) resizeScanWorkers(count int) error {
+	var err error
+	var canceledWorkers []worker
+	m.scanWorkers, canceledWorkers, err = m.resizeWorkers(m.scanWorkers, count, func() worker {
+		return newScanWorker(m.delCh, m.notifyStateCh, m.sessPool)
+	})
+	for _, w := range canceledWorkers {
+		...
+
+		result := s.PollTaskResult()
+		if result != nil {
+			jobID = result.task.JobID
+			scanID = result.task.ScanID
+
+			scanErr = result.err
+		} else {
+			// if the scan worker failed to poll the task, it's possible that the `WaitStopped` has timeout
+			// we still consider the scan task as finished
+			curTask := s.CurrentTask()
+			if curTask == nil {
+				continue
+			}
+			jobID = curTask.JobID
+			scanID = curTask.ScanID
+			scanErr = errors.New("timeout to cancel scan task")
+		}
+
+...
+
+		task.result = result
+	}
+	return err
+}
+```
+
+It's easy to fix. We need to assign a result to the scan task.

@@ -1,0 +1,95 @@
+ID: 11782
+Title: Table name is not correct when explaining execution plan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+Explain some query in TiDB
+
+2. What did you expect to see?
+
+`TableScan_9` in **Case 1**, `TableScan_5` in **Case 2**, `TableScan_19` in **Case 3**.
+The table name of operator info of these lines should be `table:t1` instead of `table:t`.
+
+3. What did you see instead?
+
+### Create table:
+``` mysql
+mysql> show create table t;
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                                                                                                        |
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| t     | CREATE TABLE `t` (
+  `a` int(11) NOT NULL,
+  `b` int(11) DEFAULT NULL,
+  `c` int(11) DEFAULT NULL,
+  PRIMARY KEY (`a`),
+  KEY `b` (`b`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin |
++-------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+### Case 1:
+``` mysql
+mysql> explain select /*+ TIDB_INLJ(t2) */ * from t t1, t t2 where t1.a = t2.b;
++-------------------------+----------+------+-------------------------------------------------------------------------------------------------------+
+| id                      | count    | task | operator info                                                                                         |
++-------------------------+----------+------+-------------------------------------------------------------------------------------------------------+
+| IndexJoin_12            | 12487.50 | root | inner join, inner:IndexLookUp_11, outer key:my_test.t1.a, inner key:my_test.t2.b                      |
+| ├─TableReader_14        | 10000.00 | root | data:TableScan_13                                                                                     |
+| │ └─TableScan_13        | 10000.00 | cop  | table:t1, range:[-inf,+inf], keep order:false, stats:pseudo                                           |
+| └─IndexLookUp_11        | 9.99     | root |                                                                                                       |
+|   ├─Selection_10        | 9.99     | cop  | not(isnull(my_test.t2.b))                                                                             |
+|   │ └─IndexScan_8       | 10.00    | cop  | table:t2, index:b, range: decided by [eq(my_test.t2.b, my_test.t1.a)], keep order:false, stats:pseudo |
+|   └─TableScan_9         | 9.99     | cop  | table:t, keep order:false, stats:pseudo                                                               |
++-------------------------+----------+------+-------------------------------------------------------------------------------------------------------+
+7 rows in set (0.00 sec)
+```
+### Case 2:
+``` mysql
+mysql> explain select * from t t1 use index(b);
++-------------------+----------+------+----------------------------------------------------------------------+
+| id                | count    | task | operator info                                                        |
++-------------------+----------+------+----------------------------------------------------------------------+
+| IndexLookUp_6     | 10000.00 | root |                                                                      |
+| ├─IndexScan_4     | 10000.00 | cop  | table:t1, index:b, range:[NULL,+inf], keep order:false, stats:pseudo |
+| └─TableScan_5     | 10000.00 | cop  | table:t, keep order:false, stats:pseudo                              |
++-------------------+----------+------+----------------------------------------------------------------------+
+3 rows in set (0.00 sec)
+```
+### Case 3:
+``` mysql
+mysql> begin;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into t values(1, 1, 1);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> explain select * from t left outer join t t1 on t.a = t1.a where t.a not between 1 and 2;
++--------------------------+---------+------+----------------------------------------------------------------------------+
+| id                       | count   | task | operator info                                                              |
++--------------------------+---------+------+----------------------------------------------------------------------------+
+| HashLeftJoin_14          | 4167.92 | root | left outer join, inner:UnionScan_18, equal:[eq(my_test.t.a, my_test.t1.a)] |
+| ├─UnionScan_15           | 3334.33 | root | not(and(ge(my_test.t.a, 1), le(my_test.t.a, 2)))                           |
+| │ └─TableReader_17       | 6666.67 | root | data:TableScan_16                                                          |
+| │   └─TableScan_16       | 6666.67 | cop  | table:t, range:[-inf,1), (2,+inf], keep order:false, stats:pseudo          |
+| └─UnionScan_18           | 3334.33 | root | not(and(ge(my_test.t1.a, 1), le(my_test.t1.a, 2)))                         |
+|   └─TableReader_20       | 6666.67 | root | data:TableScan_19                                                          |
+|     └─TableScan_19       | 6666.67 | cop  | table:t, range:[-inf,1), (2,+inf], keep order:false, stats:pseudo          |
++--------------------------+---------+------+----------------------------------------------------------------------------+
+7 rows in set (0.00 sec)
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+Release Version: v4.0.0-alpha-90-g36573d5
+Git Commit Hash: 36573d5b57354ae96cecaf446d5f70aa2a77c2f1
+Git Branch: master
+UTC Build Time: 2019-08-19 12:02:51
+GoVersion: go version go1.12.6 linux/amd64
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false

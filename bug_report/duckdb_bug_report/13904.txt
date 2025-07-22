@@ -1,0 +1,247 @@
+ID: 13904
+Title: Process gets aborted during interpreter shutdown when a duckdb connection is present in a child thread.
+Description:
+### What happens?
+
+Sometimes, duckdb aborts (SIGABRT) the python process during interpreter shutdown. The preconditions for the bug aren't that clear (it happens when we run too much tests in our test suite together), but at least I have found a reliable reproducer.
+
+I'm able to reproduce the issue in 1.0.0, but the upgrade to 1.1.0 made the issue a lot more prevalent. I suspect that the reason for this this is the [addition of the ConnectionGuard](https://github.com/duckdb/duckdb/commit/9554efca3c0d38cb02d6cdc10e4a69bc1e894891) to DuckDBPyCollection.
+
+If it helps I have a stack trace of the state of our python interpreter at the end of the pytest run:
+
+```
+#0  0x00007f0d1b8efa8c __pthread_kill_implementation (libc.so.6 + 0x87a8c)
+#1  0x00007f0d1b8a0c86 raise (libc.so.6 + 0x38c86)
+#2  0x00007f0d1b88a8ba abort (libc.so.6 + 0x228ba)
+#3  0x00007f0d15ecfa89 _ZN9__gnu_cxx27__verbose_terminate_handlerEv.cold (libstdc++.so.6 + 0xa9a89)
+#4  0x00007f0d15edaf8a _ZN10__cxxabiv111__terminateEPFvvE (libstdc++.so.6 + 0xb4f8a)
+#5  0x00007f0d15edaff5 _ZSt9terminatev (libstdc++.so.6 + 0xb4ff5)
+#6  0x00007f0d15eda8ac __gxx_personality_v0 (libstdc++.so.6 + 0xb48ac)
+#7  0x00007f0d1ba679e6 _Unwind_ForcedUnwind_Phase2 (libgcc_s.so.1 + 0x179e6)
+#8  0x00007f0d1ba680e0 _Unwind_ForcedUnwind (libgcc_s.so.1 + 0x180e0)
+#9  0x00007f0d1b8f6214 __pthread_unwind (libc.so.6 + 0x8e214)
+#10 0x00007f0d1b8eee8a pthread_exit (libc.so.6 + 0x86e8a)
+#11 0x00007f0d1bc0f8ec PyThread_exit_thread (libpython3.10.so.1.0 + 0x958ec)
+#12 0x00007f0d1bc20bf1 take_gil (libpython3.10.so.1.0 + 0xa6bf1)
+#13 0x00007f0d1bc271ce PyEval_RestoreThread (libpython3.10.so.1.0 + 0xad1ce)
+#14 0x00007f0d16bb010d _ZN6duckdb18DuckDBPyConnectionD1Ev (duckdb.cpython-310-x86_64-linux-gnu.so + 0xb6210d)
+#15 0x00007f0d16b2f26a _ZNSt16_Sp_counted_baseILN9__gnu_cxx12_Lock_policyE2EE24_M_release_last_use_coldEv (duckdb.cpython-310-x86_64-linux-gnu.so + 0xae126a)
+#16 0x00007f0d16bd4f08 _ZN8pybind116class_IN6duckdb18DuckDBPyConnectionEJNS1_10shared_ptrIS2_Lb1EEEEE7deallocERNS_6detail16value_and_holderE (duckdb.cpython-310-x86_64-linux-gnu.so + 0xb86f08)
+#17 0x00007f0d16b44af8 _ZN8pybind116detail14clear_instanceEP7_object (duckdb.cpython-310-x86_64-linux-gnu.so + 0xaf6af8)
+#18 0x00007f0d16b4549e pybind11_object_dealloc (duckdb.cpython-310-x86_64-linux-gnu.so + 0xaf749e)
+#19 0x00007f0d1bc22073 dict_dealloc (libpython3.10.so.1.0 + 0xa8073)
+#20 0x00007f0d1bc9f625 subtype_dealloc (libpython3.10.so.1.0 + 0x125625)
+#21 0x00007f0d1bbf0007 free_keys_object (libpython3.10.so.1.0 + 0x76007)
+#22 0x00007f0d1bc22173 dict_dealloc (libpython3.10.so.1.0 + 0xa8173)
+#23 0x00007f0d1bbf0007 free_keys_object (libpython3.10.so.1.0 + 0x76007)
+#24 0x00007f0d1bc22173 dict_dealloc (libpython3.10.so.1.0 + 0xa8173)
+#25 0x00007f0d1bdae2df local_clear (libpython3.10.so.1.0 + 0x2342df)
+#26 0x00007f0d1bdae3ec local_dealloc (libpython3.10.so.1.0 + 0x2343ec)
+#27 0x00007f0d1bc2180d tupledealloc (libpython3.10.so.1.0 + 0xa780d)
+#28 0x00007f0d1bc2180d tupledealloc (libpython3.10.so.1.0 + 0xa780d)
+#29 0x00007f0d1bbf6c1a delitem_common (libpython3.10.so.1.0 + 0x7cc1a)
+#30 0x00007f0d1bdafa0c PyDict_DelItem (libpython3.10.so.1.0 + 0x235a0c)
+#31 0x00007f0d1bdb029b _PyObject_GenericSetAttrWithDict (libpython3.10.so.1.0 + 0x23629b)
+#32 0x00007f0d1bd43515 PyObject_SetAttr (libpython3.10.so.1.0 + 0x1c9515)
+#33 0x00007f0d1bbdd2b0 _PyEval_EvalFrameDefault (libpython3.10.so.1.0 + 0x632b0)
+#34 0x00007f0d1bd23156 _PyEval_Vector (libpython3.10.so.1.0 + 0x1a9156)
+#35 0x00007f0d1bbd8c78 call_function (libpython3.10.so.1.0 + 0x5ec78)
+#36 0x00007f0d1bbdbfc5 _PyEval_EvalFrameDefault (libpython3.10.so.1.0 + 0x61fc5)
+#37 0x00007f0d1bd23156 _PyEval_Vector (libpython3.10.so.1.0 + 0x1a9156)
+#38 0x00007f0d1bbd8c78 call_function (libpython3.10.so.1.0 + 0x5ec78)
+#39 0x00007f0d1bbdbfc5 _PyEval_EvalFrameDefault (libpython3.10.so.1.0 + 0x61fc5)
+#40 0x00007f0d1bd23156 _PyEval_Vector (libpython3.10.so.1.0 + 0x1a9156)
+#41 0x00007f0d1bca3a14 method_vectorcall (libpython3.10.so.1.0 + 0x129a14)
+#42 0x00007f0d1bc39088 thread_run (libpython3.10.so.1.0 + 0xbf088)
+#43 0x00007f0d1bbeeaf2 pythread_wrapper (libpython3.10.so.1.0 + 0x74af2)
+#44 0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#45 0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2760:
+#0  0x00007f0d1bbe7e64 visit_decref (libpython3.10.so.1.0 + 0x6de64)
+#1  0x00007f0d1bd72614 gc_collect_main (libpython3.10.so.1.0 + 0x1f8614)
+#2  0x00007f0d1bdcef81 PyGC_Collect (libpython3.10.so.1.0 + 0x254f81)
+#3  0x00007f0d1be11507 Py_FinalizeEx.part.0 (libpython3.10.so.1.0 + 0x297507)
+#4  0x00007f0d1be2ce7b Py_RunMain (libpython3.10.so.1.0 + 0x2b2e7b)
+#5  0x00007f0d1b88bace __libc_start_call_main (libc.so.6 + 0x23ace)
+#6  0x00007f0d1b88bb89 __libc_start_main@@GLIBC_2.34 (libc.so.6 + 0x23b89)
+#7  0x0000000000401075 _start (python3.10 + 0x1075)
+Stack trace of thread 4179:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 4180:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2768:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2765:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 4175:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2762:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2766:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 4181:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2767:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2764:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 2763:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 4176:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 4177:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+Stack trace of thread 4178:
+#0  0x00007f0d1b8ea9e6 __futex_abstimed_wait_common (libc.so.6 + 0x829e6)
+#1  0x00007f0d1b8f5a70 __new_sem_wait_slow64.constprop.0 (libc.so.6 + 0x8da70)
+#2  0x00007f0d177da1b5 _ZN6duckdb13TaskScheduler14ExecuteForeverEPSt6atomicIbE (duckdb.cpython-310-x86_64-linux-gnu.so + 0x178c1b5)
+#3  0x00007f0d15f065c3 execute_native_thread_routine (libstdc++.so.6 + 0xe05c3)
+#4  0x00007f0d1b8eddd4 start_thread (libc.so.6 + 0x85dd4)
+#5  0x00007f0d1b96f9b0 __clone3 (libc.so.6 + 0x1079b0)
+```
+
+If I read this correctly then there is a GC running in the main thread (2760), and the abort happens because of some weirdness when DuckDBPyConnection tries to release the GIL when it deallocates. It _might_ (and I'm in the wild speculation area here) be connected to this specific cpython issue: https://github.com/python/cpython/issues/87135.
+
+### To Reproduce
+
+1. Create a file `repro.py` with the following contents:
+
+```python
+from threading import Thread
+
+import duckdb
+
+
+class ThreadWithConn(Thread):
+    def __init__(self, conn: duckdb.DuckDBPyConnection):
+        super().__init__()
+        self._conn = conn
+
+    def run(self) -> None:
+        while True:
+            self._conn.execute("select 42").fetchall()
+
+
+conn = duckdb.connect()
+thread = ThreadWithConn(conn)
+thread.start()
+```
+
+2. Run `python -m repro`
+3. Interrupt the running process via Ctrl + C
+
+Instead of the program exiting gracefully, I get
+
+```
+terminate called without an active exception
+Aborted
+```
+
+and an exit code of 134.
+
+It's not exactly a pretty reproducer, but it's the best thing I currently have 😅 
+
+### OS:
+
+Ubuntu x64 in WSL on Windows 11
+
+### DuckDB Version:
+
+1.1.0, 1.0.0
+
+### DuckDB Client:
+
+Python 3.10
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Míma Hlaváček
+
+### Affiliation:
+
+Arista Networks
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

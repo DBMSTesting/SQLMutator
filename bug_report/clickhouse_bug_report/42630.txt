@@ -1,0 +1,30 @@
+ID: 42630
+Title: Subtle differences in table definition between nodes may cause errors during aggregation
+Description:
+``` sql
+create table shard_0.t_different_dbs(a UInt32, b UInt32) engine = MergeTree order by a;
+
+create table shard_1.t_different_dbs(a UInt8, b UInt8) engine = MergeTree order by a;
+
+create table dist_t_different_dbs as shard_1.t_different_dbs engine = Distributed(test_cluster_two_shards_different_databases, '', t_different_dbs);
+
+insert into shard_0.t_different_dbs select number % 1000, number % 1000 from numbers_mt(1e6);
+insert into shard_1.t_different_dbs select number % 1000, number % 1000 from numbers_mt(1e6);
+
+select a, count() from dist_t_different_dbs group by a order by a limit 5 offset 500 settings group_by_two_level_threshold = 1;
+```
+
+Returns error: `Code: 93. DB::Exception: Received from localhost:9000. DB::Exception: Unknown aggregated data variant.: While executing GroupingAggregatedTransform. (UNKNOWN_AGGREGATED_DATA_VARIANT)`.
+
+The reason is HT of type `key8` is not convertible to two-level hash table. We do convertion [here](https://github.com/ClickHouse/ClickHouse/blob/master/src/Processors/Transforms/MergingAggregatedMemoryEfficientTransform.cpp#L292).
+
+Another funny case is:
+
+``` sql
+create table shard_0.t_different_dbs(a UInt32, b UInt32) engine = MergeTree order by a;
+create table shard_1.t_different_dbs(a UInt64, b UInt64) engine = MergeTree order by a;
+
+select a, count() from dist_t_different_dbs group by a, b order by a, b limit 5 offset 500 settings group_by_two_level_threshold = 1;
+```
+
+Returns incorrect result because we calculate hashes [differently](https://github.com/ClickHouse/ClickHouse/blob/master/src/Common/HashTable/Hash.h) for keys of size <= 8 bytes and keys of size > 8 byte. 

@@ -1,0 +1,181 @@
+ID: 14354
+Title: Severe Performance Degradation with Multiple LEFT OUTER JOINs on Date and Int Columns
+Description:
+### What happens?
+
+I'm experiencing significant performance degradation when performing multiple `LEFT OUTER JOIN`s on date columns in DuckDB. As the number of joins increases, the execution time grows exponentially, and beyond a certain number of joins, the query becomes impractical to run.
+
+### To Reproduce
+
+I've created a standalone Python script that reproduces the issue. The script:
+
+- Creates a `months` table containing the start and end dates of the last 13 months.
+- Generates multiple Parquet files (`dim_table_0.parquet`, `dim_table_1.parquet`, ..., `dim_table_N.parquet`) with additional numeric, string, and date fields.
+- Executes a query that performs multiple `LEFT OUTER JOIN`s on the `month_start` column.
+- Measures and prints the execution time for an increasing number of joins.
+
+**Python Script:**
+
+```python
+import duckdb
+import pandas as pd
+import datetime
+import time
+import os
+import numpy as np
+from dateutil.relativedelta import relativedelta
+
+# Connect to DuckDB
+con = duckdb.connect()
+
+# Create months table
+con.execute("""
+CREATE OR REPLACE TABLE months AS
+SELECT 
+    CAST(month_start AS DATE) AS month_start,
+    CAST(LAST_DAY(month_start) AS DATE) AS month_end
+FROM (
+    SELECT
+        date_trunc('month', CURRENT_DATE) - INTERVAL (n.idx || ' months') as month_start
+    FROM
+        generate_series(0, 13 - 1) n(idx)
+)
+""")
+
+# Create directory for Parquet files
+os.makedirs("artifacts", exist_ok=True)
+
+# Function to create Parquet files with additional columns
+def create_parquet_files(num_files, num_rows=10000):
+    for i in range(num_files):
+        file_name = f'artifacts/dim_table_{i}.parquet'
+        date_column_name = f'date_column_{i}'
+        # Generate data
+        start_date = datetime.date.today().replace(day=1) - relativedelta(months=13)
+        dates = pd.date_range(start=start_date, periods=num_rows, freq='D')
+        # Randomly assign months to dates
+        months = [date.replace(day=1) for date in dates]
+        # Create additional columns
+        data = {
+            date_column_name: np.random.choice(months, size=num_rows),
+            f'string_column_{i}': np.random.choice(['A', 'B', 'C', 'D'], size=num_rows),
+            f'numeric_column_{i}': np.random.rand(num_rows) * 1000,
+            f'date_field_{i}': dates
+        }
+        df = pd.DataFrame(data)
+        df.to_parquet(file_name)
+
+# Function to generate and execute query
+def run_query(num_joins):
+    # Generate the SQL query with multiple joins
+    join_clauses = ''
+    for i in range(num_joins):
+        file_name = f"'artifacts/dim_table_{i}.parquet'"
+        date_column_name = f'date_column_{i}'
+        alias = f't{i}'
+        join_clause = f"LEFT OUTER JOIN read_parquet({file_name}) {alias} ON {alias}.{date_column_name} = m.month_start\n"
+        join_clauses += join_clause
+    
+    query = f"""
+    SELECT 1
+    FROM months m
+    {join_clauses}
+    GROUP BY m.month_start
+    """
+    
+    # Execute the query and measure execution time
+    start_time = time.time()
+    con.execute(query).fetchall()
+    end_time = time.time()
+    print(f"Execution time with {num_joins} joins: {end_time - start_time:.4f} seconds")
+
+# Main execution
+num_parquet_files = 10  # Adjust this number as needed
+create_parquet_files(num_parquet_files)
+
+# Test with varying number of joins
+for num_joins in range(1, num_parquet_files + 1):
+    run_query(num_joins)
+```
+
+**Observed Behavior:**
+
+Running the script produces the following execution times:
+
+```
+Execution time with 1 joins: 0.0050 seconds
+Execution time with 2 joins: 0.0050 seconds
+Execution time with 3 joins: 0.0110 seconds
+Execution time with 4 joins: 0.3549 seconds
+Execution time with 5 joins: 6.6724 seconds
+```
+
+- The execution time increases dramatically after 3 joins.
+- Beyond 5 joins, the query becomes extremely slow, and I have not been able to complete runs with more than 5 joins.
+
+**Expected Behavior:**
+
+- The execution time should scale more linearly with the number of joins.
+- DuckDB should handle multiple joins on the same key efficiently without exponential degradation in performance.
+
+**Reproduction Steps Summary:**
+
+1. Run the provided Python script.
+2. Observe the execution times printed to the console.
+3. Note the exponential increase in execution time as the number of joins increases.
+
+### OS:
+
+Windows 11 amd64
+
+### DuckDB Version:
+
+1.1.1
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+**CPU:**
+
+  | Name                                  | Number of Cores | Number of Logical Processors | Max Clock Speed (MHz) |
+  |---------------------------------------|-----------------|------------------------------|-----------------------|
+  | 13th Gen Intel(R) Core(TM) i7-13700KF | 16              | 24                           | 3400                  |
+
+  **RAM:**
+
+  | Manufacturer | Capacity (Bytes) | Speed (MHz) |
+  |--------------|------------------|-------------|
+  | Corsair      | 17179869184      | 2133        |
+  | Corsair      | 17179869184      | 2133        |
+
+  **GPU:**
+
+  | Name                    | Adapter RAM (Bytes) | Driver Version |
+  |-------------------------|---------------------|----------------|
+  | NVIDIA GeForce RTX 4080 | 4293918720          | 32.0.15.6590   |
+
+### Full Name:
+
+Maitland Marshall
+
+### Affiliation:
+
+MAIT DEV
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

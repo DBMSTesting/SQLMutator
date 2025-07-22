@@ -1,0 +1,113 @@
+ID: 16926
+Title: point get is blocked by the lock of other transactions
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+All the read operation should be non-block.
+
+### 1. What did you do?
+
+<!-- If possible, provide a recipe for reproducing the error. -->
+
+There is a large transaction (insert into select) ongoing, during the transaction commit, I find the QPS drop to zero:
+
+![image](https://user-images.githubusercontent.com/1420062/80560386-4d0e0e80-8a13-11ea-95c1-595466558a61.png)
+
+There shouldn't be any `wait_expired` in the resolve lock mertics, but it's here:
+
+![image](https://user-images.githubusercontent.com/1420062/80560426-7c248000-8a13-11ea-9d8e-9f742d669987.png)
+
+
+So I check this query:
+
+
+```
+mysql> trace format = 'row' select * from sbtest2 where id >= 15199153 and id < 15199154;
++--------------------------------------------+-----------------+------------+
+| operation                                  | startTS         | duration   |
++--------------------------------------------+-----------------+------------+
+| trace                                      | 12:02:31.531096 | 6.024271ms |
+|   ├─session.Execute                        | 12:02:31.531109 | 1.127937ms |
+|   │ ├─session.ParseSQL                     | 12:02:31.531117 | 40.041µs   |
+|   │ ├─executor.Compile                     | 12:02:31.531186 | 280.203µs  |
+|   │ │ └─session.getTxnFuture               | 12:02:31.531196 | 5.398µs    |
+|   │ └─session.runStmt                      | 12:02:31.531488 | 700.308µs  |
+|   │   ├─TableReaderExecutor.Open           | 12:02:31.532070 | 79.876µs   |
+|   │   │ └─distsql.Select                   | 12:02:31.532095 | 28.192µs   |
+|   │   │   ├─rpcClient.SendRequest          | 12:02:31.532346 | 1.173327ms |
+|   │   │   ├─rpcClient.SendRequest          | 12:02:31.533568 | 2.110097ms |
+|   │   │   └─rpcClient.SendRequest          | 12:02:31.535812 | 1.058768ms |
+|   │   └─session.CommitTxn                  | 12:02:31.532176 | 21.917µs   |
+|   │     └─session.doCommitWitRetry         | 12:02:31.532182 | 3.194µs    |
+|   └─*executor.TableReaderExecutor.Next     | 12:02:31.532259 | 4.663495ms |
++--------------------------------------------+-----------------+------------+
+14 rows in set (0.05 sec)
+```
+
+This one works as expected, duration = 6.024271ms 
+
+However, something is wrong with the following one, from the trace information we can see it retries `rpcClient.SendRequest` again after again until timeout.
+
+```
+mysql> trace format = 'row' select * from sbtest2 where id = 15199153;
++------------------------------------------+-----------------+---------------+
+| operation                                | startTS         | duration      |
++------------------------------------------+-----------------+---------------+
+| trace                                    | 12:02:33.656712 | 22.001270197s |
+|   ├─session.Execute                      | 12:02:33.656722 | 481.131µs     |
+|   │ ├─session.ParseSQL                   | 12:02:33.656738 | 35.089µs      |
+|   │ ├─executor.Compile                   | 12:02:33.656830 | 36.14µs       |
+|   │ └─session.runStmt                    | 12:02:33.656910 | 245.857µs     |
+|   │   └─session.CommitTxn                | 12:02:33.657117 | 28.759µs      |
+|   │     └─session.doCommitWitRetry       | 12:02:33.657123 | 4.369µs       |
+|   └─*executor.PointGetExecutor.Next      | 12:02:33.657238 | 22.000508467s |
+|     └─tikvSnapshot.get                   | 12:02:33.657246 | 22.000286358s |
+|       ├─rpcClient.SendRequest            | 12:02:33.657295 | 1.109793ms    |
+|       ├─rpcClient.SendRequest            | 12:02:33.658483 | 4.345095ms    |
+|       ├─rpcClient.SendRequest            | 12:02:33.756253 | 959.64µs      |
+|       ├─rpcClient.SendRequest            | 12:02:33.757296 | 2.284162ms    |
+|       ├─rpcClient.SendRequest            | 12:02:33.939957 | 844.086µs     |
+|       ├─rpcClient.SendRequest            | 12:02:33.940863 | 2.32445ms     |
+|       ├─rpcClient.SendRequest            | 12:02:34.281509 | 884.784µs     |
+|       ├─rpcClient.SendRequest            | 12:02:34.282473 | 2.151626ms    |
+|       ├─rpcClient.SendRequest            | 12:02:34.968039 | 728.84µs      |
+|       ├─rpcClient.SendRequest            | 12:02:34.968846 | 2.006836ms    |
+|       ├─rpcClient.SendRequest            | 12:02:36.141184 | 1.181363ms    |
+|       ├─rpcClient.SendRequest            | 12:02:36.142498 | 3.098072ms    |
+|       ├─rpcClient.SendRequest            | 12:02:38.435026 | 780.499µs     |
+|       ├─rpcClient.SendRequest            | 12:02:38.435883 | 1.912108ms    |
+|       ├─rpcClient.SendRequest            | 12:02:41.141120 | 892.723µs     |
+|       ├─rpcClient.SendRequest            | 12:02:41.142095 | 1.574045ms    |
+|       ├─rpcClient.SendRequest            | 12:02:44.072153 | 727.558µs     |
+|       ├─rpcClient.SendRequest            | 12:02:44.073002 | 2.102668ms    |
+|       ├─rpcClient.SendRequest            | 12:02:46.103522 | 1.100992ms    |
+|       ├─rpcClient.SendRequest            | 12:02:46.104773 | 2.235892ms    |
+|       ├─rpcClient.SendRequest            | 12:02:48.924581 | 1.460175ms    |
+|       ├─rpcClient.SendRequest            | 12:02:48.926139 | 2.460523ms    |
+|       ├─rpcClient.SendRequest            | 12:02:51.645117 | 906.228µs     |
+|       ├─rpcClient.SendRequest            | 12:02:51.646128 | 2.342805ms    |
+|       ├─rpcClient.SendRequest            | 12:02:53.359837 | 1.040755ms    |
+|       ├─rpcClient.SendRequest            | 12:02:53.360986 | 1.903409ms    |
+|       ├─rpcClient.SendRequest            | 12:02:55.653230 | 790.803µs     |
+|       └─rpcClient.SendRequest            | 12:02:55.654109 | 3.104528ms    |
++------------------------------------------+-----------------+---------------+
+37 rows in set (22.05 sec)
+```
+
+### 2. What did you expect to see?
+
+Point get should be nonblock!
+
+### 3. What did you see instead?
+
+It's blocked.
+
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+
+commit f678ce66904bd255fa41553151b665822ace86bc
+Author: lysu <sulifx@gmail.com>
+Date:   Wed Apr 29 10:40:56 2020 +0800
+
+    tikv: collapse duplicate resolve locks in region requests (#16838)

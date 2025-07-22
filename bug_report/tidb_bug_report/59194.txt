@@ -1,0 +1,64 @@
+ID: 59194
+Title: statistics: asyncMergeGlobalStats wrongly merges the same cmsketch twice
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+func TestGlobalStatsDataV2(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec(`
+		create table t (a int) partition by range (a) (
+			partition p0 values less than (10),
+			partition p1 values less than (20)
+		)`)
+	tk.MustExec("set @@tidb_analyze_version=1")
+	tk.MustExec("set @@tidb_partition_prune_mode='dynamic'")
+	tk.MustExec("insert into t values (1), (2), (3), (4), (5), (6), (6), (null), (11), (12), (13), (14), (15), (16), (17), (18), (19), (19)")
+	tk.MustExec("analyze table t")
+	tk.MustQuery("explain select * from t where a = 1").Check(testkit.Rows(""))
+}
+```
+
+### 2. What did you expect to see? (Required)
+The estimated rows should be *one*.
+```
+TableReader_7 1.00 root partition:p0 data:Selection_6
+└─Selection_6 1.00 cop[tikv]  eq(test.t.a, 1)
+ └─TableFullScan_5 18.00 cop[tikv] table:t keep order:false
+```
+
+### 3. What did you see instead (Required)
+The estimated rows should not be *two*.
+```
+TableReader_7 2.00 root partition:p0 data:Selection_6
+└─Selection_6 2.00 cop[tikv]  eq(test.t.a, 1)
+  └─TableFullScan_5 18.00 cop[tikv] table:t keep order:false
+```
+
+The root cause of this problem is, the cmsketch is merged twice! L391~393 should be removed.
+<img width="976" alt="Image" src="https://github.com/user-attachments/assets/fca38688-1a29-4751-92bd-6c58e4f8df57" />
+
+### 4. What is your TiDB version? (Required)
+mysql> select tidb_version();
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                 |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v9.0.0-alpha-158-gba79f5078d-dirty
+Edition: Community
+Git Commit Hash: ba79f5078dddfca69ec720d66ee54f96c51e47b6
+Git Branch: master
+UTC Build Time: 2025-01-24 08:44:02
+GoVersion: go1.23.5
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+<!-- Paste the output of SELECT tidb_version() -->
+

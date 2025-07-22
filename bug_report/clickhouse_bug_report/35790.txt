@@ -1,0 +1,69 @@
+ID: 35790
+Title: JSON field in partitioned table insert error when crossing partition boundaries
+Description:
+Good day everyone! I have stumbled upon an interesting issue with  semi-structured data experimental feature . 
+
+
+When inserting into a partitioned MergeTree with JSON column and  crossing partition boundaries  the  error is thrown 
+`DB::Exception: ColumnObject must be converted to ColumnTuple before use. (LOGICAL_ERROR)`
+
+The  issue can be reproduced on ` 22.3.2.1` release
+
+
+**How to reproduce**
+
+* Which ClickHouse server version to use -  22.3.2.1
+* Which interface to use, if matters - does not  seem to play any role
+* Non-default settings, if any  - allow_experimental_object_type enabled
+* `CREATE TABLE` statements for all tables involved 
+```DROP TABLE IF EXISTS jsonTest;
+CREATE TABLE jsonTest
+(
+    `data` JSON,
+    `creationDateUnix` UInt32 CODEC(DoubleDelta, ZSTD(1))
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(toDate(creationDateUnix))
+ORDER BY (creationDateUnix);
+
+DROP TABLE IF EXISTS source;
+CREATE TABLE source
+(
+    `sourceData` String,
+    `creationDateUnix` UInt32 CODEC(DoubleDelta, ZSTD(1))
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(toDate(creationDateUnix))
+ORDER BY (creationDateUnix);
+
+
+truncate source;
+insert into source (sourceData,creationDateUnix)
+select coalesce(actionDetailStr,'{}'), creationDateUnix from statOptJSONstr;   
+
+
+truncate jsonTest; 
+insert into jsonTest(data, creationDateUnix)
+select sourceData,creationDateUnix from source; -- this statement fails with 
+ DB::Exception: ColumnObject must be converted to ColumnTuple before use. (LOGICAL_ERROR) (version 22.3.2.1)
+ ```
+I have noticed that if the  data belongs  to  only one partition  there  is no issue.
+For  non-partitioned tables  issue is not reproducible  as well. 
+
+following statement  can be used  for  checking my  assumption above
+```
+insert into jsonTest(data, creationDateUnix)
+select  sourceData, creationDateUnix from source  Where  toYYYYMMDD(toDate(creationDateUnix)) between 20181130  and 20181201;
+```
+
+[Here  is my  dataset in parquet](https://drive.google.com/file/d/13fmXEcfLi-qGrBTz5UUB6hWOMUcPM6xb/view?usp=sharing)
+
+**Expected behavior**
+
+Expected  behavior is successful insertion of data
+
+**Error message and/or stacktrace**
+
+SQL Error [1002]: ClickHouse exception, code: 1002, host: localhost, port: 8123; Code: 49. DB::Exception: ColumnObject must be converted to ColumnTuple before use. (LOGICAL_ERROR) (version 22.3.2.1)
+
+

@@ -1,0 +1,168 @@
+ID: 14294
+Title: Potential flakiness in test/sql/copy/file_size_bytes.test
+Description:
+### What happens?
+
+Our build server failed to build duckdb 1.1.1 because of failure in test/sql/copy/file_size_bytes.test test. [See the full log](https://hydra.nixos.org/build/274192646/nixlog/1).
+
+I was unable to reproduce the same build failure locally which might suggest some non determinism (concurrency in between tests?) is at play.
+
+This is the interesting part of the log of failed job:
+
+```
+Filters: exclude:[s3] exclude:Test closing database during long running query exclude:Test using a remote optimizer pass in case thats important to someone exclude:test/common/test_cast_hugeint.test exclude:test/sql/copy/csv/test_csv_remote.test exclude:test/sql/copy/parquet/test_parquet_remote.test exclude:test/sql/copy/parquet/test_parquet_remote_foreign_files.test exclude:test/sql/storage/compression/chimp/chimp_read.test exclude:test/sql/storage/compression/chimp/chimp_read_float.test exclude:test/sql/storage/compression/patas/patas_compression_ratio.test_coverage exclude:test/sql/storage/compression/patas/patas_read.test exclude:test/sql/json/read_json_objects.test exclude:test/sql/json/read_json.test exclude:test/sql/json/table/read_json_objects.test exclude:test/sql/json/table/read_json.test exclude:test/sql/copy/parquet/parquet_5968.test exclude:test/fuzzer/pedro/buffer_manager_out_of_memory.test exclude:test/sql/storage/compression/bitpacking/bitpacking_size_calculation.test exclude:test/sql/copy/parquet/delta_byte_array_length_mismatch.test exclude:test/sql/function/timestamp/test_icu_strptime.test exclude:test/sql/timezone/test_icu_timezone.test exclude:test/sql/copy/parquet/snowflake_lineitem.test exclude:test/sql/copy/parquet/test_parquet_force_download.test exclude:test/sql/copy/parquet/delta_byte_array_multiple_pages.test exclude:test/sql/copy/csv/test_csv_httpfs_prepared.test exclude:test/sql/copy/csv/test_csv_httpfs.test exclude:test/sql/settings/test_disabled_file_system_httpfs.test exclude:test/sql/copy/csv/parallel/test_parallel_csv.test exclude:test/sql/copy/csv/parallel/csv_parallel_httpfs.test exclude:test/common/test_cast_struct.test exclude:test/sql/copy/parquet/parquet_glob.test exclude:[!hide] exclude:test/sql/copy/csv/auto/test_csv_auto.test exclude:test/sql/table_function/read_text_and_blob.test exclude:test/sql/copy/parquet/batched_write/batch_memory_usage.test exclude:test/sql/copy/csv/recursive_query_csv.test exclude:test/sql/copy/csv/test_mixed_lines.test exclude:test/parquet/parquet_long_string_stats.test exclude:test/sql/attach/attach_remote.test exclude:test/sql/copy/csv/test_sniff_httpfs.test exclude:test/sql/httpfs/internal_issue_2490.test
+[1407/3276] (42%): test/sql/copy/file_size_bytes.test                           ================================================================================
+Wrong result in query! (test/sql/copy/file_size_bytes.test:148)!
+================================================================================
+SELECT count(*) BETWEEN 6 AND 10 FROM glob('duckdb_unittest_tempdir/3796/file_size_bytes_csv6/*.csv');
+================================================================================
+Mismatch on row 1, column 1
+0 <> 1
+================================================================================
+Expected result:
+================================================================================
+1
+================================================================================
+Actual result:
+================================================================================
+0
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+unittest is a Catch v2.13.7 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+test/sql/copy/file_size_bytes.test
+-------------------------------------------------------------------------------
+/build/source/test/sqlite/test_sqllogictest.cpp:210
+...............................................................................
+
+test/sql/copy/file_size_bytes.test:148: FAILED:
+explicitly with message:
+  0
+
+[3276/3276] (100%): test/sqlserver/sqlserver_cte.test                           
+===============================================================================
+test cases:   3276 |   3275 passed | 1 failed | 35 skipped
+assertions: 414084 | 414083 passed | 1 failed | 35 skipped
+
+Skipped tests for the following reasons:
+require block_size: 2
+require exact_vector_size: 1
+require inet: 1
+require longdouble: 2
+require noalternativeverify: 6
+require windows: 3
+require-env LOCAL_EXTENSION_REPO: 12
+require-env RUN_EXTENSION_UPDATE_TEST: 1
+require-env S3_TEST_SERVER_AVAILABLE: 7
+```
+
+Our solution for now is to disable the offending test case.
+
+This might be potentially related https://github.com/duckdb/duckdb/issues/11744
+
+### To Reproduce
+
+This seems non deterministic.
+
+I don't think is specific to build with nix so cmake flags seems most relevant:
+
+```
+cmake flags: -GNinja -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_INSTALL_LOCALEDIR=/nix/store/xqg9c1gjz43k0jb3ww7b9iik8b29k4c5-duckdb-1.1.1-lib/share/locale -DCMAKE_INSTALL_LIBEXECDIR=/nix/store/xqg9c1gjz43k0jb3ww7b9iik8b29k4c5-duckdb-1.1.1-lib/libexec -DCMAKE_INSTALL_LIBDIR=/nix/store/xqg9c1gjz43k0jb3ww7b9iik8b29k4c5-duckdb-1.1.1-lib/lib -DCMAKE_INSTALL_DOCDIR=/nix/store/47fygmjqvbpmpn4c1bhy2lcbilnqpszn-duckdb-1.1.1/share/doc/DuckDB -DCMAKE_INSTALL_INFODIR=/nix/store/47fygmjqvbpmpn4c1bhy2lcbilnqpszn-duckdb-1.1.1/share/info -DCMAKE_INSTALL_MANDIR=/nix/store/47fygmjqvbpmpn4c1bhy2lcbilnqpszn-duckdb-1.1.1/share/man -DCMAKE_INSTALL_OLDINCLUDEDIR=/nix/store/67ydim4ls9lskrvd95af4s5pf3qqhb3r-duckdb-1.1.1-dev/include -DCMAKE_INSTALL_INCLUDEDIR=/nix/store/67ydim4ls9lskrvd95af4s5pf3qqhb3r-duckdb-1.1.1-dev/include -DCMAKE_INSTALL_SBINDIR=/nix/store/47fygmjqvbpmpn4c1bhy2lcbilnqpszn-duckdb-1.1.1/sbin -DCMAKE_INSTALL_BINDIR=/nix/store/47fygmjqvbpmpn4c1bhy2lcbilnqpszn-duckdb-1.1.1/bin -DCMAKE_INSTALL_NAME_DIR=/nix/store/xqg9c1gjz43k0jb3ww7b9iik8b29k4c5-duckdb-1.1.1-lib/lib -DCMAKE_POLICY_DEFAULT_CMP0025=NEW -DCMAKE_OSX_SYSROOT= -DCMAKE_FIND_FRAMEWORK=LAST -DCMAKE_STRIP=/nix/store/zznja5f8v3jafffyah1rk46vpfcn38dv-gcc-wrapper-13.3.0/bin/strip -DCMAKE_RANLIB=/nix/store/zznja5f8v3jafffyah1rk46vpfcn38dv-gcc-wrapper-13.3.0/bin/ranlib -DCMAKE_AR=/nix/store/zznja5f8v3jafffyah1rk46vpfcn38dv-gcc-wrapper-13.3.0/bin/ar -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_INSTALL_PREFIX=/nix/store/47fygmjqvbpmpn4c1bhy2lcbilnqpszn-duckdb-1.1.1 -DDUCKDB_EXTENSION_CONFIGS=/nix/store/vqcvrx8gw7bs0f9bygmd1aijgd0hgz20-source/.github/config/in_tree_extensions.cmake -DBUILD_ODBC_DRIVER=OFF -DJDBC_DRIVER=OFF -DOVERRIDE_GIT_DESCRIBE=v1.1.1-0-gaf39bd0dcf66876e09ac2a7c3baa28fe1b301151 -DBUILD_UNITTESTS=ON
+-- Found Python3: /nix/store/h3i0acpmr8mrjx07519xxmidv8mpax4y-python3-3.12.5/bin/python3.12 (found version "3.12.5") found components: Interpreter
+-- The C compiler identification is GNU 13.3.0
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /nix/store/zznja5f8v3jafffyah1rk46vpfcn38dv-gcc-wrapper-13.3.0/bin/gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /nix/store/zznja5f8v3jafffyah1rk46vpfcn38dv-gcc-wrapper-13.3.0/bin/g++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- GIT_COMMIT_HASH has lenght 40 different than the expected 10
+-- git hash af39bd0dcf, version v1.1.1, extension folder v1.1.1
+-- Extensions will be deployed to: /build/source/build/repository
+-- Load extension 'autocomplete' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'fts' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'httpfs' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'icu' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'json' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'parquet' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'tpcds' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'tpch' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'demo_capi' from '/build/source/extensions' @ v1.1.1
+-- Load extension 'jemalloc' from '/build/source/extensions' @ v1.1.1
+CMake Warning at CMakeLists.txt:1240 (message):
+  Extension 'httpfs' has a vcpkg.json, but build was not run with VCPKG.  If
+  build fails, check out VCPKG build instructions in
+  'duckdb/extension/README.md' or try manually installing the dependencies in
+  /build/source/extension/httpfsvcpkg.json
+
+
+-- Found OpenSSL: /nix/store/1w90l4fm5lzhlybipfilyjij2das6w98-openssl-3.0.14/lib/libcrypto.so (found version "3.0.14")
+-- Extensions linked into DuckDB: [autocomplete, fts, httpfs, icu, json, parquet, tpcds, tpch, jemalloc]
+-- Extensions built but not linked: [demo_capi]
+-- Configuring done (4.7s)
+-- Generating done (0.2s)
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    BUILD_ODBC_DRIVER
+    CMAKE_EXPORT_NO_PACKAGE_REGISTRY
+    CMAKE_POLICY_DEFAULT_CMP0025
+    JDBC_DRIVER
+
+
+-- Build files have been written to: /build/source/build
+cmake: enabled parallel building
+cmake: enabled parallel installing
+Running phase: buildPhase
+build flags: -j2
+```
+
+### OS:
+
+NixOS
+
+### DuckDB Version:
+
+1.1.1
+
+### DuckDB Client:
+
+cli
+
+### Hardware:
+
+x86_64 (linux)
+
+### Full Name:
+
+Marek Fajkus
+
+### Affiliation:
+
+NixOS & Holmusk
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - Other reason (please specify in the issue body)
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,261 @@
+ID: 25638
+Title: wrong CM Sketch caused by different encoding method used by TiDB and TiKV
+Description:
+## Bug Report
+
+Reason:
+TiKV builds CM Sketch using an encoding method different from what TiDB assumes.
+Only real TiKV has this issue, unistore doesn't have this issue.
+
+TiKV side:
+https://github.com/tikv/tikv/blob/a3da6cec14857de021da6ed14353ae461303047d/src/coprocessor/statistics/analyze.rs#L748
+in which the `val` is from
+https://github.com/tikv/tikv/blob/a3da6cec14857de021da6ed14353ae461303047d/components/tidb_query_datatype/src/codec/row/v2/compat_v1.rs#L54
+
+TiDB side:
+https://github.com/pingcap/tidb/blob/97e7b60a0b15aba3a7e6543b8a73293c8a57ecc3/store/mockstore/unistore/cophandler/analyze.go#L488
+and
+https://github.com/pingcap/tidb/blob/97e7b60a0b15aba3a7e6543b8a73293c8a57ecc3/statistics/cmsketch.go#L257
+which comes to
+https://github.com/pingcap/tidb/blob/97e7b60a0b15aba3a7e6543b8a73293c8a57ecc3/tablecodec/tablecodec.go#L276-L284
+
+
+
+This will make most equal condition row count estimation got 0 rows result.
+
+### 1. Minimal reproduce step (Required)
+```
+use test;
+set session tidb_analyze_version = 1;
+create table t(a date, b int, c int unsigned, d time, e bit, f year, g timestamp, h datetime, i enum('a', 'b'), j set('a', 'b'));
+insert into t value('2021-4-10', 1, 11, '10:20:30', 1, 2000, '2021-5-1', '2021-6-1', 'a', 'b');
+analyze table t;
+select * from t where a = '2021-4-10' and b = 1 and c = 11 and d = '10:20:30' and e = 1 and f = 2000 and g = '2021-5-1' and h = '2021-6-1' and i = 'a' and j = 'b';
+```
+wait several seconds
+```
+explain select * from t where a = '2021-4-10';
+explain select * from t where b = 1;
+explain select * from t where c = 11;
+explain select * from t where d = '10:20:30';
+explain select * from t where e = 1;
+explain select * from t where f = 2000;
+explain select * from t where g = '2021-5-1';
+explain select * from t where h = '2021-6-1';
+explain select * from t where i = 'a';
+explain select * from t where j = 'b';
+```
+### 2. What did you expect to see? (Required)
+```
+root:4000[test]> explain select * from t where a = '2021-4-10';
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| id                      | estRows | task      | access object | operator info                            |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6                         |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.a, 2021-04-10 00:00:00.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false                         |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where b = 1;
++-------------------------+---------+-----------+---------------+------------------+
+| id                      | estRows | task      | access object | operator info    |
++-------------------------+---------+-----------+---------------+------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6 |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.b, 1)  |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false |
++-------------------------+---------+-----------+---------------+------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where c = 11;
++-------------------------+---------+-----------+---------------+------------------+
+| id                      | estRows | task      | access object | operator info    |
++-------------------------+---------+-----------+---------------+------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6 |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.c, 11) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false |
++-------------------------+---------+-----------+---------------+------------------+
+3 rows in set (0.001 sec)
+
+root:4000[test]> explain select * from t where d = '10:20:30';
++-------------------------+---------+-----------+---------------+-------------------------------+
+| id                      | estRows | task      | access object | operator info                 |
++-------------------------+---------+-----------+---------------+-------------------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6              |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.d, 10:20:30.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false              |
++-------------------------+---------+-----------+---------------+-------------------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where e = 1;
++-------------------------+---------+-----------+---------------+----------------------+
+| id                      | estRows | task      | access object | operator info        |
++-------------------------+---------+-----------+---------------+----------------------+
+| Selection_5             | 0.80    | root      |               | eq(test.t.e, 1)      |
+| └─TableReader_7         | 1.00    | root      |               | data:TableFullScan_6 |
+|   └─TableFullScan_6     | 1.00    | cop[tikv] | table:t       | keep order:false     |
++-------------------------+---------+-----------+---------------+----------------------+
+3 rows in set (0.001 sec)
+
+root:4000[test]> explain select * from t where f = 2000;
++-------------------------+---------+-----------+---------------+--------------------+
+| id                      | estRows | task      | access object | operator info      |
++-------------------------+---------+-----------+---------------+--------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6   |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.f, 2000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false   |
++-------------------------+---------+-----------+---------------+--------------------+
+3 rows in set (0.001 sec)
+
+root:4000[test]> explain select * from t where g = '2021-5-1';
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| id                      | estRows | task      | access object | operator info                            |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6                         |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.g, 2021-05-01 00:00:00.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false                         |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where h = '2021-6-1';
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| id                      | estRows | task      | access object | operator info                            |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6                         |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.h, 2021-06-01 00:00:00.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false                         |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+3 rows in set (0.009 sec)
+
+root:4000[test]> explain select * from t where i = 'a';
++-------------------------+---------+-----------+---------------+-------------------+
+| id                      | estRows | task      | access object | operator info     |
++-------------------------+---------+-----------+---------------+-------------------+
+| TableReader_7           | 1.00    | root      |               | data:Selection_6  |
+| └─Selection_6           | 1.00    | cop[tikv] |               | eq(test.t.i, "a") |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false  |
++-------------------------+---------+-----------+---------------+-------------------+
+3 rows in set (0.001 sec)
+
+root:4000[test]> explain select * from t where j = 'b';
++-------------------------+---------+-----------+---------------+----------------------+
+| id                      | estRows | task      | access object | operator info        |
++-------------------------+---------+-----------+---------------+----------------------+
+| Selection_5             | 0.80    | root      |               | eq(test.t.j, "b")    |
+| └─TableReader_7         | 1.00    | root      |               | data:TableFullScan_6 |
+|   └─TableFullScan_6     | 1.00    | cop[tikv] | table:t       | keep order:false     |
++-------------------------+---------+-----------+---------------+----------------------+
+3 rows in set (0.001 sec)
+---+----------------------------------------------+
+3 rows in set (0.001 sec)
+```
+### 3. What did you see instead (Required)
+```
+root:4000[test]> explain select * from t where a = '2021-4-10';
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| id                      | estRows | task      | access object | operator info                            |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                         |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.a, 2021-04-10 00:00:00.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false                         |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where b = 1;
++-------------------------+---------+-----------+---------------+------------------+
+| id                      | estRows | task      | access object | operator info    |
++-------------------------+---------+-----------+---------------+------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6 |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.b, 1)  |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false |
++-------------------------+---------+-----------+---------------+------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where c = 11;
++-------------------------+---------+-----------+---------------+------------------+
+| id                      | estRows | task      | access object | operator info    |
++-------------------------+---------+-----------+---------------+------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6 |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.c, 11) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false |
++-------------------------+---------+-----------+---------------+------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where d = '10:20:30';
++-------------------------+---------+-----------+---------------+-------------------------------+
+| id                      | estRows | task      | access object | operator info                 |
++-------------------------+---------+-----------+---------------+-------------------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6              |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.d, 10:20:30.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false              |
++-------------------------+---------+-----------+---------------+-------------------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where e = 1;
++-------------------------+---------+-----------+---------------+----------------------+
+| id                      | estRows | task      | access object | operator info        |
++-------------------------+---------+-----------+---------------+----------------------+
+| Selection_5             | 0.80    | root      |               | eq(test.t.e, 1)      |
+| └─TableReader_7         | 1.00    | root      |               | data:TableFullScan_6 |
+|   └─TableFullScan_6     | 1.00    | cop[tikv] | table:t       | keep order:false     |
++-------------------------+---------+-----------+---------------+----------------------+
+3 rows in set (0.006 sec)
+
+root:4000[test]> explain select * from t where f = 2000;
++-------------------------+---------+-----------+---------------+--------------------+
+| id                      | estRows | task      | access object | operator info      |
++-------------------------+---------+-----------+---------------+--------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6   |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.f, 2000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false   |
++-------------------------+---------+-----------+---------------+--------------------+
+3 rows in set (0.003 sec)
+
+root:4000[test]> explain select * from t where g = '2021-5-1';
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| id                      | estRows | task      | access object | operator info                            |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                         |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.g, 2021-05-01 00:00:00.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false                         |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where h = '2021-6-1';
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| id                      | estRows | task      | access object | operator info                            |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6                         |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.h, 2021-06-01 00:00:00.000000) |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false                         |
++-------------------------+---------+-----------+---------------+------------------------------------------+
+3 rows in set (0.022 sec)
+
+root:4000[test]> explain select * from t where i = 'a';
++-------------------------+---------+-----------+---------------+-------------------+
+| id                      | estRows | task      | access object | operator info     |
++-------------------------+---------+-----------+---------------+-------------------+
+| TableReader_7           | 0.00    | root      |               | data:Selection_6  |
+| └─Selection_6           | 0.00    | cop[tikv] |               | eq(test.t.i, "a") |
+|   └─TableFullScan_5     | 1.00    | cop[tikv] | table:t       | keep order:false  |
++-------------------------+---------+-----------+---------------+-------------------+
+3 rows in set (0.002 sec)
+
+root:4000[test]> explain select * from t where j = 'b';
++-------------------------+---------+-----------+---------------+----------------------+
+| id                      | estRows | task      | access object | operator info        |
++-------------------------+---------+-----------+---------------+----------------------+
+| Selection_5             | 0.80    | root      |               | eq(test.t.j, "b")    |
+| └─TableReader_7         | 1.00    | root      |               | data:TableFullScan_6 |
+|   └─TableFullScan_6     | 1.00    | cop[tikv] | table:t       | keep order:false     |
++-------------------------+---------+-----------+---------------+----------------------+
+3 rows in set (0.001 sec)
+
+```
+
+(0.8 for bit and set type is expected because they can't be pushed down for now, so the default selectivity 0.8 is used)
+
+### 4. What is your TiDB version? (Required)
+
+from v4.0.0 to current master (ed52601e)
+(but from 5.1, `tidb_analyze_version` is 2 by default, which is not affected by this issue)

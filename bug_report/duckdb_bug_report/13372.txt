@@ -1,0 +1,26 @@
+ID: 13372
+Title: WAL: Write pointers to optimistically written row groups directly, instead of copying over the data
+Description:
+
+This PR reworks the way that writing optimistically-written data to the WAL works. When data is optimistically written, we currently rely on performing a `CHECKPOINT` during the commit to persist the optimistically written pages. The checkpoint then updates all of the table metadata to point towards the new pages, and ensures they are used when the database is restarted.
+
+In scenarios where we could not `CHECKPOINT` immediately - generally due to concurrenct activity (e.g. other clients also writing/updating/deleting data) - we would write the data out to the WAL. This would lead to a big performance degradation, as the data would be copied over from the pages that had already been written to the database file into the WAL. Furthermore, as the data in the WAL is uncompressed, the WAL could end up being bigger than the actual database file.
+
+#### WAL Replay
+This PR instead reworks this by adding a new entry to the WAL - the `WALType::ROW_GROUP_DATA`. This contains a series of data pointers that can be used to reconstruct the row groups directly from the (previously optimistically written) pages. This drastically reduces the size of the data written to the WAL in these scenarios.
+
+When replaying the WAL, we must be careful not to *overwrite* pages that contain optimistically written data. Since the pages are not mentioned in the metadata of the main database file, the pages are considered empty/free when loading only the metadata of the main database file. This could potentially lead to accidentally overwriting the data on these pages.
+
+When doing the WAL replay, we already did a two-pass approach over the WAL to detect serialization errors. This change makes this even more essential. In our first pass, we add any blocks that we encounter as part of `WALType::ROW_GROUP_DATA` entries to the set of in-use blocks. This prevents them from being overwritten by replaying other WAL entries.
+
+#### Serialization Rework
+
+In order to facilitate the serialization of row group metadata to the WAL, this PR reworks the way that serialization of row groups and column data works by moving everything into a separate series of classes - `PersistentColumnData`, `PersistentRowGroupData` and `PersistentCollectionData`. These are also used to write the metadata to the main database file to ensure consistency.
+
+#### debug_skip_checkpoint_on_commit
+
+For testing, a new option is added - `debug_skip_checkpoint_on_commit`. This option can be used to simulate a scenario in which a checkpoint on commit is not possible and we must instead write to the WAL. 
+
+#### Storage Version
+
+Since we are adding a new WAL entry, WAL files written that contain this new WAL entry cannot be replayed by older versions of DuckDB. Since this WAL entry is rarely used in normal operation, and in our own storage format WAL files are also rarely used, we have opted to not consider the target storage serialization version. Instead, when applicable this WAL entry will always be written.

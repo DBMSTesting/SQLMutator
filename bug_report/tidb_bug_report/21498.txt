@@ -1,0 +1,58 @@
+ID: 21498
+Title: RC transactions may see inconsistent data when there are concurrent DDLs
+Description:
+## Bug Report
+
+**The reason**:  In the current implementation of RC transaction, it fetches a latest ts to read data for each read statement. However it always uses the schema at the transaction's startTS (if I'm correct). So if the schema changed while the transaction is running, the transaction may see data that doesn't match the definition of the schema.
+
+### 1. Minimal reproduce step (Required)
+
+There may be various cases. Here are two examples.
+
+#### Case 1: RC transaction uses IndexReader when the index is dropped and before GC.
+
+```sql
+create table t (id int primary key, v int, index iv (v));
+insert into t values (1, 10), (2, 20), (3, 30), (4, 40);
+```
+
+| session1 | session2 | result |
+|--|--|--|
+| `set transaction isolation level read committed; begin;` | | |
+| `explain select * from t where v = 10;` | | `IndexReader/IndexRangeScan` |
+| `select * from t where v = 10;` | | `(1, 10)` |
+| | `alter table t drop index iv;` | |
+| | `update t set v = 11 where id = 1;` | |
+| `explain select * from t where v = 10;` | | `IndexReader/IndexRangeScan` |
+| `select * from t where v = 10;` | | `(1, 10)` |
+| `select * from t where id = 1;` | | `(1, 11)` |
+
+#### Case 2: RC transactionuses IndexLookup when the index is dropped and before GC.
+
+```sql
+create table t (id int primary key, v int, index iv (v), v2 int);
+insert into t values (1, 10, 100), (2, 20, 200), (3, 30, 300), (4, 40, 400);
+```
+
+| session1 | session2 | result |
+|--|--|--|
+| `set transaction isolation level read committed; begin;` | | |
+| `select * from t use index (iv) where v = 10;` | | `(1, 10, 100)` |
+| | `alter table t drop index iv;` | |
+| | `update t set v = 11 where id = 1;` | |
+| `select * from t use index (iv) where v = 10;` | | `(1, 11, 100)` |
+| | `update t set id = 5 where id = 1;` | |
+| `select * from t use index (iv) where v = 10;` | | `ERROR 1105 (HY000): inconsistent index iv handle count 1 isn't equal to value count 0` |
+
+### 2. What did you expect to see? (Required)
+
+For case 1, there last `select * from t where v = 10;` should return empty result;
+For case 2, session 1 should be able to use index (iv) in the last query
+
+### 3. What did you see instead (Required)
+
+As listed in the table above.
+
+### 4. What is your TiDB version? (Required)
+
+master (3a32bd2df58d3f85504b8f928c70787ced75333a), compiled with fail point (but not used)

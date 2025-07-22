@@ -1,0 +1,130 @@
+ID: 44414
+Title: Alias column bug when used in `Distributed` tables
+Description:
+**Describe what's wrong**
+
+selecting an `ALIAS` column, together with a `AS` alias, from a `Distributed` table results in exception
+
+**problem 1**
+https://fiddle.clickhouse.com/6c60df4d-92da-4284-b066-6ed26e0ecb65
+```sql
+DROP TABLE IF EXISTS alias_bug;
+DROP TABLE IF EXISTS alias_bug_dist;
+CREATE TABLE alias_bug
+(
+    `src` String,
+    `theAlias` String ALIAS trimBoth(src)
+)
+ENGINE = MergeTree()
+ORDER BY src;
+
+CREATE TABLE alias_bug_dist
+AS alias_bug
+ENGINE = Distributed('test_cluster_two_shards', 'default', 'alias_bug', rand());
+
+INSERT INTO alias_bug VALUES ('SOURCE1');
+
+-- OK
+SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug LIMIT 1;
+
+-- Not OK
+SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug_dist LIMIT 1;
+
+
+-- trace log
+[chi-datalake-ck-cluster-2-0-0] 2022.12.20 13:47:23.702285 [ 11790 ] {1cf58ccf-f4bf-483f-bbf3-6c1b97dedb5f} <Debug> executeQuery: (from 127.0.0.1:49830, user: operator) SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug_dist LIMIT 1; (stage: Complete)
+[chi-datalake-ck-cluster-2-0-0] 2022.12.20 13:47:23.705113 [ 11790 ] {1cf58ccf-f4bf-483f-bbf3-6c1b97dedb5f} <Error> executeQuery: Code: 10. DB::Exception: Not found column trimBoth(src) in block. (NOT_FOUND_COLUMN_IN_BLOCK) (version 22.9.1.4) (from 127.0.0.1:49830) (in query: SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug_dist LIMIT 1;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xa3dbe3a in /usr/bin/clickhouse
+1. DB::Exception::Exception<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&>(int, fmt::v8::basic_format_string<char, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&>::type>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0xa428538 in /usr/bin/clickhouse
+2. DB::ActionsDAG::updateHeader(DB::Block) const @ 0x1461a3d5 in /usr/bin/clickhouse
+3. DB::ExpressionTransform::transformHeader(DB::Block, DB::ActionsDAG const&) @ 0x15ecb7a5 in /usr/bin/clickhouse
+4. DB::ExpressionStep::ExpressionStep(DB::DataStream const&, std::__1::shared_ptr<DB::ActionsDAG> const&) @ 0x15ffa93f in /usr/bin/clickhouse
+5. DB::InterpreterSelectQuery::executeProjection(DB::QueryPlan&, std::__1::shared_ptr<DB::ActionsDAG> const&) @ 0x14e5eee5 in /usr/bin/clickhouse
+6. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::optional<DB::Pipe>) @ 0x14e4e419 in /usr/bin/clickhouse
+7. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0x14e4a5d2 in /usr/bin/clickhouse
+8. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0x14e90a54 in /usr/bin/clickhouse
+9. DB::InterpreterSelectWithUnionQuery::execute() @ 0x14e91a0d in /usr/bin/clickhouse
+10. ? @ 0x15181f09 in /usr/bin/clickhouse
+11. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x1517f437 in /usr/bin/clickhouse
+12. DB::TCPHandler::runImpl() @ 0x15c83bcc in /usr/bin/clickhouse
+13. DB::TCPHandler::run() @ 0x15c981f9 in /usr/bin/clickhouse
+14. Poco::Net::TCPServerConnection::start() @ 0x18a06273 in /usr/bin/clickhouse
+15. Poco::Net::TCPServerDispatcher::run() @ 0x18a075cd in /usr/bin/clickhouse
+16. Poco::PooledThread::run() @ 0x18bc9d29 in /usr/bin/clickhouse
+17. Poco::ThreadImpl::runnableEntry(void*) @ 0x18bc75e2 in /usr/bin/clickhouse
+18. ? @ 0x7f8dcb476609 in ?
+19. clone @ 0x7f8dcb39b133 in ?
+
+
+0 rows in set. Elapsed: 0.005 sec.
+
+Received exception from server (version 22.9.1):
+Code: 10. DB::Exception: Received from localhost:9000. DB::Exception: Not found column trimBoth(src) in block. (NOT_FOUND_COLUMN_IN_BLOCK)
+```
+
+**problem 2**
+https://fiddle.clickhouse.com/3abb709b-a85a-4861-9cd2-48e050630432
+```sql
+DROP TABLE IF EXISTS alias_bug;
+DROP TABLE IF EXISTS alias_bug_dist;
+CREATE TABLE alias_bug
+(
+    `s` String,
+    `src` String,
+    `theAlias` String ALIAS trimBoth(src)
+)
+ENGINE = MergeTree()
+ORDER BY src;
+
+CREATE TABLE alias_bug_dist
+AS alias_bug
+ENGINE = Distributed('test_cluster_two_shards', 'default', 'alias_bug', rand());
+
+-- SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug_dist LIMIT 1;
+
+-- Unknown identifier ?
+SELECT CAST(123, 'String') AS src,theAlias FROM alias_bug_dist LIMIT 1;
+
+
+-- trace log
+
+[chi-datalake-ck-cluster-2-0-0] 2022.12.20 13:45:02.531303 [ 11790 ] {3ba7276d-bdc6-4a97-88e6-2c3fea0a0fdf} <Debug> executeQuery: (from 127.0.0.1:49830, user: operator) -- SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug_dist LIMIT 1;
+ SELECT CAST(123, 'String') AS src,theAlias FROM alias_bug_dist LIMIT 1; (stage: Complete)
+[chi-datalake-ck-cluster-2-0-0] 2022.12.20 13:45:02.533210 [ 11790 ] {3ba7276d-bdc6-4a97-88e6-2c3fea0a0fdf} <Error> executeQuery: Code: 47. DB::Exception: Unknown identifier: src; there are columns: s, 123, 'String', CAST(123, 'String'): While processing CAST(123, 'String') AS src, trimBoth(src) AS theAlias. (UNKNOWN_IDENTIFIER) (version 22.9.1.4) (from 127.0.0.1:49830) (in query: -- SELECT theAlias,CAST(NULL, 'Nullable(String)') AS src FROM alias_bug_dist LIMIT 1;
+ SELECT CAST(123, 'String') AS src,theAlias FROM alias_bug_dist LIMIT 1;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xa3dbe3a in /usr/bin/clickhouse
+1. DB::ActionsMatcher::getNameAndTypeFromAST(std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0x149d349b in /usr/bin/clickhouse
+2. DB::ActionsMatcher::visit(DB::ASTFunction const&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0x149ce571 in /usr/bin/clickhouse
+3. DB::ActionsMatcher::visit(DB::ASTExpressionList&, std::__1::shared_ptr<DB::IAST> const&, DB::ActionsMatcher::Data&) @ 0x149d2d58 in /usr/bin/clickhouse
+4. DB::InDepthNodeVisitor<DB::ActionsMatcher, true, false, std::__1::shared_ptr<DB::IAST> const>::visit(std::__1::shared_ptr<DB::IAST> const&) @ 0x14992117 in /usr/bin/clickhouse
+5. DB::ExpressionAnalyzer::getRootActions(std::__1::shared_ptr<DB::IAST> const&, bool, std::__1::shared_ptr<DB::ActionsDAG>&, bool) @ 0x14991eb2 in /usr/bin/clickhouse
+6. DB::SelectQueryExpressionAnalyzer::appendSelect(DB::ExpressionActionsChain&, bool) @ 0x149a1785 in /usr/bin/clickhouse
+7. DB::ExpressionAnalysisResult::ExpressionAnalysisResult(DB::SelectQueryExpressionAnalyzer&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, bool, bool, bool, std::__1::shared_ptr<DB::FilterDAGInfo> const&, std::__1::shared_ptr<DB::FilterDAGInfo> const&, DB::Block const&) @ 0x149a680c in /usr/bin/clickhouse
+8. DB::InterpreterSelectQuery::getSampleBlockImpl() @ 0x14e4f6f0 in /usr/bin/clickhouse
+9. ? @ 0x14e471c3 in /usr/bin/clickhouse
+10. DB::InterpreterSelectQuery::InterpreterSelectQuery(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context> const&, std::__1::optional<DB::Pipe>, std::__1::shared_ptr<DB::IStorage> const&, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, std::__1::shared_ptr<DB::PreparedSets>) @ 0x14e422e9 in /usr/bin/clickhouse
+11. DB::InterpreterSelectWithUnionQuery::buildCurrentChildInterpreter(std::__1::shared_ptr<DB::IAST> const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x14e8ea0c in /usr/bin/clickhouse
+12. DB::InterpreterSelectWithUnionQuery::InterpreterSelectWithUnionQuery(std::__1::shared_ptr<DB::IAST> const&, std::__1::shared_ptr<DB::Context>, DB::SelectQueryOptions const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x14e8c70c in /usr/bin/clickhouse
+13. DB::InterpreterFactory::get(std::__1::shared_ptr<DB::IAST>&, std::__1::shared_ptr<DB::Context>, DB::SelectQueryOptions const&) @ 0x14df0e5e in /usr/bin/clickhouse
+14. ? @ 0x15181960 in /usr/bin/clickhouse
+15. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x1517f437 in /usr/bin/clickhouse
+16. DB::TCPHandler::runImpl() @ 0x15c83bcc in /usr/bin/clickhouse
+17. DB::TCPHandler::run() @ 0x15c981f9 in /usr/bin/clickhouse
+18. Poco::Net::TCPServerConnection::start() @ 0x18a06273 in /usr/bin/clickhouse
+19. Poco::Net::TCPServerDispatcher::run() @ 0x18a075cd in /usr/bin/clickhouse
+20. Poco::PooledThread::run() @ 0x18bc9d29 in /usr/bin/clickhouse
+21. Poco::ThreadImpl::runnableEntry(void*) @ 0x18bc75e2 in /usr/bin/clickhouse
+22. ? @ 0x7f8dcb476609 in ?
+23. clone @ 0x7f8dcb39b133 in ?
+
+
+0 rows in set. Elapsed: 0.005 sec.
+
+Received exception from server (version 22.9.1):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: Unknown identifier: src; there are columns: s, 123, 'String', CAST(123, 'String'): While processing CAST(123, 'String') AS src, trimBoth(src) AS theAlias. (UNKNOWN_IDENTIFIER)
+```
+
+**Does it reproduce on recent release?**
+Yes

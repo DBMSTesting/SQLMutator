@@ -1,0 +1,91 @@
+ID: 8427
+Title: Query didn't work well with table created with negate() in Order By
+Description:
+**Describe the bug or unexpected behaviour**
+When ran queries on a table created with negation in Order By, we got errors like below. Both Prewhere and Where could trigger this failure with certain filtering conditions. 
+```
+Received exception from server (version 19.17.5):
+Code: 15. DB::Exception: Received from localhost:9000. DB::Exception: Column 'negate(B)' already exists.
+```
+
+**How to reproduce**
+
+Basic env
+```
+ClickHouse client version 19.17.5.18 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 19.17.5 revision 54428.
+```
+
+To reproduce
+```
+CREATE TABLE nORX (`A` Int64, `B` Int64, `V` Int64) ENGINE = MergeTree ORDER BY (A, negate(B)) SETTINGS index_granularity = 8192 
+
+insert into nORX select 111, number, number from numbers(10000000)
+
+SELECT *
+FROM nORX
+PREWHERE (A = 111) AND (B >= 1000)
+ORDER BY
+    A ASC,
+    -B ASC
+LIMIT 3
+SETTINGS max_threads = 1
+
+Received exception from server (version 19.17.5):
+Code: 15. DB::Exception: Received from localhost:9000. DB::Exception: Column 'negate(B)' already exists.
+
+SELECT *
+FROM nORX
+WHERE B >= 1000
+ORDER BY
+    A ASC,
+    -B ASC
+LIMIT 3
+SETTINGS max_threads = 1
+
+Received exception from server (version 19.17.5):
+Code: 15. DB::Exception: Received from localhost:9000. DB::Exception: Column 'negate(B)' already exists.
+```
+
+**Expected behavior**
+But this query worked as expected:
+```
+SELECT *
+FROM nORX
+WHERE (A = 111) AND (B >= 1000)
+ORDER BY
+    A ASC,
+    -B ASC
+LIMIT 3
+SETTINGS max_threads = 1
+
+┌───A─┬───────B─┬───────V─┐
+│ 111 │ 9999999 │ 9999999 │
+│ 111 │ 9999998 │ 9999998 │
+│ 111 │ 9999997 │ 9999997 │
+└─────┴─────────┴─────────┘
+
+3 rows in set. Elapsed: 0.062 sec. Processed 614.40 thousand rows, 14.75 MB (9.95 million rows/s., 238.75 MB/s.)
+```
+
+**Additional question**
+We use "ORDER BY A ASC, -B ASC" in the query to leverage the optimize_read_in_order option. Though "ORDER BY A ASC, B DESC" provided same result, the query took much longer to finish: 0.464s vs 0.062s. Is such slowness expected?
+```
+SELECT *
+FROM nORX
+WHERE (A = 111) AND (B >= 1000)
+ORDER BY
+    A ASC,
+    B DESC
+LIMIT 3
+SETTINGS max_threads = 1
+
+┌───A─┬───────B─┬───────V─┐
+│ 111 │ 9999999 │ 9999999 │
+│ 111 │ 9999998 │ 9999998 │
+│ 111 │ 9999997 │ 9999997 │
+└─────┴─────────┴─────────┘
+
+3 rows in set. Elapsed: 0.464 sec. Processed 10.00 million rows, 239.98 MB (21.56 million rows/s., 517.38 MB/s.)
+``` 

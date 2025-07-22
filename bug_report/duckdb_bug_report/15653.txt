@@ -1,0 +1,34 @@
+ID: 15653
+Title: Implement `DELTA_LENGTH_BYTE_ARRAY` and `BYTE_STREAM_SPLIT` encodings for Parquet writer
+Description:
+These are always better than `PLAIN`. With these implemented, we are only missing `DELTA_BYTE_ARRAY`, which is a bit trickier to implement than the two I implemented in this PR.
+
+`DELTA_LENGTH_BYTE_ARRAY` first compresses all the string lengths using the `DELTA_BINARY_PACKED` encoding, and then all the strings, which also should slightly improve subsequent encoding by general-purpose compression. `BYTE_STREAM_SPLIT` writes out the bytes in floating points into separate streams, which doesn't compress, but the goal is to improve subsequent encoding by general-purpose compression.
+
+I did a quick benchmark with TPC-H SF10 using ZSTD (instead of our default Snappy).
+
+This tests `DELTA_LENGTH_BYTE_ARRAY`:
+```sql
+copy (
+    select l_comment
+    from lineitem
+) to 'my.parquet' (compression zstd, compression_level 1);
+```
+| | Size | Time |
+|:-|:-|:-|
+| Old | 536MB | ~1.3s |
+| New | 470MB | ~1.2s |
+
+And this tests `BYTE_STREAM_SPLIT`:
+```sql
+copy (
+    select l_quantity::double,
+    l_extendedprice::double,
+    l_discount::double,
+    l_tax::double from lineitem
+) to 'my.parquet' (compression zstd, compression_level 1);
+```
+| | Size | Time |
+|:-|:-|:-|
+| Old | 466MB | ~1.4s |
+| New | 284MB | ~1.3s |

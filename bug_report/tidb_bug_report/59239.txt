@@ -1,0 +1,33 @@
+ID: 59239
+Title: Potential error rate regression during TiKV store leader transfer
+Description:
+## Bug Report
+Due to the general implementation design of tidb query max_execution_time, some queries can still complete even after exceeding the specified limit. However, after the recent change introduced in [#56923](https://github.com/pingcap/tidb/pull/56923), we observed an increased query error rate during TiKV store leader transfers when using strict max_execution_time(**subsecond, like 500ms**).
+
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+
+1. Simulate a scenario where a TiKV node experiences EBS latency issues, triggering leader transfers away from this node.
+2. When TiDB attempts to read from regions undergoing leader transfer, it encounters notLeader errors without receiving new leader information.
+3. Before [#56923](https://github.com/pingcap/tidb/pull/56923):
+* max_execution_time was not propagated to the backoff context.
+* The TiKV client could perform multiple retries ([ref](https://github.com/tikv/client-go/blob/d0d0c9712f43c008da792ef2f34818a156923247/internal/locate/replica_selector.go#L490)) to eventually locate the new leader(or try follower) and complete the query, even if it exceeded max_execution_time.
+4. After [#56923](https://github.com/pingcap/tidb/pull/56923):
+* max_execution_time is now propagated to the backoff context.
+* The request gets canceled once the backoff detects that the context timeout(or other func like s.client.SendRequest detects the context timeout) has been reached ([ref](https://github.com/tikv/client-go/blob/d0d0c9712f43c008da792ef2f34818a156923247/config/retry/backoff.go#L139)), resulting in more query failures during leader transfers.
+
+
+### 2. What did you expect to see? (Required)
+
+See below 
+### 3. What did you see instead (Required)
+
+While it's hard to say this is a real "bug," the stricter enforcement of max_execution_time has led to a noticeable increase in query errors during TiKV leader transfers. This behavioral change is significant and worth attention, as it affects query reliability under certain failure scenarios.
+
+### 4. What is your TiDB version? (Required)
+
+v6.5.4, but this issue very likely applies to later versions as well.
+

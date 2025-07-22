@@ -1,0 +1,76 @@
+ID: 13857
+Title: PessimisticLockNotFound without grpc error in log
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+In pessimistic txn mode, start two transaction and do conflict updates.
+
+| Txn1  | Txn2 |
+| ------------- | ------------- |
+| CREATE TABLE t(c int, d int);  |   |
+| INSERT INTO t(c, d) VALUES(1, 2);  |   |
+| BEGIN; | |
+| | BEGIN; |
+| Wait for 20 seconds | |
+| UPDATE t SET d = 3 WHERE c = 1; | |
+| | UPDATE t SET d = 4 WHERE c = 1; |
+| COMMIT; | |
+| | COMMIT; |
+
+**Notice that the update statement in txn1 should be executed about 20 seconds after the begin time.**
+
+2. What did you expect to see?
+
+Txn2 block at update statement.
+
+3. What did you see instead?
+
+Txn2 block for seconds and success.
+
+```
+mysql> UPDATE t SET d = 4 WHERE c = 1;
+Query OK, 1 row affected (3.02 sec)
+Rows matched: 1  Changed: 1  Warnings: 0
+```
+
+When commit Txn1, it tells "PessimisticLockNotFound".
+
+```
+mysql> COMMIT;
+ERROR 1105 (HY000): tikv aborts txn: Txn(Mvcc(PessimisticLockNotFound { start_ts: TimeStamp(412952748960251905), key: [116, 128, 0, 0, 0, 0, 0, 12, 41, 95, 114, 128, 0, 0, 0, 0, 0, 0, 1] }))
+```
+
+There are not any grpc errors in log, but the transaction exceeds the 20 seconds ttl. Seems the heartbeat not send.
+
+```
+[2019/12/02 20:29:04.620 +08:00] [INFO] [lock_resolver.go:540] ["resolveLock rollback"] [lock="key: {tableID=3113, handle=1}, primary: {tableID=3113, handle=1}, txnStartTS: 412952748960251905, ttl: 20019, type: PessimisticLock"]
+[2019/12/02 20:29:06.217 +08:00] [WARN] [2pc.go:639] ["send TxnHeartBeat failed"] [error="txn 412952748960251905 heartbeat fail, primary key = [116 128 0 0 0 0 0 12 41 95 114 128 0 0 0 0 0 0 1], err = "] [txnStartTS=412952748960251905]
+[2019/12/02 20:29:25.633 +08:00] [WARN] [snapshot.go:422] ["2PC failed"] [error="tikv aborts txn: Txn(Mvcc(PessimisticLockNotFound { start_ts: TimeStamp(412952748960251905), key: [116, 128, 0, 0, 0, 0, 0, 12, 41, 95, 114, 128, 0, 0, 0, 0, 0, 0, 1] }))"]
+[2019/12/02 20:29:25.634 +08:00] [WARN] [session.go:479] ["can not retry txn"] [conn=335] [label=general] [error="tikv aborts txn: Txn(Mvcc(PessimisticLockNotFound { start_ts: TimeStamp(412952748960251905), key: [116, 128, 0, 0, 0, 0, 0, 12, 41, 95, 114, 128, 0, 0, 0, 0, 0, 0, 1] }))"] [IsBatchInsert=false] [IsPessimistic=true] [InRestrictedSQL=false] [tidb_retry_limit=10] [tidb_disable_txn_auto_retry=true]
+[2019/12/02 20:29:25.634 +08:00] [WARN] [session.go:505] ["commit failed"] [conn=335] ["finished txn"="Txn{state=invalid}"] [error="tikv aborts txn: Txn(Mvcc(PessimisticLockNotFound { start_ts: TimeStamp(412952748960251905), key: [116, 128, 0, 0, 0, 0, 0, 12, 41, 95, 114, 128, 0, 0, 0, 0, 0, 0, 1] }))"]
+[2019/12/02 20:29:25.634 +08:00] [WARN] [session.go:1032] ["run statement failed"] [conn=335] [schemaVersion=1897] [error="previous statement: UPDATE t SET d = 3 WHERE c = 1: tikv aborts txn: Txn(Mvcc(PessimisticLockNotFound { start_ts: TimeStamp(412952748960251905), key: [116, 128, 0, 0, 0, 0, 0, 12, 41, 95, 114, 128, 0, 0, 0, 0, 0, 0, 1] }))"] [session="{\n  \"currDBName\": \"repro\",\n  \"id\": 335,\n  \"status\": 2,\n  \"strictMode\": false,\n  \"user\": {\n    \"Username\": \"root\",\n    \"Hostname\": \"172.16.5.6\",\n    \"CurrentUser\": false,\n    \"AuthUsername\": \"root\",\n    \"AuthHostname\": \"%\"\n  }\n}"]
+[2019/12/02 20:29:25.634 +08:00] [WARN] [conn.go:688] ["command dispatched failed"] [conn=335] [connInfo="id:335, addr:172.16.5.6:60832 status:10, collation:utf8_general_ci, user:root"] [command=Query] [status="inTxn:0, autocommit:1"] [sql=COMMIT] [err="tikv aborts txn: Txn(Mvcc(PessimisticLockNotFound { start_ts: TimeStamp(412952748960251905), key: [116, 128, 0, 0, 0, 0, 0, 12, 41, 95, 114, 128, 0, 0, 0, 0, 0, 0, 1] }))\ngithub.com/pingcap/tidb/store/tikv.extractKeyErr\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/snapshot.go:421\ngithub.com/pingcap/tidb/store/tikv.extractLockFromKeyErr\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/snapshot.go:402\ngithub.com/pingcap/tidb/store/tikv.actionPrewrite.handleSingleBatch\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/2pc.go:544\ngithub.com/pingcap/tidb/store/tikv.(*twoPhaseCommitter).doActionOnBatches\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/2pc.go:429\ngithub.com/pingcap/tidb/store/tikv.(*twoPhaseCommitter).doActionOnKeys\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/2pc.go:417\ngithub.com/pingcap/tidb/store/tikv.(*twoPhaseCommitter).prewriteKeys\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/2pc.go:976\ngithub.com/pingcap/tidb/store/tikv.(*twoPhaseCommitter).execute\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/2pc.go:1043\ngithub.com/pingcap/tidb/store/tikv.(*twoPhaseCommitter).executeAndWriteFinishBinlog\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/2pc.go:1003\ngithub.com/pingcap/tidb/store/tikv.(*tikvTxn).Commit\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/store/tikv/txn.go:313\ngithub.com/pingcap/tidb/session.(*TxnState).Commit\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/txn.go:195\ngithub.com/pingcap/tidb/session.(*session).doCommit\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/session.go:440\ngithub.com/pingcap/tidb/session.(*session).doCommitWithRetry\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/session.go:459\ngithub.com/pingcap/tidb/session.(*session).CommitTxn\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/session.go:528\ngithub.com/pingcap/tidb/session.finishStmt\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/tidb.go:204\ngithub.com/pingcap/tidb/session.runStmt\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/tidb.go:286\ngithub.com/pingcap/tidb/session.(*session).executeStatement\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/session.go:1029\ngithub.com/pingcap/tidb/session.(*session).execute\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/session.go:1134\ngithub.com/pingcap/tidb/session.(*session).Execute\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/session/session.go:1069\ngithub.com/pingcap/tidb/server.(*TiDBContext).Execute\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/server/driver_tidb.go:248\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/server/conn.go:1152\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/server/conn.go:850\ngithub.com/pingcap/tidb/server.(*clientConn).Run\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/server/conn.go:672\ngithub.com/pingcap/tidb/server.(*Server).onConn\n\t/home/jenkins/agent/workspace/build_tidb_master/go/src/github.com/pingcap/tidb/server/server.go:442\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_amd64.s:1357\nprevious statement: UPDATE t SET d = 3 WHERE c = 1"]
+[2019/12/02 20:29:25.635 +08:00] [INFO] [2pc.go:1032] ["2PC clean up done"] [conn=335] [txnStartTS=412952748960251905]
+```
+
+The errors message is missing in `[2019/12/02 20:29:06.217 +08:00] [WARN] [2pc.go:639] ["send TxnHeartBeat failed"] ...`
+
+Can only reproduce for sometimes.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+Release Version: v4.0.0-alpha-1038-g5d186eac4
+Git Commit Hash: 5d186eac4bf02580693c9f97f95ef2b2469aac66
+Git Branch: master
+UTC Build Time: 2019-12-02 03:48:20
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

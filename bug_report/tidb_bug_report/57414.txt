@@ -1,0 +1,82 @@
+ID: 57414
+Title: `INSERT ... ON DUPLICATE` during index merge phase will cause data inconsistency
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Run the following test:
+
+``` patch
+From 1625d2e39b71cb06d4e4724ec28c5a65f662b873 Mon Sep 17 00:00:00 2001
+From: joechenrh <joechenrh@gmail.com>
+Date: Fri, 15 Nov 2024 08:15:19 +0000
+Subject: [PATCH] Add test
+
+---
+ pkg/ddl/index.go             |  1 +
+ pkg/ddl/index_modify_test.go | 22 ++++++++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/pkg/ddl/index.go b/pkg/ddl/index.go
+index 0a73371562..6f853f6545 100644
+--- a/pkg/ddl/index.go
++++ b/pkg/ddl/index.go
+@@ -1352,6 +1352,7 @@ func doReorgWorkForCreateIndex(
+ 				MockDMLExecutionStateBeforeMerge()
+ 			}
+ 		})
++		failpoint.InjectCall("BeforeBackfillMerge", job)
+ 		logutil.DDLLogger().Info("index backfill state ready to merge",
+ 			zap.Int64("job ID", job.ID),
+ 			zap.String("table", tbl.Meta().Name.O),
+diff --git a/pkg/ddl/index_modify_test.go b/pkg/ddl/index_modify_test.go
+index b38d05fbff..7999368ea1 100644
+--- a/pkg/ddl/index_modify_test.go
++++ b/pkg/ddl/index_modify_test.go
+@@ -1422,3 +1422,25 @@ func TestAddVectorIndexRollback(t *testing.T) {
+ 
+ 	testfailpoint.Disable(t, "github.com/pingcap/tidb/pkg/ddl/MockCheckVectorIndexProcess")
+ }
++
++func TestAddIndex(t *testing.T) {
++	store := testkit.CreateMockStore(t)
++	tkVar := testkit.NewTestKit(t, store)
++	tkVar.MustExec("set @@global.tidb_ddl_enable_fast_reorg = 1")
++	tkVar.MustExec("set @@global.tidb_enable_dist_task=0")
++
++	tk := testkit.NewTestKit(t, store)
++	tk.MustExec("use test")
++	tk.MustExec("create table t (col1 int, col2 int, unique index i1(col2) /*T![global_index] GLOBAL */) PARTITION BY HASH (col1) PARTITIONS 2")
++
++	tk2 := testkit.NewTestKit(t, store)
++	tk2.MustExec("use test")
++
++	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/BeforeBackfillMerge", func(job *model.Job) {
++		tk2.MustExec("insert ignore into t values (1, 2), (1, 2) on duplicate key update col1 = 0, col2 = 0")
++	})
++	defer testfailpoint.Disable(t, "github.com/pingcap/tidb/pkg/ddl/BeforeBackfillMerge")
++
++	tk.MustExec("alter table t add unique index i(col1, col2)")
++	tk.MustExec("admin check table t")
++}
+-- 
+2.43.0
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Test passed.
+
+### 3. What did you see instead (Required)
+
+`admin check table` failed.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

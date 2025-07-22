@@ -1,0 +1,192 @@
+ID: 8742
+Title: clickhouse-server crashes on invalid insert query
+Description:
+When invalid insert query is sent to server, instead of returning some sort of error, clickhouse-server crashes.
+
+**How to reproduce**
+* ClickHouse server version: self-compiled 19.16.2.2. Didn't try other versions.
+* Crash may be reproduced both via clickhouse-client and via c++ client using clickhouse-cpp client library (https://github.com/artpaul/clickhouse-cpp)
+* create table statement: `CREATE TABLE testtable (time DateTime, int_value Int64) ENGINE = MergeTree ORDER BY (time);`
+* crashing insert: `INSERT INTO testtable (int_value, int_value) VALUES (30, 40);`
+
+**Expected behavior**
+Some error returned from server and server keeping running.
+
+**Error message and/or stacktrace**
+<details>
+  <summary>backtrace from core dump</summary>
+
+```
+(gdb) bt
+#0  0x000000000586708f in DB::Block::bytes (this=this@entry=0x7f1183ffd330)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/src/Core/Block.cpp:261
+#1  0x00000000058c5f46 in DB::BlockStreamProfileInfo::update (this=this@entry=0x7f11ac0062c0, block=...)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/src/DataStreams/BlockStreamProfileInfo.cpp:68
+#2  0x00000000058cd0eb in DB::IBlockInputStream::read (this=0x7f11ac006250)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/src/DataStreams/IBlockInputStream.cpp:65
+#3  0x00000000031f68a7 in DB::TCPHandler::receiveData (this=0x7f11ac002170)
+    at /usr/include/c++/9/bits/shared_ptr_base.h:1020
+#4  0x00000000031f71fb in DB::TCPHandler::receivePacket (this=0x7f11ac002170)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/programs/server/TCPHandler.cpp:855
+#5  0x00000000031f733e in DB::TCPHandler::readDataNext (this=0x7f11ac002170, poll_interval=@0x7f1183ffd6a8: 10000000, 
+    receive_timeout=@0x7f1183ffd6a4: 300) at /usr/src/debug/clickhouse-19.16.2.2/dbms/programs/server/TCPHandler.cpp:406
+#6  0x00000000031f7820 in DB::TCPHandler::readData (this=this@entry=0x7f11ac002170, connection_settings=...)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/programs/server/TCPHandler.cpp:437
+#7  0x00000000031f7b41 in DB::TCPHandler::processInsertQuery (this=0x7f11ac002170, connection_settings=...)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/programs/server/TCPHandler.cpp:463
+#8  0x00000000031f8f40 in DB::TCPHandler::runImpl (this=0x7f11ac002170)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/programs/server/TCPHandler.cpp:257
+#9  0x00000000031f91cb in DB::TCPHandler::run (this=0x7f11ac002170)
+    at /usr/src/debug/clickhouse-19.16.2.2/dbms/programs/server/TCPHandler.cpp:1223
+#10 0x00007f12655ba737 in ?? ()
+#11 0x00007f11a0002930 in ?? ()
+#12 0x00007f12655bb8d6 in ?? ()
+#13 0x00007f1183ffec80 in ?? ()
+#14 0x00007f1183ffec70 in ?? ()
+#15 0x00007f1183ffec68 in ?? ()
+#16 0x000000000962c498 in ?? ()
+#17 0x000000000962c4a0 in ?? ()
+#18 0x000000000962c4c8 in ?? ()
+#19 0x000000000962c498 in ?? ()
+#20 0x00007f1183ffecf0 in ?? ()
+#21 0x00007f1183fff700 in ?? ()
+#22 0x00007f126504689c in ?? ()
+#23 0x0000000000000000 in ?? ()
+
+(gdb) l
+256
+257     size_t Block::bytes() const
+258     {
+259         size_t res = 0;
+260         for (const auto & elem : data)
+261             res += elem.column->byteSize();
+262
+263         return res;
+264     }
+265
+(gdb) print elem.column
+$4 = {<COW<DB::IColumn>::IntrusivePtr<DB::IColumn const>> = {<boost::intrusive_ptr<DB::IColumn const>> = {
+      px = 0x0}, <No data fields>}, <No data fields>}
+```
+
+</details>
+
+**Additional context**
+It may take up to a few seconds for server to crash after receiving invalid insert.
+
+<details>
+  <summary>Following code produces same crash in clickhouse-server via clickhouse-cpp bindings:</summary>
+
+```c++
+#include <clickhouse-cpp/client.h>
+#include <clickhouse-cpp/columns/numeric.h>
+#include <clickhouse-cpp/columns/date.h>
+
+#include <boost/program_options.hpp>
+
+#include <sstream>
+#include <string>
+#include <memory>
+#include <chrono>
+
+#include <stdio.h>
+
+int main(int argc, char **argv)
+{
+	std::string table;
+
+	clickhouse::ClientOptions client_options;
+
+	boost::program_options::options_description all_options("General Options");
+	all_options.add_options()
+		("help,h", "produce help message")
+		("table,t", boost::program_options::value<std::string>(&table)->required(), "table name in clickhouse database. required argument")
+		("database,d", boost::program_options::value<std::string>(&(client_options.default_database)), "database name in clickhouse database")
+		("user,u", boost::program_options::value<std::string>(&(client_options.user)), "username for clickhouse database")
+		("password,u", boost::program_options::value<std::string>(&(client_options.password)), "password for clickhouse database")
+		("hostname,H", boost::program_options::value<std::string>(&(client_options.host))->default_value("localhost"), "hostname of clickhouse database")
+		("port,p", boost::program_options::value<int>(&(client_options.port)), "port of clickhouse database")
+	;
+
+	boost::program_options::positional_options_description pos_opts;
+
+	pos_opts.add("table", 1);
+
+	boost::program_options::variables_map vm;
+
+	try
+	{
+		boost::program_options::store(boost::program_options::command_line_parser(argc, argv).options(all_options).positional(pos_opts).run(), vm);
+	}
+	catch (const std::exception &e)
+	{
+		fprintf(stderr, "Error: %s\n", e.what());
+		return -1;
+	}
+
+	if (vm.count("help"))
+	{
+		std::stringstream desc_stream;
+		desc_stream << all_options;
+
+		printf("%s\n", desc_stream.str().c_str());
+		return 1;
+	}
+
+	try
+	{
+		boost::program_options::notify(vm);
+	}
+	catch (const std::exception &e)
+	{
+		fprintf(stderr, "Error: %s\n", e.what());
+		return -1;
+	}
+
+	try
+	{
+		clickhouse::Client client(client_options);
+
+		{
+			std::stringstream str;
+			str << "CREATE TABLE IF NOT EXISTS " << table
+			<< " (time DateTime, int_value Int64)"
+			<< " ENGINE = MergeTree ORDER BY (time)";
+
+			client.Execute(str.str());
+		}
+
+		auto time_column = std::make_shared<clickhouse::ColumnDateTime>();
+		auto int_column = std::make_shared<clickhouse::ColumnInt64>();
+		auto int_column_duplicate = std::make_shared<clickhouse::ColumnInt64>();
+
+		time_column->Append(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+		int_column->Append(1);
+		int_column_duplicate->Append(10);
+
+		clickhouse::Block block;
+
+		block.AppendColumn("time", time_column);
+		block.AppendColumn("int_value", int_column);
+		block.AppendColumn("int_value", int_column_duplicate);
+
+		client.Insert(table, block);
+	}
+	catch (const std::exception &e)
+	{
+		fprintf(stderr, "Error: %s\n", e.what());
+		return -1;
+	}
+	catch (...)
+	{
+		fprintf(stderr, "Error: caught unknown exception\n");
+		return -1;
+	}
+
+	return 0;
+}
+```
+
+</details>
+
+It requires `boost::program_options` and `clickhouse-cpp` to build and run, and takes at least one required argument: table name.

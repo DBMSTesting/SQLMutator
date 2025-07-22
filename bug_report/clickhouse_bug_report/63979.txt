@@ -1,0 +1,45 @@
+ID: 63979
+Title: LOGICAL_ERROR Pipeline for PushingPipelineExecutor was finished before all data was inserted
+Description:
+I'm able to reproduce smth similar with the following:
+
+``` sh
+diff --git a/src/Server/TCPHandler.cpp b/src/Server/TCPHandler.cpp
+index ae2f150c4a1..d0911804063 100644
+--- a/src/Server/TCPHandler.cpp
++++ b/src/Server/TCPHandler.cpp
+@@ -910,6 +910,8 @@ void TCPHandler::processInsertQuery()
+
+     auto run_executor = [&](auto & executor, Block processed_data)
+     {
++        std::this_thread::sleep_for(std::chrono::seconds(1));
++
+         /// Made above the rest of the lines,
+         /// so that in case of `start` function throws an exception,
+         /// client receive exception before sending data.
+```
+
+``` sh
+❯ cat repro.sql
+drop table if exists mv_table_1;
+drop table if exists mv_table;
+drop table if exists null_table;
+
+set max_execution_time = 0.1, timeout_overflow_mode = 'break';
+
+CREATE TABLE null_table (str String) ENGINE = Null;
+CREATE MATERIALIZED VIEW mv_table (str String) ENGINE = MergeTree ORDER BY str AS SELECT str AS str FROM null_table;
+CREATE MATERIALIZED VIEW mv_table_1 (str Decimal(38, 7)) ENGINE = MergeTree ORDER BY str AS SELECT str AS str FROM null_table;
+
+INSERT INTO null_table VALUES ('test');
+```
+
+```
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Pipeline for PushingPipelineExecutor was finished before all data was inserted. (LOGICAL_ERROR)
+```
+
+---
+
+Stepped on this while trying to reproduce https://s3.amazonaws.com/clickhouse-test-reports/63861/af84e3e1a9c8c3b62f738f231e457efc8ea301ea/ast_fuzzer__tsan_/fatal.log
+
+Not sure if it is connected anyhow with https://github.com/ClickHouse/ClickHouse/issues/52234 or not. Probably yes, since it requires `max_execution_time = 0.1, timeout_overflow_mode = 'break'`.

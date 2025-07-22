@@ -1,0 +1,46 @@
+ID: 14313
+Title: Or filter pushdown into zone maps
+Description:
+This PR will create a zone map table filter when a OR/IN filter on an integer column is present above a table scan.
+
+When are OR/IN filters are pushed down?
+If the column is an integer type column. Based on some benchmarks, the overhead of checking the min max for integer columns when the values are unordered or distinct values are sparse is very little compared to the benefit you get when they are ordered and/order the distinct values are dense.
+
+See the following results. I test or filter pushdown on the following columsn
+- a column where every value is repeated 4 times on average (i.e 25% distinct values) using l_orderkey of `lineitem`. 
+- a column where every value is distinct. orders.o_orderkey.
+
+I test on ordered column values and unordered column values.
+
+I select just two values around the minimum + ~(rowgroup size) and the maximum - ~(row group size). This way at least two row groups are emitted from the scan. I query on tpch datasets at sf1, sf10, sf100. Notice that pushing down the OR filter on an unordered version of lineitem is only ~0.1 second slower than not pushing down. This comes from the min max checks. Inspecting the explain analyze by hand, the zone map filter lets in every row group on the higher scale factors
+
+Foreign Key Data (lineitem.l_orderkey)
+
+Execution times to find 2 values in the `lineitem.l_orderkey` column. This benchmark is included in the PR and was performed on a c6id.8xlarge (32 cores, 64 GB memory).
+`select * from {lineitem_ordered/random_sfXXX} where l_orderkey in (99584, 5900006);`
+| lineitem.l_orderkey  | pushdown ordered  | pushdown random | no pushdown ordered |  no pushdown random |
+|--------  |-----------------------------|-------------------------------|---------------------|-----------------------|
+| sf=1       | 0.008176                       | 0.027871                         | 0.026316               | 0.026233                 |
+| sf=10     | 0.008149                       | 0.217365                         | 0.201166               | 0.201670                 |
+| sf=100  | 0.009608                       | 2.041269                         | 1.935285               | 1.931140                 |
+
+Primary key data.(orders.o_orderkey)
+
+Execution times to find 2 values in the `orders.o_orderkey` column. Here every o_orderkey is distinct. However, the two values selected mean that in the random order case, all values are propagated through to the FILTER.
+`select * from {orders_ordered/random_sfXXX} where o_orderkey in (99584, 5900006);`
+|  orders.o_orderkey | pushdown ordered  | pushdown random | no pushdown ordered |  no pushdown random |
+|--------  |-----------------------------|-------------------------------|---------------------|-----------------------|
+| sf=1       | 0.011753                       | 0.012705                         | 0.021179               | 0.021014                 |
+| sf=10     | 0.011964                       | 0.085094                         | 0.083017               | 0.082885                 |
+| sf=100  | 0.012428                       | 0.804672                         | 0.792688               | 0.787496                 |
+
+
+
+Future work:
+- Investigate a better way to pushdown OR/IN varcher filters into table scans.
+- Investigate a way to pushdown OR/IN filters into DATE types
+- Could zonemap filter pushdown work accross multiple columns (a = 5 OR b = 9)
+- When Bloom filters are available, evaluate the OR filter on the bloom filter first
+
+
+TODO: Add more tests

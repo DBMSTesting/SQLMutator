@@ -1,0 +1,70 @@
+ID: 12650
+Title: Add `histogram_exact` function that adds values to bins only if they match exactly, and add `other` column that contains values that do not fit in any bin
+Description:
+This PR adds the `histogram_exact` function that gathers exact matches, instead of range matches. In addition, this PR modifies the binned `histogram` function (as well as `histogram_exact`) so that entries that do not fit within a bucket are returned in a "other" bucket - which has as value the highest value for that particular type. The `is_histogram_other_bin` function is also introduced that can be used to check whether or not a value is the `other` value.
+
+```sql
+D select histogram(l_extendedprice, [1000, 2000]) from lineitem;
+┌──────────────────────────────────────────────────────────┐
+│ histogram(l_extendedprice, main.list_value(1000, 2000))  │
+│               map(decimal(15,2), ubigint)                │
+├──────────────────────────────────────────────────────────┤
+│ {1000.00=3086, 2000.00=117370, 9999999999999.99=5880759} │
+└──────────────────────────────────────────────────────────┘
+D select histogram_exact(l_returnflag, ['N']) from lineitem;
+┌─────────────────────────────────────────────────────┐
+│ histogram_exact(l_returnflag, main.list_value('N')) │
+│                map(varchar, ubigint)                │
+├─────────────────────────────────────────────────────┤
+│ {N=3043852, =2957363}                               │
+└─────────────────────────────────────────────────────┘
+```
+
+These functions are used to extend the `histogram` table function to provide better support for non-numeric types by displaying exact matches only for e.g. strings, and showing how many `(other values)` there are that do not belong to this set, e.g.:
+
+```sql
+D select * from histogram(lineitem, l_comment);
+┌────────────────────────────────────────┬─────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│                  bin                   │  count  │                                       bar                                        │
+│                varchar                 │ uint64  │                                     varchar                                      │
+├────────────────────────────────────────┼─────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│  accounts. foxes                       │       2 │                                                                                  │
+│ counts cajole evenly? sly orbits boo…  │       3 │                                                                                  │
+│ e quickly slyly ironic foxes. unusu    │       1 │                                                                                  │
+│ ffily along the sly                    │       1 │                                                                                  │
+│ ld deposits aga                        │       1 │                                                                                  │
+│ ly pending theo                        │      15 │                                                                                  │
+│ pecial excuses nag evenly f            │       2 │                                                                                  │
+│ posits. packages x-ray slyly. slyly    │       1 │                                                                                  │
+│ riously pe                             │      48 │                                                                                  │
+│ se slyly alo                           │       5 │                                                                                  │
+│ (other values)                         │ 6001136 │ ████████████████████████████████████████████████████████████████████████████████ │
+├────────────────────────────────────────┴─────────┴──────────────────────────────────────────────────────────────────────────────────┤
+│ 11 rows                                                                                                                   3 columns │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+This can also be used for numeric/date/timestamp data types using the `sample` technique, e.g.:
+
+```sql
+D select * from histogram(lineitem, l_discount, technique := 'sample');
+┌────────────────┬────────┬──────────────────────────────────────────────────────────────────────────────────┐
+│      bin       │ count  │                                       bar                                        │
+│    varchar     │ uint64 │                                     varchar                                      │
+├────────────────┼────────┼──────────────────────────────────────────────────────────────────────────────────┤
+│ 0.00           │ 544886 │ ███████████████████████████████████████████████████████████████████████████████▊ │
+│ 0.01           │ 545834 │ ███████████████████████████████████████████████████████████████████████████████▉ │
+│ 0.02           │ 546173 │ ███████████████████████████████████████████████████████████████████████████████▉ │
+│ 0.03           │ 545293 │ ███████████████████████████████████████████████████████████████████████████████▊ │
+│ 0.04           │ 545545 │ ███████████████████████████████████████████████████████████████████████████████▉ │
+│ 0.06           │ 544970 │ ███████████████████████████████████████████████████████████████████████████████▊ │
+│ 0.07           │ 546192 │ ███████████████████████████████████████████████████████████████████████████████▉ │
+│ 0.08           │ 544803 │ ███████████████████████████████████████████████████████████████████████████████▊ │
+│ 0.09           │ 545309 │ ███████████████████████████████████████████████████████████████████████████████▊ │
+│ 0.10           │ 545815 │ ███████████████████████████████████████████████████████████████████████████████▉ │
+│ (other values) │ 546395 │ ████████████████████████████████████████████████████████████████████████████████ │
+├────────────────┴────────┴──────────────────────────────────────────────────────────────────────────────────┤
+│ 11 rows                                                                                          3 columns │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+```

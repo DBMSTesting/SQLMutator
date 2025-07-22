@@ -1,0 +1,39 @@
+ID: 41327
+Title: UDFs are not taken into account on dependecies resolving on metadata loading
+Description:
+When using a materialized column, the expression of which will be a user-defined function, within which the dictionary will be called, the server cannot up due to an incorrect initialization order. This bug reproduces on 22.1.3, 22.3.11, 22.8 (most likely other versions as well)
+
+How to reproduce:
+```
+CREATE VIEW default.view AS SELECT toUInt64(1) id, toUInt32(1) value;
+
+CREATE DICTIONARY default.dict (
+  id UInt64,
+  value UInt32
+)
+PRIMARY KEY id
+SOURCE(CLICKHOUSE(
+  host 'localhost'
+  port 9000
+  password ''
+  user 'default'
+  db 'default'
+  table 'view'
+))
+LAYOUT(FLAT())
+LIFETIME(300);
+
+CREATE FUNCTION func AS (x) -> dictGet('default.dict', 'value',toUInt64(1));
+
+CREATE TABLE default.table (
+  col1 UInt32,
+  col2 MATERIALIZED func(1)
+) ENGINE = MergeTree() ORDER BY tuple();
+
++ restart
+```
+
+Error:
+```
+<Error> Application: DB::Exception: Dictionary (`default.dict`) not found: While processing _CAST(dictGet('default.dict', 'value', toUInt64(1)) AS col2_tmp_alter4123183136832856956, 'UInt32') AS col2: default expression and column type are incompatible.: Cannot attach table `default`.`table` from metadata file /var/lib/clickhouse/store/f63/f634d710-a55c-4190-822e-ba08bc224842/table.sql from query ATTACH TABLE default.table UUID '18b847db-1ed2-4846-8c75-a3802a544f3c' (`col1` UInt32, `col2` UInt32 MATERIALIZED func(1)) ENGINE = MergeTree ORDER BY tuple() SETTINGS index_granularity = 8192
+```

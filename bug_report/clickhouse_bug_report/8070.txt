@@ -1,0 +1,103 @@
+ID: 8070
+Title: Insert from MySQL tables doesn't work
+Description:
+Начиная с версии 19.17.3.7 и заканчивая 19.17.5.18 при вставке из удалённых таблиц MySQL перестаёт работать выборка (SELECT).
+
+Версия MySQL:
+root@collector:~# apt show mariadb-server
+Package: mariadb-server
+Version: 1:10.3.20-1
+
+Пример: 
+Таблица описана в MySQL следующим образом:
+
+`MariaDB [quikdata]> show create table all_trades_raw;`
+`CREATE TABLE all_trades_raw (`
+`  id int(11) unsigned NOT NULL,`
+`  dt_date_quik char(10) NOT NULL,`
+`  dt_time time NOT NULL,`
+`  dt_ms int(6) unsigned DEFAULT NULL,`
+`  symbol char(6) NOT NULL,`
+`  price decimal(16,6) unsigned NOT NULL,`
+`  amount int(11) NOT NULL,`
+`  type char(4) DEFAULT NULL`
+`) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 PAGE_CHECKSUM=1`
+
+Выборка из таблицы для примера: 
+`MariaDB [quikdata]> select * from all_trades_raw limit 5;`
+`+------------+--------------+----------+-------+--------+-------------+--------+------+`
+`| id         | dt_date_quik | dt_time  | dt_ms | symbol | price       | amount | type |`
+`+------------+--------------+----------+-------+--------+-------------+--------+------+`
+`| 2419645750 | 06.12.2019   | 10:00:00 |     0 | GDZ9   | 1477.900000 |      2 | SELL |`
+`| 2419645751 | 06.12.2019   | 10:00:00 |     0 | GDZ9   | 1477.300000 |      3 | SELL |`
+`| 2419645752 | 06.12.2019   | 10:00:00 |     0 | GDZ9   | 1477.000000 |     20 | SELL |`
+`| 2419645753 | 06.12.2019   | 10:00:00 |     0 | GDZ9   | 1476.800000 |      1 | SELL |`
+`| 2419645754 | 06.12.2019   | 10:00:00 |     0 | GDZ9   | 1476.700000 |      1 | SELL |`
+`+------------+--------------+----------+-------+--------+-------------+--------+------+`
+
+Теперь что происходит в КХ:
+`clickhouse :)`
+
+`SELECT count()`
+`FROM mysql('192.168.30.104', 'quikdata', 'all_trades_raw', '***', '***')`
+**`┌─count()─┐`
+`│ 1269488 │`
+`└─────────┘`**
+`1 rows in set. Elapsed: 0.160 sec. Processed 1.27 million rows, 5.08 MB (7.95 million rows/s., 31.81 MB/s.)`
+
+Создаём аналогичную таблицу в КХ:
+clickhouse :)
+`CREATE TABLE full2`
+`(`
+    `id UInt64,` 
+    `dt_date Date,` 
+    `dt_datetime DateTime,` 
+    `dt_ms Nullable(UInt32),` 
+    `symbol LowCardinality(String),`
+    `price Float64,` 
+    `amount UInt32,` 
+    `type LowCardinality(Nullable(String))`
+`)`
+`ENGINE = MergeTree(dt_date, (symbol, dt_date), 8192)`
+
+`Ok.`
+`0 rows in set. Elapsed: 0.002 sec. `
+
+Пытаемся вставить данные из удаленной таблицы:
+clickhouse :)
+`INSERT INTO full2 SELECT `
+`    id, `
+`    toDate(dt_datetime) AS dt_date, `
+`    toDateTime(concat(replaceRegexpOne(dt_date_quik, '(\\d{2}).(\\d{2}).(\\d{4})', '\\3-\\2-\\1'), ' ', dt_time)) AS dt_datetime, `
+`    dt_ms, `
+`    symbol, `
+`    toFloat64(price) AS price, `
+`    toUInt32(amount) AS amount, `
+`    type`
+`FROM mysql('192.168.30.104', 'quikdata', 'all_trades_raw', '***', '***')`
+
+`Ok.`
+`0 rows in set. Elapsed: 0.005 sec.`
+
+При этом SELECT, как источник данных для INSERT выше - выбирает данные из удалённой таблицы корректно:
+clickhouse :)
+
+`SELECT `
+`    id, `
+`    toDate(dt_datetime) AS dt_date, `
+`    toDateTime(concat(replaceRegexpOne(dt_date_quik, '(\\d{2}).(\\d{2}).(\\d{4})', '\\3-\\2-\\1'), ' ', dt_time)) AS dt_datetime, `
+`    dt_ms, `
+`    symbol, `
+`    toFloat64(price) AS price, `
+`    toUInt32(amount) AS amount, `
+`    type`
+`FROM mysql('192.168.30.104', 'quikdata', 'all_trades_raw', '***', '***')
+LIMIT 5`
+
+`┌─────────id─┬────dt_date─┬─────────dt_datetime─┬─dt_ms─┬─symbol─┬──price─┬─amount─┬─type─┐`
+`│ 2419645750 │ 2019-12-06 │ 2019-12-06 10:00:00 │     0 │ GDZ9   │ 1477.9 │      2 │ SELL │`
+`│ 2419645751 │ 2019-12-06 │ 2019-12-06 10:00:00 │     0 │ GDZ9   │ 1477.3 │      3 │ SELL │`
+`│ 2419645752 │ 2019-12-06 │ 2019-12-06 10:00:00 │     0 │ GDZ9   │   1477 │     20 │ SELL │`
+`│ 2419645753 │ 2019-12-06 │ 2019-12-06 10:00:00 │     0 │ GDZ9   │ 1476.8 │      1 │ SELL │`
+`│ 2419645754 │ 2019-12-06 │ 2019-12-06 10:00:00 │     0 │ GDZ9   │ 1476.7 │      1 │ SELL │`
+`└────────────┴────────────┴─────────────────────┴───────┴────────┴────────┴────────┴──────┘`

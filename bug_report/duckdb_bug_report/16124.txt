@@ -1,0 +1,62 @@
+ID: 16124
+Title: Regression: ignore columns with unsupported extension types if they aren't used (arrow extensions)
+Description:
+This behavior has changed from 1.0->1.1
+
+### Discussed in https://github.com/duckdb/duckdb/discussions/13931
+
+<div type='discussions-op-text'>
+
+<sup>Originally posted by **westonpace** September 13, 2024</sup>
+I use duckdb to query arrow tables/datasets/readers/etc.
+
+However, sometimes those tables have columns which are extension types.  If DuckDb doesn't recognize the extension type then it raises an exception.  This is understandable if the query needs to access that column.  However, this occurs even when a query doesn't need a particular column.  As a result, I have to manually prune these columns from my input before using duckdb which is inconvenient (not easy for me to know which data types duckdb supports and which it doesn't).  I'd rather duckdb just ignore the presence of these unused columns.
+
+Here is a complete example:
+
+```
+import duckdb
+import pyarrow as pa
+import uuid
+
+###
+### Create an extension type (using the example from the pyarrow docs)
+###
+class UuidType(pa.ExtensionType):
+
+    def __init__(self):
+        super().__init__(pa.binary(16), "my_package.uuid")
+
+    def __arrow_ext_serialize__(self):
+        # Since we don't have a parameterized type, we don't need extra                                                                                                                                            
+        # metadata to be deserialized                                                                                                                                                                              
+        return b''
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type, serialized):
+        # Sanity checks, not required but illustrate the method signature.                                                                                                                                         
+        assert storage_type == pa.binary(16)
+        assert serialized == b''
+        # Return an instance of this subclass given the serialized                                                                                                                                                 
+        # metadata.                                                                                                                                                                                                
+        return UuidType()
+
+storage_array = pa.array([uuid.uuid4().bytes for _ in range(4)], pa.binary(16))
+arr = pa.ExtensionArray.from_storage(UuidType(), storage_array)
+
+###
+### Create a table with all columns (duckdb can't query this) ###
+###
+tab = pa.table({"uuids": arr, "normal_type": [1, 2, 3, 4]})
+
+###
+### Prune my table to just include the columns duckdb can handle ###
+###
+pruned_tab = tab.select(["normal_type"])
+
+# This query succeeds
+print(duckdb.sql("SELECT normal_type from pruned_tab").fetchall())
+# This query fails on 1.1 with the error, but does not fail in 1.0
+#   duckdb.duckdb.NotImplementedException: Not implemented Error: Arrow Type with extension name: my_package.uuid and format: w:16, is not currently supported in DuckDB
+print(duckdb.sql("SELECT normal_type FROM tab").fetchall())
+```</div>

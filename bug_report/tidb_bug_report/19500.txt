@@ -1,0 +1,136 @@
+ID: 19500
+Title: Applying HashJoin may lead to wrong result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+drop table if exists t1;
+create table t1 (c_int int, primary key (c_int));
+insert into t1 values (1),(2),(3),(4),(5);
+drop table if exists t2;
+create table t2 (c_int int unsigned, c_str varchar(40), primary key (c_int), key (c_str));
+insert into t2 values (1, 'dazzling panini'),(2, 'infallible perlman'),(3, 'recursing cannon'),(4, 'vigorous satoshi'),(5, 'vigilant gauss'),(6, 'nervous jackson');
+drop table if exists t3;
+create table t3 (c_int int, c_str varchar(40), key (c_str));
+insert into t3 values (1, 'sweet morse'),(2, 'reverent golick'),(3, 'clever rubin'),(4, 'flamboyant morse');
+
+select (select (select sum(c_int) from t3 where t3.c_str > t2.c_str) from t2 where t2.c_int > t1.c_int order by c_int limit 1) q from t1 order by q;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
++------+
+| q    |
++------+
+| NULL |
+| NULL |
+|    3 |
+|    3 |
+|    3 |
++------+
+```
+
+### 3. What did you see instead (Required)
+
+```
++---+
+| q |
++---+
+| 3 |
+| 3 |
+| 3 |
+| 3 |
+| 3 |
++---+
+```
+
+<details>
+
+```
+mysql> select (select (select sum(c_int) from t3 where t3.c_str > t2.c_str) from t2 where t2.c_int > t1.c_int order by c_int limit 1) q from t1 order by q;
++---+
+| q |
++---+
+| 3 |
+| 3 |
+| 3 |
+| 3 |
+| 3 |
++---+
+5 rows in set (0.07 sec)
+
+mysql> explain select (select (select sum(c_int) from t3 where t3.c_str > t2.c_str) from t2 where t2.c_int > t1.c_int order by c_int limit 1) q from t1 order by q;
++-------------------------------------------+-------------+-----------+---------------+----------------------------------------------------------------------------------------------+
+| id                                        | estRows     | task      | access object | operator info                                                                                |
++-------------------------------------------+-------------+-----------+---------------+----------------------------------------------------------------------------------------------+
+| Sort_19                                   | 10000.00    | root      |               | Column#7                                                                                     |
+| └─Projection_21                           | 10000.00    | root      |               | Column#7                                                                                     |
+|   └─Apply_23                              | 10000.00    | root      |               | CARTESIAN left outer join                                                                    |
+|     ├─TableReader_25(Build)               | 10000.00    | root      |               | data:TableFullScan_24                                                                        |
+|     │ └─TableFullScan_24                  | 10000.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                               |
+|     └─TopN_28(Probe)                      | 1.00        | root      |               | test.t2.c_int, offset:0, count:1                                                             |
+|       └─HashAgg_34                        | 6400.00     | root      |               | group by:Column#12, funcs:firstrow(Column#10)->test.t2.c_int, funcs:sum(Column#11)->Column#7 |
+|         └─Projection_54                   | 79920000.00 | root      |               | test.t2.c_int, cast(test.t3.c_int, decimal(65,0) BINARY)->Column#11, test.t2.c_int           |
+|           └─HashJoin_38                   | 79920000.00 | root      |               | CARTESIAN left outer join, other cond:gt(test.t3.c_str, test.t2.c_str)                       |
+|             ├─TableReader_41(Build)       | 8000.00     | root      |               | data:Selection_40                                                                            |
+|             │ └─Selection_40              | 8000.00     | cop[tikv] |               | gt(test.t2.c_int, test.t1.c_int)                                                             |
+|             │   └─TableRangeScan_39       | 10000.00    | cop[tikv] | table:t2      | range:[0,+inf], keep order:false, stats:pseudo                                               |
+|             └─TableReader_47(Probe)       | 9990.00     | root      |               | data:Selection_46                                                                            |
+|               └─Selection_46              | 9990.00     | cop[tikv] |               | not(isnull(test.t3.c_str))                                                                   |
+|                 └─TableFullScan_45        | 10000.00    | cop[tikv] | table:t3      | keep order:false, stats:pseudo                                                               |
++-------------------------------------------+-------------+-----------+---------------+----------------------------------------------------------------------------------------------+
+15 rows in set (0.06 sec)
+
+mysql> analyze table t2, t3;
+Query OK, 0 rows affected (0.41 sec)
+
+mysql> select (select (select sum(c_int) from t3 where t3.c_str > t2.c_str) from t2 where t2.c_int > t1.c_int order by c_int limit 1) q from t1 order by q;
++---+
+| q |
++---+
+| NULL |
+| NULL |
+| 3 |
+| 3 |
+| 3 |
++---+
+5 rows in set (0.06 sec)
+
+mysql> explain select (select (select sum(c_int) from t3 where t3.c_str > t2.c_str) from t2 where t2.c_int > t1.c_int order by c_int limit 1) q from t1 order by q;
++------------------------------------------+----------+-----------+---------------+----------------------------------------------------------------------------------------------+
+| id                                       | estRows  | task      | access object | operator info                                                                                |
++------------------------------------------+----------+-----------+---------------+----------------------------------------------------------------------------------------------+
+| Sort_19                                  | 10000.00 | root      |               | Column#7                                                                                     |
+| └─Projection_21                          | 10000.00 | root      |               | Column#7                                                                                     |
+|   └─Apply_23                             | 10000.00 | root      |               | CARTESIAN left outer join                                                                    |
+|     ├─TableReader_25(Build)              | 10000.00 | root      |               | data:TableFullScan_24                                                                        |
+|     │ └─TableFullScan_24                 | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                               |
+|     └─TopN_28(Probe)                     | 1.00     | root      |               | test.t2.c_int, offset:0, count:1                                                             |
+|       └─HashAgg_34                       | 4.80     | root      |               | group by:Column#12, funcs:firstrow(Column#10)->test.t2.c_int, funcs:sum(Column#11)->Column#7 |
+|         └─Projection_54                  | 19.20    | root      |               | test.t2.c_int, cast(test.t3.c_int, decimal(65,0) BINARY)->Column#11, test.t2.c_int           |
+|           └─HashJoin_37                  | 19.20    | root      |               | CARTESIAN left outer join, other cond:gt(test.t3.c_str, test.t2.c_str)                       |
+|             ├─TableReader_47(Build)      | 4.00     | root      |               | data:Selection_46                                                                            |
+|             │ └─Selection_46             | 4.00     | cop[tikv] |               | not(isnull(test.t3.c_str))                                                                   |
+|             │   └─TableFullScan_45       | 4.00     | cop[tikv] | table:t3      | keep order:false                                                                             |
+|             └─TableReader_41(Probe)      | 4.80     | root      |               | data:Selection_40                                                                            |
+|               └─Selection_40             | 4.80     | cop[tikv] |               | gt(test.t2.c_int, test.t1.c_int)                                                             |
+|                 └─TableRangeScan_39      | 6.00     | cop[tikv] | table:t2      | range:[0,+inf], keep order:false                                                             |
++------------------------------------------+----------+-----------+---------------+----------------------------------------------------------------------------------------------+
+15 rows in set (0.05 sec)
+
+```
+
+</details>
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master @ 602afedf840bcdba4ca03383468ee6f47f401365
+release-4.0 @ 397fce9bd4bccc0e840096b429a927e30534e8ef

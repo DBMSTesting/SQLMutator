@@ -1,0 +1,76 @@
+ID: 8798
+Title: wrong result for inner join built from `!= any (subq)`
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+```
+mysql> create table t(a int, b int);
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> insert into t values(1, null),(2,null);
+Query OK, 2 rows affected (0.00 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+mysql> select * from t where b != any (select a from t);
++------+------+
+| a    | b    |
++------+------+
+|    1 | NULL |
+|    2 | NULL |
++------+------+
+2 rows in set (0.00 sec)
+
+mysql> explain select * from t where b != any (select a from t);
++----------------------------+-------+------+---------------------------------------------------------------------------------------------------------------------------------+
+| id                         | count | task | operator info                                                                                                                   |
++----------------------------+-------+------+---------------------------------------------------------------------------------------------------------------------------------+
+| Projection_9               | 2.00  | root | tmp.t.a, tmp.t.b                                                                                                                |
+| └─Projection_10            | 2.00  | root | tmp.t.a, tmp.t.b, or(or(gt(col_count, 1), ne(tmp.t.b, col_firstrow)), if(ne(agg_col_sum, 0), NULL, 0))                          |
+|   └─HashLeftJoin_11        | 2.00  | root | inner join, inner:StreamAgg_18, other cond:or(gt(col_count, 1), or(ne(tmp.t.b, col_firstrow), if(ne(agg_col_sum, 0), NULL, 0))) |
+|     ├─TableReader_14       | 2.00  | root | data:TableScan_13                                                                                                               |
+|     │ └─TableScan_13       | 2.00  | cop  | table:t, range:[-inf,+inf], keep order:false, stats:pseudo                                                                      |
+|     └─StreamAgg_18         | 1.00  | root | funcs:firstrow(tmp.t.a), count(distinct tmp.t.a), sum(isnull(tmp.t.a))                                                          |
+|       └─TableReader_25     | 2.00  | root | data:TableScan_24                                                                                                               |
+|         └─TableScan_24     | 2.00  | cop  | table:t, range:[-inf,+inf], keep order:false, stats:pseudo                                                                      |
++----------------------------+-------+------+---------------------------------------------------------------------------------------------------------------------------------+
+```
+
+2. What did you expect to see?
+
+In MySQL:
+```
+mysql> create table t(a int, b int);
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> insert into t values(1, null),(2,null);
+Query OK, 2 rows affected (0.01 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+mysql> select * from t where b != any (select a from t);
+Empty set (0.00 sec)
+```
+
+3. What did you see instead?
+
+Result set not empty. Seems we need to handle null input for outer plan in `handleCompareSubquery`/`handleNEAny`/`handleEQAll`.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select tidb_version();
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                                    |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v2.1.0-rc.3-347-ga7907ed
+Git Commit Hash: a7907ede7a9a740953b0c753b5b2b7add5b55195
+Git Branch: master
+UTC Build Time: 2018-12-24 11:14:34
+GoVersion: go version go1.11.2 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```

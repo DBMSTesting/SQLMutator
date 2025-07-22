@@ -1,0 +1,151 @@
+ID: 13512
+Title: Bad size of marks file with tokenbf_v1 INDEX and compact parts
+Description:
+Inserting data into a table with tokenbf_v1 INDEX and compact parts results in data corruption. Queries fail with the following error - 
+
+```
+Received exception from server (version 20.6.3):
+Code: 246. DB::Exception: Received from 10.128.0.101:9000. DB::Exception: Bad size of marks file '/var/lib/persist/clickhouse/data/bug_test/post_comments_data/bcea579c6d84e0110c390909fcd85acf_1_6_1/skp_idx_message_idx.mrk3': 48, must be: 168. 
+
+```
+**How to reproduce**
+
+```
+CREATE TABLE bug_test.post_comments_data
+(
+    `time` UInt64 CODEC(DoubleDelta),
+    `groupId` String,
+    `id` UInt64 CODEC(DoubleDelta),
+    `source` LowCardinality(String),
+    `message` String DEFAULT '',
+    INDEX id_idx id TYPE minmax GRANULARITY 1,
+    INDEX message_idx message TYPE tokenbf_v1(512, 3, 10) GRANULARITY 1
+)
+ENGINE = MergeTree
+PARTITION BY (groupId, toYYYYMM(toDate(time / 1000000000)))
+ORDER BY time
+SETTINGS index_granularity = 8192, min_bytes_for_wide_part = 104857600
+
+CREATE TABLE bug_test.post_comments
+(
+    `time` UInt64 CODEC(DoubleDelta),
+    `groupId` String,
+    `id` UInt64 CODEC(DoubleDelta),
+    `source` LowCardinality(String),
+    `message` String DEFAULT ''
+)
+ENGINE = Distributed('c_replicas', 'bug_test', 'post_comments_data', rand())
+
+```
+Data is inserted into the distributed table ``post_comments``  from a batch job. Executing the following results in an error 
+
+```
+SELECT count()
+FROM bug_test.post_comments
+WHERE hasToken(message, 'error')
+
+```
+Going back to wide parts, using the following resolves the issue.
+
+```
+ALTER TABLE log_schema.log_event_data
+    MODIFY SETTING min_bytes_for_wide_part = 0
+
+OPTIMIZE TABLE bug_test.post_comments_data
+```
+
+* Which ClickHouse server version to use
+
+The logs above are form **20.6.3.28**. This issue can also be reproduced in **20.3.12.112** and **20.3.15.133**.
+
+* Queries to run that lead to unexpected result
+```
+SELECT count()
+FROM bug_test.post_comments
+WHERE hasToken(message, 'error')
+```
+
+**Error message and/or stacktrace**
+
+**_SELECT QUERY_**
+```
+clickhouse-data-0.clickhouse-data.ci-clickhouse-logs.svc.cluster.local :) select count() from bug_test.post_comments where hasToken(message, 'error')
+
+SELECT count()
+FROM bug_test.post_comments
+WHERE hasToken(message, 'error')
+
+[clickhouse-data-0] 2020.08.08 01:19:28.049717 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Debug> executeQuery: (from [::ffff:10.128.0.1]:49960) SELECT count() FROM bug_test.post_comments WHERE hasToken(message, 'error')
+[clickhouse-data-0] 2020.08.08 01:19:28.051177 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Trace> ContextAccess (default): Access granted: SELECT(message) ON bug_test.post_comments
+[clickhouse-data-0] 2020.08.08 01:19:28.052040 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Trace> ContextAccess (default): Access granted: SELECT(message) ON bug_test.post_comments
+[clickhouse-data-0] 2020.08.08 01:19:28.055297 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Trace> ContextAccess (default): Access granted: SELECT(message) ON bug_test.post_comments_data
+[clickhouse-data-0] 2020.08.08 01:19:28.055615 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Debug> bug_test.post_comments_data (SelectExecutor): Key condition: unknown
+[clickhouse-data-0] 2020.08.08 01:19:28.055687 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Debug> bug_test.post_comments_data (SelectExecutor): MinMax index condition: unknown
+[clickhouse-data-0] 2020.08.08 01:19:28.058031 [ 109 ] {d9978132-7113-4368-8422-39980e1f6ccb} <Error> executeQuery: Code: 246, e.displayText() = DB::Exception: Bad size of marks file '/var/lib/persist/clickhouse/data/bug_test/post_comments_data/bcea579c6d84e0110c390909fcd85acf_1_6_1/skp_idx_message_idx.mrk3': 48, must be: 168 (version 20.6.3.28 (official build)) (from [::ffff:10.128.0.1]:49960) (in query: SELECT count() FROM bug_test.post_comments WHERE hasToken(message, 'error')), Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x12405650 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xa2423fd in /usr/bin/clickhouse
+2. ? @ 0xf9d6f39 in /usr/bin/clickhouse
+3. DB::MergeTreeMarksLoader::loadMarks() @ 0xf9d5aad in /usr/bin/clickhouse
+4. DB::MergeTreeMarksLoader::getMark(unsigned long, unsigned long) @ 0xf9d6075 in /usr/bin/clickhouse
+5. DB::MergeTreeReaderStream::MergeTreeReaderStream(std::__1::shared_ptr<DB::IDisk>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> > const&, DB::MergeTreeReaderSettings const&, DB::MarkCache*, DB::UncompressedCache*, unsigned long, DB::MergeTreeIndexGranularityInfo const*, std::__1::function<void (DB::ReadBufferFromFileBase::ProfileInfo)> const&, int) @ 0xf9e3701 in /usr/bin/clickhouse
+6. DB::MergeTreeIndexReader::MergeTreeIndexReader(std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::shared_ptr<DB::IMergeTreeDataPart const>, unsigned long, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> > const&, DB::MergeTreeReaderSettings) @ 0xf9759d3 in /usr/bin/clickhouse
+7. DB::MergeTreeDataSelectExecutor::filterMarksUsingIndex(std::__1::shared_ptr<DB::IMergeTreeIndex const>, std::__1::shared_ptr<DB::IMergeTreeIndexCondition>, std::__1::shared_ptr<DB::IMergeTreeDataPart const>, std::__1::deque<DB::MarkRange, std::__1::allocator<DB::MarkRange> > const&, DB::Settings const&, DB::MergeTreeReaderSettings const&) const @ 0xf952469 in /usr/bin/clickhouse
+8. DB::MergeTreeDataSelectExecutor::readFromParts(std::__1::vector<std::__1::shared_ptr<DB::IMergeTreeDataPart const>, std::__1::allocator<std::__1::shared_ptr<DB::IMergeTreeDataPart const> > >, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo const&, DB::Context const&, unsigned long, unsigned int, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, long, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, long> > > const*) const @ 0xf95c15c in /usr/bin/clickhouse
+9. DB::MergeTreeDataSelectExecutor::read(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo const&, DB::Context const&, unsigned long, unsigned int, std::__1::unordered_map<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, long, std::__1::hash<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::equal_to<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::pair<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const, long> > > const*) const @ 0xf95f8c2 in /usr/bin/clickhouse
+10. DB::StorageMergeTree::read(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xf6ce544 in /usr/bin/clickhouse
+11. DB::ReadFromStorageStep::ReadFromStorageStep(std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::SelectQueryOptions, std::__1::shared_ptr<DB::IStorage>, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::SelectQueryInfo const&, std::__1::shared_ptr<DB::Context>, DB::QueryProcessingStage::Enum, unsigned long, unsigned long) @ 0xfea921a in /usr/bin/clickhouse
+12. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&, std::__1::shared_ptr<DB::PrewhereInfo> const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xf203841 in /usr/bin/clickhouse
+13. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>) @ 0xf207782 in /usr/bin/clickhouse
+14. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf208d84 in /usr/bin/clickhouse
+15. DB::InterpreterSelectQuery::execute() @ 0xf2090e5 in /usr/bin/clickhouse
+16. ? @ 0xf64d9d2 in /usr/bin/clickhouse
+17. ? @ 0xf64ddb2 in /usr/bin/clickhouse
+18. DB::ClusterProxy::SelectStreamFactory::createForShard(DB::Cluster::ShardInfo const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::shared_ptr<DB::Throttler> const&, DB::SelectQueryInfo const&, std::__1::vector<DB::Pipe, std::__1::allocator<DB::Pipe> >&) @ 0xf64f86d in /usr/bin/clickhouse
+19. DB::ClusterProxy::executeQuery(DB::ClusterProxy::IStreamFactory&, std::__1::shared_ptr<DB::Cluster> const&, Poco::Logger*, std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, DB::Settings const&, DB::SelectQueryInfo const&) @ 0xf656da8 in /usr/bin/clickhouse
+20. DB::StorageDistributed::read(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) @ 0xf63e5fc in /usr/bin/clickhouse
+21. DB::ReadFromStorageStep::ReadFromStorageStep(std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>, std::__1::shared_ptr<DB::StorageInMemoryMetadata const>&, DB::SelectQueryOptions, std::__1::shared_ptr<DB::IStorage>, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&, DB::SelectQueryInfo const&, std::__1::shared_ptr<DB::Context>, DB::QueryProcessingStage::Enum, unsigned long, unsigned long) @ 0xfea921a in /usr/bin/clickhouse
+22. DB::InterpreterSelectQuery::executeFetchColumns(DB::QueryProcessingStage::Enum, DB::QueryPlan&, std::__1::shared_ptr<DB::PrewhereInfo> const&, std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0xf203841 in /usr/bin/clickhouse
+23. DB::InterpreterSelectQuery::executeImpl(DB::QueryPlan&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>) @ 0xf207782 in /usr/bin/clickhouse
+24. DB::InterpreterSelectQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf208d84 in /usr/bin/clickhouse
+25. DB::InterpreterSelectWithUnionQuery::buildQueryPlan(DB::QueryPlan&) @ 0xf37548c in /usr/bin/clickhouse
+26. DB::InterpreterSelectWithUnionQuery::execute() @ 0xf3757a5 in /usr/bin/clickhouse
+27. ? @ 0xf4e9f3f in /usr/bin/clickhouse
+28. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0xf4ed6b5 in /usr/bin/clickhouse
+29. DB::TCPHandler::runImpl() @ 0xfb66dec in /usr/bin/clickhouse
+30. DB::TCPHandler::run() @ 0xfb67b70 in /usr/bin/clickhouse
+31. Poco::Net::TCPServerConnection::start() @ 0x1232347b in /usr/bin/clickhouse
+
+
+Received exception from server (version 20.6.3):
+Code: 246. DB::Exception: Received from 10.128.0.101:9000. DB::Exception: Bad size of marks file '/var/lib/persist/clickhouse/data/bug_test/post_comments_data/bcea579c6d84e0110c390909fcd85acf_1_6_1/skp_idx_message_idx.mrk3': 48, must be: 168. 
+
+0 rows in set. Elapsed: 0.015 sec. 
+
+```
+
+**_OPTIMIZE TABLE_**
+```
+clickhouse-data-0.clickhouse-data.ci-clickhouse-logs.svc.cluster.local :) OPTIMIZE TABLE bug_test.post_comments_data
+
+OPTIMIZE TABLE bug_test.post_comments_data
+
+[clickhouse-data-0] 2020.08.08 01:23:58.308890 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> executeQuery: (from [::ffff:10.128.0.1]:49960) OPTIMIZE TABLE bug_test.post_comments_data
+[clickhouse-data-0] 2020.08.08 01:23:58.309540 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Trace> ContextAccess (default): Access granted: OPTIMIZE ON bug_test.post_comments_data
+[clickhouse-data-0] 2020.08.08 01:23:58.309760 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> bug_test.post_comments_data (MergerMutator): Selected 3 parts from bcea579c6d84e0110c390909fcd85acf_1_6_1 to bcea579c6d84e0110c390909fcd85acf_8_8_0
+[clickhouse-data-0] 2020.08.08 01:23:58.309933 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> DiskLocal: Reserving 2.84 MiB on disk `default`, having unreserved 319.91 GiB.
+[clickhouse-data-0] 2020.08.08 01:23:58.310050 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> bug_test.post_comments_data (MergerMutator): Merging 3 parts: from bcea579c6d84e0110c390909fcd85acf_1_6_1 to bcea579c6d84e0110c390909fcd85acf_8_8_0 into Compact
+[clickhouse-data-0] 2020.08.08 01:23:58.310438 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> bug_test.post_comments_data (MergerMutator): Selected MergeAlgorithm: Horizontal
+[clickhouse-data-0] 2020.08.08 01:23:58.310608 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Trace> MergeTreeSequentialSource: Reading 8 marks from part bcea579c6d84e0110c390909fcd85acf_1_6_1, total 50510 rows starting from the beginning of the part
+[clickhouse-data-0] 2020.08.08 01:23:58.311025 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Trace> MergeTreeSequentialSource: Reading 2 marks from part bcea579c6d84e0110c390909fcd85acf_7_7_0, total 10100 rows starting from the beginning of the part
+[clickhouse-data-0] 2020.08.08 01:23:58.311522 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Trace> MergeTreeSequentialSource: Reading 2 marks from part bcea579c6d84e0110c390909fcd85acf_8_8_0, total 10100 rows starting from the beginning of the part
+[clickhouse-data-0] 2020.08.08 01:23:58.785159 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> bug_test.post_comments_data (MergerMutator): Merge sorted 70710 rows, containing 5 columns (5 merged, 0 gathered) in 0.47509789 sec., 148832.48586938577 rows/sec., 54.37 MiB/sec.
+[clickhouse-data-0] 2020.08.08 01:23:58.788912 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Trace> bug_test.post_comments_data: Renaming temporary part tmp_merge_bcea579c6d84e0110c390909fcd85acf_1_8_2 to bcea579c6d84e0110c390909fcd85acf_1_8_2.
+[clickhouse-data-0] 2020.08.08 01:23:58.789110 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Trace> bug_test.post_comments_data (MergerMutator): Merged 3 parts: from bcea579c6d84e0110c390909fcd85acf_1_6_1 to bcea579c6d84e0110c390909fcd85acf_8_8_0
+[clickhouse-data-0] 2020.08.08 01:23:58.789152 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> MemoryTracker: Peak memory usage: 45.73 MiB.
+[clickhouse-data-0] 2020.08.08 01:23:58.789481 [ 109 ] {01538da4-7c7f-416d-9f7b-b085a0a188f3} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+Ok.
+
+0 rows in set. Elapsed: 0.499 sec. 
+
+```

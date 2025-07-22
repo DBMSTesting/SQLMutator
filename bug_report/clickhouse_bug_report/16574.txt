@@ -1,0 +1,67 @@
+ID: 16574
+Title: Wrong behavior for sumIf with non-nullable first argument and nullable second argument
+Description:
+https://github.com/ClickHouse/ClickHouse/pull/13964 introduced following tricky bug. It does not appear on versions before mentioned PR.
+
+Listing below uses environment for tests (test_cluster_two_shards is a cluster consisting of two copies of local shard).
+
+When making a distributed query, subj leads to the following error:
+`
+Code: 42. DB::Exception: Received from localhost:59000. DB::Exception: Aggregate function sum requires single argument: while receiving packet from 127.0.0.2:59000: While executing Remote.
+`
+
+```
+max42-dev.sas.yp-c.yandex.net :) create table T(a Nullable(Int64)) engine = Memory()                                                                                                                                                          
+                                                                                                                                                                                                                                              
+CREATE TABLE T                                                                                                                                                                                                                                
+(                                                                                                                                                                                                                                             
+    `a` Nullable(Int64)                                                                                                                                                                                                                       
+)                                                                                                                                                                                                                                             
+ENGINE = Memory()                                                                                                                                                                                                                             
+                                                                                                                                                                                                                                              
+Ok.                                                                                                                                                                                                                                           
+
+0 rows in set. Elapsed: 0.004 sec.
+
+max42-dev.sas.yp-c.yandex.net :) insert into T values (1), (2), (3), (4), (5)
+
+INSERT INTO T VALUES
+
+Ok.
+
+5 rows in set. Elapsed: 0.004 sec.
+
+max42-dev.sas.yp-c.yandex.net :) create table default.DT as default.T engine = Distributed(test_cluster_two_shards, default, T)                                                                                                               
+                                                                                                                                                                                                                                              
+CREATE TABLE default.DT AS default.T                                                                                                                                                                                                          
+ENGINE = Distributed(test_cluster_two_shards, default, T)                                                                                                                                                                                     
+                                                                                                                                                                                                                                              
+Ok.                                                                                                                                                                                                                                           
+                                                                                                                                                                                                                                              
+0 rows in set. Elapsed: 0.005 sec.                                                                                                                                                                                                            
+                                                                                                                                                                                                                                              
+max42-dev.sas.yp-c.yandex.net :) select sumIf(42, (a % 2) = 0) from DT
+
+SELECT sumIf(42, (a % 2) = 0)
+FROM DT
+
+→ Progress: 5.00 rows, 45.00 B (46.77 rows/s., 420.89 B/s.)
+Received exception from server (version 20.8.1):
+Code: 42. DB::Exception: Received from localhost:59000. DB::Exception: Aggregate function sum requires single argument: while receiving packet from 127.0.0.2:59000: While executing Remote.
+
+0 rows in set. Elapsed: 0.107 sec.
+
+max42-dev.sas.yp-c.yandex.net :) select sumIf(42, (a % 2) = 0) from T
+
+SELECT sumIf(42, (a % 2) = 0)
+FROM T
+
+┌─sumIf(42, equals(modulo(a, 2), 0))─┐
+│                                 84 │
+└────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.005 sec.
+
+```
+
+Reproduces on clickhouse client and clickhouse server from Arcadia since r7258384 (including current trunk version).

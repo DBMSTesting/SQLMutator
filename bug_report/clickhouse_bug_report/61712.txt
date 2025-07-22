@@ -1,0 +1,89 @@
+ID: 61712
+Title: Materialized view with refresh
+Description:
+When creating MV got error and database down and can't start anymore.
+
+Expectation is created MV and no down database.
+> A link to reproducer in [https://fiddle.clickhouse.com/](https://fiddle.clickhouse.com/).
+
+```
+create table devices_pg on cluster cluster_name
+(
+ id                             UUID,
+ device_models_dict_code        String,
+ comment                        String,
+ source                         String,
+ created_by                     UUID,
+ updated_by                     UUID,
+ created_at                     DateTime,
+ updated_at                     DateTime,
+ deleted_at                     Nullable(DateTime),
+ status                         String,
+ platform                       String,
+ compliance                     String,
+ tenant_code                    String
+) ENGINE = PostgreSQL(getMacro('host_port'), getMacro('dbname'), 'devices', getMacro('dbuser'), getMacro('dbpassword'), 'schema_name');
+
+```
+
+```
+SELECT *
+FROM devices_pg
+1200 rows in set. Elapsed: 0.020 sec. Processed 1.20 thousand rows, 345.63 KB (61.29 thousand rows/s., 17.65 MB/s.)
+Peak memory usage: 551.56 KiB.
+```
+
+```
+CREATE MATERIALIZED VIEW devices_mv ON CLUSTER ocs
+REFRESH EVERY 20 MINUTE
+ENGINE = MergeTree
+ORDER BY tuple() AS
+SELECT *
+FROM devices_pg
+
+Query id: afffabc5-5c6f-4337-a8b8-6414af2e5398
+
+↘ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.)                                                                               
+↖ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.)                                                                               
+Elapsed: 9.077 sec. 
+
+Received exception from server (version 24.1.6):
+Code: 999. DB::Exception: Received from localhost:9000. Coordination::Exception. Coordination::Exception: Coordination error: Connection loss: While executing DDLQueryStatus. (KEEPER_EXCEPTION)
+
+SELECT 1
+
+Query id: d7cae4f6-1dc2-4def-a5fa-c1a94d5a85ac
+
+Connecting to localhost:9000 as user default.
+Exception on client:
+Code: 210. DB::NetException: Connection refused (localhost:9000). (NETWORK_ERROR)
+
+```
+
+**How to reproduce**
+
+* Which ClickHouse server version to use - 24.1.6
+* Which interface to use, if it matters - clickhouse-client
+
+Stack trace:
+
+```
+2024.03.21 16:41:04.397172 [ 24530 ] {afffabc5-5c6f-4337-a8b8-6414af2e5398} <Error> executeQuery: Code: 999. Coordination::Exception: Coordination error: Connection loss: While executing DDLQueryStatus. (KEEPER_EXCEPTION) (version 24.1.6.52 (official build)) (from 127.0.0.1:43230) (in query: CREATE MATERIALIZED VIEW devices_mv ON CLUSTER ocs REFRESH EVERY 20 MINUTE ENGINE = MergeTree ORDER BY tuple() AS SELECT * FROM devices_pg), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c80359b in /usr/bin/clickhouse
+1. DB::Exception::Exception<char const*>(int, FormatStringHelperImpl<std::type_identity<char const*>::type>, char const*&&) @ 0x000000000af890d0 in /usr/bin/clickhouse
+2. Coordination::Exception::Exception(Coordination::Error) @ 0x000000001300da82 in /usr/bin/clickhouse
+3. zkutil::ZooKeeper::tryMulti(std::vector<std::shared_ptr<Coordination::Request>, std::allocator<std::shared_ptr<Coordination::Request>>> const&, std::vector<std::shared_ptr<Coordination::Response>, std::allocator<std::shared_ptr<Coordination::Response>>>&, bool) @ 0x000000001301abc2 in /usr/bin/clickhouse
+4. zkutil::MultiReadResponses<Coordination::ListResponse, true> zkutil::ZooKeeper::multiRead<Coordination::ListResponse, true, std::__wrap_iter<String const*>>(std::__wrap_iter<String const*>, std::__wrap_iter<String const*>, std::function<std::shared_ptr<Coordination::Request> (String const&)>, std::function<std::future<Coordination::ListResponse> (String const&)>) @ 0x000000000fd8902c in /usr/bin/clickhouse
+5. void DB::ZooKeeperRetriesControl::retryLoop<DB::DDLQueryStatusSource::generate()::$_0&, void DB::ZooKeeperRetriesControl::retryLoop<DB::DDLQueryStatusSource::generate()::$_0>(DB::DDLQueryStatusSource::generate()::$_0&&)::'lambda'()>(DB::DDLQueryStatusSource::generate()::$_0&&, void DB::ZooKeeperRetriesControl::retryLoop<DB::DDLQueryStatusSource::generate()::$_0>(DB::DDLQueryStatusSource::generate()::$_0&&)::'lambda'()&&) @ 0x00000000118f5562 in /usr/bin/clickhouse
+6. DB::DDLQueryStatusSource::generate() @ 0x00000000118ed029 in /usr/bin/clickhouse
+7. DB::ISource::tryGenerate() @ 0x0000000012976655 in /usr/bin/clickhouse
+8. DB::ISource::work() @ 0x00000000129760a3 in /usr/bin/clickhouse
+9. DB::ExecutionThreadContext::executeTask() @ 0x000000001298f07a in /usr/bin/clickhouse
+10. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012985ad0 in /usr/bin/clickhouse
+11. DB::PipelineExecutor::execute(unsigned long, bool) @ 0x0000000012984ce0 in /usr/bin/clickhouse
+12. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<true>::ThreadFromGlobalPoolImpl<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x0000000012992a03 in /usr/bin/clickhouse
+13. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000c8efd7e in /usr/bin/clickhouse
+14. start_thread @ 0x0000000000007ea5 in /usr/lib64/libpthread-2.17.so
+15. clone @ 0x00000000000feb0d in /usr/lib64/libc-2.17.so
+```

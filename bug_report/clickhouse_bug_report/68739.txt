@@ -1,0 +1,167 @@
+ID: 68739
+Title: DeltaLake: Invalid access: Can not convert empty value on struct datatype
+Description:
+Regression
+
+Version this happens on: 24.8.1.2684
+Version this used to work on: 24.3.7.30
+
+**Describe what's wrong**
+
+Reading a delta table from MINIO (S3) that contains a struct datatype doesn't work.
+
+**Does it reproduce on the most recent release?**
+Yes
+
+**How to reproduce**
+
+create a docker-compose.yml
+
+```
+version: '3.8'
+
+services:
+  clickhouse-server:
+    image: clickhouse/clickhouse-server
+    container_name: clickhouse-server
+    ports:
+      - 8123:8123
+    depends_on:
+      - minio2
+    environment:
+      - CLICKHOUSE_DB=default
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=""
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    networks:
+      - clickhouse_network
+
+  minio2:
+    hostname: minio
+    container_name: minio2
+    image: quay.io/minio/minio
+    ports:
+      - 9000:9000
+      - 9001:9001
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: 'server /data --console-address ":9001"'
+    volumes:
+      - minio-data:/data
+    networks:
+      - clickhouse_network
+
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init2
+    entrypoint: >
+      /bin/sh -c "
+      mc config host add myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/test;
+      mc policy set public myminio/test;
+      exit 0;
+      "
+    depends_on:
+      - minio2
+volumes:
+  clickhouse-data:
+  minio-data:
+
+networks:
+  clickhouse_network:
+    driver: bridge
+```
+Execute the following to get clickhouse and minio running:
+
+> docker-compose up -d
+
+
+On Python 3.10, install the following packages
+
+pyarrow                           15.0.0
+deltalake                         0.16.0
+
+and run this script to create the tables, one that works, and another that doesn't due to the struct datatype
+
+```
+import pyarrow as pa
+import pyarrow.parquet as pq
+from deltalake.writer import write_deltalake
+import os
+
+# Define a PyArrow schema with a struct field
+schema = pa.schema([
+    ('id', pa.int32()),
+    ('name', pa.string()),
+    ('address', pa.struct([
+        ('street', pa.string()),
+        ('city', pa.string()),
+        ('state', pa.string())
+    ]))
+])
+
+# Create sample data
+data = [
+    pa.array([1, 2, 3], type=pa.int32()),
+    pa.array(['John Doe', 'Jane Smith', 'Jake Johnson'], type=pa.string()),
+    pa.array([
+        {'street': '123 Elm St', 'city': 'Springfield', 'state': 'IL'},
+        {'street': '456 Maple St', 'city': 'Shelbyville', 'state': 'IL'},
+        {'street': '789 Oak St', 'city': 'Ogdenville', 'state': 'IL'}
+    ], type=schema.field('address').type)
+]
+
+schema_harmless = pa.schema([
+    ('id', pa.int32()),
+    ('name', pa.string()),
+  ])
+
+data_harmless = [
+    pa.array([1, 2, 3], type=pa.int32()),
+    pa.array(['John Doe', 'Jane Smith', 'Jake Johnson'], type=pa.string()),
+]
+
+
+endpoint_url = "http://127.0.0.1:9000"
+aws_access_key_id = "minioadmin"
+aws_secret_access_key = "minioadmin"
+
+
+storage_options = {
+    "AWS_ENDPOINT_URL": endpoint_url,
+    "AWS_ACCESS_KEY_ID": aws_access_key_id,
+    "AWS_SECRET_ACCESS_KEY": aws_secret_access_key,
+    "AWS_ALLOW_HTTP": "true",
+    "AWS_S3_ALLOW_UNSAFE_RENAME": "true",
+}
+path = f"s3://test/testtable"
+path_harmless = f"s3://test/testtable_harmless"
+table = pa.Table.from_arrays(data, schema=schema)
+table_harmless = pa.Table.from_arrays(data_harmless, schema=schema_harmless)
+
+# Write the table as a Delta table using the Delta Lake writer
+write_deltalake(path, table, storage_options=storage_options)
+write_deltalake(path_harmless, table_harmless, storage_options=storage_options)
+```
+
+Connect to the clickhouse instance on docker
+
+>docker exec -it clickhouse-server bash
+>clickhouse-client
+
+> SELECT id FROM deltaLake('http://minio:9000/test/testtable_harmless' , 'minioadmin', 'minioadmin' )
+
+works
+>SELECT id FROM deltaLake('http://minio:9000/test/testtable' , 'minioadmin', 'minioadmin' )
+
+Code: 1000. DB::Exception: Received from localhost:9000. DB::Exception: Invalid access: Can not convert empty value.. (POCO_EXCEPTION)
+
+
+**Expected behavior**
+
+Be able to read the struct as before.
+

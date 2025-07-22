@@ -1,0 +1,98 @@
+ID: 22567
+Title: prepared stmt cannot execute when tidb_snapshot is set
+Description:
+## Development Task
+
+Add the below test case into `planner/core/prepare_test.go`:
+
+```golang
++func (s *testPlanSerialSuite) TestPreparedSnapshot(c *C) {
++       store, _, err := newStoreWithBootstrap()
++       c.Assert(err, IsNil)
++       tk := testkit.NewTestKit(c, store)
++
++       tk.MustExec("use test")
++       tk.MustExec("drop table if exists t")
++       tk.MustExec("create table t(id int)")
++       tk.MustExec("insert into t values (1),(2),(3),(4)")
++
++       // For mocktikv, safe point is not initialized, we manually insert it for snapshot to use.
++       timeSafe := time.Now().Add(-48 * 60 * 60 * time.Second).Format("20060102-15:04:05 -0700 MST")
++       safePointSQL := `INSERT HIGH_PRIORITY INTO mysql.tidb VALUES ('tikv_gc_safe_point', '%[1]s', '')
++                              ON DUPLICATE KEY
++                              UPDATE variable_value = '%[1]s'`
++       tk.MustExec(fmt.Sprintf(safePointSQL, timeSafe))
++
++       tk.MustExec("prepare stmt from 'select * from t where id=?'")
++       tk.MustExec("set @p = 1")
++       tk.MustQuery("execute stmt using @p").Check(testkit.Rows("1"))
++
++       // Record the current tso.
++       tk.MustExec("begin")
++       tso := tk.Se.GetSessionVars().TxnCtx.StartTS
++       tk.MustExec("rollback")
++       c.Assert(tso > 0, IsTrue)
++       // Insert one more row with id = 1.
++       tk.MustExec("insert into t values (1)")
++
++       tk.MustExec(fmt.Sprintf("set @@tidb_snapshot = '%d'", tso))
++       tk.MustQuery("select * from t where id = 1").Check(testkit.Rows("1"))
++       tk.MustQuery("execute stmt using @p").Check(testkit.Rows("1"))
++}
+```
+
+This test would fail with stack like:
+
+```
+----------------------------------------------------------------------
+FAIL: prepare_test.go:926: testPlanSerialSuite.TestPreparedSnapshot
+
+prepare_test.go:957:
+    tk.MustQuery("execute stmt using @p").Check(testkit.Rows("1"))
+/Users/cauchy/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:270:
+    tk.c.Assert(errors.ErrorStack(err), check.Equals, "", comment)
+... obtained string = "" +
+...     "[kv:8024]invalid transaction\n" +
+...     "github.com/pingcap/errors.AddStack\n" +
+...     "\t/Users/cauchy/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20201126102027-b0a155152ca3/errors.go:174\n" +
+...     "github.com/pingcap/tidb/session.(*session).Txn\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/session/session.go:1787\n" +
+...     "github.com/pingcap/tidb/executor.(*executorBuilder).getSnapshotTS\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/builder.go:1387\n" +
+...     "github.com/pingcap/tidb/executor.buildNoRangeTableReader\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/builder.go:2528\n" +
+...     "github.com/pingcap/tidb/executor.(*executorBuilder).buildTableReader\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/builder.go:2596\n" +
+...     "github.com/pingcap/tidb/executor.(*executorBuilder).build\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/builder.go:212\n" +
+...     "github.com/pingcap/tidb/executor.(*ExecuteExec).Build\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/prepared.go:261\n" +
+...     "github.com/pingcap/tidb/executor.(*ExecStmt).buildExecutor\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/adapter.go:769\n" +
+...     "github.com/pingcap/tidb/executor.(*ExecStmt).Exec\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/executor/adapter.go:330\n" +
+...     "github.com/pingcap/tidb/session.runStmt\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/session/session.go:1558\n" +
+...     "github.com/pingcap/tidb/session.(*session).ExecuteStmt\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/session/session.go:1463\n" +
+...     "github.com/pingcap/tidb/util/testkit.(*TestKit).Exec\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:170\n" +
+...     "github.com/pingcap/tidb/util/testkit.(*TestKit).MustQuery\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:269\n" +
+...     "github.com/pingcap/tidb/planner/core_test.(*testPlanSerialSuite).TestPreparedSnapshot\n" +
+...     "\t/Users/cauchy/go/src/github.com/pingcap/tidb/planner/core/prepare_test.go:957\n" +
+...     "reflect.Value.call\n" +
+...     "\t/usr/local/go/src/reflect/value.go:476\n" +
+...     "reflect.Value.Call\n" +
+...     "\t/usr/local/go/src/reflect/value.go:337\n" +
+...     "github.com/pingcap/check.(*suiteRunner).forkTest.func1\n" +
+...     "\t/Users/cauchy/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:850\n" +
+...     "github.com/pingcap/check.(*suiteRunner).forkCall.func1\n" +
+...     "\t/Users/cauchy/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:739\n" +
+...     "runtime.goexit\n" +
+...     "\t/usr/local/go/src/runtime/asm_amd64.s:1374"
+... expected string = ""
+... sql:execute stmt using @p, args:[]
+```
+
+Looks like this problem is introduced recently, the GitHash I used is `0ffa6057371d08443176065e54633d91c3da0960`.

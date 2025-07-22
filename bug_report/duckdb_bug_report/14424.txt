@@ -1,0 +1,39 @@
+ID: 14424
+Title: Top-N: Rework to use heap of sort keys
+Description:
+This PR reworks the Top-N implementation to use a heap of sort keys. Previously, we used to lean on our sort implementation, and would "sort of" make a heap by re-sorting and discarding entries, in combination with some early filtering. See https://github.com/duckdb/duckdb/pull/2172
+
+The main reason we implemented it this way is that we had to implement the Top-N operator for many types, included nested types, and it was easier to lean on the existing sort implementation - which was also an improvement over the `Value`-based implementation we had previously. Now that we have sort keys, it is much easier to implement the Top-N algorithm using an actual heap - by leveraging sort keys. This PR does exactly that - and implements sort keys using a heap from the `std` (using `std::push_heap` and `std::pop_heap` over a vector).
+
+This allows some clean-up of code as we can remove specialized code (`VectorOperations::DistinctLessThanNullsFirst`/`VectorOperations::DistinctGreaterThanNullsFirst`). In addition, we improve performance in many cases. In particular, sort keys allow us to also easily keep track of a "global boundary value" across all threads - that allows us to do much more skipping in the adversarial case where data is reverse-sorted on the order key. This makes performance much more stable. 
+
+Below are some performance numbers running on TPC-H SF10:
+
+
+```sql
+-- natural sort order, small limit, large payload
+SELECT * FROM lineitem ORDER BY l_orderkey LIMIT 5;
+-- old: 0.18s, new: 0.22s
+
+-- inverse natural sort order, small limit, large payload
+SELECT * FROM lineitem ORDER BY l_orderkey DESC LIMIT 5;
+-- old: 0.76s, new: 0.24s
+
+-- inverse natural sort order, large limit, large payload
+SELECT * FROM lineitem ORDER BY l_orderkey DESC LIMIT 10000;
+-- old: 1.59s, new: 0.34s
+
+-- natural sort order, small limit, small payload
+SELECT l_orderkey FROM lineitem ORDER BY l_orderkey LIMIT 5;
+-- old: 0.03s, new: 0.06s
+
+-- inverse natural sort order, small limit, small payload
+SELECT l_orderkey FROM lineitem ORDER BY l_orderkey DESC LIMIT 5;
+-- old: 0.16s, new: 0.07s
+
+-- inverse natural sort order, small limit, large payload
+SELECT l_orderkey FROM lineitem ORDER BY l_orderkey DESC LIMIT 10000;
+-- old: 0.32s, new: 0.14s
+```
+
+In general, we can see that performance is much more stable and greatly improved in several cases. There are a number of small regressions - in particular when sorting on individual integer keys in natural sort order the old algorithm is sometimes better. That is mostly because in these cases we can filter out values immediately. In the old implementation we would figure this out directly with the sort values, whereas in the new implementation we still spend time constructing the sort keys. We could remedy that by adding templated heaps for primitive types in the future. 

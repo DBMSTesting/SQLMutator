@@ -1,0 +1,65 @@
+ID: 53428
+Title: stale-read query latency 10x spike cause by information schema cache miss
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+High schema cache miss.
+
+Related metrics:
+
+<img width="1502" alt="image" src="https://github.com/pingcap/tidb/assets/26020263/04a6d0d3-f682-4c70-a213-6150e4aa3188">
+
+<img width="1500" alt="image" src="https://github.com/pingcap/tidb/assets/26020263/7f1b2c99-e331-45ed-a9d1-efb4b3681913">
+
+
+
+#### Analyze
+    The reason for a large number of load snapshot schema operations must be InfoSchema cache miss, but what causes cache miss?
+
+    Almost all TiDB generate a large number of load snapshot schema operations at the same time. It's weird, I picked a TiDB (tidb-11) with a large amount of operations for log analysis.
+
+> grep 'load InfoSchema' tidb-11.log
+
+```log
+"[2024/05/09 15:00:46.337 +00:00] [INFO] [domain.go:224] [\"diff load InfoSchema success\"] [currentSchemaVersion=585441] [neededSchemaVersion=585442] [\"start time\"=1.734944ms] [phyTblIDs=\"[]\"] [actionTypes=\"[]\"]",
+
+"[2024/05/09 15:00:46.521 +00:00] [INFO] [domain.go:224] [\"diff load InfoSchema success\"] [currentSchemaVersion=585442] [neededSchemaVersion=585443] [\"start time\"=503.56µs] [phyTblIDs=\"[]\"] [actionTypes=\"[]\"]",
+
+"[2024/05/09 15:01:34.130 +00:00] [INFO] [domain.go:224] [\"diff load InfoSchema success\"] [currentSchemaVersion=585443] [neededSchemaVersion=585445] [\"start time\"=4.158976ms] [phyTblIDs=\"[454637]\"] [actionTypes=\"[8]\"]",
+```
+
+The schema version has 585442, 585443, and 585445, but 585444 does not exist, and there's a hole that causes schema cache misses, so TiDB needs to load snapshot schema from TiKV. Related codes are following:
+
+https://github.com/pingcap/tidb/blob/868456d0f2b89e032997c3c07cad633725583e67/infoschema/cache.go#L118
+
+Well, Why does the schema version 585444 not exist? From the current code implementation, since `GenSchemaVersion` uses a separate transaction to generate schema version, but `SetSchemaDiff` use another transaction, so if `GenSchemaVersion` transaction succeed, but `SetSchemaDiff` transaction fails,  then will have schema version gap in this issue.
+
+Why use two separate transactions? this change is introduced by [PR: support concurrent ddl](https://github.com/pingcap/tidb/pull/32169/files#diff-dfc42c5764e7e4ff9122a1db728ff1cb0dee56e72dbccefdb211018ccd444c73L1131)
+
+https://github.com/pingcap/tidb/blob/5d990c60e4a2928148cde450cd37b38acded2724/pkg/ddl/ddl.go#L448-L453
+
+https://github.com/pingcap/tidb/blob/851e22d0b2b221388a076115ed76720c27b286cf/pkg/ddl/schema_version.go#L358
+
+https://github.com/pingcap/tidb/blob/2abf83ddd50755dc7c3af6d2f2cf669fab29051d/domain/domain.go#L423-L424
+
+
+
+### 2. What did you expect to see? (Required)
+
+No information schema cache miss.
+
+### 3. What did you see instead (Required)
+
+information schema cache miss then cause many operation which is load snapshot schema for stale-read query.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+nightly: e1a6b1d63399ce06b00132bc55052fb2c4e8a7fd
+

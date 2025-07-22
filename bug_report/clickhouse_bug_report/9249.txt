@@ -1,0 +1,36 @@
+ID: 9249
+Title: CREATE as remote(...) may lead to server startup failure
+Description:
+
+**How to reproduce**
+```
+create database z;
+create table z.tmp (n Int8) engine=Memory;
+create table default.remote as remote('localhost', 'z', 'tmp');
+```
+and restart clickhouse-server
+
+**Error message and/or stacktrace**
+```
+2020.02.20 15:29:48.875097 [ 1 ] {} <Error> Application: DB::Exception: Cannot attach table 'remote' from query ATTACH TABLE remote AS remote('localhost', 'z', 'tmp'). Error: Code: 81, e.displayText() = DB::Exception: Database z doesn't exist, Stack trace (when copying this message, always include the lines below):
+
+0. 0x4832817 StackTrace::StackTrace() /home/avtokmakov/ch/ClickHouse/build/../dbms/src/Common/StackTrace.cpp:228
+1. 0x8196321 DB::Context::getTableImpl(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Exception*) const /home/avtokmakov/ch/ClickHouse/build/../dbms/src/Common/Exception.h:0
+2. 0x8195ef0 DB::Context::getTable(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/memory:3939
+3. 0x85fe35a DB::getStructureOfRemoteTable(DB::Cluster const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context const&, std::__1::shared_ptr<DB::IAST> const&) /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/memory:3933
+4. 0x7fb67ee DB::TableFunctionRemote::executeImpl(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/memory:3939
+5. 0x8883153 DB::ITableFunction::execute(std::__1::shared_ptr<DB::IAST> const&, DB::Context const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const /home/avtokmakov/ch/ClickHouse/build/../dbms/src/TableFunctions/ITableFunction.cpp:16
+6. 0x89aca45 DB::createTableFromAST(DB::ASTCreateQuery, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool) /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/memory:4520
+7. 0x89b5c2b std::__1::__function::__func<DB::DatabaseOrdinary::loadStoredObjects(DB::Context&, bool)::$_1, std::__1::allocator<DB::DatabaseOrdinary::loadStoredObjects(DB::Context&, bool)::$_1>, void ()>::operator()() /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/string:3073
+8. 0x4867296 ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/atomic:1036
+9. 0x48691f8 std::__1::__function::__func<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&)::'lambda'(), std::__1::allocator<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&)::'lambda'()>, void ()>::operator()() /home/avtokmakov/ch/ClickHouse/build/../dbms/src/Common/ThreadPool.cpp:0
+10. 0x4865526 ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/atomic:1036
+11. 0x4868120 void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()> >(void*) /home/avtokmakov/ch/ClickHouse/build/../contrib/libcxx/include/memory:2648
+12. 0x7f55a7f106db start_thread /lib/x86_64-linux-gnu/libpthread-2.27.so
+13. 0x7f55a7a3588f clone /build/glibc-OTsEL5/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97
+```
+
+**Additional context**
+Table function `remote(...)` creates `Distributed` storage, which requires columns description. If it cannot get columns description for some reason (table is not loaded yet, or remote server is unavailable now) server fails to start.
+
+It cannot be fixed in the way like #8824. Probably we need rewrite CREATE query to add columns description even for table functions

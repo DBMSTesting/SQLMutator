@@ -1,0 +1,73 @@
+ID: 15117
+Title: ALTER TABLE ADD COLUMN on Buffer table breaks block structure
+Description:
+**Describe the bug**
+INSERT fails after adding a column to a buffer table.
+FYI SELECT works.
+
+**How to reproduce**
+* ClickHouse server version 20.8.3.18 Debian official build.  Error message showed version 20.8.2.
+* `CREATE TABLE` statement
+```
+CREATE TABLE t_local (timestamp DateTime)
+ENGINE = MergeTree PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY ( timestamp )
+;
+CREATE TABLE t_buffer (timestamp DateTime)
+Engine = Buffer(default, t_local, 16, 3, 20, 2000000, 20000000, 100000000, 300000000);
+```
+
+* Queries to run that lead to unexpected result
+```
+INSERT INTO t_buffer (timestamp) VALUES (now());
+
+ALTER TABLE t_local ADD COLUMN s String;
+ALTER TABLE t_buffer ADD COLUMN s String;
+
+-- SELECT works.   It successfully returns two columns
+SELECT * FROM t_buffer;  
+
+-- INSERT fails
+INSERT INTO t_buffer (timestamp, s) VALUES (now(), 'hello'); 
+```
+
+**Expected behavior**
+INSERT should be successful.
+
+**Error message**
+```
+Received exception from server (version 20.8.2):
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Block structure mismatch in Buffer stream: different number of columns:
+s String String(size = 1), timestamp DateTime UInt32(size = 1)
+timestamp DateTime UInt32(size = 0).
+```
+
+**Stack trace**
+```
+2020.09.22 05:14:31.973903 [ 2044016 ] {5dede1ca-e5c5-4f57-bac1-ba11a89fdbdc} <Error> executeQuery: Code: 49, e.displayText() = DB::Exception: Block structure mismatch in Buffer stream: different number of columns:
+s String String(size = 1), timestamp DateTime UInt32(size = 1)
+timestamp DateTime UInt32(size = 0) (version 20.8.2.3 (official build)) (from [::1]:44036) (in query: INSERT into t_buffer (timestamp, s) values ), Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1a80ae30 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xff9e75d in /usr/bin/clickhouse
+2. ? @ 0x16f1b264 in /usr/bin/clickhouse
+3. ? @ 0x16f16906 in /usr/bin/clickhouse
+4. DB::BufferBlockOutputStream::insertIntoBuffer(DB::Block const&, DB::StorageBuffer::Buffer&) @ 0x17aea10a in /usr/bin/clickhouse
+5. DB::BufferBlockOutputStream::write(DB::Block const&) @ 0x17aeae41 in /usr/bin/clickhouse
+6. DB::PushingToViewsBlockOutputStream::write(DB::Block const&) @ 0x17453176 in /usr/bin/clickhouse
+7. DB::AddingDefaultBlockOutputStream::write(DB::Block const&) @ 0x17459329 in /usr/bin/clickhouse
+8. DB::SquashingBlockOutputStream::finalize() @ 0x17458b77 in /usr/bin/clickhouse
+9. DB::SquashingBlockOutputStream::writeSuffix() @ 0x17458c5d in /usr/bin/clickhouse
+10. DB::TCPHandler::processInsertQuery(DB::Settings const&) @ 0x17e9c4aa in /usr/bin/clickhouse
+11. DB::TCPHandler::runImpl() @ 0x17e9d6ab in /usr/bin/clickhouse
+12. DB::TCPHandler::run() @ 0x17e9dd50 in /usr/bin/clickhouse
+13. Poco::Net::TCPServerConnection::start() @ 0x1a728c9b in /usr/bin/clickhouse
+14. Poco::Net::TCPServerDispatcher::run() @ 0x1a72912b in /usr/bin/clickhouse
+15. Poco::PooledThread::run() @ 0x1a8a7c06 in /usr/bin/clickhouse
+16. Poco::ThreadImpl::runnableEntry(void*) @ 0x1a8a3000 in /usr/bin/clickhouse
+17. start_thread @ 0x9609 in /lib/x86_64-linux-gnu/libpthread-2.31.so
+18. /build/glibc-YYA7BZ/glibc-2.31/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97: __GI___clone @ 0x122103 in /usr/lib/debug/lib/x86_64-linux-gnu/libc-2.31.so
+```
+
+**Additional context**
+To work around the problem DROP and CREATE t_buffer table with s String column.  Make sure the content of the buffer table has been flushed to the local table before dropping.

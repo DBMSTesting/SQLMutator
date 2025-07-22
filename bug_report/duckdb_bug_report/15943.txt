@@ -1,0 +1,55 @@
+ID: 15943
+Title: Optimizer remove unnecessary projections
+Description:
+They are called `useless` in this PR, happy to change the name if desired. 
+
+This is an optimizer to help with reordering left joins (which will come in a follow up PR). This is to remove projections when you have queries like so
+
+```
+explain select * from (select a, b from t1) left join (select c, d from t2) on (a = c)
+│┌───────────────────────────┐│
+││  Optimized Logical Plan   ││
+│└───────────────────────────┘│
+└─────────────────────────────┘
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        Expressions:       │
+│             a             │
+│             b             │
+│             c             │
+│             d             │
+│                           │
+│         ~200 Rows         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      COMPARISON_JOIN      │
+│    ────────────────────   │
+│      Join Type: RIGHT     │
+│    Conditions: (c = a)    ├──────────────┐
+│                           │              │
+│         ~200 Rows         │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         PROJECTION        ││         PROJECTION        │
+│    ────────────────────   ││    ────────────────────   │
+│        Expressions:       ││        Expressions:       │
+│             c             ││             a             │
+│             d             ││             b             │
+│                           ││                           │
+│         ~200 Rows         ││         ~100 Rows         │
+└─────────────┬─────────────┘└─────────────┬─────────────┘
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│          SEQ_SCAN         ││          SEQ_SCAN         │
+│    ────────────────────   ││    ────────────────────   │
+│             t2            ││             t1            │
+│                           ││                           │
+│         ~200 Rows         ││         ~100 Rows         │
+└───────────────────────────┘└───────────────────────────┘
+```
+The two tables have a projection operator before the join that is unnecessary since only an and b are selected from t1. Currently the join order optimizer treats projections as not reorder able, so the presence of these operators makes reordering left joins difficult. 
+
+Eventually I plan on either removing this optimizer and doing one of the following
+
+1. Adding logic to the Join order optimizer to treat projections as reorderable in certain cases,
+2. Pull projections up so that all unnecessary columns are filtered out at the top of a reorder able join tree, then projection pushdown can happen so the columns get filtered out as soon as possible, then the build_side_probe_side optimizer can be performed.

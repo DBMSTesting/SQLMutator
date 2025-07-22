@@ -1,0 +1,183 @@
+ID: 5860
+Title: After cluster restart, table not attach on same servers.
+Description:
+When restart cluster, table not attach on same servers.
+
+ClickHouse server version 19.9.2 revision 54421.
+
+Untar clickhouse.tar.gz, from attach.
+
+`docker network create clickhouse-net` - create network
+`make clean-cluster` - create empty dirs for clickhouse and zookeeper volumes
+`docker-compose up -d` - start cluster where 3 zookeeper servers, 6 clickhouse servers (3 shards with 2 replications)
+`make setup-cluster` - create ttt ReplicatedMergeTree table and ttt_all Distributed table and fill table ttt_all
+`make run-cluster-query` - check cluster with queries
+
+```
+echo "SELECT count() FROM default.ttt" | curl "http://localhost:8123/" --data-binary @-
+35
+echo "SELECT count() FROM default.ttt_all" | curl "http://localhost:8123/" --data-binary @-
+100
+GET ttt FROM clickhouse-01
+28
+GET ttt_all FROM clickhouse-01
+100
+GET ttt FROM clickhouse-02
+28
+GET ttt_all FROM clickhouse-02
+100
+GET ttt FROM clickhouse-03
+35
+GET ttt_all FROM clickhouse-03
+100
+GET ttt FROM clickhouse-04
+35
+GET ttt_all FROM clickhouse-04
+100
+GET ttt FROM clickhouse-05
+37
+GET ttt_all FROM clickhouse-05
+100
+GET ttt FROM clickhouse-06
+37
+GET ttt_all FROM clickhouse-06
+100
+```
+After that, restart cluster and check cluster with queries
+```
+docker-compose down
+docker-compose up -d
+make run-cluster-query
+```
+Table default.ttt not attached on some servers.
+```
+echo "SELECT count() FROM default.ttt" | curl "http://localhost:8123/" --data-binary @-
+28
+echo "SELECT count() FROM default.ttt_all" | curl "http://localhost:8123/" --data-binary @-
+Code: 279, e.displayText() = DB::NetException: All connection tries failed. Log: 
+
+There is no table default.ttt on server: clickhouse-05:9000, 172.28.0.7
+There is no table default.ttt on server: clickhouse-06:9000, 172.28.0.5
+
+ (version 19.9.2.4 (official build))
+GET ttt FROM clickhouse-01
+28
+GET ttt_all FROM clickhouse-01
+GET ttt FROM clickhouse-02
+28
+GET ttt_all FROM clickhouse-02
+GET ttt FROM clickhouse-03
+35
+GET ttt_all FROM clickhouse-03
+GET ttt FROM clickhouse-04
+35
+GET ttt_all FROM clickhouse-04
+GET ttt FROM clickhouse-05
+GET ttt_all FROM clickhouse-05
+GET ttt FROM clickhouse-06
+GET ttt_all FROM clickhouse-06
+make: *** [Makefile:17: run-cluster-query] Ошибка 8
+```
+No table default.ttt on clickhouse-05 and clickhouse-06 servers.
+
+Check table manually on clickhouse-05 and clickhouse-06 servers.
+
+`make run-cluster-client-5` - connect to clickhouse-05
+```
+clickhouse-05 :) show tables
+
+SHOW TABLES
+
+┌─name────┐
+│ ttt_all │
+└─────────┘
+
+1 rows in set. Elapsed: 0.001 sec. 
+
+clickhouse-05 :) show create table ttt
+
+SHOW CREATE TABLE ttt
+
+┌─statement───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE default.ttt (`id` Int32) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/ttt', '{replica}') PARTITION BY id ORDER BY id SETTINGS index_granularity = 8192 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.001 sec. 
+```
+
+`make run-cluster-client-6` - connect to clickhouse-06
+```
+clickhouse-06 :) show tables
+
+SHOW TABLES
+
+┌─name────┐
+│ ttt_all │
+└─────────┘
+
+1 rows in set. Elapsed: 0.001 sec. 
+
+clickhouse-06 :) show create table ttt
+
+SHOW CREATE TABLE ttt
+
+┌─statement───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE default.ttt (`id` Int32) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/ttt', '{replica}') PARTITION BY id ORDER BY id SETTINGS index_granularity = 8192 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+1 rows in set. Elapsed: 0.002 sec. 
+```
+
+After manually attach table default.ttt on clickhouse-05, and clickhouse-06 servers.
+```
+clickhouse-05 :) attach table ttt
+
+ATTACH TABLE ttt
+
+Ok.
+
+0 rows in set. Elapsed: 0.115 sec. 
+
+clickhouse-06 :) attach table ttt
+
+ATTACH TABLE ttt
+
+Ok.
+
+0 rows in set. Elapsed: 0.110 sec. 
+
+```
+
+When check cluster after manually connected tables all good.
+```
+echo "SELECT count() FROM default.ttt" | curl "http://localhost:8123/" --data-binary @-
+35
+echo "SELECT count() FROM default.ttt_all" | curl "http://localhost:8123/" --data-binary @-
+100
+GET ttt FROM clickhouse-01
+28
+GET ttt_all FROM clickhouse-01
+100
+GET ttt FROM clickhouse-02
+28
+GET ttt_all FROM clickhouse-02
+100
+GET ttt FROM clickhouse-03
+35
+GET ttt_all FROM clickhouse-03
+100
+GET ttt FROM clickhouse-04
+35
+GET ttt_all FROM clickhouse-04
+100
+GET ttt FROM clickhouse-05
+37
+GET ttt_all FROM clickhouse-05
+100
+GET ttt FROM clickhouse-06
+37
+GET ttt_all FROM clickhouse-06
+100
+```
+
+[clickhouse.tar.gz](https://github.com/yandex/ClickHouse/files/3356508/clickhouse.tar.gz)

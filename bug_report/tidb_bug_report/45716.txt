@@ -1,0 +1,130 @@
+ID: 45716
+Title: index join  exceeding memory of quota may hang the session
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+set tidb_mem_quota_query = 120000;
+drop table if exists t1, t2;
+create table t1(a int, index(a));
+create table t2(a int, index(a));
+insert into t1 values (1), (2);
+insert into t2 values (1),(1),(2),(2);
+select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a;
+set tidb_mem_quota_query=1000;
+select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a;
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+report exceed memory quota error
+```sql
+sql > select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a;
+(1105, 'Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=2097154]')
+```
+### 3. What did you see instead (Required)
+the second query for a long time and no reocrd returned. the session maybe hang.
+```sql
+[16:46:45]TiDB root:test> show processlist;
++---------+------+-----------------+------+---------+------+------------+-------------------------------------------------------------+
+| Id      | User | Host            | db   | Command | Time | State      | Info                                                        |
++---------+------+-----------------+------+---------+------+------------+-------------------------------------------------------------+
+| 2097166 | root | 127.0.0.1:51511 | test | Query   | 105  | autocommit | select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a |
+| 2097168 | root | 127.0.0.1:51517 | test | Query   | 79   | autocommit | select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a |
+| 2097170 | root | 127.0.0.1:51522 | test | Query   | 0    | autocommit | show processlist                                            |
+| 2097154 | root | 127.0.0.1:51377 | test | Query   | 403  | autocommit | select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a |
+| 2097156 | root | 127.0.0.1:51385 | test | Sleep   | 389  | autocommit | <null>                                                      |
+| 2097162 | root | 127.0.0.1:51448 | test | Query   | 242  | autocommit | select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a |
+| 2097164 | root | 127.0.0.1:51503 | test | Query   | 120  | autocommit | select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a |
++---------+------+-----------------+------+---------+------+------------+-------------------------------------------------------------+
+```
+tidb log
+```log
+[2023/08/01 16:40:01.970 +08:00] [ERROR] [adapter.go:152] ["execute sql panic"] [conn=2097154] [sql="select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a"] [stack="github.com/pingcap/tidb/executor.(*recordSet).Next.func1
+	/Users/aytrack/gitproject/pingcap/tidb/executor/adapter.go:152
+runtime.gopanic
+	/opt/homebrew/Cellar/go/1.20.2/libexec/src/runtime/panic.go:884
+github.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action
+	/Users/aytrack/gitproject/pingcap/tidb/util/memory/action.go:187
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1
+	/Users/aytrack/gitproject/pingcap/tidb/util/memory/tracker.go:440
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume
+	/Users/aytrack/gitproject/pingcap/tidb/util/memory/tracker.go:484
+github.com/pingcap/tidb/executor.(*IndexLookUpJoin).newInnerWorker
+	/Users/aytrack/gitproject/pingcap/tidb/executor/index_lookup_join.go:242
+github.com/pingcap/tidb/executor.(*IndexLookUpJoin).startWorkers
+	/Users/aytrack/gitproject/pingcap/tidb/executor/index_lookup_join.go:194
+github.com/pingcap/tidb/executor.(*IndexLookUpJoin).Next
+	/Users/aytrack/gitproject/pingcap/tidb/executor/index_lookup_join.go:261
+github.com/pingcap/tidb/executor.Next
+	/Users/aytrack/gitproject/pingcap/tidb/executor/executor.go:253
+github.com/pingcap/tidb/executor.(*ExecStmt).next
+	/Users/aytrack/gitproject/pingcap/tidb/executor/adapter.go:1222
+github.com/pingcap/tidb/executor.(*recordSet).Next
+	/Users/aytrack/gitproject/pingcap/tidb/executor/adapter.go:155
+github.com/pingcap/tidb/server/internal/resultset.(*tidbResultSet).Next
+	/Users/aytrack/gitproject/pingcap/tidb/server/internal/resultset/resultset.go:62
+github.com/pingcap/tidb/server.(*clientConn).writeChunks
+	/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:2207
+github.com/pingcap/tidb/server.(*clientConn).writeResultSet
+	/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:2150
+github.com/pingcap/tidb/server.(*clientConn).handleStmt
+	/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:2018
+github.com/pingcap/tidb/server.(*clientConn).handleQuery
+	/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:1779
+github.com/pingcap/tidb/server.(*clientConn).dispatch
+	/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:1266
+github.com/pingcap/tidb/server.(*clientConn).Run
+	/Users/aytrack/gitproject/pingcap/tidb/server/conn.go:1045
+github.com/pingcap/tidb/server.(*Server).onConn
+	/Users/aytrack/gitproject/pingcap/tidb/server/server.go:662"]
+[2023/08/01 16:40:01.970 +08:00] [ERROR] [coprocessor.go:1100] ["copIteratorWork meet panic"] [r="\"Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=2097154]\""] ["stack trace"="github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask.func1
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:1102
+runtime.gopanic
+	/opt/homebrew/Cellar/go/1.20.2/libexec/src/runtime/panic.go:884
+github.com/pingcap/tidb/util/memory.(*PanicOnExceed).Action
+	/Users/aytrack/gitproject/pingcap/tidb/util/memory/action.go:187
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume.func1
+	/Users/aytrack/gitproject/pingcap/tidb/util/memory/tracker.go:440
+github.com/pingcap/tidb/util/memory.(*Tracker).Consume
+	/Users/aytrack/gitproject/pingcap/tidb/util/memory/tracker.go:484
+github.com/pingcap/tidb/store/copr.(*copIteratorWorker).sendToRespCh
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:990
+github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopResponse
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:1401
+github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleCopPagingResult
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:1302
+github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTaskOnce
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:1241
+github.com/pingcap/tidb/store/copr.(*copIteratorWorker).handleTask
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:1113
+github.com/pingcap/tidb/store/copr.(*copIteratorWorker).run
+	/Users/aytrack/gitproject/pingcap/tidb/store/copr/coprocessor.go:806"]
+
+[2023/08/01 16:47:59.240 +08:00] [WARN] [expensivequery.go:145] [expensive_query] [cost_time=180.150269709s] [stats=t1:443253881867075585,t2:443253881867862019] [conn=2097166] [user=root] [database=test] [index_names="[t1:a]"] [txn_start_ts=443253915409186816] [mem_max="1210 Bytes (1.18 KB)"] [sql="select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a"]
+[2023/08/01 16:48:02.743 +08:00] [WARN] [expensivequery.go:145] [expensive_query] [cost_time=480.772150833s] [stats=t1:pseudo,t2:pseudo] [conn=2097154] [user=root] [database=test] [index_names="[t1:a]"] [txn_start_ts=443253837520961536] [mem_max="1210 Bytes (1.18 KB)"] [sql="select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a"]
+[2023/08/01 16:48:26.240 +08:00] [WARN] [expensivequery.go:145] [expensive_query] [cost_time=180.2530095s] [stats=t2:443253881867862019,t1:443253881867075585] [conn=2097168] [user=root] [database=test] [index_names="[t1:a]"] [txn_start_ts=443253922460598272] [mem_max="1214 Bytes (1.19 KB)"] [sql="select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a"]
+
+```
+### 4. What is your TiDB version? (Required)
+```sql
+[16:48:15]TiDB root:test> select tidb_version();
++-----------------------------------------------------------+
+| tidb_version()                                            |
++-----------------------------------------------------------+
+| Release Version: v7.3.0-alpha-264-g79f0001601             |
+| Edition: Community                                        |
+| Git Commit Hash: 79f00016016e9a1688613b7f4c8b5d830814fecb |
+| Git Branch: HEAD                                          |
+| UTC Build Time: 2023-08-01 08:39:18                       |
+| GoVersion: go1.20.2                                       |
+| Race Enabled: false                                       |
+| Check Table Before Drop: false                            |
+| Store: unistore                                           |
++-----------------------------------------------------------+
+```
+<!-- Paste the output of SELECT tidb_version() -->
+

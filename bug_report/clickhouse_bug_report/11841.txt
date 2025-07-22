@@ -1,0 +1,135 @@
+ID: 11841
+Title: Memory is not released.
+Description:
+**Describe the bug**
+I ran the same query couple times. The first couple time, the query works file, but after that, it will start to fail.
+```python
+rom sqlalchemy import create_engine, Column, MetaData, literal
+from clickhouse_sqlalchemy import Table, make_session, get_declarative_base, types, engines
+import pandas as pd
+import numpy as np
+
+uri = 'clickhouse://default@192.168.10.9/'
+engine = create_engine(uri)
+metadata = MetaData()
+
+sql = """
+SELECT toYYYYMMDD(trade_datetime) AS trade_dt, s_info_windcode, SUM(volume) AS volume FROM minute_bar
+WHERE toInt64(toYYYYMMDDhhmmss(trade_datetime)) - toInt64(toYYYYMMDD(trade_datetime)) * 1000000 > 94500
+AND toInt64(toYYYYMMDDhhmmss(trade_datetime)) - toInt64(toYYYYMMDD(trade_datetime)) * 1000000 < 141500
+GROUP BY toYYYYMMDD(trade_datetime), s_info_windcode"""
+
+for i in range(10):
+    res = engine.execute(sql)
+    data = res.fetchall()
+    print(i, data[0])
+```
+the except is the following:
+```
+0 ('20191025', '603915.SH', '2157700')
+1 ('20130208', '002059.SZ', '1159964')
+2 ('20191025', '603915.SH', '2157700')
+3 ('20130208', '002059.SZ', '1159964')
+4 ('20130208', '002059.SZ', '1159964')
+5 ('20191025', '603915.SH', '2157700')
+---------------------------------------------------------------------------
+DatabaseException                         Traceback (most recent call last)
+<ipython-input-2-d1cd821b006b> in <module>
+      7 
+      8 for i in range(10):
+----> 9     res = engine.execute(sql)
+     10     data = res.fetchall()
+     11     print(i, data[0])
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/engine/base.py in execute(self, statement, *multiparams, **params)
+   2242 
+   2243         connection = self._contextual_connect(close_with_result=True)
+-> 2244         return connection.execute(statement, *multiparams, **params)
+   2245 
+   2246     def scalar(self, statement, *multiparams, **params):
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/engine/base.py in execute(self, object_, *multiparams, **params)
+   1010         """
+   1011         if isinstance(object_, util.string_types[0]):
+-> 1012             return self._execute_text(object_, multiparams, params)
+   1013         try:
+   1014             meth = object_._execute_on_connection
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/engine/base.py in _execute_text(self, statement, multiparams, params)
+   1185             parameters,
+   1186             statement,
+-> 1187             parameters,
+   1188         )
+   1189         if self._has_events or self.engine._has_events:
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/engine/base.py in _execute_context(self, dialect, constructor, statement, parameters, *args)
+   1322         except BaseException as e:
+   1323             self._handle_dbapi_exception(
+-> 1324                 e, statement, parameters, cursor, context
+   1325             )
+   1326 
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/engine/base.py in _handle_dbapi_exception(self, e, statement, parameters, cursor, context)
+   1519                 )
+   1520             else:
+-> 1521                 util.raise_(exc_info[1], with_traceback=exc_info[2])
+   1522 
+   1523         finally:
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/util/compat.py in raise_(***failed resolving arguments***)
+    176 
+    177         try:
+--> 178             raise exception
+    179         finally:
+    180             # credit to
+
+/opt/conda/lib/python3.7/site-packages/sqlalchemy/engine/base.py in _execute_context(self, dialect, constructor, statement, parameters, *args)
+   1282                 if not evt_handled:
+   1283                     self.dialect.do_execute(
+-> 1284                         cursor, statement, parameters, context
+   1285                     )
+   1286 
+
+/opt/conda/lib/python3.7/site-packages/clickhouse_sqlalchemy/drivers/base.py in do_execute(self, cursor, statement, parameters, context)
+    874 
+    875     def do_execute(self, cursor, statement, parameters, context=None):
+--> 876         cursor.execute(statement, parameters, context=context)
+    877 
+    878     def _check_unicode_returns(self, connection, additional_tests=None):
+
+/opt/conda/lib/python3.7/site-packages/clickhouse_sqlalchemy/drivers/http/connector.py in execute(self, operation, parameters, context)
+    115         response_gen = transport.execute(raw_sql, params=params)
+    116 
+--> 117         self._process_response(response_gen)
+    118         self._end_query()
+    119 
+
+/opt/conda/lib/python3.7/site-packages/clickhouse_sqlalchemy/drivers/http/connector.py in _process_response(self, response)
+    214         response = iter(response)
+    215 
+--> 216         self._columns = next(response, None)
+    217         self._types = next(response, None)
+    218         self._response = response
+
+/opt/conda/lib/python3.7/site-packages/clickhouse_sqlalchemy/drivers/http/transport.py in execute(self, query, params)
+     89         there is nothing to return.
+     90         """
+---> 91         r = self._send(query, params=params, stream=True)
+     92         lines = r.iter_lines()
+     93         try:
+
+/opt/conda/lib/python3.7/site-packages/clickhouse_sqlalchemy/drivers/http/transport.py in _send(self, data, params, stream)
+    135             orig = HTTPException(r.text)
+    136             orig.code = r.status_code
+--> 137             raise DatabaseException(orig)
+    138         return r
+
+DatabaseException: Orig exception: Code: 241, e.displayText() = DB::Exception: Memory limit (total) exceeded: would use 52.74 GiB (attempt to allocate chunk of 4718592 bytes), maximum: 52.73 GiB: While executing AggregatingTransform (version 20.4.5.36 (official build))
+```
+ 
+
+**How to reproduce**
+CentOS 7
+Clickhouse 20.4.5.36
+
+I posted the log file here: https://gist.github.com/HooliBox/7c2c80712403e47b975a1e8d219ce549

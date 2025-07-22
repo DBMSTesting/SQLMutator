@@ -1,0 +1,61 @@
+ID: 47743
+Title: tidb_mdl_view is not showing blocked ddl when ddl contains multiple table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+- create 2 table, t1, t2, insert 1 row to them.
+- in session 1:
+```sql
+begin;
+select * from t1;
+```
+- in session 2, the sql will block
+```sql
+rename table t1 to t11, t2 to t22;
+```
+
+now query block
+```sql
+mysql> select * from mysql.tidb_mdl_view;
+Empty set (0.02 sec)
+```
+
+it's because we're not put all table id into `ddl_jobs` view as `ActionMultiSchemaChange` do:
+https://github.com/pingcap/tidb/blob/3ef01b5882cccec1d043cba36037b276a3ddbf00/pkg/executor/executor.go#L492
+
+
+query using this sql, we can see the block, 122 is the table id of `t1`:
+```sql
+mysql> SELECT job_id,
+    ->     json_extract(cast(cast(job_meta as char) as json), '$.schema_name') as db_name,
+    ->     json_extract(cast(cast(job_meta as char) as json), '$.table_name') as table_name,
+    ->     json_extract(cast(cast(job_meta as char) as json), '$.query') as query,
+    ->     session_id,
+    ->     txnstart,
+    ->     tidb_decode_sql_digests(all_sql_digests, 4096) AS SQL_DIGESTS
+    ->   FROM mysql.tidb_ddl_job,
+    ->     information_schema.cluster_tidb_trx,
+    ->     information_schema.cluster_processlist
+    ->   WHERE tidb_ddl_job.processing = 1 and Find_in_set(122, tidb_ddl_job.table_ids)
+    ->     AND Find_in_set(122, cluster_tidb_trx.related_table_ids)
+    ->     AND cluster_tidb_trx.session_id = cluster_processlist.id;
++--------+---------+------------+-------------------------------------+------------+----------------------------------------+--------------------------------+
+| job_id | db_name | table_name | query                               | session_id | txnstart                               | SQL_DIGESTS                    |
++--------+---------+------------+-------------------------------------+------------+----------------------------------------+--------------------------------+
+|    126 | "test"  | "t2"       | "rename table t1 to t11, t2 to t22" | 1103101964 | 10-18 14:46:58.547(445018700132384769) | ["begin","select * from `t1`"] |
++--------+---------+------------+-------------------------------------+------------+----------------------------------------+--------------------------------+
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+v7.4.0
+<!-- Paste the output of SELECT tidb_version() -->
+

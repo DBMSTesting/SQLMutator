@@ -1,0 +1,34 @@
+ID: 16045
+Title: [Julia] Fixes a a bug that the database is not properly closed even after close() is called
+Description:
+This PR adds a fix to close the database reliably. The issue is that a call to `execute` creates a prepared statement handle that keeps the database connection open even if `duckdb_disconnect` is called. 
+The handle is closed automatically by the gargabe collector, however this is delayed and in the meantime the database stays locked for other processes. 
+
+The change is to manually close the prepared statement handle after a call to `execute` to not have to wait for the garbage collector.
+
+
+## Example
+
+If the following code is executed in the REPL 
+
+```julia
+using DuckDB
+import DBInterface: execute, connect, close!
+
+"""write_data(dbfile::String)"""
+function write_data(dbfile::String)
+    db = DuckDB.DB(dbfile)
+    conn = connect(db)
+    execute(conn, "CREATE OR REPLACE TABLE test (a INTEGER, b INTEGER);")
+    execute(conn, "INSERT INTO test VALUES (1, 2);")
+    close!(conn)
+    DuckDB.close_database(db)
+    return true
+end
+
+file_name = "duckdata.db"
+write_data(file_name) # database stays open
+```
+
+keep the REPL open and try open the database in a different process (e.g. `duckdb duckdata.db`). In most cases this fails with:
+`Error: unable to open database "duckdata.db": IO Error: Could not set lock on file "duckdata.db"`

@@ -1,0 +1,53 @@
+ID: 51901
+Title: Problem with query plan optimizer yielding incorrect results
+Description:
+After upgrading ClickHouse server, one of our queries started returning incorrect results due to a problem with query plan optimizations. The issue was first introduced in `v22.4` and I believe it's related to this PR: #35623.
+
+Consider the following query:
+
+```SQL
+SELECT
+    Dim,
+    CumulativeSum
+FROM
+(
+    SELECT
+        Dim,
+        runningAccumulate(SumState) AS CumulativeSum
+    FROM
+    (
+        SELECT
+            Dim,
+            sumState(DimCount) AS SumState
+        FROM
+        (
+            SELECT
+                c1 AS Dim,
+                count() as DimCount
+            FROM VALUES(9, 5, 5, 2, 1, 1)
+            GROUP BY Dim
+        )
+        GROUP BY Dim
+        ORDER BY Dim DESC
+    )
+)
+ORDER BY Dim ASC
+```
+
+The correct results of this query should be:
+
+```
+┌─Dim─┬─CumulativeSum─┐
+│   1 │             6 │
+│   2 │             4 │
+│   5 │             3 │
+│   9 │             1 │
+└─────┴───────────────┘
+```
+
+But starting from v22.4, ClickHouse query plan optimizer decides to calculate `runningAccumulate` after sorting which ruins the cumulative sum and gives incorrect results.
+
+[ClickHouse Playground v22.3](https://fiddle.clickhouse.com/c77e6c20-830b-413b-ad78-3d9e59707a4f) (gives correct results)
+[ClickHouse Playground v22.4](https://fiddle.clickhouse.com/c2a08315-2850-425e-bf9b-189ff3200f0b) (gives incorrect results)
+
+Note that by setting `query_plan_enable_optimizations=0`, the query gives correct results which indicates the issue is related to the query plan optimizer.

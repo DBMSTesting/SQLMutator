@@ -1,0 +1,45 @@
+ID: 47182
+Title: Crash when execute `explain pipeline graph=1 select count(ID) from t1`
+Description:
+** Version **
+22.9
+and latest should have the issue too. In latest version, no below error message but there is a mess in the output.
+
+** Reproduce **
+https://fiddle.clickhouse.com/8308205c-5098-4363-b566-bc690223fa87
+```SQL
+CREATE TABLE t1(ID UInt64, name String) engine=MergeTree order by ID;
+
+insert into t1(ID, name) values (1, 'abc'), (2, 'bbb');
+
+explain pipeline graph=1 select count(ID) from t1;
+```
+
+**Error message**
+```
+[3b65c6d14127] 2023.03.03 08:14:11.235194 [ 258 ] <Fatal> BaseDaemon: ########################################
+[3b65c6d14127] 2023.03.03 08:14:11.235257 [ 258 ] <Fatal> BaseDaemon: (version 22.9.7.34 (official build), build id: EF7468FF8440F1A7E98894D99638C4583A10FB41) (from thread 54) (query_id: 6ff39b5f-c2c2-4469-9b2c-f114edf9f77c) (query: explain pipeline graph=1 select count(ID) from t1;) Received signal Segmentation fault (11)
+[3b65c6d14127] 2023.03.03 08:14:11.235286 [ 258 ] <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+[3b65c6d14127] 2023.03.03 08:14:11.235313 [ 258 ] <Fatal> BaseDaemon: Stack trace: 0x1207f1a6 0x1207332d 0x12070fad 0x123f552b 0x123f2416 0x12f96a05 0x12faa919 0x15a3da4f 0x15a3fddb 0x15bfb432 0x15bf8bbd 0x7f69933d0609 0x7f69932f5133
+[3b65c6d14127] 2023.03.03 08:14:11.235368 [ 258 ] <Fatal> BaseDaemon: 2. DB::printPipelineCompact(std::__1::vector<std::__1::shared_ptr<DB::IProcessor>, std::__1::allocator<std::__1::shared_ptr<DB::IProcessor> > > const&, DB::WriteBuffer&, bool) @ 0x1207f1a6 in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235397 [ 258 ] <Fatal> BaseDaemon: 3. DB::InterpreterExplainQuery::executeImpl() @ 0x1207332d in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235416 [ 258 ] <Fatal> BaseDaemon: 4. DB::InterpreterExplainQuery::execute() @ 0x12070fad in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235445 [ 258 ] <Fatal> BaseDaemon: 5. ? @ 0x123f552b in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235471 [ 258 ] <Fatal> BaseDaemon: 6. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x123f2416 in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235498 [ 258 ] <Fatal> BaseDaemon: 7. DB::TCPHandler::runImpl() @ 0x12f96a05 in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235519 [ 258 ] <Fatal> BaseDaemon: 8. DB::TCPHandler::run() @ 0x12faa919 in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235538 [ 258 ] <Fatal> BaseDaemon: 9. Poco::Net::TCPServerConnection::start() @ 0x15a3da4f in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235578 [ 258 ] <Fatal> BaseDaemon: 10. Poco::Net::TCPServerDispatcher::run() @ 0x15a3fddb in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235607 [ 258 ] <Fatal> BaseDaemon: 11. Poco::PooledThread::run() @ 0x15bfb432 in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235630 [ 258 ] <Fatal> BaseDaemon: 12. Poco::ThreadImpl::runnableEntry(void*) @ 0x15bf8bbd in /usr/bin/clickhouse
+[3b65c6d14127] 2023.03.03 08:14:11.235655 [ 258 ] <Fatal> BaseDaemon: 13. ? @ 0x7f69933d0609 in ?
+[3b65c6d14127] 2023.03.03 08:14:11.235672 [ 258 ] <Fatal> BaseDaemon: 14. __clone @ 0x7f69932f5133 in ?
+[3b65c6d14127] 2023.03.03 08:14:11.349745 [ 258 ] <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: A70D04D997328309562E75C69D55D0D5)
+Error on processing query: Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000. (ATTEMPT_TO_READ_AFTER_EOF) (version 22.9.7.34 (official build))
+(query: explain pipeline graph=1 select count(ID) from t1;)
+```
+
+** Diagnositic 
+![image](https://user-images.githubusercontent.com/1518453/222668077-fb827a05-51a0-4397-a1be-d4d0986125fb.png)
+
+In printPipeline.cpp, line 110 ~ 128, the `item.first` of an item in `steps_map` points to an invalid memory, and `typeid()` does not work either.

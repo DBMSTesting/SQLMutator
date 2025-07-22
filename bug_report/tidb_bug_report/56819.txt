@@ -1,0 +1,70 @@
+ID: 56819
+Title: Row not found for Global Index during DeleteOnly state of Reorganize Partition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+Apply this patch:
+```diff
+diff --git a/pkg/ddl/tests/partition/multi_domain_test.go b/pkg/ddl/tests/partition/multi_domain_test.go
+index 1c567c9a4a..3a17df219d 100644
+--- a/pkg/ddl/tests/partition/multi_domain_test.go
++++ b/pkg/ddl/tests/partition/multi_domain_test.go
+@@ -27,6 +27,28 @@ import (
+        "go.uber.org/zap"
+ )
+ 
++func TestMultiSchemaReorganizePartition(t *testing.T) {
++       createSQL := `create table t (a int primary key, b varchar(255), unique index idx_b_global (b) global) partition by range (a) (partition p1 values less than (200), partition pMax values less than (maxvalue))`
++       initFn := func(tkO *testkit.TestKit) {
++               tkO.MustExec(`insert into t values (1,1),(2,2)`)
++       }
++       alterSQL := `alter table t reorganize partition p1 into (partition p0 values less than (100), partition p1 values less than (200))`
++       loopFn := func(tkO, tkNO *testkit.TestKit) {
++               res := tkO.MustQuery(`select schema_state from information_schema.DDL_JOBS where table_name = 't' order by job_id desc limit 1`)
++               schemaState := res.Rows()[0][0].(string)
++               switch schemaState {
++               case model.StateDeleteOnly.String():
++                       tkNO.MustExec(`insert into t values (4,4)`)
++                       tkNO.MustQuery(`select * from t where b = "4"`).Sort().Check(testkit.Rows("4 4"))
++                       tkO.MustQuery(`select * from t where b = "4"`).Sort().Check(testkit.Rows("4 4"))
++               }
++       }
++       postFn := func(tkO *testkit.TestKit) {
++               // nothing
++       }
++       runMultiSchemaTest(t, createSQL, alterSQL, initFn, postFn, loopFn)
++}
++
+ func TestMultiSchemaDropRangePartition(t *testing.T) {
+        createSQL := `create table t (a int primary key, b varchar(255)) partition by range (a) (partition p0 values less than (100), partition p1 values less than (200))`
+        initFn := func(tkO *testkit.TestKit) {
+```
+
+use `make failpoint-enable` and run the test.
+
+### 2. What did you expect to see? (Required)
+test passing
+
+### 3. What did you see instead (Required)
+Read from the second SELECT did not return anything! I.e. the row "4 4" could not be found!
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v8.4.0-alpha-463-ged9a909395
+Edition: Community
+Git Commit Hash: ed9a9093954f6636f8d3c9d09686069626e5b5ce
+Git Branch: master
+UTC Build Time: 2024-10-24 13:20:54
+GoVersion: go1.23.2
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore
+```

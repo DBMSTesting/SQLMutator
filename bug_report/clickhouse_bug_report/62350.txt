@@ -1,0 +1,88 @@
+ID: 62350
+Title: 24.3-lts breaks arrayJoin dependent on lambda expression
+Description:
+After upgrading to 24.3-lts release from 23.12 the following query had stopped working:
+
+* Tried on 24.1 and it worked, will try 24.2 soonish to pinpoint a specific release
+
+```sql
+INSERT INTO db.replicatedAggregatingTable_local
+    SELECT
+        organizationId,
+        topicId,
+        groupUniqArrayArray(eventIds) AS eventIds,
+        groupUniqArrayArray(topicTypes) AS topicTypes,
+        groupUniqArrayArray(regions) AS regions,
+        deviceKeys as deviceIds,
+        arrayJoin(arrayReverseSplit(
+            current, idx -> arrayExists(x -> current.1 != x.1 and current.3 > x.2, arraySlice(sortedSessions, idx + 1)) = 0,
+            arraySort(
+                t -> t.2, -- sort by start time
+                arrayFold(
+                    acc, dKey, dValues -> arrayConcat(acc, arrayMap(x -> (dKey, toUnixTimestamp(x[1]), toUnixTimestamp(x[2])), dValues)),
+                    mapKeys(mapApply(
+                        deviceId, entries -> (
+                            deviceId,
+                            arrayMap(
+                                entry -> [entry[1], entry[-1]],
+                                arrayReverseSplit(
+                                    (eventTimestamp, nextTimestamp) -> dateDiff('seconds', eventTimestamp, nextTimestamp) > 10,
+                                    arraySort(entries) AS sortedEntries,
+                                    arrayShiftLeft(sortedEntries, 1, '1970-01-01 00:00:00'::DateTime)
+                                )
+                            )
+                        ),
+                        arrayFold(
+                            acc, x -> mapUpdate(acc, map(x.1, mapContains(acc, x.1) ? arrayConcat(acc[x.1], x.2) : x.2)),
+                            groupArray((deviceId, entries)),
+                            map()::Map(String, Array(DateTime))
+                        )  -- contains array of separate unprocessed
+                    ) as deviceSessionMaps) as deviceKeys, -- at this point we have a map of device: [sessionStart, sessionEnd][] entries
+                    mapValues(deviceSessionMaps),
+                    array()::Array(Tuple(String, UInt32, UInt32))
+                )
+            ) as sortedSessions,
+            arrayEnumerate(sortedSessions)
+        )) as sessions,
+        length(sessions) > 1 as isNotSolo,
+        toDateTime(sessions[1].2) AS sessionStart,
+        toDateTime(arrayMax(sess -> sess.3, sessions)) AS maxSessionEnd,
+        dateDiff('second', sessionStart, sessionEnd) as sessionDurationInSeconds,
+        ((arrayFold(
+                acc,sess,idx -> (
+                    indexOf(acc.1, sess.1) > 0 ? acc.1 : arrayPushBack(acc.1, sess.1),
+                    acc.2 + toUInt64(arrayMax([0,
+                        arrayMin([
+                            sess.3,
+                            arrayFold(acc,x,curIdx -> curIdx = idx ? acc : arrayMax([x.3, acc]), sessions, sessEnum, toUInt32(0)),
+                            toUnixTimestamp(sessionEnd)
+                        ]) - 
+                        arrayMax([
+                            sess.2,
+                            arrayFold(acc,x,curIdx -> curIdx = idx ? acc : arrayMin([x.2, acc]), sessions, sessEnum, toUInt32(0))
+                        ])
+                        + 1
+                    ]))
+                ),
+                sessions,
+                arrayEnumerate(sessions) as sessEnum,
+                (emptyArrayString(), 0)::Tuple(Array(String), UInt64)
+            ) as deviceCountAndOverlap).1) as sessionDeviceIds,
+        deviceCountAndOverlap.2 as cumulativeSessionInSeconds,
+        length(sessionDeviceIds) as deviceCount,
+        arrayJoin(arrayMap(x -> toDateTime(x), range(toUnixTimestamp(toStartOfMinute(sessionStart)), toUnixTimestamp(toStartOfMinute(maxSessionEnd + toIntervalSecond(60))), 60))) as bucket,
+        arrayMin([bucket + toIntervalSecond(60), maxSessionEnd]) as sessionEnd
+    FROM db.another_agg_table_local
+    WHERE lastUpdate > now() - INTERVAL 15 MINUTE -- will update multiple entries from time to time, potentially we want this to be >= lastUpdateWindow - (overlap)
+    GROUP BY 
+        organizationId,
+        topicId
+```
+
+With the following error:
+
+```
+Code: 36. DB::Exception: Expression in arrayJoin cannot depend on lambda argument: arrayReverseSplit(__lambda_81818250236484651_3830172693888305223, arraySort(__lambda_3300351395863633682_4399777983534596501, arrayFold(__lambda_12259650419080174981_3565112130766842181, mapKeys(mapApply(__lambda_12366991849968339470_14351277049452244980, arrayFold(__lambda_498855992585145301_12437858059378950563, groupArray(tuple(__table1.deviceId, __table1.entries)), _CAST([]_Map(String, Array(DateTime)), 'Map(String, Array(DateTime))'_String)))), mapValues(mapApply(__lambda_12366991849968339470_14351277049452244980, arrayFold(__lambda_498855992585145301_12437858059378950563, groupArray(tuple(__table1.deviceId, __table1.entries)), _CAST([]_Map(String, Array(DateTime)), 'Map(String, Array(DateTime))'_String)))), _CAST([]_Array(Tuple(String, UInt32, UInt32)), 'Array(Tuple(String, UInt32, UInt32))'_String))), arrayEnumerate(arraySort(__lambda_3300351395863633682_4399777983534596501, arrayFold(__lambda_12259650419080174981_3565112130766842181, mapKeys(mapApply(__lambda_12366991849968339470_14351277049452244980, arrayFold(__lambda_498855992585145301_12437858059378950563, groupArray(tuple(__table1.deviceId, __table1.entries)), _CAST([]_Map(String, Array(DateTime)), 'Map(String, Array(DateTime))'_String)))), mapValues(mapApply(__lambda_12366991849968339470_14351277049452244980, arrayFold(__lambda_498855992585145301_12437858059378950563, groupArray(tuple(__table1.deviceId, __table1.entries)), _CAST([]_Map(String, Array(DateTime)), 'Map(String, Array(DateTime))'_String)))), _CAST([]_Array(Tuple(String, UInt32, UInt32)), 'Array(Tuple(String, UInt32, UInt32))'_String))))) . (BAD_ARGUMENTS)
+```
+
+Worked really well (and fast) on 23.12, but not anymore. Would you be able to suggest how to tweak the query so that it starts working again or maybe there is some sort of bug in latest LTS release?

@@ -1,0 +1,68 @@
+ID: 42437
+Title: Hash join is best not to scan probe-side table when build-side table is empty
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+mysql> create table a(id int);
+mysql> create table b(id int);
+mysql> insert into b values ... 32768 rows
+mysql> explain analyze select * from a,b where a.id=b.id;
++------------------------------+----------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+-----------+---------+
+| id                           | estRows  | actRows | task      | access object | execution info                                                                                                                                                                                                                                                                             | operator info                                | memory    | disk    |
++------------------------------+----------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+-----------+---------+
+| HashJoin_9                   | 40960.00 | 0       | root      |               | time:38ms, loops:1, build_hash_table:{total:915.2μs, fetch:915.2μs, build:0s}                                                                                                                                                                                                              | inner join, equal:[eq(test.a.id, test.b.id)] | 0 Bytes   | 0 Bytes |
+| ├─TableReader_12(Build)      | 9990.00  | 0       | root      |               | time:827.5μs, loops:1, cop_task: {num: 1, max: 1.02ms, proc_keys: 0, rpc_num: 1, rpc_time: 958.9μs, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}                                                                                                                                   | data:Selection_11                            | 253 Bytes | N/A     |
+| │ └─Selection_11             | 9990.00  | 0       | cop[tikv] |               | tikv_task:{time:0s, loops:1}, scan_detail: {total_keys: 1, get_snapshot_time: 47.2μs, rocksdb: {block: {}}}                                                                                                                                                                                | not(isnull(test.a.id))                       | N/A       | N/A     |
+| │   └─TableFullScan_10       | 10000.00 | 0       | cop[tikv] | table:a       | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                                                                               | keep order:false, stats:pseudo               | N/A       | N/A     |
+| └─TableReader_15(Probe)      | 32768.00 | 1024    | root      |               | time:37.7ms, loops:1, cop_task: {num: 3, max: 12.8ms, min: 12.3ms, avg: 12.5ms, p95: 12.8ms, max_proc_keys: 992, p95_proc_keys: 992, tot_proc: 34ms, rpc_num: 3, rpc_time: 37.5ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}                                                    | data:Selection_14                            | 11.9 KB   | N/A     |
+|   └─Selection_14             | 32768.00 | 1696    | cop[tikv] |               | tikv_task:{proc max:12ms, min:12ms, avg: 12ms, p80:12ms, p95:12ms, iters:12, tasks:3}, scan_detail: {total_process_keys: 1696, total_process_keys_size: 62752, total_keys: 1699, get_snapshot_time: 112.1μs, rocksdb: {delete_skipped_count: 95232, key_skipped_count: 96928, block: {}}}  | not(isnull(test.b.id))                       | N/A       | N/A     |
+|     └─TableFullScan_13       | 32768.00 | 1696    | cop[tikv] | table:b       | tikv_task:{proc max:12ms, min:12ms, avg: 12ms, p80:12ms, p95:12ms, iters:12, tasks:3}                                                                                                                                                                                                      | keep order:false                             | N/A       | N/A     |
++------------------------------+----------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+-----------+---------+
+7 rows in set (0.04 sec)
+
+mysql> alter table b set tiflash replica 1;
+mysql> explain analyze select * from a,b where a.id=b.id;
++------------------------------+----------+---------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+-----------+---------+
+| id                           | estRows  | actRows | task         | access object | execution info                                                                                                                                                                                                                                             | operator info                                | memory    | disk    |
++------------------------------+----------+---------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+-----------+---------+
+| HashJoin_9                   | 40960.00 | 0       | root         |               | time:66.5ms, loops:1, build_hash_table:{total:1.2ms, fetch:1.2ms, build:0s}                                                                                                                                                                                | inner join, equal:[eq(test.a.id, test.b.id)] | 0 Bytes   | 0 Bytes |
+| ├─TableReader_12(Build)      | 9990.00  | 0       | root         |               | time:1.12ms, loops:1, cop_task: {num: 1, max: 1.32ms, proc_keys: 0, rpc_num: 1, rpc_time: 1.24ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}                                                                                                     | data:Selection_11                            | 261 Bytes | N/A     |
+| │ └─Selection_11             | 9990.00  | 0       | cop[tikv]    |               | tikv_task:{time:0s, loops:1}, scan_detail: {total_keys: 1, get_snapshot_time: 170.8μs, rocksdb: {block: {}}}                                                                                                                                               | not(isnull(test.a.id))                       | N/A       | N/A     |
+| │   └─TableFullScan_10       | 10000.00 | 0       | cop[tikv]    | table:a       | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                                               | keep order:false, stats:pseudo               | N/A       | N/A     |
+| └─TableReader_18(Probe)      | 32768.00 | 1024    | root         |               | time:66.2ms, loops:1, cop_task: {num: 1, max: 61.5ms, proc_keys: 0, rpc_num: 1, rpc_time: 61.5ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}                                                                                                     | data:Selection_17                            | 256.7 KB  | N/A     |
+|   └─Selection_17             | 32768.00 | 32768   | cop[tiflash] |               | tiflash_task:{time:13.3ms, loops:1, threads:1}                                                                                                                                                                                                             | not(isnull(test.b.id))                       | N/A       | N/A     |
+|     └─TableFullScan_16       | 32768.00 | 32768   | cop[tiflash] | table:b       | tiflash_task:{time:12.3ms, loops:1, threads:1}, tiflash_scan:{dtfile:{total_scanned_packs:4, total_skipped_packs:0, total_scanned_rows:32768, total_skipped_rows:0, total_rs_index_load_time: 0ms, total_read_time: 1ms}, total_create_snapshot_time: 0ms} | keep order:false                             | N/A       | N/A     |
++------------------------------+----------+---------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+-----------+---------+
+7 rows in set (0.07 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+The table scan is not executed on probe side, just like mysql or oracle, e.g. mysql execution plan:
+```
+mysql> explain analyze select /*+ hash_join(b,a) */ * from a,b where a.id=b.id;
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| EXPLAIN                                                                                                                                                                                                                                                                      |
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| -> Inner hash join (b.id = a.id)  (cost=3301.40 rows=3277) (actual time=0.029..0.029 rows=0 loops=1)
+    -> Table scan on b  (cost=351.93 rows=32768) (never executed)
+    -> Hash
+        -> Table scan on a  (cost=0.35 rows=1) (actual time=0.023..0.023 rows=0 loops=1)
+ |
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+The probe side actually performs the table scan, resulting in unnecessary overhead.
+
+### 4. What is your TiDB version? (Required)
+
+master
+

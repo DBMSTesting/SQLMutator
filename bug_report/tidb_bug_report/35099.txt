@@ -1,0 +1,50 @@
+ID: 35099
+Title: correlated-agg in group by can't be detected and optimized & groupBy building should be after selection
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+create table t(a int, b int)
+tidb> explain select 1 from t n where b>0 group by (select count(n.b) from t);
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+correlated-agg should be evaluated outside, and be linked into its sub-query.
+
+the main reason is that: 
+`resolveGroup` build the correlated-agg in the sub-query directly. (plan tree has changed after that)
+
+MySQL is special: it allows sub-query in where and group clause, that's why we need to analyze these two before we really build them
+
+we need to split this functionality into two parts:
+
+1: we need a group clause analysis process
+2: we need a building group process after the selection (selection should be built before groupby)
+
+### 3. What did you see instead (Required)
+```
++----------------------------------+----------+-----------+---------------+-------------------------------------------------+
+| id                               | estRows  | task      | access object | operator info                                   |
++----------------------------------+----------+-----------+---------------+-------------------------------------------------+
+| Projection_10                    | 3333.33  | root      |               | 1->Column#8                                     |
+| └─HashAgg_11                     | 3333.33  | root      |               | group by:Column#7, funcs:firstrow(1)->Column#11 |
+|   └─Apply_13                     | 3333.33  | root      |               | CARTESIAN left outer join                       |
+|     ├─TableReader_16(Build)      | 3333.33  | root      |               | data:Selection_15                               |
+|     │ └─Selection_15             | 3333.33  | cop[tikv] |               | gt(test.t.b, 0)                                 |
+|     │   └─TableFullScan_14       | 10000.00 | cop[tikv] | table:n       | keep order:false, stats:pseudo                  |
+|     └─HashAgg_17(Probe)          | 1.00     | root      |               | funcs:count(test.t.b)->Column#7                 |
+|       └─TableReader_23           | 10000.00 | root      |               | data:TableFullScan_22                           |
+|         └─TableFullScan_22       | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                  |
++----------------------------------+----------+-----------+---------------+-------------------------------------------------+
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master
+

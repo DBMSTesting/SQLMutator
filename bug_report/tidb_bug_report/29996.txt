@@ -1,0 +1,104 @@
+ID: 29996
+Title: lightning max-error record tripled when backend is tidb
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. Do lightning import for data with 2 type errors (e.g. type error), and check max-error records in lightning_task_info.type_error_v1
+
+Test data:
+```
+[root@centos76_vm type_error]# tail max_error.t2.1.csv
+21348226,"lGztBz","2021-11-17 00:00:00"
+89250625,"ltDGh","2021-11-17 00:00:00"
+9207504,"iEMNwuP","2021-11-17 00:00:00"
+1,"b1","2021-11-14 00:00:00"
+2,"b2","2021-11-14 00:00:00"
+3,"b3","2021-11-14 00:00:00"
+4,"b4","2021-11-14 00:00:00"
+"xxx","b5","2021-11-15 00:00:00"
+5,"b6","0"
+
+[root@centos76_vm type_error]# cat max_error.t2-schema.sql
+/*!40101 SET NAMES binary*/;
+CREATE TABLE `t2` (
+  `a` int(11) NOT NULL,
+  `b` varchar(10) DEFAULT NULL,
+  `c` datetime DEFAULT NULL,
+  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */,
+  UNIQUE KEY `uk_b` (`b`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+```
+lightning config is as below
+```SQL
+[root@centos76_vm type_error]# grep -v ^# lightning.toml
+[lightning]
+level = "info"
+file = "tidb-lightning.log"
+max-error = 10
+
+[checkpoint]
+driver = "mysql"
+
+[tikv-importer]
+backend = "tidb"
+sorted-kv-dir = "/home/sorted-kv-dir"
+
+[mydumper]
+data-source-dir = "s3://nfs/tools_test_data/max_error/type_error?access-key=minioadmin&secret-access-key=minioadmin&endpoint=http%3a%2f%2fminio.pingcap.net%3a9000&force-path-style=true"
+no-schema = false
+
+filter = ['*.*', 'mysql.*', '!sys.*', '!INFORMATION_SCHEMA.*', '!PERFORMANCE_SCHEMA.*', '!METRICS_SCHEMA.*', '!INSPECTION_SCHEMA.*']
+
+[mydumper.csv]
+separator = ','
+delimiter = '"'
+header = true
+
+
+[tidb]
+host = "172.16.6.217"
+port = 4000
+user = "root"
+status-port = 10080
+sql-mode = "STRICT_TRANS_TABLES"
+
+```
+
+### 2. What did you expect to see? (Required)
+lightning_task_info.type_error_v1 should record 2 rows with type error
+
+### 3. What did you see instead (Required)
+lightning_task_info.type_error_v1 recorded 6 rows with type error, the records are tripled.
+This issue is NOT seem when backend is local.
+
+```SQL
+mysql> select * from lightning_task_info.type_error_v1;
++---------------------+----------------------------+------------------+--------------------+--------+-------------------------------------------------------------------+------------------------------------+
+| task_id             | create_time                | table_name       | path               | offset | error                                                             | row_data                           |
++---------------------+----------------------------+------------------+--------------------+--------+-------------------------------------------------------------------+------------------------------------+
+| 1637567621075919308 | 2021-11-22 15:53:42.370553 | `max_error`.`t2` | max_error.t2.1.csv |   3803 | Error 1366: Incorrect int value: 'xxx' for column 'a' at row 1    | ('xxx','b5','2021-11-15 00:00:00') |
+| 1637567621075919308 | 2021-11-22 15:53:42.379626 | `max_error`.`t2` | max_error.t2.1.csv |   3836 | Error 1292: Incorrect datetime value: '0' for column 'c' at row 1 | ('5','b6','0')                     |
+| 1637567621075919308 | 2021-11-22 15:53:42.507533 | `max_error`.`t2` | max_error.t2.1.csv |   3803 | Error 1366: Incorrect int value: 'xxx' for column 'a' at row 1    | ('xxx','b5','2021-11-15 00:00:00') |
+| 1637567621075919308 | 2021-11-22 15:53:42.512061 | `max_error`.`t2` | max_error.t2.1.csv |   3836 | Error 1292: Incorrect datetime value: '0' for column 'c' at row 1 | ('5','b6','0')                     |
+| 1637567621075919308 | 2021-11-22 15:53:42.640734 | `max_error`.`t2` | max_error.t2.1.csv |   3803 | Error 1366: Incorrect int value: 'xxx' for column 'a' at row 1    | ('xxx','b5','2021-11-15 00:00:00') |
+| 1637567621075919308 | 2021-11-22 15:53:42.645454 | `max_error`.`t2` | max_error.t2.1.csv |   3836 | Error 1292: Incorrect datetime value: '0' for column 'c' at row 1 | ('5','b6','0')                     |
++---------------------+----------------------------+------------------+--------------------+--------+-------------------------------------------------------------------+------------------------------------+
+6 rows in set (0.00 sec)
+
+```
+
+### 4. What is your TiDB version? (Required)
+[root@centos76_vm type_error]# tiup tidb-lightning:v5.3.0 -V
+Starting component `tidb-lightning`: /root/.tiup/components/tidb-lightning/v5.3.0/tidb-lightning -V
+Release Version: v5.3.0
+Git Commit Hash: 79e237d9d336e78f1933e38940f2e1703e383b1f
+Git Branch: heads/refs/tags/v5.3.0
+Go Version: go1.16.4
+UTC Build Time: 2021-11-18 13:06:05
+Race Enabled: false
+
+

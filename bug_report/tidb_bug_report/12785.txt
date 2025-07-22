@@ -1,0 +1,60 @@
+ID: 12785
+Title: Wrong result for index merge join when using projection upon the indexlookup
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+Wrong result for index merge join when using projection upon the indexlookup.
+(Hint: I wil try to find a SQL that don't need to change the cost model , and also trigger  the bug. )
+```
+use test;
+drop table if exists t1, t2;
+create table t1(a int, b date, c float, primary key(a, b));
+create table t2(a int primary key);
+insert into t1 values(1, '2017-11-29', 2.2);
+insert into t2 values(1);
+select /*+ TIDB_INLJ(t1) */ * from t1 join t2 on t1.a=t2.a;
+```
+2. What did you expect to see?
+```
+tidb> select /*+ TIDB_INLJ(t1) */ * from t1 join t2 on t1.a=t2.a;
++---+------------+------+---+
+| a | b          | c    | a |
++---+------------+------+---+
+| 1 | 2017-11-29 |  2.2 | 1 |
++---+------------+------+---+
+1 row in set (0.01 sec)
+```
+
+3. What did you see instead?
+
+I change the cost model , and focus to use index merge join.
+
+```
+tidb> select /*+ TIDB_INLJ(t1) */ * from t1 join t2 on t1.a=t2.a;
+Empty set (0.00 sec)
+
+tidb> desc analyze select /*+ TIDB_INLJ(t1) */ * from t1 join t2 on t1.a=t2.a;
++--------------------------+-------+-----------+-------------------------------------------------------------------------------------------------+------------------------------------------------------+-----------+
+| id                       | count | task      | operator info                                                                                   | execution info                                       | memory    |
++--------------------------+-------+-----------+-------------------------------------------------------------------------------------------------+------------------------------------------------------+-----------+
+| IndexMergeJoin_25        | 1.00  | root      | inner join, inner:Projection_23, outer key:Column#5, inner key:Column#1                         | time:546.102µs, loops:2, rows:0                      | 745 Bytes |
+| ├─Projection_23          | 1.00  | root      | Column#1, Column#2, Column#3                                                                    | time:73.202µs, loops:1, rows:0                       | N/A       |
+| │ └─IndexLookUp_22       | 1.00  | root      |                                                                                                 | time:72.229µs, loops:1, rows:0                       | 0 Bytes   |
+| │   ├─IndexScan_20       | 1.00  | cop[tikv] | table:t1, index:a, b, range: decided by [eq(Column#1, Column#5)], keep order:true, stats:pseudo | time:0s, loops:0, rows:0                             | N/A       |
+| │   └─TableScan_21       | 1.00  | cop[tikv] | table:t1, keep order:false, stats:pseudo                                                        | time:0s, loops:0, rows:0                             | N/A       |
+| └─TableReader_29         | 1.00  | root      | data:TableScan_28                                                                               | time:108.032µs, loops:2, rows:1, rpc time:136.84µs   | 127 Bytes |
+|   └─TableScan_28         | 1.00  | cop[tikv] | table:t2, range:[-inf,+inf], keep order:false, stats:pseudo                                     | time:73.076µs, loops:2, rows:1                       | N/A       |
++--------------------------+-------+-----------+-------------------------------------------------------------------------------------------------+------------------------------------------------------+-----------+
+7 rows in set (0.00 sec)
+
+```
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+master - e168fd93f 

@@ -1,0 +1,169 @@
+ID: 15091
+Title: Reusable column expressions not cached
+Description:
+### What happens?
+
+Referencing a reusable column expression seems to execute the expression over and over instead of caching its result and reusing that result.
+
+### To Reproduce
+
+**Prepare test data**
+First create a test CSV file with a line number and a struct as a string (this string will be parsed and checked).
+
+```sql
+copy (
+select
+  i as linenumber,
+	{ c1: 'a', c2: 'b', c3: i%3} as c1
+from range(1, 10_000_001) as t(i)
+) to 'test-struct.csv' (format CSV, sep '|', header false)
+;
+```
+
+**Example of reusable column expression query (slow, high cpu)**
+
+```sql
+.timer on
+set threads to 4;
+
+with csv as (
+	select 
+	  *,
+  from  read_csv('test-struct.csv', header = false, sep = '|', columns = {
+		'linenumber': 'BIGINT',
+		'c1': 'VARCHAR',
+  })
+)
+, validate as (
+	select 
+	  *,
+		-- is the value missing
+		"c1" is null or length("c1")=0 or "c1" in ('''''','null','N/A') as "c1#missing",
+
+		-- cast when not missing
+		case when not "c1#missing" then try_cast("c1" as struct("c1" varchar, "c2" varchar, "c3" varchar)) else null end as "c1#cast",
+
+		-- determine if members are missing 
+		"c1#cast"['c1'] is null or length("c1#cast"['c1'])=0 or "c1#cast"['c1'] in ('''''','null','N/A') as "c1#c1#missing",
+		"c1#cast"['c2'] is null or length("c1#cast"['c2'])=0 or "c1#cast"['c2'] in ('''''','null','N/A') as "c1#c2#missing",
+		"c1#cast"['c3'] is null or length("c1#cast"['c3'])=0 or "c1#cast"['c3'] in ('''''','null','N/A') as "c1#c3#missing",
+
+		-- is member c3 an integer
+		case when not "c1#c3#missing" then try_cast( "c1#cast"['c3'] as integer) end as "c1#c3#cast",
+
+		-- when a valid integer is the value a positive number
+		"c1#c3#cast" >= 0 as "c1#c3#cast#positive_number",
+
+		-- when a positive integer is it an even number
+		case when "c1#c3#cast#positive_number" then "c1#c3#cast" % 2 == 0 end as "c1#c3#cast#even_number"
+
+  from csv
+)
+select 
+  *
+from validate 
+;
+```
+
+The result of the timer: Run Time (s): real 10.965 user 41.954573 sys 0.134134
+
+**Rewritten query, somehow results are cached when wrapped in a struct**
+
+```sql
+with csv as (
+	select 
+	  *,
+  from  read_csv('test-struct.csv', header = false, sep = '|', columns = {
+		'linenumber': 'BIGINT',
+		'c1': 'VARCHAR',
+  })
+)
+, basic_parse as (
+	select 
+	  *,
+
+		{
+			-- is the value missing
+			"missing": "c1" is null or length("c1")=0 or "c1" in ('''''','null','N/A'),
+
+			-- cast when not missing
+			"try_cast": case when not ("c1" is null or length("c1")=0 or "c1" in ('''''','null','N/A')) then try_cast("c1" as struct("c1" varchar, "c2" varchar, "c3" varchar)) else null end
+		} as "c1#cast",
+
+  from csv
+)
+, validate as (
+	select 
+	  *,
+
+		-- determine if members are missing 
+		"c1#cast"."try_cast"."c1" is null or length("c1#cast"."try_cast"."c1")=0 or "c1#cast"."try_cast"."c1" in ('''''','null','N/A') as "c1#c1#missing",
+		"c1#cast"."try_cast"."c2" is null or length("c1#cast"."try_cast"."c2")=0 or "c1#cast"."try_cast"."c2" in ('''''','null','N/A') as "c1#c2#missing",
+		"c1#cast"."try_cast"."c3" is null or length("c1#cast"."try_cast"."c3")=0 or "c1#cast"."try_cast"."c3" in ('''''','null','N/A') as "c1#c3#missing",
+
+		-- is member c3 an integer
+		case when not "c1#c3#missing" then try_cast( "c1#cast"."try_cast"."c3" as integer) end as "c1#c3#cast",
+
+		-- when a valid integer is the value a positive number
+		"c1#c3#cast" >= 0 as "c1#c3#cast#positive_number",
+
+		-- when a positive integer is it an even number
+		case when "c1#c3#cast#positive_number" then "c1#c3#cast" % 2 == 0 end as "c1#c3#cast#even_number"
+
+  from basic_parse
+)
+select 
+  *
+from validate 
+;
+```
+
+The result of the timer: Run Time (s): real 0.965 user 3.499025 sys 0.116607
+
+
+This is a significant difference. But it makes the query much more complex and also the fact that a result is cached when wrapped in an object is more or less an accidental side effect we ran into while testing.
+
+Shouldn't reusable column expression be cached by default?
+PS: we have other test results in which we reduced the amount of CPU from 200 secs to 5 secs by wrapping expressions in structs with CTE's.
+
+
+
+### OS:
+
+macOs Sonoma 14.4.1 on M3
+
+### DuckDB Version:
+
+v1.1.3
+
+### DuckDB Client:
+
+cli
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Erik Jansen
+
+### Affiliation:
+
+I-Refact BV
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

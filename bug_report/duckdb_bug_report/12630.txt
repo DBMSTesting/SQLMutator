@@ -1,0 +1,64 @@
+ID: 12630
+Title: Refactor `quantile` aggregate - clean up code & support `quantile_disc`/`median` for all types
+Description:
+This PR makes `quantile` and `median` work for all types using sort keys. Previously, unsupported types would be cast to `VARCHAR` instead and sorted using lexicographical string ordering, leading to confusing quantile results:
+
+```sql
+select quantile([i], 0.5) AS res from range(10000) t(i);
+┌─────────┐
+│   res   │
+│ varchar │
+├─────────┤
+│ [54]    │
+└─────────┘
+```
+
+This PR now produces the correct/expected result for all types:
+
+```sql
+D select quantile([i], 0.5) AS res from range(10000) t(i);
+┌─────────┐
+│   res   │
+│ int64[] │
+├─────────┤
+│ [4999]  │
+└─────────┘
+```
+
+For string/sort key quantiles, we also switch from using `std::string` to allocating strings using the aggregate arena allocator, greatly increasing performance:
+
+```sql
+create table quantile as select concat('thisisalongprefix', range) s, random() from range(10000000) union all values (NULL, 0.1), (NULL, 0.5), (NULL, 0.9) order by 2;
+SELECT quantile(s, 0.5) FROM quantile;
+-- old: 2.8s, new: 0.38s
+```
+
+This PR also does a lot of code clean-up - moving code to different files, reducing duplicate code, and in particular cleaning up a lot of the code around handling of decimals. We also fix some consistency issues here - e.g. `median` now does a continuous quantile for decimals (as it also does for other numeric types), e.g.:
+
+```sql
+-- new behavior
+D select median(r) int_median, median(r::decimal(10,2)) AS dec_median from range(10000) t(r);
+┌────────────┬───────────────┐
+│ int_median │  dec_median   │
+│   double   │ decimal(10,2) │
+├────────────┼───────────────┤
+│     4999.5 │       4999.50 │
+└────────────┴───────────────┘
+```
+
+Previously we would do a discrete quantile for decimals instead, but a continuous quantile for other numeric types:
+
+```sql
+-- old behavior
+D select median(r) int_median, median(r::decimal(10,2)) AS dec_median from range(10000) t(r);
+┌────────────┬───────────────┐
+│ int_median │  dec_median   │
+│   double   │ decimal(10,2) │
+├────────────┼───────────────┤
+│     4999.5 │       4999.00 │
+└────────────┴───────────────┘
+```
+
+
+
+We also partially unify the `mode`/`histogram`/`quantile` code for sort keys using a new `AggregateSortKeyHelpers` class.

@@ -1,0 +1,137 @@
+ID: 12983
+Title: Error Reading From Delta Table Containing >=100 Writes
+Description:
+### What happens?
+
+Hello! When reading from a delta table with `delta_scan` I get a `InvalidInputException` and  `Error: IO Error: Hit DeltaKernel FFI error` when the table has >= 100 writes to it. Reading works up till 100 writes.
+
+I use the python `deltalake` library for writing (and also tried `polars` `df`'s `write_delta` method).
+
+I tried different variations on the type of df that was being written to the table, the return type from the duckdb call, partitions vs. no partitions, `overwrite` vs `append`, and a few others. I get the same exception after 100 writes in all cases.
+
+The Error is as follows:
+```
+InvalidInputException: Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result
+Error: IO Error: Hit DeltaKernel FFI error (from: While trying to read from delta table: './test_table/'): Hit error: 2 (ArrowError) with message (Invalid argument error: Incorrect datatype for StructArray field "partitionValues", expected Map(Field { name: "entries", data_type: Struct([Field { name: "keys", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "values", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, false) got Map(Field { name: "entries", data_type: Struct([Field { name: "key", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "value", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, false))
+```
+
+### To Reproduce
+
+
+Example code to reproduce:
+```python
+import duckdb
+import pandas as pd
+import polars as pl
+import numpy as np
+from deltalake import write_deltalake
+
+
+con = duckdb.connect()
+
+df_size = 10
+loops = 101
+delta_table_path = "./test_table"
+
+# tried different options, but the error persists
+df_create_class = pd.DataFrame
+# df_create_class = pl.DataFrame
+df_return_method = "df"
+# return_method = "pl"
+mode = "append"
+# mode = "overwrite"
+partition_by = None
+# partition_by = ["c"]
+
+for i in range(loops):
+    # create df
+    df = df_create_class({
+        'a': np.random.randint(0, 5, size=df_size),
+        'b': np.random.randint(0, 5, size=df_size),
+        'c': np.random.randint(0, 5, size=df_size),
+    })
+
+    # write it
+    if df_create_class == pd.DataFrame:
+        write_deltalake(delta_table_path, df, mode=mode, partition_by=partition_by)
+    else:
+        df.write_delta(delta_table_path, mode=mode, delta_write_options={"partition_by": partition_by})
+
+    print("writes: ", i+1)
+
+    # attempt to read back
+    qry = f"""
+    SELECT *
+    FROM delta_scan('{delta_table_path}')
+    """
+    result_df = getattr(con.query(qry), df_return_method)()
+
+    print('table size: ', len(result_df))
+```
+
+The tail of the output and exception thrown are as follows:
+```
+appends:  95
+table size:  950
+appends:  96
+table size:  960
+appends:  97
+table size:  970
+appends:  98
+table size:  980
+appends:  99
+table size:  990
+appends:  100
+```
+
+```python
+---------------------------------------------------------------------------
+InvalidInputException                     Traceback (most recent call last)
+Cell In[10], [line 45](vscode-notebook-cell:?execution_count=10&line=45)
+     [40](vscode-notebook-cell:?execution_count=10&line=40) # attempt to read back
+     [41](vscode-notebook-cell:?execution_count=10&line=41) qry = f"""
+     [42](vscode-notebook-cell:?execution_count=10&line=42) SELECT *
+     [43](vscode-notebook-cell:?execution_count=10&line=43) FROM delta_scan('{delta_table_path}')
+     [44](vscode-notebook-cell:?execution_count=10&line=44) """
+---> [45](vscode-notebook-cell:?execution_count=10&line=45) result_df = getattr(con.query(qry), return_method)()
+     [47](vscode-notebook-cell:?execution_count=10&line=47) print('table size: ', len(result_df))
+
+InvalidInputException: Invalid Input Error: Attempting to execute an unsuccessful or closed pending query result
+Error: IO Error: Hit DeltaKernel FFI error (from: While trying to read from delta table: './test_table/'): Hit error: 2 (ArrowError) with message (Invalid argument error: Incorrect datatype for StructArray field "partitionValues", expected Map(Field { name: "entries", data_type: Struct([Field { name: "keys", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "values", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, false) got Map(Field { name: "entries", data_type: Struct([Field { name: "key", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "value", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, false))
+```
+
+### OS:
+
+MacOS Sonoma Version 14.4.1 (23E224) (Apple Silicon M2 Chip)
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+python 3.11.9
+
+### Full Name:
+
+T Drobbin
+
+### Affiliation:
+
+NA
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

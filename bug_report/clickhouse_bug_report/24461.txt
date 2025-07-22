@@ -1,0 +1,122 @@
+ID: 24461
+Title: Crash when chaining different uniq*State
+Description:
+**Describe the bug**
+
+Chaining **different** uniqXXXXState calls (uniqState, uniqExactState, uniqThetaState, uniqHLL12State or uniqCombinedState) crashes the server.
+
+**Does it reproduce on recent release?**
+
+Yes. I've tested 20.7 and current master/HEAD.
+
+**How to reproduce**
+
+Example with a query:
+
+```sql
+SELECT
+    id,
+    uniqState(s)
+FROM
+(
+    SELECT
+        number % 10 as id,
+        uniqExactState(number) as s
+    FROM
+    (
+        SELECT number
+        FROM system.numbers
+        LIMIT 1000
+    )
+    GROUP BY number
+)
+GROUP BY id
+```
+
+The other way around (uniqState -> uniqExactState) also crashes, as well as other combinations with other uniq*State.
+
+Same can be done using a table:
+```sql
+DROP TABLE IF EXISTS uniq_crash_table;
+
+CREATE TABLE uniq_crash_table
+(
+    `id` Int64,
+    `hits` AggregateFunction(uniq, UInt64)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY id
+ORDER BY id AS
+SELECT
+    number % 10 AS id,
+    uniqState(number) AS hits
+FROM
+(
+    SELECT number
+    FROM system.numbers
+    LIMIT 1000
+)
+GROUP BY number
+
+SELECT
+    id,
+    uniqExactState(hits)
+FROM uniq_crash_table
+GROUP BY id
+```
+
+**Expected behavior**
+
+The server shouldn't crash. If the SQL is invalid then an exception should be raised instead.
+
+**Error message and/or stacktrace**
+
+Different queries crash in different parts, for example when running the first query from above you get an error like this in the clickhouse-client:
+```
+Exception on client:
+Code: 173. DB::ErrnoException: Allocator: Cannot mmap 1.00 TiB., errno: 12, strerror: Cannot allocate memory: while receiving packet from localhost:9000
+
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 21.7.1 revision 54448.
+```
+
+And the coredump looks like this:
+
+```
+(gdb) bt
+#0  0x00007f2685cacd22 in raise () from /usr/lib/libc.so.6
+#1  0x00007f2685c96862 in abort () from /usr/lib/libc.so.6
+#2  0x00007f2687701fd4 in terminate_handler () at ../base/daemon/BaseDaemon.cpp:432
+#3  0x00007f2685e7d888 in std::__terminate (func=0x2) at ../contrib/libcxxabi/src/cxa_handlers.cpp:59
+#4  0x00007f2685e7d7ea in std::terminate () at ../contrib/libcxxabi/src/cxa_handlers.cpp:88
+#5  0x00007f2683ee213b in __clang_call_terminate () from /mnt/ch/ClickHouse/build/src/AggregateFunctions/libclickhouse_aggregate_functions.so
+#6  0x00007f2685579690 in HashTable<unsigned long, HashTableCell<unsigned long, HashCRC32<unsigned long>, HashTableNoState>, HashCRC32<unsigned long>, HashTableGrower<4ul>, AllocatorWithStackMemory<Allocator<true, true>, 128ul, 1ul> >::~HashTable (
+    this=0x7f258483f0a0) at ../src/Common/HashTable/HashTable.h:703
+#7  DB::AggregateFunctionUniqExactData<unsigned long>::~AggregateFunctionUniqExactData (this=0x7f258483f0a0) at ../src/AggregateFunctions/AggregateFunctionUniq.h:93
+#8  DB::IAggregateFunctionDataHelper<DB::AggregateFunctionUniqExactData<unsigned long>, DB::AggregateFunctionUniq<unsigned long, DB::AggregateFunctionUniqExactData<unsigned long> > >::destroy (this=<optimized out>, place=0x7f258483f0a0 "")
+    at ../src/AggregateFunctions/IAggregateFunction.h:443
+#9  0x00007f267960cdbc in DB::ColumnAggregateFunction::~ColumnAggregateFunction (this=0x7f2566fbc980) at ../src/Columns/ColumnAggregateFunction.cpp:80
+#10 0x00007f267960cf8e in DB::ColumnAggregateFunction::~ColumnAggregateFunction (this=0x7f2566fbc980) at ../src/Columns/ColumnAggregateFunction.cpp:77
+#11 0x00007f2687eb8c32 in boost::sp_adl_block::intrusive_ptr_release<DB::IColumn, boost::sp_adl_block::thread_safe_counter> (p=<optimized out>) at ../contrib/boost/boost/smart_ptr/intrusive_ref_counter.hpp:173
+#12 boost::intrusive_ptr<DB::IColumn const>::~intrusive_ptr (this=0x7f25831a4770) at ../contrib/boost/boost/smart_ptr/intrusive_ptr.hpp:98
+#13 DB::ColumnWithTypeAndName::~ColumnWithTypeAndName (this=0x7f25831a4770) at ../src/Core/ColumnWithTypeAndName.h:19
+#14 std::__1::allocator<DB::ColumnWithTypeAndName>::destroy (this=0x7f258edf0a50, __p=0x7f25831a4770) at ../contrib/libcxx/include/memory:891
+#15 std::__1::allocator_traits<std::__1::allocator<DB::ColumnWithTypeAndName> >::__destroy<DB::ColumnWithTypeAndName> (__a=..., __p=0x7f25831a4770) at ../contrib/libcxx/include/__memory/allocator_traits.h:539
+#16 std::__1::allocator_traits<std::__1::allocator<DB::ColumnWithTypeAndName> >::destroy<DB::ColumnWithTypeAndName> (__a=..., __p=0x7f25831a4770) at ../contrib/libcxx/include/__memory/allocator_traits.h:487
+#17 std::__1::__vector_base<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >::__destruct_at_end (this=0x7f258edf0a40, __new_last=0x7f25831a4740) at ../contrib/libcxx/include/vector:428
+#18 std::__1::__vector_base<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >::clear (this=0x7f258edf0a40) at ../contrib/libcxx/include/vector:371
+#19 std::__1::__vector_base<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >::~__vector_base (this=0x7f258edf0a40) at ../contrib/libcxx/include/vector:465
+#20 std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >::~vector (this=0x7f258edf0a40) at ../contrib/libcxx/include/vector:557
+#21 DB::Block::~Block (this=0x7f258edf0a40) at ../src/Core/Block.h:25
+#22 0x00007f26783e29b9 in DB::TCPHandler::processOrdinaryQueryWithProcessors (this=<optimized out>, this@entry=0x7f2583167500) at ../src/Server/TCPHandler.cpp:722
+#23 0x00007f26783dd487 in DB::TCPHandler::runImpl (this=0x7f2583167500) at ../src/Server/TCPHandler.cpp:331
+#24 0x00007f26783e90a9 in DB::TCPHandler::run (this=0x7f2583167500) at ../src/Server/TCPHandler.cpp:1621
+#25 0x00007f26869b110c in Poco::Net::TCPServerConnection::start (this=0x2) at ../contrib/poco/Net/src/TCPServerConnection.cpp:43
+#26 0x00007f26869b1647 in Poco::Net::TCPServerDispatcher::run (this=0x7f2583d8d800) at ../contrib/poco/Net/src/TCPServerDispatcher.cpp:115
+#27 0x00007f268668ddaa in Poco::PooledThread::run (this=0x7f266f769380) at ../contrib/poco/Foundation/src/ThreadPool.cpp:199
+#28 0x00007f268668b660 in Poco::ThreadImpl::runnableEntry (pThread=0x7f266f7693b8) at ../contrib/poco/Foundation/src/Thread_POSIX.cpp:345
+#29 0x00007f2685f9c259 in start_thread () from /usr/lib/libpthread.so.0
+#30 0x00007f2685d6e5e3 in clone () from /usr/lib/libc.so.6
+```
+
+Any pointers on where to look to fix this myself are also appreciated.

@@ -1,0 +1,90 @@
+ID: 59718
+Title: BR snapshot restore reuses the last global ID when pre-allocates table IDs
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+Upstream SQL and backup them
+```
+MySQL [(none)]> create table test.t1 (id int, name char(20));
+Query OK, 0 rows affected (0.12 sec)
+
+MySQL [(none)]> create table test.t2 (id int, name char(20));
+Query OK, 0 rows affected (0.10 sec)
+
+MySQL [(none)]> create table test.t3 (id int, name char(20));
+Query OK, 0 rows affected (0.10 sec)
+
+MySQL [(none)]> SELECT TABLE_SCHEMA, TABLE_NAME, TIDB_TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='test' AND table_name like 't%';
++--------------+------------+---------------+
+| TABLE_SCHEMA | TABLE_NAME | TIDB_TABLE_ID |
++--------------+------------+---------------+
+| test         | t1         |           104 |
+| test         | t2         |           106 |
+| test         | t3         |           108 |
++--------------+------------+---------------+
+3 rows in set (0.00 sec)
+```
+
+Downstream SQL
+```
+MySQL [(none)]> create table test.t0 (id int primary key, name char(20)) partition by HASH(id) partitions 1;
+Query OK, 0 rows affected (0.11 sec)
+
+MySQL [(none)]> SELECT TABLE_SCHEMA, TABLE_NAME, TIDB_TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='test' AND table_name like 't%';
++--------------+------------+---------------+
+| TABLE_SCHEMA | TABLE_NAME | TIDB_TABLE_ID |
++--------------+------------+---------------+
+| test         | t0         |           104 |
++--------------+------------+---------------+
+1 row in set (0.00 sec)
+
+MySQL [(none)]> SELECT TABLE_SCHEMA, TABLE_NAME, PARTITION_NAME, TIDB_PARTITION_ID FROM INFORMATION_SCHEMA.PARTITIONS WHERE table_schema='test' AND table_name like 't%';
++--------------+------------+----------------+-------------------+
+| TABLE_SCHEMA | TABLE_NAME | PARTITION_NAME | TIDB_PARTITION_ID |
++--------------+------------+----------------+-------------------+
+| test         | t0         | p0             |               105 |
++--------------+------------+----------------+-------------------+
+1 row in set (0.01 sec)
+
+MySQL [(none)]> admin show ddl jobs;
++--------+---------+-------------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+| JOB_ID | DB_NAME | TABLE_NAME              | JOB_TYPE      | SCHEMA_STATE | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE  |
++--------+---------+-------------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+|    106 | test    | t0                      | create table  | public       |         2 |      104 |         0 | 2024-12-03 10:00:43 | 2024-12-03 10:00:43 | 2024-12-03 10:00:43 | synced |
+
+
+Now Global ID is 106
+```
+restore
+after restore to downstream
+```
+MySQL [(none)]> SELECT TABLE_SCHEMA, TABLE_NAME, TIDB_TABLE_ID FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='test' AND table_name like 't%';
++--------------+------------+---------------+
+| TABLE_SCHEMA | TABLE_NAME | TIDB_TABLE_ID |
++--------------+------------+---------------+
+| test         | t0         |           104 |
+| test         | t2         |           106 |
++--------------+------------+---------------+
+2 rows in set (0.00 sec)
+
+MySQL [(none)]> admin show ddl jobs;
++--------+---------+-------------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+| JOB_ID | DB_NAME | TABLE_NAME              | JOB_TYPE      | SCHEMA_STATE | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE  |
++--------+---------+-------------------------+---------------+--------------+-----------+----------+-----------+---------------------+---------------------+---------------------+--------+
+|    109 | test    | t2                      | create tables | public       |         2 |      106 |         0 | 2024-12-03 10:01:47 | 2024-12-03 10:01:47 | 2024-12-03 10:01:48 | synced |
+|    106 | test    | t0                      | create table  | public       |         2 |      104 |         0 | 2024-12-03 10:00:43 | 2024-12-03 10:00:43 | 2024-12-03 10:00:43 | synced |
+
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+No conflict id usage
+### 3. What did you see instead (Required)
+There is one DDL job ID the same as a table ID.
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

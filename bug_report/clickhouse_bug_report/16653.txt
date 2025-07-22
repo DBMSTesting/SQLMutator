@@ -1,0 +1,149 @@
+ID: 16653
+Title: ORDER BY LowCardinality column does not work properly
+Description:
+When ordering rows by a LowCardinality column as the first in order in a statement with multiple ordering columns, the order of the rows is incorrect.
+
+* version:
+20.5.4.40
+
+* setup:
+```
+CREATE TABLE IF NOT EXISTS tmp.logs 
+(
+    a UInt8,
+    b LowCardinality(String),
+    c UInt8
+)
+ENGINE Memory;
+
+INSERT INTO tmp.logs 
+SELECT 1, 'aaaa', 1
+UNION ALL
+SELECT 1, 'aaaa', 2
+UNION ALL
+SELECT 1, 'bbbb', 1
+UNION ALL
+SELECT 1, 'bbbb', 2
+UNION ALL
+SELECT 2, 'aaaa', 1
+UNION ALL
+SELECT 2, 'aaaa', 2
+UNION ALL
+SELECT 2, 'bbbb', 1
+UNION ALL
+SELECT 2, 'bbbb', 2;
+```
+
+* case 1 (correct): LowCardinality column as the 2nd order
+```
+select a, b from tmp.logs order by a, b
+
+SELECT
+    a,
+    b
+FROM tmp.logs
+ORDER BY
+    a ASC,
+    b ASC
+
+┌─a─┬─b────┐
+│ 1 │ aaaa │
+│ 1 │ aaaa │
+│ 1 │ bbbb │
+│ 1 │ bbbb │
+│ 2 │ aaaa │
+│ 2 │ aaaa │
+│ 2 │ bbbb │
+│ 2 │ bbbb │
+└───┴──────┘
+```
+
+* case 2 (correct): LowCardinality column no included in the order
+```
+select a, c from tmp.logs order by a, c
+
+SELECT
+    a,
+    c
+FROM tmp.logs
+ORDER BY
+    a ASC,
+    c ASC
+
+┌─a─┬─c─┐
+│ 1 │ 1 │
+│ 1 │ 1 │
+│ 1 │ 2 │
+│ 1 │ 2 │
+│ 2 │ 1 │
+│ 2 │ 1 │
+│ 2 │ 2 │
+│ 2 │ 2 │
+└───┴───┘
+```
+
+* case 3 (**incorrect**): LowCardinality column as the 1st order
+```
+select b, c from tmp.logs order by b, c
+
+SELECT
+    b,
+    c
+FROM tmp.logs
+ORDER BY
+    b ASC,
+    c ASC
+
+┌─b────┬─c─┐
+│ aaaa │ 1 │
+│ aaaa │ 1 │
+│ aaaa │ 2 │ 
+│ bbbb │ 1 │<---------- Incorrect
+│ aaaa │ 2 │<---------- Incorrect
+│ bbbb │ 2 │<---------- Incorrect
+│ bbbb │ 1 │
+│ bbbb │ 2 │
+└──────┴───┘
+```
+
+* case 4 (correct): LowCardinality column by itself
+```
+SELECT c
+FROM tmp.logs
+ORDER BY c ASC
+
+┌─c─┐
+│ 1 │
+│ 1 │
+│ 1 │
+│ 1 │
+│ 2 │
+│ 2 │
+│ 2 │
+│ 2 │
+└───┘
+```
+
+* case 5 (**incorrect**): LowCardinality column in the middle
+```
+SELECT
+    a,
+    b,
+    c
+FROM tmp.logs
+ORDER BY
+    a ASC,
+    b ASC,
+    c ASC
+
+┌─c─┬─b────┬─a─┐
+│ 1 │ aaaa │ 1 │
+│ 1 │ bbbb │ 1 │<---------- Incorrect
+│ 1 │ aaaa │ 2 │<---------- Incorrect
+│ 1 │ bbbb │ 2 │<---------- Incorrect
+│ 2 │ aaaa │ 1 │<---------- Incorrect
+│ 2 │ aaaa │ 2 │<---------- Incorrect
+│ 2 │ bbbb │ 1 │<---------- Incorrect
+│ 2 │ bbbb │ 2 │
+└───┴──────┴───┘
+```

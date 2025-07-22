@@ -1,0 +1,163 @@
+ID: 12548
+Title: Add support for binned histograms
+Description:
+
+Partially implements #2268
+
+Includes https://github.com/duckdb/duckdb/pull/12545
+
+This PR implements binned histograms with user-defined bins, e.g.:
+
+```sql
+SELECT histogram(l_orderkey, [0, 2000000, 4000000, 6000000]) AS result FROM lineitem;
+┌──────────────────────────────────────────────────────────┐
+│                          result                          │
+│                   map(bigint, ubigint)                   │
+├──────────────────────────────────────────────────────────┤
+│ {0=0, 2000000=2000497, 4000000=2000161, 6000000=2000557} │
+└──────────────────────────────────────────────────────────┘
+```
+
+The bins are defined as inclusive upper bounds, i.e. the way to read the above result is:
+
+```
+(-inf, 0]:          0 rows
+(0, 2000000]:       2000497 rows
+(2000000, 4000000]: 2000161 rows
+(4000000, 6000000]: 2000557 rows
+```
+
+Any values that are above the final (upper) bin are ignored and not returned, e.g. if we leave out the upper bin the rows are not returned:
+
+```sql
+SELECT histogram(l_orderkey, [0, 2000000, 4000000]) AS result FROM lineitem;
+┌─────────────────────────────────────────┐
+│                 result                  │
+│          map(bigint, ubigint)           │
+├─────────────────────────────────────────┤
+│ {0=0, 2000000=2000497, 4000000=2000161} │
+└─────────────────────────────────────────┘
+```
+
+#### Data Types
+
+All data types are supported, including dates:
+
+```sql
+D SELECT histogram(l_shipdate, generate_series(timestamp '1992-01-01', timestamp '2000-01-01', interval '2 year')) AS result
+FROM lineitem;
+┌───────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                            result                                             │
+│                                      map(date, ubigint)                                       │
+├───────────────────────────────────────────────────────────────────────────────────────────────┤
+│ {1992-01-01=0, 1994-01-01=1667513, 1996-01-01=1824433, 1998-01-01=1824964, 2000-01-01=684305} │
+└───────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Strings:
+
+```sql
+WITH histogram_result AS (SELECT histogram(l_comment, [chr(x::INT) for x in generate_series(ord('a'), ord('z'))]) AS histogram FROM lineitem)
+  SELECT UNNEST(MAP_KEYS(histogram)) AS bins, UNNEST(MAP_VALUES(histogram)) AS counts FROM histogram_result;
+┌─────────┬────────┐
+│  bins   │ counts │
+│ varchar │ uint64 │
+├─────────┼────────┤
+│ a       │ 923340 │
+│ b       │ 368025 │
+│ c       │  76547 │
+│ d       │ 227697 │
+│ e       │ 119328 │
+│ f       │ 599683 │
+│ g       │ 164403 │
+│ h       │ 136793 │
+│ i       │ 122466 │
+│ j       │ 343811 │
+│ k       │  11794 │
+│ l       │  55422 │
+│ m       │ 467343 │
+│ n       │  18274 │
+│ o       │ 264338 │
+│ p       │ 283780 │
+│ q       │ 139679 │
+│ r       │  43336 │
+│ s       │ 271960 │
+│ t       │ 455359 │
+│ u       │ 313022 │
+│ v       │ 297389 │
+│ w       │  32319 │
+│ x       │  18307 │
+│ y       │  33975 │
+│ z       │ 210477 │
+├─────────┴────────┤
+│     26 rows      │
+└──────────────────┘
+```
+
+Or even nested types like structs/lists:
+
+```sql
+D SELECT histogram([l_orderkey], [[0], [2000000], [4000000]]) AS result FROM lineitem;
+┌───────────────────────────────────────────────┐
+│                    result                     │
+│            map(bigint[], ubigint)             │
+├───────────────────────────────────────────────┤
+│ {[0]=0, [2000000]=2000497, [4000000]=2000161} │
+└───────────────────────────────────────────────┘
+```
+
+#### Bins
+
+Bins do not need to be constant literals - but can also be generated as part of a query, e.g.:
+
+```sql
+SELECT histogram(
+	l_orderkey,
+	range((SELECT MIN(l_orderkey) FROM lineitem), (SELECT MAX(l_orderkey) FROM lineitem) + 1000000 - 1, 1000000)) AS result
+FROM lineitem;
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                   result                                                   │
+│                                            map(bigint, ubigint)                                            │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ {1=6, 1000001=1000049, 2000001=1000447, 3000001=999170, 4000001=1000992, 5000001=1000491, 6000001=1000060} │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Binned histograms can also be computed as part of groups:
+
+```sql
+SELECT l_returnflag, histogram(l_orderkey, [0, 2000000, 4000000, 6000000]) AS result FROM lineitem
+  GROUP BY l_returnflag ORDER BY l_returnflag;
+┌──────────────┬──────────────────────────────────────────────────────────┐
+│ l_returnflag │                          result                          │
+│   varchar    │                   map(bigint, ubigint)                   │
+├──────────────┼──────────────────────────────────────────────────────────┤
+│ A            │ {0=0, 2000000=493070, 4000000=492512, 6000000=492911}    │
+│ N            │ {0=0, 2000000=1014293, 4000000=1014831, 6000000=1014728} │
+│ R            │ {0=0, 2000000=493134, 4000000=492818, 6000000=492918}    │
+└──────────────┴──────────────────────────────────────────────────────────┘
+```
+
+We can even use different bins *across* groups:
+
+```sql
+SELECT l_returnflag, histogram(l_orderkey, case when l_returnflag='A' then [0, 3000000, 6000000] else [0, 2000000, 4000000, 6000000] end) AS result FROM lineitem
+  GROUP BY l_returnflag ORDER BY l_returnflag;
+┌──────────────┬──────────────────────────────────────────────────────────┐
+│ l_returnflag │                          result                          │
+│   varchar    │                   map(bigint, ubigint)                   │
+├──────────────┼──────────────────────────────────────────────────────────┤
+│ A            │ {0=0, 3000000=739276, 6000000=739217}                    │
+│ N            │ {0=0, 2000000=1014293, 4000000=1014831, 6000000=1014728} │
+│ R            │ {0=0, 2000000=493134, 4000000=492818, 6000000=492918}    │
+└──────────────┴──────────────────────────────────────────────────────────┘
+```
+
+However, we need to always use the same bins *within* a group:
+
+```sql
+SELECT l_returnflag, histogram(l_orderkey, [l_orderkey]) AS result FROM lineitem
+  GROUP BY l_returnflag ORDER BY l_returnflag;
+-- Not implemented Error: Histogram - cannot combine histograms with different bin boundaries. Bin boundaries must be the same for all histograms within the same group
+```
+

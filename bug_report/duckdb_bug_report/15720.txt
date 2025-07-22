@@ -1,0 +1,267 @@
+ID: 15720
+Title: Aggregation after unnest is slow when filter pushdown enabled
+Description:
+### What happens?
+
+I have a dataset with a data volume of 10 million records, and the table structure is as follows:
+
+| _id | age | team_members |
+|-|-|-|
+| TEXT | INT | TEXT[] |
+
+I need to aggregate the elements in the array. The SQL is as follows:
+```sql
+select
+    team_member,
+    count(DISTINCT _id) as count,
+    count(DISTINCT age) as major_c
+from (
+    select _id, age, unnest(team_members) as team_member
+    from read_parquet("/path/to/dataset.parquet")
+)
+where team_member like '65919%'
+group by
+    team_member
+```
+I noticed that this SQL query executes very slowly. The profiling:
+
+```
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 11.30s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│         Groups: #0        │
+│                           │
+│        Aggregates:        │
+│     count(DISTINCT #1)    │
+│     count(DISTINCT #2)    │
+│                           │
+│         1000 Rows         │
+│          (19.09s)         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        team_member        │
+│            _id            │
+│            age            │
+│                           │
+│       29880000 Rows       │
+│          (0.98s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│             #3            │
+│                           │
+│       29880000 Rows       │
+│          (0.94s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│ prefix(team_member, '65919│
+│             ')            │
+│                           │
+│       29880000 Rows       │
+│          (4.81s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNNEST          │
+│    ────────────────────   │
+│       39840000 Rows       │
+│          (5.48s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        READ_PARQUET       │
+│                           │
+│        Projections:       │
+│            _id            │
+│            age            │
+│        team_members       │
+│                           │
+│       10000000 Rows       │
+│          (2.83s)          │
+└───────────────────────────┘
+```
+But when I tested the same query in Starrocks, it only took less than 2 seconds.
+
+After disabling the optimization rules for filter pushdown,  performance has improved.
+
+```sql
+SET disabled_optimizers = 'filter_pushdown';
+```
+The profiling:
+```
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 7.02s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│         Groups: #0        │
+│                           │
+│        Aggregates:        │
+│     count(DISTINCT #1)    │
+│     count(DISTINCT #2)    │
+│                           │
+│         1000 Rows         │
+│          (2.49s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        team_member        │
+│            _id            │
+│            age            │
+│                           │
+│       29880000 Rows       │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│ prefix(team_member, '65919│
+│             ')            │
+│                           │
+│       29880000 Rows       │
+│          (6.03s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│            _id            │
+│            age            │
+│        team_member        │
+│                           │
+│       39840000 Rows       │
+│          (0.84s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           UNNEST          │
+│    ────────────────────   │
+│       39840000 Rows       │
+│          (5.15s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        READ_PARQUET       │
+│                           │
+│        Projections:       │
+│            _id            │
+│            age            │
+│        team_members       │
+│                           │
+│       10000000 Rows       │
+│          (2.79s)          │
+└───────────────────────────┘
+``` 
+
+
+### To Reproduce
+
+```sql
+SET profiling_mode = 'detailed';
+-- with filter_pushdown
+select
+    team_member,
+    count(DISTINCT _id) as count,
+    count(DISTINCT age) as major_c
+from (
+    select _id, age, unnest(team_members) as team_member
+    from read_parquet("dataset.parquet")
+)
+where team_member like '65919%'
+group by
+    team_member;
+
+-- disabled filter_pushdown
+SET disabled_optimizers = 'filter_pushdown';
+
+-- re query
+select
+    team_member,
+    count(DISTINCT _id) as count,
+    count(DISTINCT age) as major_c
+from (
+    select _id, age, unnest(team_members) as team_member
+    from read_parquet("dataset.parquet")
+)
+where team_member like '65919%'
+group by
+    team_member;
+```
+
+I put the dataset on Google Drive: [dataset.parquet](https://drive.google.com/file/d/1oBGboJsVvtU3rHWjZIlxmIq9YH6Y6qRx/view?usp=sharing)
+
+
+### OS:
+
+macos(aarch64), linux(x86_64)
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+shell
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+jun
+
+### Affiliation:
+
+jdy
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

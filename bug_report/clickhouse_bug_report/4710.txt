@@ -1,0 +1,142 @@
+ID: 4710
+Title: Kafka engine table gets one extraneous row when Kafka producer send one Protobuf message. 
+Description:
+**Describe the bug**
+ a Kafka engine table gets one extraneous row when Kafka producer send one Protobuf message. 
+
+**How to reproduce**
+* Clickhouse: version 19.4.0.49 on Ubuntu 18.04.2 LTS. The official deb package from Yandex repo.
+* Interface: Protobuf format, Kafka engine table.
+* `CREATE TABLE` statement:
+```
+create table simple (
+  t UInt64,
+  url String
+) ENGINE=Kafka('localhost:9092', 'topic', 'mygroup', 'Protobuf');
+```
+Protobuf schema "simple.proto"
+
+```
+syntax = "proto3";
+
+message AccessLog {
+  uint64 t = 1;
+  string url = 2;
+}
+```
+A Kafka producer in Python3
+
+```
+#!/usr/bin/env python3
+
+"""
+protoc --version
+libprotoc 3.0.0
+
+# to create simple_pb2.py
+protoc --python_out=. simple.proto 
+"""
+import time
+import simple_pb2
+from kafka import KafkaProducer
+
+# varint encoder
+def encode(number):
+    """Pack `number` into varint bytes"""
+    buf = b''
+    while True:
+        towrite = number & 0x7f
+        number >>= 7
+        if number:
+            buf += bytes((towrite | 0x80,))
+        else:
+            buf += bytes((towrite,))
+            break
+    return buf
+
+
+topic = "topic"
+
+producer = KafkaProducer(bootstrap_servers='localhost:9092')
+
+o = simple_pb2.AccessLog()
+o.t = 1552683000  # 2019-03-15 20:50:00 GMT
+o.url = 'http://www.google.com'
+data = o.SerializeToString()
+
+# prepend the length header
+value = encode(len(data)) + data
+
+print(repr(value))
+producer.send(topic, value=value)
+```
+
+* Sample data
+
+The output of the above test script is
+b'\x1d\x08\xf8\x9f\xb0\xe4\x05\x12\x15http://www.google.com'
+
+**Test**
+1. put the simple.proto to /var/lib/clickhouse/format_schemas/
+2. chown clickhouse:clickhouse simple.proto
+3. Create the table
+4. Run the python producer which publish one kafka message.
+5. SELECT as CSV 
+
+```
+:) select * from simple FORMAT CSV SETTINGS format_schema='simple:AccessLog';
+
+SELECT *
+FROM simple 
+FORMAT CSV
+SETTINGS format_schema = 'simple:AccessLog'
+
+Received exception from server (version 19.4.0):
+Code: 36. DB::Exception: Received from localhost:9000, 127.0.0.1. DB::Exception: Format schema requires the 'format_schema' setting to have the 'schema_file:message_name' format, e.g. 'schema.proto:Message'. 
+
+0 rows in set. Elapsed: 0.002 sec. 
+```
+At this point the kafka message was already consumed.  
+
+6. Run the producer again to send another kafka message.
+
+```
+:) select * from simple FORMAT CSV SETTINGS format_schema='simple:AccessLog';
+
+SELECT *
+FROM simple 
+FORMAT CSV
+SETTINGS format_schema = 'simple:AccessLog'
+
+1552683000,"http://www.google.com"
+0,""
+
+2 rows in set. Elapsed: 5.790 sec. 
+
+```
+
+7. send one more message, and select again.
+
+```
+:) select * from simple FORMAT CSV SETTINGS format_schema='simple:AccessLog';
+
+SELECT *
+FROM simple 
+FORMAT CSV
+SETTINGS format_schema = 'simple:AccessLog'
+
+1552683000,"http://www.google.com"
+0,""
+1552683000,"http://www.google.com"
+0,""
+
+4 rows in set. Elapsed: 0.502 sec. 
+```
+There are 4 rows including the 2 extraneous rows.
+
+**Expected behavior**
+1.  Why the first SELECT failed?  It shouldn't fail.  Also the error message does not make sense since format_schema was correctly set.
+2.  Clickhouse shouldn't commit the Kafka offset when the SELECT on Kafka engine table failed because the messages in Kakfa topic would be lost for the consumer group.  
+3.  The second SELECT was successful, but there shouldn't be the extraneous row.  FYI I confirmed  this problem does not happen to tables with other engines e.g. Memory().
+
+

@@ -1,0 +1,91 @@
+ID: 5186
+Title: Column already exists with FINAL queries to distributed tables with max_parallel_replicas > 1
+Description:
+Let's say that I have a cluster with one shard and two replicas. The setting `max_parallel_replicas` is set to 2.
+
+On each of the replicas I create the following tables:
+
+```sql
+CREATE TABLE test (
+  sequenceId  String,
+  id          String,
+  dateTime    DateTime('UTC'),
+  version     UInt64
+) ENGINE ReplicatedReplacingMergeTree('/shard/{shard}', '{replica}', version)
+PARTITION BY toYYYYMM(dateTime)
+ORDER BY (toDate(dateTime), cityHash64(sequenceId), id)
+PRIMARY KEY (toDate(dateTime), cityHash64(sequenceId))
+SAMPLE BY cityHash64(sequenceId);
+
+CREATE TABLE IF NOT EXISTS test_d AS test ENGINE = Distributed('test-cluster', 'default', test, sipHash64(sequenceId));
+```
+
+and insert some values:
+
+```sql
+INSERT INTO test_d (sequenceId, id, dateTime, version) VALUES (
+  'a3892197-3ad7-37d4-a1cf-2053b33fc287',
+  'f0d88bf6-b258-4a37-b15e-c68a7c1ec258',
+  toDateTime('2019-01-01 00:00:00'),
+  1
+), (
+  'a3892197-3ad7-37d4-a1cf-2053b33fc287',
+  'f0d88bf6-b258-4a37-b15e-c68a7c1ec258',
+  toDateTime('2019-01-01 00:00:00'),
+  2
+)
+```
+
+Then I try to query counts from the local table and this works fine:
+```sql
+:) select count() from test
+                                                                                                                                              
+SELECT count()                                                                                                                                
+FROM test
+
+┌─count()─┐
+│       2 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.208 sec.
+```
+```sql
+:) select count() from test final
+
+SELECT count()
+FROM test
+FINAL
+
+┌─count()─┐
+│       1 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.213 sec.
+```
+However, when I try to do the same with the distributed table, the `FINAL` query doesn't work:
+```sql
+ :) select count() from test_d
+
+SELECT count()
+FROM test_d
+
+┌─count()─┐
+│       2 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.238 sec.
+```
+```sql
+ :) select count() from test_d final
+
+SELECT count()
+FROM test_d
+FINAL
+
+Received exception from server (version 19.1.6):
+Code: 15. DB::Exception: Received from clickhouse-2:9000, 192.168.0.251. DB::Exception: Received from clickhouse-2:9000, 192.168.0.251. DB::Exception: Column 'cityHash64(sequenceId)' already exists.
+
+0 rows in set. Elapsed: 0.208 sec. 
+```
+
+However, when I set `max_parallel_replicas` to 1 it works fine, but doesn't use both replicas for processing.

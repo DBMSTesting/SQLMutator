@@ -1,0 +1,106 @@
+ID: 4585
+Title: 19.1.10 crashes when updating a MySQL dictionary while an invalidate query for another dictionary runs every five seconds
+Description:
+If I have a MySQL dictionary and a ClickHouse dictionary with an invalidate query, and the invalidate query starts to run every 5 seconds, then the next update of the MySQL dictionary will crash the server.
+I believe it started with 19.1.7.
+
+Here the 48 thread is running the invalidate query every 5 seconds, and then crashes:
+```
+2019.03.04 23:52:10.096888 [ 48 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.03.04 23:52:10.097019 [ 48 ] {} <Trace> Aggregator: Aggregating
+2019.03.04 23:52:10.097076 [ 48 ] {} <Trace> Aggregator: Aggregation method: without_key
+2019.03.04 23:52:10.097122 [ 48 ] {} <Trace> Aggregator: Aggregated. 1 to 1 rows (from 0.000 MiB) in 0.000 sec. (15625.977 rows/sec., 0.060 MiB/sec.)
+2019.03.04 23:52:10.097147 [ 48 ] {} <Trace> Aggregator: Merging aggregated data
+2019.03.04 23:52:10.097176 [ 48 ] {} <Trace> virtual DB::MergingAndConvertingBlockInputStream::~MergingAndConvertingBlockInputStream(): Waiting for threads to finish
+2019.03.04 23:52:15.099209 [ 48 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.03.04 23:52:15.099336 [ 48 ] {} <Trace> Aggregator: Aggregating
+2019.03.04 23:52:15.099385 [ 48 ] {} <Trace> Aggregator: Aggregation method: without_key
+2019.03.04 23:52:15.099420 [ 48 ] {} <Trace> Aggregator: Aggregated. 1 to 1 rows (from 0.000 MiB) in 0.000 sec. (18774.054 rows/sec., 0.072 MiB/sec.)
+2019.03.04 23:52:15.099443 [ 48 ] {} <Trace> Aggregator: Merging aggregated data
+2019.03.04 23:52:15.099476 [ 48 ] {} <Trace> virtual DB::MergingAndConvertingBlockInputStream::~MergingAndConvertingBlockInputStream(): Waiting for threads to finish
+2019.03.04 23:52:15.498116 [ 2 ] {} <Error> BaseDaemon: ########################################
+2019.03.04 23:52:15.498187 [ 2 ] {} <Error> BaseDaemon: (from thread 48) Received signal Segmentation fault (11).
+2019.03.04 23:52:15.498205 [ 2 ] {} <Error> BaseDaemon: Address: 0x7fa8b36be000
+2019.03.04 23:52:15.498213 [ 2 ] {} <Error> BaseDaemon: Access: read.
+2019.03.04 23:52:15.498222 [ 2 ] {} <Error> BaseDaemon: Attempted access has violated the permissions assigned to the memory area.
+2019.03.04 23:52:15.527786 [ 2 ] {} <Error> BaseDaemon: 0. clickhouse-server(memcpy+0x28b) [0x6dbcefb]
+2019.03.04 23:52:15.527814 [ 2 ] {} <Error> BaseDaemon: 1. clickhouse-server() [0x5878193]
+2019.03.04 23:52:15.527846 [ 2 ] {} <Error> BaseDaemon: 2. clickhouse-server(DB::CurrentThread::getCurrentQueryID[abi:cxx11]()+0xf3) [0x58784c3]
+2019.03.04 23:52:15.527861 [ 2 ] {} <Error> BaseDaemon: 3. clickhouse-server(DB::ExtendedLogMessage::getFrom(Poco::Message const&)+0x76) [0x354ec96]
+2019.03.04 23:52:15.527873 [ 2 ] {} <Error> BaseDaemon: 4. clickhouse-server(DB::OwnSplitChannel::log(Poco::Message const&)+0x66) [0x354a106]
+2019.03.04 23:52:15.527904 [ 2 ] {} <Error> BaseDaemon: 5. clickhouse-server(Poco::Logger::log(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, Poco::Message::Priority)+0x5a) [0x32ff51a]
+2019.03.04 23:52:15.527918 [ 2 ] {} <Error> BaseDaemon: 6. clickhouse-server(DB::MySQLDictionarySource::getLastModification() const+0x1e6) [0x694d8a6]
+2019.03.04 23:52:15.527930 [ 2 ] {} <Error> BaseDaemon: 7. clickhouse-server(DB::MySQLDictionarySource::isModified() const+0x65) [0x694e925]
+2019.03.04 23:52:15.527942 [ 2 ] {} <Error> BaseDaemon: 8. clickhouse-server(DB::ExternalLoader::reloadAndUpdate(bool)+0x5bb) [0x575933b]
+2019.03.04 23:52:15.527953 [ 2 ] {} <Error> BaseDaemon: 9. clickhouse-server(DB::ExternalLoader::reloadPeriodically()+0x2a) [0x575a83a]
+2019.03.04 23:52:15.527964 [ 2 ] {} <Error> BaseDaemon: 10. clickhouse-server() [0xa9c9c7f]
+2019.03.04 23:52:15.527974 [ 2 ] {} <Error> BaseDaemon: 11. /lib/x86_64-linux-gnu/libpthread.so.0(+0x8064) [0x7fa8b3fdd064]
+```
+The definition of the MySQL dictionary:
+```
+    <dictionary>
+        <name>table</name>
+        <source>
+            <mysql>
+                <host>host</host>
+                <port>3306</port>
+                <user>user</user>
+                <password/>
+                <db>db</db>
+                <table>table</table>
+            </mysql>
+        </source>
+        <lifetime>60</lifetime>
+        <layout><flat/></layout>
+        <structure>
+            <id>
+                <name>key</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value/>
+            </attribute>
+        </structure>
+    </dictionary>
+```
+The definition of the CH dictionary:
+```
+    <dictionary>
+        <name>table</name>
+        <source>
+            <clickhouse>
+                <host>localhost</host>
+                <port>9000</port>
+                <user>default</user>
+                <password/>
+                <db>db</db>
+                <table>table</table>
+                <invalidate_query>select max(modification_time) from system.parts where database='db' and table='table'</invalidate_query>
+            </clickhouse>
+        </source>
+        <lifetime>60</lifetime>
+        <layout><flat/></layout>
+        <structure>
+            <id>
+                <name>key</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value/>
+            </attribute>
+        </structure>
+    </dictionary>
+```
+The definition of the source table:
+```
+CREATE TABLE db.table 
+(
+  key    Int64,
+  name   String
+)
+ENGINE = ReplacingMergeTree 
+PARTITION BY tuple ()
+ORDER BY key
+```

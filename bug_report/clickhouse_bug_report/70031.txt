@@ -1,0 +1,73 @@
+ID: 70031
+Title: Data corruption on column after failed ALTER MODIFY with DoubleDelta codec
+Description:
+**Describe the bug**
+
+After a failed ALTER MODIFY column statement, a column of a table can no longer be read.
+
+**How to reproduce**
+
+Run:
+
+```sql
+SET enable_zstd_qat_codec = 1, allow_suspicious_codecs = 1;
+CREATE TABLE t0 (c0 Nullable(Int)) ENGINE = MergeTree() ORDER BY tuple() SETTINGS allow_nullable_key = 1;
+SET mutations_sync = 1;
+INSERT INTO TABLE t0 (c0) VALUES (NULL), (1), (NULL), (2);
+DELETE FROM t0 WHERE c0 > 1;
+INSERT INTO TABLE t0 (c0) VALUES (3), (4);
+ALTER TABLE t0 MODIFY COLUMN c0 Int CODEC(ZSTD_QAT(3), Default, DoubleDelta); --error
+/*
+DB::Exception: Exception happened during execution of mutation 'mutation_4.txt' with part
+'all_1_1_0_2' reason: 'Code: 349. DB::Exception: Cannot convert NULL value to non-Nullable
+type: while executing 'FUNCTION _CAST(c0 :: 0, 'Int32' :: 2) -> _CAST(c0, 'Int32') Int32 : 3':
+(while reading from part ./store/760/760ac308-e0c4-4e45-a816-91ac70f8591e/all_1_1_0_2/
+located on disk default of type local): While executing MergeTreeSequentialSource. (CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN) (version 24.10.1.1)'. This error maybe retryable
+or not. In case of unretryable error, mutation can be killed with KILL MUTATION query
+*/
+ALTER TABLE t0 UPDATE c0 = 1 WHERE TRUE;
+SELECT c0 FROM t0;
+/*Outputs 2 rows out of 6:
+1
+-5 (wrong)
+Then error:
+Cannot decompress ZSTD-encoded data: Data corruption detected: (while reading column c0):
+(while reading from part ./store/760/760ac308-e0c4-4e45-a816-91ac70f8591e/all_1_1_0_5/
+in table s0.t0 (760ac308-e0c4-4e45-a816-91ac70f8591e) located on disk default of type local,
+from mark 0 with max_rows_to_read = 4): While executing MergeTreeSelect(pool: ReadPool,
+algorithm: Thread). Stack trace:
+
+0. contrib/llvm-project/libcxx/include/exception:141: std::exception::capture() @ 0x000000001b191fab
+1. contrib/llvm-project/libcxx/include/exception:114: Poco::Exception::Exception(String const&, int) @ 0x0000000039da3a12
+2. src/Common/Exception.cpp:109: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000002663e3ab
+3. src/Common/Exception.h:110: DB::Exception::Exception(PreformattedMessage&&, int) @ 0x000000001b1878f6
+4. src/Common/Exception.h:128: DB::Exception::Exception<String>(int, FormatStringHelperImpl<std::type_identity<String>::type>, String&&) @ 0x000000001b1a4cef
+5. src/Compression/CompressionCodecZSTD.cpp:65: DB::CompressionCodecZSTD::doDecompressData(char const*, unsigned int, char*, unsigned int) const @ 0x0000000031345215
+6. src/Compression/ICompressionCodec.cpp:108: DB::ICompressionCodec::decompress(char const*, unsigned int, char*) const @ 0x0000000031382117
+7. src/Compression/CompressionCodecMultiple.cpp:114: DB::CompressionCodecMultiple::doDecompressData(char const*, unsigned int, char*, unsigned int) const @ 0x000000003134bd2d
+8. src/Compression/ICompressionCodec.cpp:108: DB::ICompressionCodec::decompress(char const*, unsigned int, char*) const @ 0x0000000031382117
+9. src/Compression/CompressedReadBufferFromFile.cpp:137: DB::CompressedReadBufferFromFile::readBig(char*, unsigned long) @ 0x000000003132ed28
+10. src/DataTypes/Serializations/SerializationNumber.cpp:221: DB::SerializationNumber<int>::deserializeBinaryBulk(DB::IColumn&, DB::ReadBuffer&, unsigned long, double) const @ 0x000000003166db39
+11. src/DataTypes/Serializations/ISerialization.cpp:148: DB::ISerialization::deserializeBinaryBulkWithMultipleStreams(COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, DB::ISerialization::DeserializeBinaryBulkSettings&, std::shared_ptr<DB::ISerialization::DeserializeBinaryBulkState>&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>*) const @ 0x000000003158718b
+12. src/Storages/MergeTree/MergeTreeReaderCompact.cpp:189: DB::MergeTreeReaderCompact::readData(DB::NameAndTypePair const&, COW<DB::IColumn>::immutable_ptr<DB::IColumn>&, unsigned long, std::function<DB::ReadBuffer* (DB::ISerialization::SubstreamPath const&)> const&, std::unordered_map<String, COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::hash<String>, std::equal_to<String>, std::allocator<std::pair<String const, COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>&) @ 0x00000000351a4a16
+13. src/Storages/MergeTree/MergeTreeReaderCompactSingleBuffer.cpp:59: DB::MergeTreeReaderCompactSingleBuffer::readRows(unsigned long, unsigned long, bool, unsigned long, std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&) @ 0x00000000351ca560
+14. src/Storages/MergeTree/MergeTreeRangeReader.cpp:116: DB::MergeTreeRangeReader::DelayedStream::readRows(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&, unsigned long) @ 0x00000000351b348e
+15. src/Storages/MergeTree/MergeTreeRangeReader.cpp:190: DB::MergeTreeRangeReader::DelayedStream::finalize(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>&) @ 0x00000000351b3732
+16. src/Storages/MergeTree/MergeTreeRangeReader.cpp:302: DB::MergeTreeRangeReader::continueReadingChain(DB::MergeTreeRangeReader::ReadResult const&, unsigned long&) @ 0x00000000351c22b2
+17. src/Storages/MergeTree/MergeTreeRangeReader.cpp:981: DB::MergeTreeRangeReader::read(unsigned long, DB::MarkRanges&) @ 0x00000000351bf856
+18. src/Storages/MergeTree/MergeTreeReadTask.cpp:162: DB::MergeTreeReadTask::read(DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x00000000351fe5cf
+19. src/Storages/MergeTree/MergeTreeSelectAlgorithms.h:38: DB::MergeTreeThreadSelectAlgorithm::readFromTask(DB::MergeTreeReadTask&, DB::MergeTreeReadTask::BlockSizeParams const&) @ 0x0000000036491694
+20. src/Storages/MergeTree/MergeTreeSelectProcessor.cpp:193: DB::MergeTreeSelectProcessor::read() @ 0x00000000351f9001
+21. src/Storages/MergeTree/MergeTreeSource.cpp:225: DB::MergeTreeSource::tryGenerate() @ 0x00000000364de955
+22. src/Processors/ISource.cpp:108: DB::ISource::work() @ 0x0000000035a1ab9a
+23. src/Processors/Executors/ExecutionThreadContext.cpp:47: DB::ExecutionThreadContext::executeTask() @ 0x0000000035a49ac1
+24. src/Processors/Executors/PipelineExecutor.cpp:288: DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000035a35f23
+25. src/Processors/Executors/PipelineExecutor.cpp:254: DB::PipelineExecutor::executeSingleThread(unsigned long) @ 0x0000000035a3632b
+26. src/Processors/Executors/PipelineExecutor.cpp:391: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::PipelineExecutor::spawnThreads()::$_0, void ()>>(std::__function::__policy_storage const*) @ 0x0000000035a37367
+27. contrib/llvm-project/libcxx/include/__functional/function.h:848: ? @ 0x0000000026770399
+28. src/Common/ThreadPool.cpp:252: ThreadFromGlobalPoolImpl<false, true>::ThreadFromGlobalPoolImpl<void ThreadPoolImpl<ThreadFromGlobalPoolImpl<false, true>>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>(void&&)::'lambda'()::operator()() @ 0x0000000026776b44
+29. contrib/llvm-project/libcxx/include/__functional/function.h:848: ? @ 0x000000002676ce59
+30. src/Common/ThreadPool.cpp:252: void* std::__thread_proxy[abi:v15007]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x0000000026772cc1
+31. ? @ 0x00007ffff7c9ca94
+*/
+```

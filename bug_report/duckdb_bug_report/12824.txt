@@ -1,0 +1,56 @@
+ID: 12824
+Title: [StreamQueryResult] Add `ExecuteTask` method to StreamQueryResult
+Description:
+This PR fixes https://github.com/duckdblabs/duckdb-internal/issues/2344
+
+### PendingQueryResult
+
+PendingQueryResult starts up execution, and provides an `ExecuteTask` method to pick up a Task and (partially) process it, returning an enum indicating the state of the execution:
+```c++
+enum class PendingExecutionResult : uint8_t {
+	RESULT_READY,
+	RESULT_NOT_READY,
+	EXECUTION_ERROR,
+	BLOCKED,
+	NO_TASKS_AVAILABLE,
+	EXECUTION_FINISHED
+};
+```
+
+This allows the user to periodically call `ExecuteTask` until `RESULT_READY` is returned, meaning the QueryResult is ready and can be instantly retrieved with a call to `Execute`.
+
+### Materialized vs Streaming
+
+When a MaterializedQueryResult is created, the entire pipeline will have completed.
+For a StreamQueryResult this is not the case, and the final pipeline hasn't completed yet.
+
+To get a DataChunk from the QueryResult, the QueryResult provides a `Fetch` interface.
+Again, for a MaterializedQueryResult this is instant because the entire result is already materialized and ready to be consumed.
+
+On a StreamQueryResult, calling Fetch will execute the final pipeline until a DataChunk worth of tuples are ready or the execution has finished.
+Like any pipeline, this final pipeline could be heavy and possibly block if it's waiting on IO for example.
+
+### ExecuteTask
+
+This is where `StreamQueryResult::ExecuteTask` comes in, like the PendingQueryResult variant, it picks up a Task to partially process, returning an enum indicating the state of the execution:
+```c++
+enum class StreamExecutionResult : uint8_t {
+	CHUNK_READY,
+	CHUNK_NOT_READY,
+	EXECUTION_ERROR,
+	EXECUTION_CANCELLED,
+	BLOCKED,
+	NO_TASKS_AVAILABLE,
+	EXECUTION_FINISHED
+};
+```
+
+If `CHUNK_READY` is returned, Fetch can be called to immediately retrieve the chunk that is waiting to be fetched.
+
+### WaitForTask
+
+Similar to <https://github.com/duckdb/duckdb/pull/12483>, the StreamQueryResult also has `WaitForTask` that should be used in the event where `BLOCKED` is returned (also shown in the example mentioned below)
+
+### Example Usage
+
+An example of this can be seen in `tools/pythonpkg/src/pyresult.cpp` at the bottom of the list of changed files in this PR

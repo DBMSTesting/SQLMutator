@@ -1,0 +1,84 @@
+ID: 28692
+Title: (*Handle).execRestrictedSQL may return incorrect result
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+In `statistics/handle/handle.go`, expose `(*Handle).execRestrictedSQL` to test.
+```
+func (h *Handle) ExecuteRestrictedSQL(ctx context.Context, sql string) ([]chunk.Row, []*ast.ResultField, error) {
+	return h.execRestrictedSQL(ctx, sql)
+}
+```
+
+In `statistics/handle/handle_test.go`, add the following test.
+```
+
+func (s *testSerialStatsSuite) TestExecuteRestrictedSQL(c *C) {
+	defer cleanEnv(c, s.store, s.do)
+	tk := testkit.NewTestKit(c, s.store)
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (table_id bigint(64) not null, column_id bigint(64) not null, last_used_at timestamp, last_analyzed_at timestamp, primary key (table_id, column_id) clustered)")
+	tk.MustExec("insert into t values (57, 1, '2021-10-09 19:45:02', '2021-10-09 19:44:47'), (57, 2, null, '2021-10-09 19:44:47'), (57, 3, null, '2021-10-09 19:44:47'), (57, 4, null, '2021-10-09 19:44:47')")
+	tk.MustQuery("select * from t").Check(testkit.Rows(
+		"57 1 2021-10-09 19:45:02 2021-10-09 19:44:47",
+		"57 2 <nil> 2021-10-09 19:44:47",
+		"57 3 <nil> 2021-10-09 19:44:47",
+		"57 4 <nil> 2021-10-09 19:44:47"))
+	h := s.do.StatsHandle()
+	rows, _, err := h.ExecuteRestrictedSQL(context.Background(), "SELECT table_id, column_id, last_used_at, last_analyzed_at FROM test.t")
+	c.Assert(err, IsNil)
+	res := make([]string, 0, len(rows))
+	for _, row := range rows {
+		tableID := row.GetInt64(0)
+		columnID := row.GetInt64(1)
+		lastUsedAt := row.GetTime(2)
+		lastAnalyzedAt := row.GetTime(3)
+		res = append(res, fmt.Sprintf("%v %v %v %v", tableID, columnID, lastUsedAt, lastAnalyzedAt))
+	}
+	c.Assert(len(res), Equals, 4)
+	c.Assert(res[0], Equals, "57 1 2021-10-09 19:45:02 2021-10-09 19:44:47")
+	c.Assert(res[1], Equals, "57 2 0000-00-00 00:00:00 2021-10-09 19:44:47")
+	c.Assert(res[2], Equals, "57 3 0000-00-00 00:00:00 2021-10-09 19:44:47")
+	c.Assert(res[3], Equals, "57 4 0000-00-00 00:00:00 2021-10-09 19:44:47")
+}
+```
+
+### 2. What did you expect to see? (Required)
+The test passes.
+
+### 3. What did you see instead (Required)
+The test failed.
+```
+FAIL: handle_test.go:3078: testSerialStatsSuite.TestExecuteRestrictedSQL
+
+handle_test.go:3104:
+    c.Assert(res[1], Equals, "57 2 0000-00-00 00:00:00 2021-10-09 19:44:47")
+... obtained string = "57 2 2021-10-09 19:45:02 2021-10-09 19:44:47"
+... expected string = "57 2 0000-00-00 00:00:00 2021-10-09 19:44:47"
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                                   |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v5.3.0-alpha-1052-g219c02e96-dirty
+Edition: Community
+Git Commit Hash: 219c02e9620dbe22a4c76775e5215f7197096da1
+Git Branch: master
+UTC Build Time: 2021-10-09 13:20:49
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

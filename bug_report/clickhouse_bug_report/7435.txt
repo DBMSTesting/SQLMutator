@@ -1,0 +1,171 @@
+ID: 7435
+Title: TTL doesn't drop old parts with Custom Partitioning Key
+Description:
+**Describe the bug or unexpected behaviour**
+TTL does NOT drop old parts with Custom Partitioning Key
+
+**How to reproduce**
+* Which ClickHouse server version to use
+```19.14.6 revision 54425```
+* Which interface to use, if matters
+```clickhouse-client```
+
+* Non-default settings, if any
+default setting 
+
+* `CREATE TABLE` statements for all tables involved
+```
+CREATE TABLE visits
+(
+    `ts` DateTime, 
+    `mac` String
+)
+ENGINE = ReplacingMergeTree(ts)
+PARTITION BY formatDateTime(ts, '%Y%m%d%H')
+ORDER BY mac
+TTL ts + toIntervalDay(32)
+```
+
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/dbms/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+```
+INSERT INTO test.visits(ts, mac) VALUES('2019-09-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-10-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-11-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-12-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-08-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-09-12 22:00:00', 'B');
+INSERT INTO test.visits(ts, mac) VALUES('2019-12-12 22:00:00', 'B');
+```
+
+* Queries to run that lead to unexpected result
+```
+SELECT 
+    partition, 
+    name, 
+    active
+FROM system.parts
+WHERE (table = 'visits') AND (database = 'test')
+ORDER BY partition ASC
+
+┌─partition──┬─name───────────────────────────────────┬─active─┐
+│ 2019081222 │ eae76ed737ba99cdf46f1a8ac4bec0c6_5_5_0 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_0 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_1 │      1 │
+│ 2019101222 │ 4fd947f7fa76dae62ad1f577cf7288eb_2_2_0 │      1 │
+│ 2019111222 │ 772fa7daaf898503df5471e344203fc7_3_3_0 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_4_4_0 │      1 │
+└────────────┴────────────────────────────────────────┴────────┘
+```
+
+```
+OPTIMIZE TABLE test.visits DEDUPLICATE;
+OPTIMIZE TABLE test.visits FINAL;
+```
+```
+SELECT 
+    partition, 
+    name, 
+    active
+FROM system.parts
+WHERE (table = 'visits') AND (database = 'test')
+ORDER BY partition ASC
+
+┌─partition──┬─name───────────────────────────────────┬─active─┐
+│ 2019081222 │ eae76ed737ba99cdf46f1a8ac4bec0c6_5_5_0 │      0 │
+│ 2019081222 │ eae76ed737ba99cdf46f1a8ac4bec0c6_5_5_1 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_0 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_1 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_6_2 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_6_6_0 │      0 │
+│ 2019101222 │ 4fd947f7fa76dae62ad1f577cf7288eb_2_2_0 │      0 │
+│ 2019101222 │ 4fd947f7fa76dae62ad1f577cf7288eb_2_2_1 │      1 │
+│ 2019111222 │ 772fa7daaf898503df5471e344203fc7_3_3_0 │      0 │
+│ 2019111222 │ 772fa7daaf898503df5471e344203fc7_3_3_1 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_4_4_0 │      0 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_4_7_1 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_7_7_0 │      0 │
+└────────────┴────────────────────────────────────────┴────────┘
+```
+
+**Expected behavior**
+A clear and concise description of what you expected to happen.
+I expected that old parts should be deleted 
+
+**Error message and/or stacktrace**
+If applicable, add screenshots to help explain your problem.
+
+**Additional context**
+Add any other context about the problem here.
+
+The same with Merge tree 
+```
+CREATE TABLE visits
+(
+    ts DateTime,
+    mac String
+)
+ENGINE = MergeTree()
+PARTITION BY formatDateTime(ts, '%Y%m%d%H') 
+ORDER BY mac
+TTL ts + toIntervalDay(32);
+
+
+INSERT INTO test.visits(ts, mac) VALUES('2019-09-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-10-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-11-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-12-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-08-12 22:00:00', 'A');
+INSERT INTO test.visits(ts, mac) VALUES('2019-09-12 22:00:00', 'B');
+INSERT INTO test.visits(ts, mac) VALUES('2019-12-12 22:00:00', 'B');
+```
+
+```
+SELECT 
+    partition, 
+    name, 
+    active
+FROM system.parts
+WHERE (table = 'visits') AND (database = 'test')
+ORDER BY partition ASC
+
+┌─partition──┬─name───────────────────────────────────┬─active─┐
+│ 2019081222 │ eae76ed737ba99cdf46f1a8ac4bec0c6_5_5_0 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_0 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_1 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_6_6_0 │      1 │
+│ 2019101222 │ 4fd947f7fa76dae62ad1f577cf7288eb_2_2_0 │      1 │
+│ 2019111222 │ 772fa7daaf898503df5471e344203fc7_3_3_0 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_4_4_0 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_7_7_0 │      1 │
+└────────────┴────────────────────────────────────────┴────────┘
+
+OPTIMIZE TABLE test.visits DEDUPLICATE;
+OPTIMIZE TABLE test.visits FINAL;
+
+SELECT 
+    partition, 
+    name, 
+    active
+FROM system.parts
+WHERE (table = 'visits') AND (database = 'test')
+ORDER BY partition ASC
+
+┌─partition──┬─name───────────────────────────────────┬─active─┐
+│ 2019081222 │ eae76ed737ba99cdf46f1a8ac4bec0c6_5_5_0 │      0 │
+│ 2019081222 │ eae76ed737ba99cdf46f1a8ac4bec0c6_5_5_1 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_0 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_1_1 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_6_2 │      0 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_1_6_3 │      1 │
+│ 2019091222 │ 50166ca44dd6cd5f15db48d60861d71d_6_6_0 │      0 │
+│ 2019101222 │ 4fd947f7fa76dae62ad1f577cf7288eb_2_2_0 │      0 │
+│ 2019101222 │ 4fd947f7fa76dae62ad1f577cf7288eb_2_2_1 │      1 │
+│ 2019111222 │ 772fa7daaf898503df5471e344203fc7_3_3_0 │      0 │
+│ 2019111222 │ 772fa7daaf898503df5471e344203fc7_3_3_1 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_4_4_0 │      0 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_4_7_1 │      1 │
+│ 2019121222 │ 3ab6b6764da08f00c4f6f6166b60ba94_7_7_0 │      0 │
+└────────────┴────────────────────────────────────────┴────────┘
+
+
+```

@@ -1,0 +1,44 @@
+ID: 54750
+Title: Wrong parsing of AST in CREATE TABLE with multiple CSEs
+Description:
+IMPORTANT: due to this bug table gets inconsistent metadata on disk vs ZK, if used with a different table engine. So clickhouse will not start.
+
+**How to reproduce**
+```
+~ :) create table kek (
+    `id` String,
+    `value1` Float32,
+    `value2` Float32,
+    `param` String,
+    `date` String,
+    `val1` Float32 MATERIALIZED value1 * dictGetFloat32('default.dict', 'rate', (param, toDate(date) AS date_local)),
+    `val2` Float32 MATERIALIZED value2 * dictGetFloat32('default.dict', 'rate', (param, toDate(date) AS date_local))
+)
+ENGINE = MergeTree()
+PRIMARY KEY id
+ORDER BY id
+SETTINGS index_granularity = 8192
+
+CREATE TABLE kek
+(
+    `id` String,
+    `value1` Float32,
+    `value2` Float32,
+    `param` String,
+    `date` String,
+    `val1` Float32 MATERIALIZED value1 * dictGetFloat32('default.dict', 'rate', (param, toDate(date) AS date_local)),
+    `val2` Float32 MATERIALIZED value2 * dictGetFloat32('default.dict', 'rate', (param, date_local)) <----- problem is here
+)
+ENGINE = MergeTree
+PRIMARY KEY id
+ORDER BY id
+SETTINGS index_granularity = 8192
+
+Query id: ff4986cc-34ff-46d9-8310-d44bc3e7b2cb
+
+Ok.
+```
+
+There are two "AS date_local" which leads to wrong AST parsing due to the following code:
+
+https://github.com/ClickHouse/ClickHouse/blob/ed22d0f028ca15256d4807d879fe22a722f751e8/src/Parsers/ASTWithAlias.cpp#L19-L27

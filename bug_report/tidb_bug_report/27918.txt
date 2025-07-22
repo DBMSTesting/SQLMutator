@@ -1,0 +1,86 @@
+ID: 27918
+Title: TiDB restarted unexpectedly due to an unrecoverable panic
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+We found tidb panicked and restarted during sqllogic test, as the following log shows:
+```
+[2021/09/08 13:46:43.386 +00:00] [INFO] [gc.go:74] ["remove stats in GC due to dropped table"] [table_id=8768]
+[2021/09/08 13:46:43.429 +00:00] [INFO] [gc.go:74] ["remove stats in GC due to dropped table"] [table_id=8772]
+fatal error: sync: RUnlock of unlocked RWMutex
+
+goroutine 39519084 [running]:
+runtime.throw(0x3bbc397, 0x21)
+        /usr/local/go/src/runtime/panic.go:1117 +0x72 fp=0xc0018c9b68 sp=0xc0018c9b38 pc=0x1227dd2
+sync.throw(0x3bbc397, 0x21)
+        /usr/local/go/src/runtime/panic.go:1103 +0x35 fp=0xc0018c9b88 sp=0xc0018c9b68 pc=0x125cdd5
+sync.(*RWMutex).rUnlockSlow(0xc04fcdfb60, 0xffffffff)
+        /usr/local/go/src/sync/rwmutex.go:93 +0x3f fp=0xc0018c9bb0 sp=0xc0018c9b88 pc=0x126f73f
+sync.(*RWMutex).RUnlock(...)
+        /usr/local/go/src/sync/rwmutex.go:83
+github.com/pingcap/tidb/util/chunk.(*mutexForRowContainer).RUnlock(0xc03ca0b860)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/util/chunk/row_container.go:73 +0x4c fp=0xc0018c9bd0 sp=0xc0018c9bb0 pc=0x1faaa0c
+github.com/pingcap/tidb/util/chunk.(*RowContainer).Add(0xc03ae64f50, 0xc03b94b950, 0x0, 0x0)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/util/chunk/row_container.go:228 +0xc5 fp=0xc0018c9c18 sp=0xc0018c9bd0 pc=0x1faba65
+github.com/pingcap/tidb/executor.(*hashRowContainer).PutChunkSelected(0xc03ca57500, 0xc03b94b950, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/hash_table.go:164 +0xee fp=0xc0018c9d28 sp=0xc0018c9c18 pc=0x30df34e
+github.com/pingcap/tidb/executor.(*hashRowContainer).PutChunk(...)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/hash_table.go:153
+github.com/pingcap/tidb/executor.(*HashJoinExec).buildHashTableForList(0xc039ba3e00, 0xc03c65e900, 0xc03c631530, 0xc03c648880)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/join.go:771 +0x6d0 fp=0xc0018c9e90 sp=0xc0018c9d28 pc=0x3141590
+github.com/pingcap/tidb/executor.(*HashJoinExec).fetchAndBuildHashTable(0xc039ba3e00, 0x4096050, 0xc03b3a0720)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/join.go:730 +0x1b3 fp=0xc0018c9f38 sp=0xc0018c9e90 pc=0x3140c53
+github.com/pingcap/tidb/executor.(*HashJoinExec).Next.func1()
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/join.go:675 +0xa9 fp=0xc0018c9fa0 sp=0xc0018c9f38 pc=0x31f2d09
+github.com/pingcap/tidb/util.WithRecovery(0xc03ca603a0, 0xc03ae0b0c0)
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/util/misc.go:100 +0x4f fp=0xc0018c9fd0 sp=0xc0018c9fa0 pc=0x1fcbb2f
+runtime.goexit()
+        /usr/local/go/src/runtime/asm_amd64.s:1371 +0x1 fp=0xc0018c9fd8 sp=0xc0018c9fd0 pc=0x1263081
+created by github.com/pingcap/tidb/executor.(*HashJoinExec).Next
+        /home/jenkins/agent/workspace/build_tidb_multi_branch_master/go/src/github.com/pingcap/tidb/executor/join.go:673 +0x245
+
+...
+[2021/09/08 13:46:45.040 +00:00] [INFO] [printer.go:34] ["Welcome to TiDB."] ["Release Version"=v5.3.0-alpha-38-g2ae0bb73d] [Edition=Community] ["Git Commit Hash"=2ae0bb73d7296ab4c5c1a381b8f80e7fa810f525] ["Git Branch"=master] ["UTC Build Time"="2021-09-07 13:42:24"] [GoVersion=go1.16.4] ["Race Enabled"=false] ["Check Table Before Drop"=false] ["TiKV Min Version"=v3.0.0-60965b006877ca7234adaced7890d7b029ed1306]
+[2021/09/08 13:46:45.040 +00:00] [INFO] [trackerRecorder.go:29] ["Mem Profile Tracker started"]
+```
+
+It's hard to provide an minimal reproduce step for such a race bug. According to the stack, it seems to be caused by shallow copy, here is the case:
+```go
+package chunk
+
+import (
+	"testing"
+)
+
+func TestUnlockPanic1(t *testing.T) {
+	c1 := NewRowContainer(nil, 0)
+	c1.m.Lock()
+	c1.ShallowCopyWithNewMutex()
+	c1.m.Unlock()
+}
+
+func TestUnlockPanic2(t *testing.T) {
+	c1 := NewRowContainer(nil, 0)
+	c1.m.RLock()
+	c1.ShallowCopyWithNewMutex()
+	c1.m.RUnlock()
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+TiDB shouldn't restart.
+
+### 3. What did you see instead (Required)
+
+As described in "Minimal reproduce step".
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master (2ae0bb73d7296ab4c5c1a381b8f80e7fa810f525)

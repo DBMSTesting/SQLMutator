@@ -1,0 +1,87 @@
+ID: 25804
+Title: Query use TilFlash on primary key predicate, causing query performance degrefation
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+1. prepare ch workload 5k warehouses
+
+the ddl of the table order_line with clustered index and 1 tiflash replica.
+```
+CREATE TABLE `order_line` (
+  `ol_o_id` int(11) NOT NULL,
+  `ol_d_id` int(11) NOT NULL,
+  `ol_w_id` int(11) NOT NULL,
+  `ol_number` int(11) NOT NULL,
+  `ol_i_id` int(11) NOT NULL,
+  `ol_supply_w_id` int(11) DEFAULT NULL,
+  `ol_delivery_d` datetime DEFAULT NULL,
+  `ol_quantity` int(11) DEFAULT NULL,
+  `ol_amount` decimal(6,2) DEFAULT NULL,
+  `ol_dist_info` char(24) DEFAULT NULL,
+  PRIMARY KEY (`ol_w_id`,`ol_d_id`,`ol_o_id`,`ol_number`) /*T![clustered_index] CLUSTERED */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin 
+```
+
+2. run the ch workload, the bottleneck is on the query
+
+and query and plan as below:
+
+```
+SELECT
+  ol_d_id,
+  SUM(ol_amount)
+FROM
+  order_line
+WHERE
+  (ol_w_id, ol_d_id, ol_o_id) IN (
+    (4922, 1, 2101),
+    (4922, 2, 2101)
+  )
+  GROUP BY
+  ol_d_id;
+	id                       	task        	estRows 	operator info                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          	actRows	execution info                                                                                                                                                                                                                                                                                                                                                      	memory 	disk
+	Projection_6             	root        	1       	c_tpcc5000.order_line.ol_d_id, Column#11                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               	10     	time:594ms, loops:6, Concurrency:OFF                                                                                                                                                                                                                                                                                                                                	1.76 KB	N/A
+	└─HashAgg_7              	root        	1       	group by:c_tpcc5000.order_line.ol_d_id, funcs:sum(c_tpcc5000.order_line.ol_amount)->Column#11, funcs:firstrow(c_tpcc5000.order_line.ol_d_id)->c_tpcc5000.order_line.ol_d_id                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            	10     	time:594ms, loops:6, partial_worker:{wall_time:594.007633ms, concurrency:5, task_num:4, tot_wait:2.969833144s, tot_exec:68.67µs, tot_time:2.969914728s, max:593.992892ms, p95:593.992892ms}, final_worker:{wall_time:594.023819ms, concurrency:5, task_num:9, tot_wait:2.969933294s, tot_exec:98.376µs, tot_time:2.970035609s, max:594.014211ms, p95:594.014211ms}	33.4 KB	N/A
+	  └─UnionScan_8          	root        	30523.01	or(or(or(and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 1), eq(c_tpcc5000.order_line.ol_o_id, 2114))), and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 2), eq(c_tpcc5000.order_line.ol_o_id, 2114)))), or(and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 3), eq(c_tpcc5000.order_line.ol_o_id, 2114))), or(and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 4), eq(c_tpcc5000.order_line.ol_o_id, 2114))), and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 5), eq(c_tpcc5000.order_line.ol_o_id, 2114)))))), or(or(and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 6), eq(c_tpcc5000.order_line.ol_o_id, 2114))), and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 7), eq(c_tpcc5000.order_line.ol_o_id, 2114)))), or(and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 8), eq(c_tpcc5000.order_line.ol_o_id, 2114))), or(and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 9), eq(c_tpcc5000.order_line.ol_o_id, 2114))), and(eq(c_tpcc5000.order_line.ol_w_id, 3095), and(eq(c_tpcc5000.order_line.ol_d_id, 10), eq(c_tpcc5000.order_line.ol_o_id, 2114)))))))	101    	time:594ms, loops:5                                                                                                                                                                                                                                                                                                                                                 	N/A    	N/A
+	    └─TableReader_12     	root        	30523.01	data:TableRangeScan_11                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 	101    	time:593.8ms, loops:104, cop_task: {num: 1, max: 594.4ms, proc_keys: 0, rpc_num: 1, rpc_time: 594.4ms, copr_cache_hit_ratio: 0.00}                                                                                                                                                                                                                                  	7.33 KB	N/A
+	      └─TableRangeScan_11	cop[tiflash]	30523.01	table:order_line, range:[3095 1 2114,3095 1 2114], [3095 2 2114,3095 2 2114], [3095 3 2114,3095 3 2114], [3095 4 2114,3095 4 2114], [3095 5 2114,3095 5 2114], [3095 6 2114,3095 6 2114], [3095 7 2114,3095 7 2114], [3095 8 2114,3095 8 2114], [3095 9 2114,3095 9 2114], [3095 10 2114,3095 10 2114], keep order:false                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               	101    	tiflash_task:{time:272.1ms, loops:10, threads:1}                                                                                                                                                                                                                                                                                                                    	N/A    	N/A
+```
+### 2. What did you expect to see? (Required)
+accessed by TiKV instead of offloading to tiflash
+
+```
++------------------------------+---------+-----------+------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                           | estRows | task      | access object    | operator info                                                                                                                                         |
++------------------------------+---------+-----------+------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_5                 | 1.00    | root      |                  | c_tpcc5000.order_line.ol_d_id, Column#11                                                                                                              |
+| └─HashAgg_10                 | 1.00    | root      |                  | group by:c_tpcc5000.order_line.ol_d_id, funcs:sum(Column#12)->Column#11, funcs:firstrow(c_tpcc5000.order_line.ol_d_id)->c_tpcc5000.order_line.ol_d_id |
+|   └─TableReader_11           | 1.00    | root      |                  | data:HashAgg_6                                                                                                                                        |
+|     └─HashAgg_6              | 1.00    | cop[tikv] |                  | group by:c_tpcc5000.order_line.ol_d_id, funcs:sum(c_tpcc5000.order_line.ol_amount)->Column#12                                                         |
+|       └─TableRangeScan_9     | 6128.40 | cop[tikv] | table:order_line | range:[4922 1 2101,4922 1 2101], [4922 2 2101,4922 2 2101], keep order:false                                                                          |
++------------------------------+---------+-----------+------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+### 3. What did you see instead (Required)
+accessed by TiFlash
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+Release Version: v5.2.0-alpha-164-g8434069c5
+Edition: Community
+Git Commit Hash: 8434069c5f63abdcebf476334152cc071833c9eb
+Git Branch: master
+UTC Build Time: 2021-06-25 11:33:39
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```

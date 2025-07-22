@@ -1,0 +1,88 @@
+ID: 12911
+Title: Wrong execution info of explain analyze when using IndexMergeJoin
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+Run SQL
+```
+use test;
+drop table if exists t1, t2;
+create table t1(a int, b date, c float, primary key(a, b));
+create table t2(a int primary key);
+insert into t1 values(1, '2017-11-29', 2.2);
+insert into t2 values(1);
+select /*+ TIDB_INLJ(t2) */ * from t1 use index(primary) join t2 on t1.a=t2.a ;
+explain analyze select /*+ TIDB_INLJ(t2) */ * from t1 use index(primary) join t2 on t1.a=t2.a ;
+```
+
+The execution info has been calculate twice.
+
+2. What did you expect to see?
+```
+tidb> select /*+ TIDB_INLJ(t2) */ * from t1 use index(primary) join t2 on t1.a=t2.a ;
++---+------------+------+---+
+| a | b          | c    | a |
++---+------------+------+---+
+| 1 | 2017-11-29 |  2.2 | 1 |
++---+------------+------+---+
+1 row in set (0.00 sec)
+
+tidb> explain analyze select /*+ TIDB_INLJ(t2) */ * from t1 use index(primary) join t2 on t1.a=t2.a ;
++------------------------+----------+-----------+--------------------------------------------------------------------------+-------------------------------------------------------+-----------------+
+| id                     | count    | task      | operator info                                                            | execution info                                        | memory          |
++------------------------+----------+-----------+--------------------------------------------------------------------------+-------------------------------------------------------+-----------------+
+| IndexMergeJoin_13      | 12500.00 | root      | inner join, inner:TableReader_11, outer key:Column#1, inner key:Column#5 | time:1.269272ms, loops:2, rows:1                      | 2.6962890625 KB |
+| ├─IndexLookUp_18       | 10000.00 | root      |                                                                          | time:480.854µs, loops:2, rows:1, rpc time:133.189µs   | 1.86328125 KB   |
+| │ ├─IndexScan_16       | 10000.00 | cop[tikv] | table:t1, index:a, b, range:[NULL,+inf], keep order:false, stats:pseudo  | time:44.96µs, loops:2, rows:1                         | N/A             |
+| │ └─TableScan_17       | 10000.00 | cop[tikv] | table:t1, keep order:false, stats:pseudo                                 | time:26.657µs, loops:2, rows:1                        | N/A             |
+| └─TableReader_11       | 1.00     | root      | data:TableScan_10                                                        | time:79.613µs, loops:2, rows:1, rpc time:47.875µs     | N/A             |
+|   └─TableScan_10       | 1.00     | cop[tikv] | table:t2, range: decided by [Column#1], keep order:true, stats:pseudo    | time:14.201µs, loops:2, rows:1                        | N/A             |
++------------------------+----------+-----------+--------------------------------------------------------------------------+-------------------------------------------------------+-----------------+
+6 rows in set (0.00 sec)
+
+```
+
+
+3. What did you see instead?
+```
+tidb> select /*+ TIDB_INLJ(t2) */ * from t1 use index(primary) join t2 on t1.a=t2.a ;
++---+------------+------+---+
+| a | b          | c    | a |
++---+------------+------+---+
+| 1 | 2017-11-29 |  2.2 | 1 |
++---+------------+------+---+
+1 row in set (0.00 sec)
+
+tidb> explain analyze select /*+ TIDB_INLJ(t2) */ * from t1 use index(primary) join t2 on t1.a=t2.a ;
++------------------------+----------+-----------+--------------------------------------------------------------------------+-------------------------------------------------------+-----------------+
+| id                     | count    | task      | operator info                                                            | execution info                                        | memory          |
++------------------------+----------+-----------+--------------------------------------------------------------------------+-------------------------------------------------------+-----------------+
+| IndexMergeJoin_13      | 12500.00 | root      | inner join, inner:TableReader_11, outer key:Column#1, inner key:Column#5 | time:1.269272ms, loops:4, rows:2                      | 2.6962890625 KB |
+| ├─IndexLookUp_18       | 10000.00 | root      |                                                                          | time:480.854µs, loops:2, rows:1, rpc time:133.189µs   | 1.86328125 KB   |
+| │ ├─IndexScan_16       | 10000.00 | cop[tikv] | table:t1, index:a, b, range:[NULL,+inf], keep order:false, stats:pseudo  | time:44.96µs, loops:2, rows:1                         | N/A             |
+| │ └─TableScan_17       | 10000.00 | cop[tikv] | table:t1, keep order:false, stats:pseudo                                 | time:26.657µs, loops:2, rows:1                        | N/A             |
+| └─TableReader_11       | 1.00     | root      | data:TableScan_10                                                        | time:79.613µs, loops:2, rows:1, rpc time:47.875µs     | N/A             |
+|   └─TableScan_10       | 1.00     | cop[tikv] | table:t2, range: decided by [Column#1], keep order:true, stats:pseudo    | time:14.201µs, loops:2, rows:1                        | N/A             |
++------------------------+----------+-----------+--------------------------------------------------------------------------+-------------------------------------------------------+-----------------+
+6 rows in set (0.00 sec)
+
+```
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+tidb> select version();
++-----------------------------------------+
+| version()                               |
++-----------------------------------------+
+| 5.7.25-TiDB-v4.0.0-alpha-610-g07b926d26 |
++-----------------------------------------+
+1 row in set (0.00 sec)
+```
+

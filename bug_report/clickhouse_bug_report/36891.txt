@@ -1,0 +1,65 @@
+ID: 36891
+Title: unexpected errors with a clash of constant strings in aggregate function and prewhere and join
+Description:
+```sql
+drop table if exists e;
+
+CREATE TABLE e
+(   a UInt64, t DateTime )
+Engine=MergeTree PARTITION BY toDate(t)
+ORDER BY tuple()
+
+insert into e select 0, toDateTime('2020-02-01 12:00:01') + interval number month from numbers(10);
+
+SELECT sumIf( 1, if( 1, toDateTime('2020-01-01 00:00:00', 'UTC'), toDateTime('1970-01-01 00:00:00', 'UTC')) > t ) 
+FROM e JOIN ( SELECT 1 joinKey) AS da ON joinKey = a
+WHERE  t >= toDateTime('2021-07-19T13:00:00', 'UTC') AND t <= toDateTime('2021-07-19T13:59:59', 'UTC');
+
+Received exception from server (version 22.5.1):
+DB::Exception: Illegal type of argument #2 'timezone' of function toDateTime, expected const String, got String: 
+While processing toDateTime('2020-01-01 00:00:00', 'UTC') > t. (ILLEGAL_COLUMN)
+
+
+SELECT any( toDateTime('2020-01-01T00:00:00', 'UTC'))
+FROM e JOIN ( SELECT 1 joinKey) AS da ON joinKey = a
+PREWHERE t >= toDateTime('2021-07-19T13:00:00', 'UTC');
+
+DB::Exception: Illegal type of argument #2 'timezone' of function toDateTime, expected const String, got String
+
+
+SELECT sumIf( 1, if( 1, toDateTime('2020-01-01 00:00:00', 'UTC'), toDateTime('1970-01-01 00:00:00', 'UTC')) > t ) 
+FROM e JOIN ( SELECT 1 joinKey) AS da ON joinKey = a
+WHERE  t >= toDateTime('2020-01-01 00:00:00', 'UTC') AND t <= toDateTime('2021-07-19T13:59:59', 'UTC');
+
+Received exception from server (version 22.5.1):
+Code: 10. DB::Exception: Received from localhost:9000. 
+DB::Exception: Not found column toDateTime('2020-01-01 00:00:00', 'UTC') in block. (NOT_FOUND_COLUMN_IN_BLOCK)
+
+
+SELECT any(toDateTime('2020-01-01 00:00:00'))
+FROM e JOIN ( SELECT 1 joinKey) AS da ON joinKey = a
+PREWHERE t >= toDateTime('2020-01-01 00:00:00');
+
+DB::Exception: Not found column toDateTime('2020-01-01 00:00:00') in block. There are only columns: a, joinKey. (NOT_FOUND_COLUMN_IN_BLOCK)
+
+
+SELECT any('2020-01-01 00:00:00')
+FROM e JOIN ( SELECT 1 joinKey) AS da ON joinKey = a
+PREWHERE t = '2020-01-01 00:00:00';
+
+DB::Exception: Not found column '2020-01-01 00:00:00' in block. There are only columns: a, joinKey
+
+
+
+SELECT any('x')
+FROM e JOIN ( SELECT 1 joinKey) AS da ON joinKey = a
+PREWHERE toString(a) = 'x';
+
+DB::Exception: Not found column 'x' in block.
+```
+
+works with `set optimize_move_to_prewhere=0;`
+
+All versions are affected starting from 21.9
+
+Not related to partitioning, the same issue with no `PARTITION BY`

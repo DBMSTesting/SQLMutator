@@ -1,0 +1,80 @@
+ID: 19324
+Title: cache is open when tidb_enable_parallel_apply is equal to  0
+Description:
+## Description
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+set tidb_enable_parallel_apply=0;
+create table t1(a int);
+explain analyze select * from t1 where t1.a - 100  > (select min(t2.a) from t1 t2 where t2.a > t1.a);
+```
+### 2. What did you expect to see? (Required)
+cache: OFF
+```
+mysql> explain analyze select * from t1 where t1.a - 100  > (select min(t2.a) from t1 t2 where t2.a > t1.a);                                                                                   +------------------------------------+----------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------+---------------+------+
+| id                                 | estRows  | actRows | task      | access object | execution info                                                                                             | operator info                                                         | memory        | disk |
++------------------------------------+----------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------+---------------+------+
+| Projection_14                      | 10000.00 | 0       | root      |               | time:166.942µs, loops:1, Concurrency:5                                                                     | test2.t1.a                                                            | 5.44921875 KB | N/A  |
+| └─Apply_16                         | 10000.00 | 0       | root      |               | time:145.341µs, loops:1, cache:OFF, cacheHitRatio:0.000%                                                    | CARTESIAN inner join, other cond:gt(minus(test2.t1.a, 100), Column#5) | 0 Bytes       | N/A  |
+|   ├─TableReader_18(Build)          | 10000.00 | 0       | root      |               | time:135.964µs, loops:1, cop_task: {num: 1, max:76.112µs, proc_keys: 0, rpc_num: 1, rpc_time: 71.674µs}    | data:TableFullScan_17                                                 | 133 Bytes     | N/A  |
+|   │ └─TableFullScan_17             | 10000.00 | 0       | cop[tikv] | table:t1      | time:0ns, loops:0                                                                                          | keep order:false, stats:pseudo                                        | N/A           | N/A  |
+|   └─StreamAgg_23(Probe)            | 1.00     | 0       | root      |               | time:0s, loops:0                                                                                           | funcs:min(test2.t1.a)->Column#5                                       | N/A           | N/A  |
+|     └─TopN_24                      | 1.00     | 0       | root      |               | time:0s, loops:0                                                                                           | test2.t1.a, offset:0, count:1                                         | N/A           | N/A  |
+|       └─TableReader_33             | 1.00     | 0       | root      |               | time:0s, loops:0                                                                                           | data:TopN_32                                                          | N/A           | N/A  |
+|         └─TopN_32                  | 1.00     | 0       | cop[tikv] |               | time:0ns, loops:0                                                                                          | test2.t1.a, offset:0, count:1                                         | N/A           | N/A  |
+|           └─Selection_31           | 7992.00  | 0       | cop[tikv] |               | time:0ns, loops:0                                                                                          | gt(test2.t1.a, test2.t1.a), not(isnull(test2.t1.a))                   | N/A           | N/A  |
+|             └─TableFullScan_30     | 10000.00 | 0       | cop[tikv] | table:t2      | time:0ns, loops:0                                                                                          | keep order:false, stats:pseudo                                        | N/A           | N/A  |
++------------------------------------+----------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------+---------------+------+
+10 rows in set (0.00 sec)
+```
+### 3. What did you see instead (Required)
+cache: ON
+```
+mysql> explain analyze select * from t1 where t1.a - 100  > (select min(t2.a) from t1 t2 where t2.a > t1.a);                                                                                   +------------------------------------+----------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------+---------------+------+
+| id                                 | estRows  | actRows | task      | access object | execution info                                                                                             | operator info                                                         | memory        | disk |
++------------------------------------+----------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------+---------------+------+
+| Projection_14                      | 10000.00 | 0       | root      |               | time:166.942µs, loops:1, Concurrency:5                                                                     | test2.t1.a                                                            | 5.44921875 KB | N/A  |
+| └─Apply_16                         | 10000.00 | 0       | root      |               | time:145.341µs, loops:1, cache:ON, cacheHitRatio:0.000%                                                    | CARTESIAN inner join, other cond:gt(minus(test2.t1.a, 100), Column#5) | 0 Bytes       | N/A  |
+|   ├─TableReader_18(Build)          | 10000.00 | 0       | root      |               | time:135.964µs, loops:1, cop_task: {num: 1, max:76.112µs, proc_keys: 0, rpc_num: 1, rpc_time: 71.674µs}    | data:TableFullScan_17                                                 | 133 Bytes     | N/A  |
+|   │ └─TableFullScan_17             | 10000.00 | 0       | cop[tikv] | table:t1      | time:0ns, loops:0                                                                                          | keep order:false, stats:pseudo                                        | N/A           | N/A  |
+|   └─StreamAgg_23(Probe)            | 1.00     | 0       | root      |               | time:0s, loops:0                                                                                           | funcs:min(test2.t1.a)->Column#5                                       | N/A           | N/A  |
+|     └─TopN_24                      | 1.00     | 0       | root      |               | time:0s, loops:0                                                                                           | test2.t1.a, offset:0, count:1                                         | N/A           | N/A  |
+|       └─TableReader_33             | 1.00     | 0       | root      |               | time:0s, loops:0                                                                                           | data:TopN_32                                                          | N/A           | N/A  |
+|         └─TopN_32                  | 1.00     | 0       | cop[tikv] |               | time:0ns, loops:0                                                                                          | test2.t1.a, offset:0, count:1                                         | N/A           | N/A  |
+|           └─Selection_31           | 7992.00  | 0       | cop[tikv] |               | time:0ns, loops:0                                                                                          | gt(test2.t1.a, test2.t1.a), not(isnull(test2.t1.a))                   | N/A           | N/A  |
+|             └─TableFullScan_30     | 10000.00 | 0       | cop[tikv] | table:t2      | time:0ns, loops:0                                                                                          | keep order:false, stats:pseudo                                        | N/A           | N/A  |
++------------------------------------+----------+---------+-----------+---------------+------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------+---------------+------+
+10 rows in set (0.00 sec)
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+Release Version: v4.0.0-beta.2-974-g92513a2f4
+Edition: Community
+Git Commit Hash: 92513a2f4d382dc89bb47d3907261d49175f20ac
+Git Branch: master
+UTC Build Time: 2020-08-19 02:45:27
+GoVersion: go1.14.6
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+
+
+
+
+## SIG slack channel
+[#sig-exec](https://slack.tidb.io/invite?team=tidb-community&channel=sig-exec&ref=high-performance)
+
+## Score
+- 300
+
+## Mentor
+ * @XuHuaiyu

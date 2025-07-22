@@ -1,0 +1,159 @@
+ID: 40416
+Title: When using OFFSET in subquery, WHERE clause in main query is also being applied to subquery first.
+Description:
+**Describe what's wrong**
+
+When using OFFSET in subquery, WHERE clause in main query is also being applied to subquery first.
+
+**Does it reproduce on recent release?**
+
+yes. 22.7
+
+**How to reproduce**
+
+* Which ClickHouse server version to use:  22.7.3.5
+* Which interface to use, if matters : clickhouse-client
+
+create table: CREATE TABLE t ENGINE=Log as select * from system.numbers limit 20;
+
+- query 1: 
+```
+clickhouse :) select number from t order by number desc offset 3;
+
+SELECT number
+FROM t
+ORDER BY number DESC
+OFFSET 3
+
+Query id: 8c390ae6-640e-46c9-8a6c-d907f8f24277
+
+┌─number─┐
+│     16 │
+│     15 │
+│     14 │
+│     13 │
+│     12 │
+│     11 │
+│     10 │
+│      9 │
+│      8 │
+│      7 │
+│      6 │
+│      5 │
+│      4 │
+│      3 │
+│      2 │
+│      1 │
+│      0 │
+└────────┘
+
+17 rows in set. Elapsed: 0.015 sec.
+```
+
+- query 2: 
+```
+clickhouse :) select number from (select number from t order by number desc offset 3) where number < 18;
+
+SELECT number
+FROM
+(
+    SELECT number
+    FROM t
+    ORDER BY number DESC
+    OFFSET 3
+)
+WHERE number < 18
+
+Query id: 3901f6d1-7d21-437f-8bbd-575e50946426
+
+┌─number─┐
+│     14 │
+│     13 │
+│     12 │
+│     11 │
+│     10 │
+│      9 │
+│      8 │
+│      7 │
+│      6 │
+│      5 │
+│      4 │
+│      3 │
+│      2 │
+│      1 │
+│      0 │
+└────────┘
+
+15 rows in set. Elapsed: 0.007 sec.
+```
+
+**Expected behavior**
+
+Should produce same result however, it does not, where clause gets applied in subquery:
+```
+EXPLAIN SYNTAX
+SELECT number
+FROM
+(
+SELECT number
+FROM t
+ORDER BY number DESC
+OFFSET 3
+) AS desc
+WHERE number < 18
+
+Query id: f0c5e9f4-628d-474f-9038-98d221be31b6
+
+┌─explain──────────────────┐
+│ SELECT number │
+│ FROM │
+│ ( │
+│ SELECT number │
+│ FROM t │
+│ WHERE number < 18 │
+│ ORDER BY number DESC │
+│ OFFSET 3 │
+│ ) AS desc │
+│ WHERE number < 18 │
+└──────────────────────────┘
+```
+
+workaround: 
+```
+clickhouse :)  set enable_optimize_predicate_expression=1
+
+clickhouse :) select number from (select number from t order by number desc offset 3) where number < 18;
+
+SELECT number
+FROM
+(
+    SELECT number
+    FROM t
+    ORDER BY number DESC
+    OFFSET 3
+)
+WHERE number < 18
+
+Query id: ab454aba-f4c2-4683-b2d5-9250de5b320a
+
+┌─number─┐
+│     14 │
+│     13 │
+│     12 │
+│     11 │
+│     10 │
+│      9 │
+│      8 │
+│      7 │
+│      6 │
+│      5 │
+│      4 │
+│      3 │
+│      2 │
+│      1 │
+│      0 │
+└────────┘
+
+15 rows in set. Elapsed: 0.008 sec.
+```
+

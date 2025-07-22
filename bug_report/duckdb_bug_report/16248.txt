@@ -1,0 +1,88 @@
+ID: 16248
+Title: Generalize `rowid` into the concept of virtual columns, and make `filename` a virtual column in the Parquet/CSV/JSON readers
+Description:
+This PR generalizes the `rowid` column to the broader concept of virtual columns. Previously, `rowid` was a special column that existed within DuckDB tables. This column was special in the sense that it could be queried, but would not show up as an actual column of the table when inspecting the table or when running `SELECT * FROM tbl`:
+
+```sql
+D create table tbl(i int);
+D insert into tbl values (42);
+D select * from tbl;
+┌───────┐
+│   i   │
+│ int32 │
+├───────┤
+│  42   │
+└───────┘
+D describe tbl;
+┌─────────────┬─────────────┬─────────┬─────────┬─────────┬─────────┐
+│ column_name │ column_type │  null   │   key   │ default │  extra  │
+│   varchar   │   varchar   │ varchar │ varchar │ varchar │ varchar │
+├─────────────┼─────────────┼─────────┼─────────┼─────────┼─────────┤
+│ i           │ INTEGER     │ YES     │ NULL    │ NULL    │ NULL    │
+└─────────────┴─────────────┴─────────┴─────────┴─────────┴─────────┘
+-- but we can query the column if explicitly mentioned
+D select rowid, i from tbl;
+┌───────┬───────┐
+│ rowid │   i   │
+│ int64 │ int32 │
+├───────┼───────┤
+│   0   │  42   │
+└───────┴───────┘
+```
+
+The `rowid` column is also used internally for several purposes, such as handling deletes/updates of rows, or performing late materialization.
+
+In the current implementation - only the `rowid` virtual column exists, and only tables can implement this virtual column.  Some previous work was done on making the `rowid` column type more flexible - e.g. https://github.com/duckdb/duckdb/pull/14674 - but still only this virtual column was hard-coded in the system.
+
+This PR generalizes the concept of virtual columns by adding a new callback to the `TableFunction`, that allows table functions to return the set of virtual columns that they support:
+
+```cpp
+struct TableColumn {
+	string name;
+	LogicalType type;
+};
+
+using virtual_column_map_t = unordered_map<column_t, TableColumn>;
+
+typedef virtual_column_map_t (*table_function_get_virtual_columns_t)(ClientContext &context,
+                                                                     optional_ptr<FunctionData> bind_data);
+```
+
+As an example, if we wanted to support the `rowid` column as before we would set it up like so:
+
+```cpp
+virtual_column_map_t virtual_columns;
+virtual_columns.insert(make_pair(COLUMN_IDENTIFIER_ROW_ID, TableColumn("rowid", LogicalType::ROW_TYPE)));
+```
+
+However, we can now support multiple virtual columns and can fully customize the virtual columns that we emit. This PR also introduces two new virtual columns:
+
+* `COLUMN_IDENTIFIER_FILENAME`, emitted by the Parquet/CSV/JSON readers 
+* `COLUMN_IDENTIFIER_EMPTY ` - this is a non-queryable virtual column. When this column is present, it is added when running `COUNT(*)` over the table function.
+
+
+#### Filename
+
+With the addition of the `filename` virtual column, the following snippet now works:
+
+```sql
+D copy (select 42 i) to tbl.parquet;
+D select * from tbl.parquet;
+┌───────┐
+│   i   │
+│ int32 │
+├───────┤
+│  42   │
+└───────┘
+D select *, filename from tbl.parquet;
+┌───────┬─────────────┐
+│   i   │  filename   │
+│ int32 │   varchar   │
+├───────┼─────────────┤
+│  42   │ tbl.parquet │
+└───────┴─────────────┘
+```
+
+Previously, we could emit the filename only by using the `filename` option. This is now no longer required - we can directly query the `filename` if desired.
+
+This PR is primarily adding support for virtual columns - we're planning to extend this support further in the future.

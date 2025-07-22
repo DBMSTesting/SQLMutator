@@ -1,0 +1,88 @@
+ID: 43843
+Title: ALTER TABLE ... ON CLUSTER ... RESET SETTING is not applied in every replica
+Description:
+**Describe what's wrong**
+
+`ALTER TABLE ... ON CLUSTER ... RESET SETTING` only resets the setting in one of the replicas in the cluster 
+
+It should reset the setting in all replicas in the cluster
+
+**Does it reproduce on recent release?**
+
+Tested on version 22.11.1.1360
+
+**How to reproduce**
+
+* ClickHouse server version to use: 22.11.1.1360
+* Tested using ClickHouse client
+* Cluster `test_cluster` has two replicas 
+
+1. Create database and table ON CLUSTER:
+
+```sql
+CREATE DATABASE test_reset_setting  ON CLUSTER test_cluster ENGINE = Atomic;
+```
+
+```sql
+CREATE TABLE test_reset_setting.test_table ON CLUSTER test_cluster
+(
+    `id` UInt64,
+    `username` String,
+    `date` DateTime
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/test_reset_setting.test_table', '{replica}')
+PARTITION BY toYYYYMM(date)
+ORDER BY (id, date);
+```
+
+2. Modify a table setting (`min_bytes_for_wide_part` in this case) and reset it ON CLUSTER:
+
+```sql
+ALTER TABLE test_reset_setting.test_table ON CLUSTER test_cluster MODIFY SETTING min_bytes_for_wide_part=41943040;
+ALTER TABLE test_reset_setting.test_table ON CLUSTER test_cluster RESET SETTING min_bytes_for_wide_part;
+```
+3. Check table settings in both replicas
+
+* First replica:
+
+```sql
+SHOW CREATE TABLE test_reset_setting.test_table;
+```
+
+```sql
+CREATE TABLE test_reset_setting.test_table
+(
+    `id` UInt64,
+    `username` String,
+    `date` DateTime
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/test_reset_setting.test_table', '{replica}')
+PARTITION BY toYYYYMM(date)
+ORDER BY (id, date)
+SETTINGS index_granularity = 8192
+```
+
+* Second replica:
+
+```sql
+SHOW CREATE TABLE test_reset_setting.test_table;
+```
+
+```sql
+CREATE TABLE test_reset_setting.test_table
+(
+    `id` UInt64,
+    `username` String,
+    `date` DateTime
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/test_reset_setting.test_table', '{replica}')
+PARTITION BY toYYYYMM(date)
+ORDER BY (id, date)
+SETTINGS index_granularity = 8192, min_bytes_for_wide_part = 41943040
+```
+
+As we can see, in the second replica, the `min_bytes_for_wide_part` has not been reseted.
+
+**Expected behavior**
+
+It should reset the setting in all the replicas in the cluster

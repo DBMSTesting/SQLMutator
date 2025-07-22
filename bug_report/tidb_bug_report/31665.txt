@@ -1,0 +1,149 @@
+ID: 31665
+Title: unionscan + expression index query return error record
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+create table t1  (c_int int, c_str varchar(40) character set utf8 collate utf8_general_ci, c_datetime datetime, c_timestamp timestamp, c_double double, c_decimal decimal(12, 6), c_enum enum('blue','green','red','yellow','white','orange','purple'), primary key (c_datetime) , key(c_int)  , key(c_datetime) , key((c_int + 1)), key((c_int -1)), key((lower(c_str))), key((md5(c_str))), key((reverse(c_str))), key((upper(c_str)))) ;
+ 
+create table t2  like t1 ;
+ 
+insert into t1 values(11, 'loving grothendieck', '2020-02-02 19:25:49', '2020-03-27 15:17:14',     3.269, 1.851000, 'white' );
+insert into t1 values(11, 'quirky kapitsa'     , '2020-06-21 03:55:31', '2020-02-29 17:02:48',      6.94, 1.851000, 'yellow');
+insert into t1 values( 7, 'boring bouman'      , '2020-05-10 00:01:04', '2020-02-01 20:18:00', 84.096168, 6.996000, 'white' );
+
+
+insert into t2 values( 11, 'wizardly antonelli', '2020-01-30 17:27:17', '2020-01-01 10:05:31', 6.886177, 6.332000, 'green'   );
+insert into t2 values( 2, 'angry kapitsa'       , '2020-03-30 05:09:44', '2020-02-15 00:36:52', 95.798378, 3.118000, 'blue'  );
+insert into t2 values( 7, 'dreamy shamir'       , '2020-05-28 14:13:42', '2020-06-02 07:23:22', 26.623227, 3.105000, 'orange');
+
+begin;
+delete from t2 where c_decimal > c_double/2 order by c_int, c_str, c_double, c_decimal limit 1;
+select t2.c_enum from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_enum; ---check
+select t2.c_int from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_int; ---check
+select t2.c_enum from t2,t1 where t1.c_int = t2.c_int order  by t2.c_enum;  ---check
+```
+
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> select t2.c_enum from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_enum;
++--------+
+| c_enum |
++--------+
+| orange |
++--------+
+1 row in set (0.01 sec)
+
+mysql> select t2.c_int from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_int; 
++-------+
+| c_int |
++-------+
+|     7 |
++-------+
+1 row in set (0.00 sec)
+
+mysql> select t2.c_enum from t2,t1 where t1.c_int = t2.c_int order  by t2.c_enum;
++--------+
+| c_enum |
++--------+
+| orange |
++--------+
+1 row in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> select t2.c_enum from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_enum;
++--------+
+| c_enum |
++--------+
+| green  |
+| green  |
+| orange |
++--------+
+3 rows in set (0.00 sec)
+
+mysql> select t2.c_int from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_int;       
++-------+
+| c_int |
++-------+
+|     7 |
++-------+
+1 row in set (0.00 sec)
+
+mysql> select t2.c_enum from t2,t1 where t1.c_int = t2.c_int order  by t2.c_enum;        
++--------+
+| c_enum |
++--------+
+| orange |
++--------+
+1 row in set (0.00 sec)
+
+mysql> explain select t2.c_enum from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_enum;
++------------------------------------+---------+-----------+-------------------------------------------------+--------------------------------------------------------------------------+
+| id                                 | estRows | task      | access object                                   | operator info                                                            |
++------------------------------------+---------+-----------+-------------------------------------------------+--------------------------------------------------------------------------+
+| Sort_12                            | 3.75    | root      |                                                 | test.t2.c_enum                                                           |
+| └─HashJoin_34                      | 3.75    | root      |                                                 | inner join, equal:[eq(minus(test.t1.c_int, 1), minus(test.t2.c_int, 1))] |
+|   ├─UnionScan_38(Build)            | 3.00    | root      |                                                 | not(isnull(minus(test.t2.c_int, 1)))                                     |
+|   │ └─Selection_42                 | 3.00    | root      |                                                 | not(isnull(minus(test.t2.c_int, 1)))                                     |
+|   │   └─Projection_41              | 3.00    | root      |                                                 | test.t2.c_datetime, test.t2.c_enum, minus(test.t2.c_int, 1)              |
+|   │     └─TableReader_40           | 3.00    | root      |                                                 | data:TableFullScan_39                                                    |
+|   │       └─TableFullScan_39       | 3.00    | cop[tikv] | table:t2                                        | keep order:false, stats:pseudo                                           |
+|   └─IndexReader_37(Probe)          | 3.00    | root      |                                                 | index:IndexFullScan_36                                                   |
+|     └─IndexFullScan_36             | 3.00    | cop[tikv] | table:t1, index:expression_index_2(`c_int` - 1) | keep order:false, stats:pseudo                                           |
++------------------------------------+---------+-----------+-------------------------------------------------+--------------------------------------------------------------------------+
+9 rows in set (0.00 sec)
+
+mysql> explain select t2.c_int from t2,t1 where t1.c_int - 1 = t2.c_int - 1 order  by t2.c_int;  
++----------------------------------+---------+-----------+-------------------------------------------------+--------------------------------------------------------------------------+
+| id                               | estRows | task      | access object                                   | operator info                                                            |
++----------------------------------+---------+-----------+-------------------------------------------------+--------------------------------------------------------------------------+
+| Sort_12                          | 3.75    | root      |                                                 | test.t2.c_int                                                            |
+| └─HashJoin_34                    | 3.75    | root      |                                                 | inner join, equal:[eq(minus(test.t1.c_int, 1), minus(test.t2.c_int, 1))] |
+|   ├─UnionScan_38(Build)          | 3.00    | root      |                                                 | not(isnull(minus(test.t2.c_int, 1)))                                     |
+|   │ └─Selection_41               | 3.00    | root      |                                                 | not(isnull(minus(test.t2.c_int, 1)))                                     |
+|   │   └─TableReader_40           | 3.00    | root      |                                                 | data:TableFullScan_39                                                    |
+|   │     └─TableFullScan_39       | 3.00    | cop[tikv] | table:t2                                        | keep order:false, stats:pseudo                                           |
+|   └─IndexReader_37(Probe)        | 3.00    | root      |                                                 | index:IndexFullScan_36                                                   |
+|     └─IndexFullScan_36           | 3.00    | cop[tikv] | table:t1, index:expression_index_2(`c_int` - 1) | keep order:false, stats:pseudo                                           |
++----------------------------------+---------+-----------+-------------------------------------------------+--------------------------------------------------------------------------+
+8 rows in set (0.00 sec)
+
+mysql> explain select t2.c_enum from t2,t1 where t1.c_int = t2.c_int order  by t2.c_enum;   
++----------------------------------+---------+-----------+------------------------------+------------------------------------------------------+
+| id                               | estRows | task      | access object                | operator info                                        |
++----------------------------------+---------+-----------+------------------------------+------------------------------------------------------+
+| Sort_12                          | 3.75    | root      |                              | test.t2.c_enum                                       |
+| └─HashJoin_34                    | 3.75    | root      |                              | inner join, equal:[eq(test.t1.c_int, test.t2.c_int)] |
+|   ├─UnionScan_38(Build)          | 3.00    | root      |                              | not(isnull(test.t2.c_int))                           |
+|   │ └─TableReader_41             | 3.00    | root      |                              | data:Selection_40                                    |
+|   │   └─Selection_40             | 3.00    | cop[tikv] |                              | not(isnull(test.t2.c_int))                           |
+|   │     └─TableFullScan_39       | 3.00    | cop[tikv] | table:t2                     | keep order:false, stats:pseudo                       |
+|   └─IndexReader_37(Probe)        | 3.00    | root      |                              | index:IndexFullScan_36                               |
+|     └─IndexFullScan_36           | 3.00    | cop[tikv] | table:t1, index:c_int(c_int) | keep order:false, stats:pseudo                       |
++----------------------------------+---------+-----------+------------------------------+------------------------------------------------------+
+8 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
+Release Version: v5.4.0-nightly
+Edition: Community
+Git Commit Hash: 4baab3cf1abdf09cf7b5dc6078b770cf67905aff
+Git Branch: heads/refs/tags/v5.4.0-nightly
+UTC Build Time: 2022-01-10 05:19:54
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

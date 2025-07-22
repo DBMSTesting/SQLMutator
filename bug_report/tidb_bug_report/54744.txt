@@ -1,0 +1,100 @@
+ID: 54744
+Title: Read a value that should be deleted
+Description:
+## Bug Report
+
+When I tested Repeatable Read isolation levels on TiDB, I found a like lost update exception.
+In a transaction, I used a table-wide delete statement, but was still able to read data from the table, which should have been deleted. If I use this result to modify the data, it will result in a serious error.
+A simplified test case with result is as follows.
+In the last query of T2, I should see an empty set.Therefore, it seems to me that this is a logical bug for the isolation level.
+
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+CREATE TABLE t0(c0 INT primary key);
+INSERT INTO t0 VALUES (1);
+INSERT INTO t0 VALUES (-1);
+
+/* T1 */ BEGIN;
+/* T2 */ BEGIN;
+/* T1 */ SELECT * FROM t0;
+/* T2 */ SELECT * FROM t0;
+/* T1 */ UPDATE t0 SET c0 = 2 where c0 = 1;
+/* T1 */ SELECT * FROM t0;
+/* T1 */ COMMIT;
+/* T2 */ Delete FROM t0;
+/* T2 */ SELECT * FROM t0;
+/* T2 */ COMMIT;
+```
+### 2. What did you expect to see? (Required)
+In MySQL
+```sql
+/* T2 */ Delete FROM t0;
+mysql> /* T2 */ SELECT * FROM t0;
+Empty set (0.00 sec)
+```
+In PG
+```sql
+/* T2 */ Delete FROM t0;
+postgres=*# /* T2 */ SELECT * FROM t0;
+ c0 
+----
+(0 rows)
+```
+### 3. What did you see instead (Required)
+```sql
+/* T1 */ BEGIN;
+/* T2 */ BEGIN;
+/* T1 */ SELECT * FROM t0;
++----+
+| c0 |
++----+
+| -1 |
+|  1 |
++----+
+2 rows in set (0.00 sec)
+/* T2 */ SELECT * FROM t0;
++----+
+| c0 |
++----+
+| -1 |
+|  1 |
++----+
+2 rows in set (0.00 sec)
+/* T1 */ UPDATE t0 SET c0 = 2 where c0 = 1;
+Query OK, 1 row affected (0.00 sec)
+Rows matched: 1  Changed: 1  Warnings: 0
+/* T1 */ SELECT * FROM t0;
++----+
+| c0 |
++----+
+| -1 |
+|  2 |
++----+
+2 rows in set (0.00 sec)
+/* T1 */ COMMIT;
+/* T2 */ Delete FROM t0;
+Query OK, 2 rows affected (8.53 sec)
+/* T2 */ SELECT * FROM t0;
++----+
+| c0 |
++----+
+|  1 |
++----+
+1 row in set (0.00 sec)
+/* T2 */ COMMIT;
+```
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+Release Version: v8.2.0
+Edition: Community
+Git Commit Hash: 821e491a20fbab36604b36b647b5bae26a2c1418
+Git Branch: HEAD
+UTC Build Time: 2024-07-05 09:16:25
+GoVersion: go1.21.10
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv

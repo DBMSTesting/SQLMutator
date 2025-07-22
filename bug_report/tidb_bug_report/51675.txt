@@ -1,0 +1,63 @@
+ID: 51675
+Title: ttl: 1 hour's deviation for 'expire time' in TTL
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. Set time zone as 'PDT': `set @@time_zone='America/Los_Angeles'` on PDT time.
+2. Run test 'TestSubmitJob':
+```
+go test --tags=intest -timeout 30s -run ^TestSubmitJob$ "github.com/pingcap/tidb/pkg/ttl/ttlworker"
+```
+
+### 2. What did you expect to see? (Required)
+
+Test succeeded.
+
+### 3. What did you see instead (Required)
+
+Test failed:
+```
+--- FAIL: TestSubmitJob (0.96s)
+    job_manager_integration_test.go:477:
+        	Error Trace:	/Users/bb7133/Projects/gopath/src/github.com/pingcap/tidb/pkg/ttl/ttlworker/job_manager_integration_test.go:477
+        	Error:      	Max difference between 1710172125 and 1710175725 allowed is 300, but difference was -3600
+        	Test:       	TestSubmitJob
+FAIL
+```
+
+### 4. What is your TiDB version? (Required)
+Latest master branch
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+### 5. Root cause
+The [calculation of 'expire time'](https://github.com/pingcap/tidb/blob/e2718640b58e3cef5eb2be1275ad59fdab36ea61/pkg/ttl/cache/table.go#L199-L201) is problematic when facing daylight saving time:
+```
+fmt.Sprintf("SELECT FROM_UNIXTIME(0) + INTERVAL %d SECOND - INTERVAL %s %s", now.Unix(), expireExpr, unit.String()),
+```
+For areas like Los Angeles, the time of `FROM_UNIXTIME(0)` is in PST when `now()` is in PDT, there will be 1-hour deviation.
+
+As a result, users will also notice this bug checking job status in PDT time:
+
+```
+tidb> create table ttlp1(a int, t timestamp) TTL=`t`+interval 1 HOUR PARTITION BY RANGE (a) (
+    -> PARTITION p0 VALUES LESS THAN (10),
+    -> PARTITION p1 VALUES LESS THAN (100));
+Query OK, 0 rows affected (0.09 sec)
+
+tidb> select * from mysql.tidb_ttl_table_status\G
+...
+*************************** 3. row ***************************
+                      table_id: 110
+               parent_table_id: 109
+              table_statistics: NULL
+                   last_job_id: bfbe0a4394ad4a50852ef6da315a9640
+           last_job_start_time: 2024-03-11 14:20:39
+          last_job_finish_time: 2024-03-11 14:20:54
+           **last_job_ttl_expire**: 2024-03-11 12:20:39
+...
+```

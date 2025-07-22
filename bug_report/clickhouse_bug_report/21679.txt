@@ -1,0 +1,89 @@
+ID: 21679
+Title: quantileOrNull returns NULL even when there is no NULL data
+Description:
+When using `quantileOrNull` on a `UInt32` column, occasionally the result will be NULL, even though there are no NULL values in the table.
+
+On version 20.3.9.70
+Table statement:
+```
+CREATE TABLE default.transactions_local (`project_id` UInt64, `event_id` UUID, `trace_id` Nullable(UUID), `span_id` UInt64, `transaction_name` LowCardinality(String), `transaction_hash` UInt64 MATERIALIZED cityHash64(transaction_name), `transaction_op` LowCardinality(String), `transaction_status` UInt8 DEFAULT 2, `start_ts` DateTime, `start_ms` UInt16, `finish_ts` DateTime, `finish_ms` UInt16, `duration` UInt32, `platform` LowCardinality(String), `environment` LowCardinality(Nullable(String)), `release` LowCardinality(Nullable(String)), `dist` LowCardinality(Nullable(String)), `ip_address_v4` Nullable(IPv4), `ip_address_v6` Nullable(IPv6), `user` String DEFAULT '', `user_hash` UInt64 MATERIALIZED cityHash64(user), `user_id` Nullable(String), `user_name` Nullable(String), `user_email` Nullable(String), `sdk_name` LowCardinality(String) DEFAULT '', `sdk_version` LowCardinality(String) DEFAULT '', `http_method` LowCardinality(Nullable(String)), `http_referer` Nullable(String), `tags.key` Array(String), `tags.value` Array(String), `_tags_flattened` String, `_tags_hash_map` Array(UInt64) MATERIALIZED arrayMap((k, v) -> cityHash64(concat(replaceRegexpAll(k, '(\\=|\\\\)', '\\\\\\1'), '=', v)), tags.key, tags.value), `contexts.key` Array(String), `contexts.value` Array(String), `_contexts_flattened` String, `measurements.key` Array(LowCardinality(String)), `measurements.value` Array(Float64), `partition` UInt16, `offset` UInt64, `message_timestamp` DateTime, `retention_days` UInt16, `deleted` UInt8, `type` LowCardinality(String) MATERIALIZED 'transaction', `message` String MATERIALIZED transaction_name, `title` String MATERIALIZED transaction_name, `timestamp` DateTime MATERIALIZED finish_ts,  INDEX minmax_timestamp timestamp TYPE minmax GRANULARITY 1) ENGINE = ReplacingMergeTree(deleted) PARTITION BY (retention_days, toMonday(finish_ts)) ORDER BY (project_id, toStartOfDay(finish_ts), transaction_name, cityHash64(span_id)) SAMPLE BY cityHash64(span_id) TTL finish_ts + toIntervalDay(retention_days) SETTINGS index_granularity = 8192
+```
+
+The import columns is `duration UInt32`.
+
+There only needs to be one row of data to reproduce this:
+
+```
+{
+    "project_id": "609",
+    "event_id": "4cea6f7b-8c45-4c48-8662-d09fe4cbefb0",
+    "trace_id": "af2a25f2-2403-4c4e-9e90-ac6d15d59a73",
+    "span_id": "7676270175682840107",
+    "transaction_name": "\/country_by_code\/",
+    "transaction_op": "http.server",
+    "transaction_status": 0,
+    "start_ts": "2021-03-11 09:59:57",
+    "start_ms": 0,
+    "finish_ts": "2021-03-11 10:00:00",
+    "finish_ms": 0,
+    "duration": 3000,
+    "platform": "other",
+    "environment": "dev",
+    "release": null,
+    "dist": null,
+    "ip_address_v4": "127.0.0.1",
+    "ip_address_v6": null,
+    "user": "ip:127.0.0.1",
+    "user_id": null,
+    "user_name": null,
+    "user_email": null,
+    "sdk_name": "",
+    "sdk_version": "",
+    "http_method": "GET",
+    "http_referer": "fixtures.transaction",
+    "tags.key": ["browser"],
+    "tags.value": ["Python Requests 2.22"],
+    "_tags_flattened": "",
+    "contexts.key": ["browser.name"],
+    "contexts.value": ["Python Requests"],
+    "_contexts_flattened": "",
+    "measurements.key": [],
+    "measurements.value": [],
+    "partition": 0,
+    "offset": "0",
+    "message_timestamp": "0000-00-00 00:00:00",
+    "retention_days": 90,
+    "deleted": 0
+}
+```
+
+When I run the query below over and over, the output is sometimes NULL and sometimes 3000. This happens once every 10th or 20th time for me.
+```
+SELECT quantileOrNull(0.5)(duration) FROM transactions_local WHERE event_id = '4cea6f7b-8c45-4c48-8662-d09fe4cbefb0';
+```
+
+```
+SELECT quantileOrNull(0.5)(duration)
+FROM transactions_local
+WHERE event_id = '4cea6f7b-8c45-4c48-8662-d09fe4cbefb0'
+
+┌─quantileOrNull(0.5)(duration)─┐
+│                          ᴺᵁᴸᴸ │
+└───────────────────────────────┘
+
+1 rows in set. Elapsed: 0.005 sec.
+
+56cd99828102 :) select quantileOrNull(0.5)(duration) from transactions_local where event_id = '4cea6f7b-8c45-4c48-8662-d09fe4cbefb0';
+
+SELECT quantileOrNull(0.5)(duration)
+FROM transactions_local
+WHERE event_id = '4cea6f7b-8c45-4c48-8662-d09fe4cbefb0'
+
+┌─quantileOrNull(0.5)(duration)─┐
+│                          3000 │
+└───────────────────────────────┘
+
+1 rows in set. Elapsed: 0.007 sec.
+```
+
+I would expect this to always return a number, since the row does not have NULL data.

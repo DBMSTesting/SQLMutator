@@ -1,0 +1,72 @@
+ID: 45647
+Title: having item ref-ed to a grouping expression shouldn't be push down through expand
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```
+CREATE TABLE `sales` (
+  `year` int DEFAULT NULL,
+  `country` varchar(20) DEFAULT NULL,
+  `product` varchar(32) DEFAULT NULL,
+  `profit` int DEFAULT NULL
+)
+alter table sales set tiflash replica 1
+explain SELECT year+2 as y, SUM(profit) AS profit FROM sales GROUP BY year+2, year+profit WITH ROLLUP having y > 2002 order by year+2, profit;
+```
+
+### 2. What did you expect to see? (Required)
+```
++----------------------------------------------+----------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                           | estRows  | task         | access object | operator info                                                                                                                                                                                                                            |
++----------------------------------------------+----------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Projection_10                                | 6400.00  | root         |               | Column#6, Column#9                                                                                                                                                                                                                       |
+| └─Sort_12                                    | 6400.00  | root         |               | Column#6, Column#9                                                                                                                                                                                                                       |
+|   └─TableReader_36                           | 6400.00  | root         |               | MppVersion: 2, data:ExchangeSender_35                                                                                                                                                                                                    |
+|     └─ExchangeSender_35                      | 6400.00  | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                                |
+|       └─Projection_34                        | 6400.00  | mpp[tiflash] |               | Column#9, Column#6                                                                                                                                                                                                                       |
+|         └─HashAgg_17                         | 6400.00  | mpp[tiflash] |               | group by:Column#20, Column#21, Column#22, funcs:sum(Column#18)->Column#9, funcs:firstrow(Column#19)->Column#6                                                                                                                            |
+|           └─Projection_47                    | 8000.00  | mpp[tiflash] |               | cast(test.sales.profit, decimal(10,0) BINARY)->Column#18, Column#6->Column#19, Column#6->Column#20, Column#7->Column#21, gid->Column#22                                                                                                  |
+|             └─ExchangeReceiver_33            | 8000.00  | mpp[tiflash] |               |                                                                                                                                                                                                                                          |
+|               └─ExchangeSender_32            | 8000.00  | mpp[tiflash] |               | ExchangeType: HashPartition, Compression: FAST, Hash Cols: [name: Column#6, collate: binary], [name: Column#7, collate: binary], [name: gid, collate: binary]                                                                            |
+|                 └─Selection_31               | 8000.00  | mpp[tiflash] |               | gt(Column#6, 2002)                                                                                                                                                                                                                       |
+|                   └─Expand_27                | 10000.00 | mpp[tiflash] |               | level-projection:[test.sales.profit, <nil>->Column#6, <nil>->Column#7, 0->gid],[test.sales.profit, Column#6, <nil>->Column#7, 1->gid],[test.sales.profit, Column#6, Column#7, 3->gid]; schema: [test.sales.profit,Column#6,Column#7,gid] |
+|                     └─Projection_23          | 10000.00 | mpp[tiflash] |               | test.sales.profit, plus(test.sales.year, 2)->Column#6, plus(test.sales.year, test.sales.profit)->Column#7                                                                                                                                |
+|                       └─TableFullScan_24     | 10000.00 | mpp[tiflash] | table:sales   | keep order:false, stats:pseudo                                                                                                                                                                                                           |
++----------------------------------------------+----------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+13 rows in set (3.454 sec)
+```
+
+### 3. What did you see instead (Required)
+```
++--------------------------------------------+----------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                                         | estRows  | task         | access object | operator info                                                                                                                                                                                                                            |
++--------------------------------------------+----------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| TableReader_46                             | 6400.00  | root         |               | MppVersion: 2, data:ExchangeSender_45                                                                                                                                                                                                    |
+| └─ExchangeSender_45                        | 6400.00  | mpp[tiflash] |               | ExchangeType: PassThrough                                                                                                                                                                                                                |
+|   └─Projection_9                           | 6400.00  | mpp[tiflash] |               | Column#6, Column#9                                                                                                                                                                                                                       |
+|     └─Projection_40                        | 6400.00  | mpp[tiflash] |               | Column#9, Column#6                                                                                                                                                                                                                       |
+|       └─HashAgg_38                         | 6400.00  | mpp[tiflash] |               | group by:Column#22, Column#23, Column#24, funcs:sum(Column#20)->Column#9, funcs:firstrow(Column#21)->Column#6                                                                                                                            |
+|         └─Projection_47                    | 8000.00  | mpp[tiflash] |               | cast(test.sales.profit, decimal(10,0) BINARY)->Column#20, Column#6->Column#21, Column#6->Column#22, Column#7->Column#23, gid->Column#24                                                                                                  |
+|           └─ExchangeReceiver_24            | 8000.00  | mpp[tiflash] |               |                                                                                                                                                                                                                                          |
+|             └─ExchangeSender_23            | 8000.00  | mpp[tiflash] |               | ExchangeType: HashPartition, Compression: FAST, Hash Cols: [name: Column#6, collate: binary], [name: Column#7, collate: binary], [name: gid, collate: binary]                                                                            |
+|               └─Expand_22                  | 8000.00  | mpp[tiflash] |               | level-projection:[test.sales.profit, <nil>->Column#6, <nil>->Column#7, 0->gid],[test.sales.profit, Column#6, <nil>->Column#7, 1->gid],[test.sales.profit, Column#6, Column#7, 3->gid]; schema: [test.sales.profit,Column#6,Column#7,gid] |
+|                 └─Projection_17            | 8000.00  | mpp[tiflash] |               | test.sales.profit, plus(test.sales.year, 2)->Column#6, plus(test.sales.year, test.sales.profit)->Column#7                                                                                                                                |
+|                   └─Selection_19           | 8000.00  | mpp[tiflash] |               | gt(plus(test.sales.year, 2), 2002)                                                                                                                                                                                                       |
+|                     └─TableFullScan_18     | 10000.00 | mpp[tiflash] | table:sales   | pushed down filter:empty, keep order:false, stats:pseudo                                                                                                                                                                                 |
++--------------------------------------------+----------+--------------+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+12 rows in set (26 min 50.782 sec)
+```
+
+As you see having item y is referenced to select item (year + 2) referenced to a grouping set expression (year + 2). And after Expand OP, grouping set expression (year + 2) is changed as column#6 with nullability change, which means it's not the original (year+2) / column#6 any more. Therefore (year +2) > 2002 shouldn't be pushed down through Expand, otherwise, additional NULL value in position of grouping set expression (year + 2) will be generated and remained later.
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master
+

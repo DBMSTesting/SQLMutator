@@ -1,0 +1,58 @@
+ID: 58105
+Title: 2038 issue for TTL schedule
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+Create a TTL table with:
+
+```sql
+CREATE TABLE t2 (id INT PRIMARY KEY, created_at DATETIME) TTL = created_at + INTERVAL '-20' YEAR
+```
+
+Then it cannot be scheduled because the `NOW() + JINTERVAL 175200 Hour` is greater than 2038. 
+
+### 2. What did you expect to see? (Required)
+
+The TTL job can be successfully scheduled.
+
+### 3. What did you see instead (Required)
+
+The TTL failed to schedule.
+
+It's because the TTL uses the `TIMESTAMP` type to store the `current_job_ttl_expire`, and it can only store time from '1970-01-01 00:00:01' UTC to '2038-01-19 03:14:07' UTC. It's less likely to have issues now because we are still far from 2038, but it's possible to have such kinds of table right now.  Hope we can solve it before 2038 reaches.
+
+BTW, I'm not sure whether it's expected to allow all kinds of `Literal` in the TTL interval expression, like `created_at + INTERVAL false YEAR`... Maybe we should limit them to `SignedNumLiteral` (though it doesn't exist yet).
+
+```go
+func Test2038IssueForTTL(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	waitAndStopTTLManager(t, dom)
+	tk := testkit.NewTestKit(t, store)
+
+	sessionFactory := sessionFactory(t, store)
+	se := sessionFactory()
+
+	tk.MustExec("use test")
+	tk.MustExec("CREATE TABLE t1 (id INT PRIMARY KEY, created_at DATETIME) TTL = created_at + INTERVAL 20 YEAR")
+	tk.MustExec("CREATE TABLE t2 (id INT PRIMARY KEY, created_at DATETIME) TTL = created_at + INTERVAL '-20' YEAR")
+	testTable1, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t1"))
+	require.NoError(t, err)
+	testTable2, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t2"))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	m := ttlworker.NewJobManager("test-ttl-job-manager-1", nil, store, nil, nil)
+
+	now := se.Now()
+	// acquire the job
+	require.NoError(t, m.InfoSchemaCache().Update(se))
+	require.NoError(t, m.TableStatusCache().Update(ctx, se))
+	_, err = m.LockJob(context.Background(), se, m.InfoSchemaCache().Tables[testTable1.Meta().ID], now, uuid.NewString(), false)
+	require.NoError(t, err)
+	_, err = m.LockJob(context.Background(), se, m.InfoSchemaCache().Tables[testTable2.Meta().ID], now, uuid.NewString(), false)
+	require.NoError(t, err)
+}
+
+```

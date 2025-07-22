@@ -1,0 +1,132 @@
+ID: 31449
+Title: query does not return the expected results but mixing columns
+Description:
+### Context
+A computed W2V dataset is created and inserted into ClickHouse using these operations and to reproduce this issue included a copy of the dataset
+```SQL
+-- cat vectors/part* | clickhouse-client -h localhost --query="insert into ot.ml_w2v_log format JSONEachRow "
+create database if not exists ot;
+create table if not exists ot.ml_w2v_log
+(
+    category String,
+    word   String,
+    norm    Float64,
+    vector Array(Float64)
+) engine = Log;
+
+create table if not exists ot.ml_w2v
+    engine = MergeTree()
+        order by (word)
+        primary key (word)
+as
+select category,
+       word,
+       norm,
+       vector
+from (select category, word, norm, vector from ot.ml_w2v_log);
+```
+The used query to get the top words from some category is
+```SQL
+WITH (
+    SELECT sumForEach(vector)
+    FROM ot.ml_w2v
+    PREWHERE (in(word,('CHEMBL1737')))
+    ) AS vv,
+     sqrt(arraySum(x -> x*x,vv)) AS vvnorm,
+     if(and(notEquals(vvnorm,0.0),notEquals(norm,0.0)),divide(arraySum(x -> x.1 * x.2,arrayZip(vv,vector)),multiply(norm,vvnorm)),0.0) AS similarity
+SELECT category, word, similarity
+FROM ot.ml_w2v
+    PREWHERE (in(category,('disease')))
+WHERE (greaterOrEquals(similarity,0.1))
+ORDER BY similarity DESC
+LIMIT 10 OFFSET 0;
+```
+The expected output is a list of `>= 0` elements coming just from category `disease`. In the last release, it gets words from a category that does not belong to.
+
+output with versions
+```
+ClickHouse client version 21.9.4.35 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 21.9.4 revision 54449.
+```
+```SQL
+WITH
+    (
+        SELECT sumForEach(vector)
+        FROM ot.ml_w2v
+        PREWHERE word IN ('CHEMBL1737')
+    ) AS vv,
+    sqrt(arraySum(x -> (x * x), vv)) AS vvnorm,
+    if((vvnorm != 0.) AND (norm != 0.), arraySum(x -> ((x.1) * (x.2)), arrayZip(vv, vector)) / (norm * vvnorm), 0.) AS similarity
+SELECT
+    category,
+    word,
+    similarity
+FROM ot.ml_w2v
+PREWHERE category IN ('disease')
+WHERE similarity >= 0.1
+ORDER BY similarity DESC
+LIMIT 0, 10
+
+Query id: a4fbcdab-0bd7-4cdd-816f-fc5508154f25
+
+┌─category─┬─word────────────┬─────────similarity─┐
+│ disease  │ EFO_0004234     │ 0.7696740602266341 │
+│ disease  │ EFO_1000466     │ 0.6860139858343028 │
+│ disease  │ MONDO_0001999   │ 0.6183489436097988 │
+│ disease  │ HP_0001667      │ 0.6032877790181791 │
+│ disease  │ EFO_0009085     │ 0.5989707188199231 │
+│ disease  │ Orphanet_156629 │ 0.5800397436624738 │
+│ disease  │ EFO_0009196     │  0.579683404421804 │
+│ disease  │ EFO_0001361     │   0.56757779832079 │
+│ disease  │ HP_0200023      │  0.565599936638102 │
+│ disease  │ MONDO_0001574   │ 0.5552950663929026 │
+└──────────┴─────────────────┴────────────────────┘
+
+10 rows in set. Elapsed: 0.029 sec. Processed 47.47 thousand rows, 19.90 MB (1.66 million rows/s., 694.93 MB/s.)
+```
+and this output is expected. But when the same query is executed against the latest version
+```
+ClickHouse client version 21.11.3.6 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 21.11.3 revision 54450.
+```
+```SQL
+
+WITH
+    (
+        SELECT sumForEach(vector)
+        FROM ot.ml_w2v
+        PREWHERE word IN ('CHEMBL1737')
+    ) AS vv,
+    sqrt(arraySum(x -> (x * x), vv)) AS vvnorm,
+    if((vvnorm != 0.) AND (norm != 0.), arraySum(x -> ((x.1) * (x.2)), arrayZip(vv, vector)) / (norm * vvnorm), 0.) AS similarity
+SELECT
+    category,
+    word,
+    similarity
+FROM ot.ml_w2v
+PREWHERE category IN ('disease')
+WHERE similarity >= 0.1
+ORDER BY similarity DESC
+LIMIT 0, 10
+
+Query id: 707cefb6-1c3b-427f-85ac-44a813020bab
+
+┌─category─┬─word──────────┬─────────similarity─┐
+│ disease  │ CHEMBL2110641 │ 12.066153256687638 │
+│ disease  │ CHEMBL1887891 │  8.441367361572434 │
+│ disease  │ CHEMBL219376  │   8.42932989841403 │
+│ disease  │ CHEMBL2108401 │  6.813855928884503 │
+│ disease  │ CHEMBL1927030 │   5.82952056420569 │
+│ disease  │ CHEMBL1464    │  5.501304739078533 │
+│ disease  │ CHEMBL2107880 │  5.351481348458378 │
+│ disease  │ CHEMBL2103836 │  5.082651728915573 │
+│ disease  │ CHEMBL2219640 │  4.849979327914108 │
+│ disease  │ CHEMBL1644695 │ 4.6276729651167345 │
+└──────────┴───────────────┴────────────────────┘
+
+10 rows in set. Elapsed: 0.027 sec. Processed 47.13 thousand rows, 19.61 MB (1.75 million rows/s., 728.89 MB/s.)
+```
+this output is not expected as there is no word starting with `CHEMBL` in the category `disease`. I guess the way the similarity comes is by not computing it correctly. Might it be the way to take the vector from the query in the WITH section either?
+

@@ -1,0 +1,58 @@
+ID: 15665
+Title: Enable index scan for dynamic IN filter
+Description:
+Follow-up to #15410. While #15410 only supports `IN` filters pushed down via hash joins, this PR extends that functionality to detect conventional `IN` filters.
+
+```sql
+D CREATE TABLE tbl AS SELECT range AS i FROM range(500000);
+D ALTER TABLE tbl ADD PRIMARY KEY(i);
+D EXPLAIN ANALYZE DELETE FROM tbl WHERE i IN (2, 42, 100, 101);
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE DELETE FROM tbl WHERE i IN (2, 42, 100, 101);
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 0.0029s             ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│           0 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      DELETE_OPERATOR      │
+│    ────────────────────   │
+│           1 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│ ((i = 2) OR (i = 42) OR (i│
+│    = 100) OR (i = 101))   │
+│                           │
+│           4 Rows          │
+│          (0.00s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│         Table: tbl        │
+│      Type: Index Scan     │
+│                           │
+│          Filters:         │
+│ optional: i IN (2, 42, 100│
+│           , 101)          │
+│                           │
+│           4 Rows          │
+│          (0.00s)          │
+└───────────────────────────┘
+```

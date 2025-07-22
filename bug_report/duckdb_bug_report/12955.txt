@@ -1,0 +1,55 @@
+ID: 12955
+Title: Pushdown dynamically generated filters into `MultiFileList`, allowing partitions to be pruned
+Description:
+Follow-up from https://github.com/duckdb/duckdb/pull/12908
+
+This PR enables the filters that get dynamically generated through e.g. joins to be pushed into the `MultiFileList`, which allows partitions to be pruned using these filters. 
+
+### MultiFileList API
+
+
+The `MultiFileList` API is extended with a new method - `DynamicFilterPushdown`:
+
+```cpp
+unique_ptr<MultiFileList> DynamicFilterPushdown(
+	ClientContext &context,
+	const MultiFileReaderOptions &options,
+	const vector<string> &names,
+	const vector<LogicalType> &types,
+	const vector<column_t> &column_ids,
+	TableFilterSet &filters) const;
+```
+
+Conceptually this is almost identical to `ComplexFilterPushdown` (minus getting a `TableFilterSet` and names instead of a `LogicalGet`). The main difference is that this method is `const`. As such - the original `MultiFileList` cannot be modified. This is necessary because filters dynamically generated at run-time cannot be kept around in the bind data, otherwise recursive CTEs will provide incorrect results (a recursive CTE test is added to verify this).
+
+In the ParquetReader we no longer directly access the `MultiFileList` from the `bind_data` in order to facilitate this. Instead, the `ParquetReadGlobalState` has a reference to the `MultiFileList`. In case there are no dynamic filters it links directly to the `MultiFileList` in the `bind_data`. Otherwise it uses the `MultiFileList` returned by `DynamicFilterPushdown`.
+
+Aside from this the PR is mostly code clean-up to facilitate the change:
+
+* `Expression::Copy` is now a `const` method
+* `TableFilter::ToExpression` is added to turn table filters into expressions so the original partition pruning code can be re-used
+* Dependencies on the `LogicalGet` are removed from the `MultiFileList` - this is instead replaced by `MultiFilePushdownInfo`
+
+
+### Benchmark
+Below is a performance comparison of running the below query on TPC-H SF15:
+
+##### Create
+```sql
+COPY (FROM lineitem ORDER BY l_shipdate) TO 'lineitem_sf15_partitioned_shipdate' (FORMAT PARQUET, PARTITION_BY l_shipdate);
+CREATE TABLE shipdates AS SELECT '1998-12-01' d;
+```
+
+##### Benchmark
+```sql
+SELECT COUNT(*) from 'lineitem_sf15_partitioned_shipdate/**/*.parquet' WHERE l_shipdate=(SELECT MAX(d) FROM shipdates)
+```
+
+| v1.0.0 | main  |  New  |
+|--------|-------|-------|
+| 0.67s  | 0.38s | 0.20s |
+
+
+The performance difference from `v1.0.0 -> main` is due to the join filters being generated in the first place (allowing skipping of reading any row groups within the parquet files). The performance difference between `main -> new` is due to the files being fully pruned.
+
+The main remaining cost is globbing of the file system - if we push the globbing optimization we could get the performance of this query down even further.

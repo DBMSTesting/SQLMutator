@@ -1,0 +1,89 @@
+ID: 20727
+Title: *: `insufficient bytes decode value` reported when adding index for some split common-handled tables.  
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+tidb> show variables like '%clustered%';
+
+
++-----------------------------+-------+
+| Variable_name               | Value |
++-----------------------------+-------+
+| tidb_enable_clustered_index | ON    |
++-----------------------------+-------+
+1 row in set (0.02 sec)
+```
+
+```
+tidb> create table t (a varchar(255), b int, primary key(a));
+Query OK, 0 rows affected (0.02 sec)
+
+tidb> insert into t values ('a', 1), ('b', 2), ('c', 3), ('u', 1);
+Query OK, 4 rows affected (0.00 sec)
+Records: 4  Duplicates: 0  Warnings: 0
+
+tidb> split table t between ('a') and ('z') regions 5;
++--------------------+----------------------+
+| TOTAL_SPLIT_REGION | SCATTER_FINISH_RATIO |
++--------------------+----------------------+
+|                  4 |                    1 |
++--------------------+----------------------+
+1 row in set (0.01 sec)
+
+tidb> create index idx on t (b);
+```
+
+### 2. What did you expect to see? (Required)
+The job ran successfully.
+
+### 3. What did you see instead (Required)
+Error reported when executing the DDL job:
+
+```
+[worker="worker 2, tp add index"] [error="insufficient bytes to decode value"] [errorVerbose="insufficient bytes to decode value
+github.com/pingcap/tidb/util/codec.peekBytes
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/util/codec/codec.go:958
+github.com/pingcap/tidb/util/codec.peek
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/util/codec/codec.go:933
+github.com/pingcap/tidb/util/codec.CutOne
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/util/codec/codec.go:887
+github.com/pingcap/tidb/kv.NewCommonHandle
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/kv/key.go:248
+github.com/pingcap/tidb/tablecodec.DecodeRowKey
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/tablecodec/tablecodec.go:269
+github.com/pingcap/tidb/ddl.decodeHandleRange
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/backfilling.go:364
+github.com/pingcap/tidb/ddl.(*worker).sendRangeTaskToWorkers
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/backfilling.go:380
+github.com/pingcap/tidb/ddl.(*worker).writePhysicalTableRecord
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/backfilling.go:563
+github.com/pingcap/tidb/ddl.(*worker).addPhysicalTableIndex
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/index.go:1142
+github.com/pingcap/tidb/ddl.(*worker).addTableIndex
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/index.go:1165
+github.com/pingcap/tidb/ddl.(*worker).onCreateIndex.func1
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/index.go:564
+github.com/pingcap/tidb/ddl.(*worker).runReorgJob.func1
+	/home/bb7133/Projects/gopath/src/github.com/pingcap/tidb/ddl/reorg.go:190
+runtime.goexit
+	/home/bb7133/Softwares/go/src/runtime/asm_amd64.s:1374"]
+```
+
+### 4. What is your TiDB version? (Required)
+This can be reproduced in the master version
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+### Root Cause
+For now, `ADD INDEX`(as well as some other DDL jobs that need data-reorganization) assume that the 'startKey' and 'endKey' of a region can always be decoded:
+
+https://github.com/pingcap/tidb/blob/937949f44d0d25e21f5a5722dbb334773de38db9/ddl/backfilling.go#L359
+
+But it is not the case for:
+- The previous versions of TiDB-Lightning(https://github.com/pingcap/tidb-lightning/pull/422)
+- Explicit `SPLIT TABLE` for clustered index.

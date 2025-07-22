@@ -1,0 +1,32 @@
+ID: 10075
+Title: Default auto-retry mechanism causes TiDB to lose updates by default
+Description:
+The auto-retry mechanism, enabled by default in TiDB 2.1.7, retries transaction failures by blindly re-applying writes from the failed transaction in a fresh transaction. This  effectively bypasses the conflict detection required by snapshot isolation: when a conflict is encountered, transactions *should* abort, but instead, they can go on to commit their conflicting writes regardless of conflicts. The result is lost updates.
+
+There are certain classes of transactions which *can* be safely retried--for instance, blind writes, in-place updates, and transactions in which no client-visible reads occur before a write. However, TiDB assumes *all* transactions can be safely retried, which violates TiDB's claim of snapshot isolation.
+
+I suggest disabling the retry mechanism by default.
+
+1. What did you do?
+
+With Jepsen d003233c0e7e9f6d9f841647f661a868cd0a222a, run 
+
+```
+lein run test --time-limit 60 --concurrency 2n -w bank --auto-retry
+```
+
+This test transfers money between simulated bank accounts; under snapshot isolation, the total of all accounts should remain constant. However, with automatic retries, under normal operating conditions without failures, the total balance drifts over time: transactions observe values in transaction T1, and, thanks to retries, commit new values based on those from T1 in a fresh transaction T2.
+
+2. What did you expect to see?
+
+The total of all accounts should be constant.
+
+3. What did you see instead?
+
+The total of all accounts fluctuates over time: http://jepsen.io.s3.amazonaws.com/analyses/tidb-2.1.7/20190408T132351-auto-retry.zip.
+
+![bank (7)](https://user-images.githubusercontent.com/3748/55744057-f1d13e80-5a01-11e9-885e-cbe7f69e2ba7.png)
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+v2.1.7-linux-amd64

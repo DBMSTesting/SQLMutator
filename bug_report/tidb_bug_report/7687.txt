@@ -1,0 +1,79 @@
+ID: 7687
+Title: wrong result for query containing embedded outer join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+If possible, provide a recipe for reproducing the error.
+
+I was trying to propagate constant before simplifying outer join(see also https://github.com/pingcap/tidb/issues/7679), and found some lines of function `simplifyOuterJoin` incorrect. It would lead to wrong result returned for query containing embedded outer join.
+
+In MySQL:
+```
+create table t1(id int primary key, a int, b int);
+create table t2(id int primary key, a int, b int);
+create table t3(id int primary key, a int, b int);
+create table t4(id int primary key, a int, b int);
+insert into t1 values(1,1);
+
+mysql> select * from (t1 left join t2 on t1.a = t2.a) left join (t3 left join t4 on t3.a = t4.a) on t2.b = 1;
++------+------+------+------+------+------+------+------+
+| a    | b    | a    | b    | a    | b    | a    | b    |
++------+------+------+------+------+------+------+------+
+|    1 |    1 | NULL | NULL | NULL | NULL | NULL | NULL |
++------+------+------+------+------+------+------+------+
+1 row in set (0.00 sec)
+```
+
+while in TiDB:
+```
+mysql> select * from (t1 left join t2 on t1.a = t2.a) left join (t3 left join t4 on t3.a = t4.a) on t2.b = 1;
+Empty set (0.02 sec)
+```
+
+The reason is in function `simplifyOuterJoin`, we append the join condition of upper level to predicates, and use them for null rejection check of lower level outer join.
+```go
+    // first simplify embedded outer join.
+    // When trying to simplify an embedded outer join operation in a query,
+    // we must take into account the join condition for the embedding outer join together with the WHERE condition.
+    if innerPlan, ok := innerTable.(*LogicalJoin); ok {
+        fullConditions = concatOnAndWhereConds(p, predicates)
+        simplifyOuterJoin(innerPlan, fullConditions)
+    }
+    if outerPlan, ok := outerTable.(*LogicalJoin); ok {
+        if fullConditions != nil {
+            fullConditions = concatOnAndWhereConds(p, predicates)
+        }
+        simplifyOuterJoin(outerPlan, fullConditions)
+    }
+``` 
+This would convert `(t1 left join t2 on t1.a = t2.a)` to inner join, which is semantically wrong indeed.
+
+2. What did you expect to see?
+
+1 row returned
+
+3. What did you see instead?
+
+empty result
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select tidb_version();
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                                                             |
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v2.1.0-rc.1-98-g7de83a3-dirty
+Git Commit Hash: 7de83a3c8f11571d5ac4821541e5df1f84f38b70
+Git Branch: const_prop_simplify_outer
+UTC Build Time: 2018-09-07 06:18:44
+GoVersion: go version go1.11rc1 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false |
++------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```

@@ -1,0 +1,150 @@
+ID: 24930
+Title: a query may hang forever when its plan has a ParallelApply under TopN
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+set @@tidb_enable_parallel_apply=1;
+
+create table t1 (a int);
+create table t2 (a int);
+
+select 
+    case when t1.a is null 
+    then (select t2.a from t2 where t2.a = t1.a limit 1) 
+    else t1.a
+    end a
+from t1 where t1.a=1
+order by a limit 1;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+The query can return an empty result.
+
+### 3. What did you see instead (Required)
+The query hangs forever.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+Master
+
+### 5. Root cause analysis!
+All executors in TiDB have an implicit assumption that they will not be called again after returning an empty result(represent that they have no more data).
+In this case, the underlying `ParallelApply` is called again by the `TopN` after returning an empty result.
+Here is the stack:
+```
+goroutine 484 [running]:
+runtime/debug.Stack(0xc010ca6510, 0x406cb40, 0xc010ca6558)
+        /Users/zhangyuanjia/Workspace/goroot/go1.16/src/runtime/debug/stack.go:24 +0x9f
+runtime/debug.PrintStack()
+        /Users/zhangyuanjia/Workspace/goroot/go1.16/src/runtime/debug/stack.go:16 +0x25
+github.com/pingcap/tidb/executor.(*ParallelNestedLoopApplyExec).Next(0xc0004bfd40, 0x6aa2878, 0xc00f7066f0, 0xc00f856cd0, 0xc010ca6678, 0x401023b)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/parallel_apply.go:145 +0x18a
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6b78, 0xc0004bfd40, 0xc00f856cd0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0xc00044cb00, 0x6aa2878, 0xc00f7066f0, 0xc00f8572c0, 0x0, 0x1e5d0a5f42e00)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:193 +0xb2
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0xc00044cb00, 0x6aa2878, 0xc00f7066f0, 0xc00f8572c0, 0xc000373500, 0xc00fcccd58)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:179 +0x73
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6c38, 0xc00044cb00, 0xc00f8572c0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*TopNExec).loadChunksUntilTotalLimit(0xc000618140, 0x6aa2878, 0xc00f7066f0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/sort.go:429 +0x2b8
+github.com/pingcap/tidb/executor.(*TopNExec).Next(0xc000618140, 0x6aa2878, 0xc00f7066f0, 0xc00f856d20, 0x1, 0xc010ca6c48)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/sort.go:395 +0x270
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa7338, 0xc000618140, 0xc00f856d20, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0xc00044cd00, 0x6aa2878, 0xc00f7066f0, 0xc00f856d70, 0x0, 0x1e5d0a5f42400)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:193 +0xb2
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0xc00044cd00, 0x6aa2878, 0xc00f7066f0, 0xc00f856d70, 0xc00fa9ae70, 0xc010ca6c01)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:179 +0x73
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6c38, 0xc00044cd00, 0xc00f856d70, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0xc00044ce00, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0x0, 0x1e5d0a5f41f00)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:193 +0xb2
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0xc00044ce00, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0xc00fcc7810, 0x6aa3138)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:179 +0x73
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6c38, 0xc00044ce00, 0xc00f857270, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*recordSet).Next(0xc00f8571d0, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/adapter.go:142 +0xb5
+github.com/pingcap/tidb/server.(*tidbResultSet).Next(0xc00f857220, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0xc00fb9e030, 0x400)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/driver_tidb.go:304 +0x51
+github.com/pingcap/tidb/server.(*clientConn).writeChunks(0xc00fc18400, 0x6aa2878, 0xc00f7066f0, 0x6ab8e58, 0xc00f857220, 0x20000, 0x8441700, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1881 +0x4de
+github.com/pingcap/tidb/server.(*clientConn).writeResultset(0xc00fc18400, 0x6aa2878, 0xc00f7066f0, 0x6ab8e58, 0xc00f857220, 0x28e00, 0x0, 0x0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1829 +0x20e
+github.com/pingcap/tidb/server.(*clientConn).handleStmt(0xc00fc18400, 0x6aa27d0, 0xc00f7066f0, 0x6abcf18, 0xc0005d13b0, 0x8441700, 0x0, 0x0, 0x1, 0x0, ...)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1723 +0x3e5
+github.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc00fc18400, 0x6aa27d0, 0xc00034a580, 0xc0000bb9a1, 0x9d, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1569 +0x492
+github.com/pingcap/tidb/server.(*clientConn).dispatch(0xc00fc18400, 0x6aa27d0, 0xc00034a580, 0xc0000bb9a0, 0x9e, 0x9d, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1103 +0xacf
+github.com/pingcap/tidb/server.(*clientConn).Run(0xc00fc18400, 0x6aa2878, 0xc000639d40)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:861 +0x296
+github.com/pingcap/tidb/server.(*Server).onConn(0xc00fa9cc30, 0xc00fc18400)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/server.go:482 +0xa7e
+created by github.com/pingcap/tidb/server.(*Server).Run
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/server.go:385 +0x8d5
+goroutine 484 [running]:
+runtime/debug.Stack(0x0, 0xc010ca6568, 0x40a5fbd)
+        /Users/zhangyuanjia/Workspace/goroot/go1.16/src/runtime/debug/stack.go:24 +0x9f
+runtime/debug.PrintStack()
+        /Users/zhangyuanjia/Workspace/goroot/go1.16/src/runtime/debug/stack.go:16 +0x25
+github.com/pingcap/tidb/executor.(*ParallelNestedLoopApplyExec).Next(0xc0004bfd40, 0x6aa2878, 0xc00f7066f0, 0xc00f856cd0, 0x10100000030, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/parallel_apply.go:145 +0x18a
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6b78, 0xc0004bfd40, 0xc00f856cd0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0xc00044cb00, 0x6aa2878, 0xc00f7066f0, 0xc00f857310, 0x0, 0x1e5d0a6135700)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:193 +0xb2
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0xc00044cb00, 0x6aa2878, 0xc00f7066f0, 0xc00f857310, 0xc000373800, 0xc00fcccd90)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:179 +0x73
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6c38, 0xc00044cb00, 0xc00f857310, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*TopNExec).executeTopN(0xc000618140, 0x6aa2878, 0xc00f7066f0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/sort.go:454 +0xfa
+github.com/pingcap/tidb/executor.(*TopNExec).Next(0xc000618140, 0x6aa2878, 0xc00f7066f0, 0xc00f856d20, 0x1, 0xc010ca6c48)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/sort.go:399 +0x2a5
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa7338, 0xc000618140, 0xc00f856d20, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0xc00044cd00, 0x6aa2878, 0xc00f7066f0, 0xc00f856d70, 0x0, 0x1e5d0a5f42400)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:193 +0xb2
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0xc00044cd00, 0x6aa2878, 0xc00f7066f0, 0xc00f856d70, 0xc00fa9ae70, 0xc010ca6c01)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:179 +0x73
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6c38, 0xc00044cd00, 0xc00f856d70, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*ProjectionExec).unParallelExecute(0xc00044ce00, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0x0, 0x1e5d0a5f41f00)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:193 +0xb2
+github.com/pingcap/tidb/executor.(*ProjectionExec).Next(0xc00044ce00, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0xc00fcc7810, 0x6aa3138)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/projection.go:179 +0x73
+github.com/pingcap/tidb/executor.Next(0x6aa2878, 0xc00f7066f0, 0x6aa6c38, 0xc00044ce00, 0xc00f857270, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/executor.go:284 +0x2de
+github.com/pingcap/tidb/executor.(*recordSet).Next(0xc00f8571d0, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/executor/adapter.go:142 +0xb5
+github.com/pingcap/tidb/server.(*tidbResultSet).Next(0xc00f857220, 0x6aa2878, 0xc00f7066f0, 0xc00f857270, 0xc00fb9e030, 0x400)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/driver_tidb.go:304 +0x51
+github.com/pingcap/tidb/server.(*clientConn).writeChunks(0xc00fc18400, 0x6aa2878, 0xc00f7066f0, 0x6ab8e58, 0xc00f857220, 0x20000, 0x8441700, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1881 +0x4de
+github.com/pingcap/tidb/server.(*clientConn).writeResultset(0xc00fc18400, 0x6aa2878, 0xc00f7066f0, 0x6ab8e58, 0xc00f857220, 0x28e00, 0x0, 0x0, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1829 +0x20e
+github.com/pingcap/tidb/server.(*clientConn).handleStmt(0xc00fc18400, 0x6aa27d0, 0xc00f7066f0, 0x6abcf18, 0xc0005d13b0, 0x8441700, 0x0, 0x0, 0x1, 0x0, ...)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1723 +0x3e5
+github.com/pingcap/tidb/server.(*clientConn).handleQuery(0xc00fc18400, 0x6aa27d0, 0xc00034a580, 0xc0000bb9a1, 0x9d, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1569 +0x492
+github.com/pingcap/tidb/server.(*clientConn).dispatch(0xc00fc18400, 0x6aa27d0, 0xc00034a580, 0xc0000bb9a0, 0x9e, 0x9d, 0x0, 0x0)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:1103 +0xacf
+github.com/pingcap/tidb/server.(*clientConn).Run(0xc00fc18400, 0x6aa2878, 0xc000639d40)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/conn.go:861 +0x296
+github.com/pingcap/tidb/server.(*Server).onConn(0xc00fa9cc30, 0xc00fc18400)
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/server.go:482 +0xa7e
+created by github.com/pingcap/tidb/server.(*Server).Run
+        /Users/zhangyuanjia/Workspace/go/src/github.com/pingcap/tidb/server/server.go:385 +0x8d5
+
+```
+

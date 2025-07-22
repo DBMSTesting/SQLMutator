@@ -1,0 +1,134 @@
+ID: 30468
+Title: Data race when sub-executors of IndexLookUpJoin gets snapshot ts
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t (id varchar(64) primary key, v int);
+/* init */ insert into t values ("1", 10), ("2", 20), ("3", 30), ("4", 40), ("5", 50), ("6", 60), ("7", 70), ("8", 90);
+
+/* t1 */ set @@tidb_index_join_batch_size = 1;
+
+/* t1 */ explain update /*+ INL_JOIN(t) */ t join (select "1" as id, 1 as diff union select "2" as id, 1 as diff union select "3" as id, 1 as diff union select "4" as id, 1 as diff) as b on t.id = b.id set t.v = t.v + b.diff;
+
+/* t1 */ update /*+ INL_JOIN(t) */ t join (select "1" as id, 1 as diff union select "2" as id, 1 as diff union select "3" as id, 1 as diff union select "4" as id, 1 as diff) as b on t.id = b.id set t.v = t.v + b.diff;
+```
+
+### 2. What did you expect to see? (Required)
+
+It works normally.
+
+### 3. What did you see instead (Required)
+
+It randomly reports: 
+
+```
+E8024: invalid transaction
+```
+
+The stack trace:
+
+```
+[kv:8024]invalid transaction
+github.com/pingcap/errors.AddStack
+	/nfs/cache/mod/github.com/pingcap/errors@v0.11.5-0.20210425183316-da1aaba5fb63/errors.go:174
+github.com/pingcap/tidb/session.(*session).Txn
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/session/session.go:2104
+github.com/pingcap/tidb/executor.(*executorBuilder).getSnapshotTS
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/builder.go:1455
+github.com/pingcap/tidb/executor.buildNoRangeIndexLookUpReader
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/builder.go:3254
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildIndexLookUpReaderForIndexJoin
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/builder.go:3820
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoinInternal
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/builder.go:3507
+github.com/pingcap/tidb/executor.(*dataReaderBuilder).buildExecutorForIndexJoin
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/builder.go:3496
+github.com/pingcap/tidb/executor.(*innerWorker).fetchInnerResults
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:651
+github.com/pingcap/tidb/executor.(*innerWorker).handleTask
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:493
+github.com/pingcap/tidb/executor.(*innerWorker).run
+	/home/jenkins/agent/workspace/optimization-build-tidb-linux-amd/go/src/github.com/pingcap/tidb/executor/index_lookup_join.go:470
+runtime.goexit
+	/usr/local/go/src/runtime/asm_amd64.s:1371
+```
+
+and reports this in a lower probability:
+
+```
+E1105: transaction future is not set
+```
+
+It's found to be a data race in IndexLookUpJoin executor. 
+
+IndexLookUpJoin builds its inner executors when it starts executing, and it doesn't retrieve the snapshotTS before it. If the current statement is autocommit or the first statement of a non-autocommit transaction without an explicit `begin` statement, it may be the first time to retrieve the startTS when the inner executor is built, therefore it will be the time that the transaction state is activated (done by the `Txn(true)` invocation).
+
+However `IndexLookUpJoin` builds its inner executors concurrently, while the [`Txn`](https://github.com/pingcap/tidb/blob/master/session/session.go#L2006) function is not thread-safe. In this function which is invoked by `Txn` function:
+
+```go
+func (txn *LazyTxn) changePendingToValid(ctx context.Context) error {
+	if txn.txnFuture == nil {
+		return errors.New("transaction future is not set")
+	}
+
+	future := txn.txnFuture
+	txn.txnFuture = nil   // A
+
+	defer trace.StartRegion(ctx, "WaitTsoFuture").End()
+	t, err := future.wait()
+	if err != nil {
+		txn.Transaction = nil
+		return err
+	}
+	txn.Transaction = t   // B
+	txn.initStmtBuf()
+
+	// The txnInfo may already recorded the first statement (usually "begin") when it's pending, so keep them.
+	txn.mu.Lock()
+	defer txn.mu.Unlock()
+	txn.resetTxnInfo(
+		t.StartTS(),
+		txninfo.TxnIdle,
+		uint64(txn.Transaction.Len()),
+		uint64(txn.Transaction.Size()),
+		txn.mu.TxnInfo.CurrentSQLDigest,
+		txn.mu.TxnInfo.AllSQLDigests)
+
+	return nil
+}
+```
+
+Between location A and location B, like during `future.wait()`, the `txn.txnFuture` and `txn.Transaction` will be both nil. Ignoring cache and out-of-order execution of instructions, if we check the transaction's state between this two position concurrently, we will find it invalid.
+
+To make it happen, we need at least two batches of the index join executes concurrently, therefore we set:
+
+```sql
+/* t1 */ set @@tidb_index_join_batch_size = 1;
+```
+
+and since `future.wait()` in `changePendingToValid` we mentioned above waits for TSO from PD internally, this issue might be easier to occur in environments that TSO latency is high or jitters much. When I reproduces this problem, I add this failpoint to `txnFuture.wait()`: 
+
+```go
+	failpoint.Inject("txnFutureWait", func() {}) // Triggers with 30%sleep(200)->9%sleep(400)->3%sleep(1000)
+```
+
+The structures of IndexLookUpJoin, IndexLookUpHashJoin and IndexLookUpMergeJoin are just similar, however the latter one activates the transaction before building its inner executors, therefore this problem is avoided. In some early version, IndexLookUpJoin does this too, however removed in https://github.com/pingcap/tidb/pull/20388 .
+
+To workaround this problem, use IndexLookUpHashJoin instead of IndexLookUpJoin by using the `/*+ INL_HASH_JOIN(...) */` hint. 
+
+To fix it, it should be ok to just **reverting https://github.com/pingcap/tidb/pull/20388**. However I don't have any idea how to write the unit test for now.
+
+Actually, I believe this problem reflects a fact that the architecture of these executors is not in a good design.
+
+### 4. What is your TiDB version? (Required)
+
+Found in v5.2.2.
+This should affects all 5.x versions.
+
+

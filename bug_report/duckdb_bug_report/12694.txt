@@ -1,0 +1,20 @@
+ID: 12694
+Title: Prevent unnecessary usage of `std::string` in `list` aggregate - and use more efficient `memcpy` for batched copy
+Description:
+The `list` aggregate for string values has a few places where strings are not handled as efficiently as possible:
+
+* It would call `string_t::GetString()` to construct a `std::string`, only to iterate over the characters. This triggers an unnecessary allocation/copy.
+* It would do a character-by-character copy, calling `GetSegment` and incrementing several counters for every character.
+* In Finalize, we would first accumulate into a `std::string`, and then slice data from that string
+
+This PR reworks the accumulation to do a batched `memcpy` instead by looking at how many characters can be copied (`min(capacity - count, remaining_bytes)`) - and incrementing the counters all at once.
+
+This speeds up accumulation of many larger strings by around ~40%.
+
+```sql
+select avg(len(comment_list)) from ( select l_orderkey, list(l_comment) comment_list from lineitem group by all);
+```
+| v1.0  |  New  |
+|-------|-------|
+| 7.5s | 4.4s |
+

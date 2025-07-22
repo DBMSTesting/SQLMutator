@@ -1,0 +1,58 @@
+ID: 55100
+Title: Alter metadata and mutation race
+Description:
+Here is a test with ADD, UPDATE, DROP column
+
+https://github.com/ClickHouse/ClickHouse/pull/50181/files#diff-a325afcc7940a12bb0bf204f87db9e705d68cd5a8d336fbe74cf21f8a03ad44dR30-R32
+
+This test shows the error
+```
+Code: 341. DB::Exception: Received from localhost:9000. DB::Exception: Exception happened during execution of mutations '0000000001, 0000000002' with part 'all_0_0_0_2' reason: 'Code: 8. DB::Exception: Column x is updated but not requested to read. (THERE_IS_NO_COLUMN) (version 23.9.1.1)'. This error maybe retryable or not. In case of unretryable error, mutation can be killed with KILL MUTATION query. (UNFINISHED)
+(query: ALTER TABLE test DROP COLUMN x SETTINGS mutations_sync = 2;)
+```
+
+At the moment of mutation, the part does not have a column yet, but the table metadata does not have a column already.
+As a result, mutations are stuck, and error is continuously repeated in logs.
+```
+SELECT *
+FROM system.mutations
+WHERE is_done = 0
+
+Query id: 9a1b3702-215c-45f8-b228-82160f130301
+
+Row 1:
+──────
+database:                   default
+table:                      test
+mutation_id:                0000000001
+command:                    UPDATE x = x + 1 WHERE 1
+create_time:                2023-09-28 11:53:46
+block_numbers.partition_id: ['all']
+block_numbers.number:       [3]
+parts_to_do_names:          ['all_0_0_0_2','all_1_1_0_2']
+parts_to_do:                2
+is_done:                    0
+latest_failed_part:         all_0_0_0_2
+latest_fail_time:           2023-09-28 11:53:56
+latest_fail_reason:         Code: 8. DB::Exception: Column x is updated but not requested to read. (THERE_IS_NO_COLUMN) (version 23.9.1.1)
+
+Row 2:
+──────
+database:                   default
+table:                      test
+mutation_id:                0000000002
+command:                    DROP COLUMN x
+create_time:                2023-09-28 11:53:46
+block_numbers.partition_id: ['all']
+block_numbers.number:       [4]
+parts_to_do_names:          ['all_0_0_0_2','all_1_1_0_2']
+parts_to_do:                2
+is_done:                    0
+latest_failed_part:         all_0_0_0_2
+latest_fail_time:           2023-09-28 11:53:56
+latest_fail_reason:         Code: 8. DB::Exception: Column x is updated but not requested to read. (THERE_IS_NO_COLUMN) (version 23.9.1.1)
+
+
+```
+
+The same issue with ADD, MATERIALIZE, DROP projection.

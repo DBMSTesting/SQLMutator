@@ -1,0 +1,42 @@
+ID: 20192
+Title: Log entries do not clear from replication queue
+Description:
+version 21.1.2.15 (official build)
+
+We have a table with admittedly too many small parts.  The replicas are currently thrashing (and presumably thrashing zookeeper) with entries such as the following: 
+
+```
+2021.02.08 00:55:19.795290 [ 26888 ] {} <Information> analytics.kpipe_metrics_1d (ReplicatedMergeTreeQueue): Not executing log entry queue-0019436996 for part 20210208_4717_4741_1 because another log entry for the same part is being processed. This shouldn't happen often.
+2021.02.08 00:55:19.798990 [ 26957 ] {} <Information> analytics.kpipe_metrics (ReplicatedMergeTreeQueue): Not executing log entry queue-0074963354 for part 20210208_4657_4747_2 because another log entry for the same part is being processed. This shouldn't happen often.
+2021.02.08 00:55:19.904822 [ 26923 ] {} <Information> analytics.kpipe_metrics (ReplicatedMergeTreeQueue): Not executing log entry queue-0074963354 for part 20210208_4657_4747_2 because another log entry for the same part is being processed. This shouldn't happen often.
+2021.02.08 00:55:19.907965 [ 26915 ] {} <Information> analytics.kpipe_metrics_1d (ReplicatedMergeTreeQueue): Not executing log entry queue-0019436996 for part 20210208_4717_4741_1 because another log entry for the same part is being processed. This shouldn't happen often.
+2021.02.08 00:55:20.011100 [ 26909 ] {} <Information> analytics.kpipe_metrics (ReplicatedMergeTreeQueue): Not executing log entry queue-0074963354 for part 20210208_4657_4747_2 because another log entry for the same part is being processed. This shouldn't happen often.
+2021.02.08 00:55:20.019564 [ 26917 ] {} <Information> analytics.kpipe_metrics_1d (ReplicatedMergeTreeQueue): Not executing log entry queue-0019436996 for part 20210208_4717_4741_1 because another log entry for the same part is being processed. This shouldn't happen often.
+```
+
+Note that these broken/stalled parts are retried within a 10th of a second.  There should be some kind of backoff or large delay for this particular condition.  Stalled log entries should not cause other bad parts to retry in such a tight loop.
+
+This condition creates an even tighter loop:
+
+```2021.02.08 01:09:22.551361 [ 18670 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.573842 [ 18681 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking part 20210208_4847_4851_1
+2021.02.08 01:09:22.575731 [ 18681 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20210208_4847_4851_1.
+2021.02.08 01:09:22.588482 [ 18738 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.601379 [ 18681 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Found parts with the same min block and with the same max block as the missing part 20210208_4847_4851_1. Hoping that it will eventually appear as a result of a merge.
+2021.02.08 01:09:22.621022 [ 18676 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.636729 [ 18691 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking part 20210208_4847_4851_1
+2021.02.08 01:09:22.641790 [ 18691 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20210208_4847_4851_1.
+2021.02.08 01:09:22.662710 [ 18739 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.670084 [ 18691 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Found parts with the same min block and with the same max block as the missing part 20210208_4847_4851_1. Hoping that it will eventually appear as a result of a merge.
+2021.02.08 01:09:22.699833 [ 18677 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.700172 [ 18768 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking part 20210208_4847_4851_1
+2021.02.08 01:09:22.703090 [ 18768 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20210208_4847_4851_1.
+2021.02.08 01:09:22.722582 [ 18768 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Found parts with the same min block and with the same max block as the missing part 20210208_4847_4851_1. Hoping that it will eventually appear as a result of a merge.
+2021.02.08 01:09:22.730712 [ 18794 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.751212 [ 18789 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking part 20210208_4847_4851_1
+2021.02.08 01:09:22.752585 [ 18789 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Checking if anyone has a part covering 20210208_4847_4851_1.
+2021.02.08 01:09:22.767888 [ 18732 ] {} <Information> analytics.kpipe_metrics_5m: DB::Exception: No active replica has part 20210208_4847_4851_1 or covering part
+2021.02.08 01:09:22.773437 [ 18789 ] {} <Warning> analytics.kpipe_metrics_5m (ReplicatedMergeTreePartCheckThread): Found parts with the same min block and with the same max block as the missing part 20210208_4847_4851_1. Hoping that it will eventually appear as a result of a merge.
+```
+
+Again it seems that ClickHouse should have a back off of some kind.

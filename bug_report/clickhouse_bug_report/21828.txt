@@ -1,0 +1,113 @@
+ID: 21828
+Title: Order by clause is not respected when using a window with a partition by expression
+Description:
+**Describe the unexpected behaviour**
+When doing `select ... over(partition by X)... order by Y` using window functions, the result is ordered by X, Y, instead of just Y
+
+**How to reproduce**
+* Which ClickHouse server version to use
+```
+> ch server --version          
+ClickHouse server version 21.4.1.6215 (official build).
+```
+* Which interface to use, if matters
+```
+> ch client --version                                                          
+ClickHouse client version 21.4.1.6215 (official build).
+```
+* Non-default settings, if any
+```
+set allow_experimental_window_functions = 1;
+```
+* `CREATE TABLE` statements for all tables involved
+```
+DROP TABLE IF EXISTS events;
+
+CREATE TABLE events
+(
+    `date` DateTime, 
+    `product_id` String, 
+    `user_id` Int64, 
+    `event` String, 
+    `extra_data` String
+)
+
+ENGINE = MergeTree()
+ORDER BY date;
+```
+
+* Sample data for all these tables
+[events_10K.csv.zip](https://github.com/ClickHouse/ClickHouse/files/6155529/events_10K.csv.zip)
+Insert it doing `cat ../datasets/events_10K.csv | ch client -q 'insert into events format CSV'`
+
+Here are the first 10 rows of the dataset
+```
+> ch client -q 'select date, event from events order by date limit 10 format PrettyCompact;'
+┌────────────────date─┬─event─────────────────┐
+│ 2017-01-01 02:13:08 │ add_item_to_cart      │
+│ 2017-01-01 04:26:04 │ add_item_to_cart      │
+│ 2017-01-01 08:45:35 │ remove_item_from_cart │
+│ 2017-01-01 12:21:35 │ buy                   │
+│ 2017-01-01 12:54:25 │ view                  │
+│ 2017-01-01 15:40:57 │ add_item_to_cart      │
+│ 2017-01-01 18:31:42 │ buy                   │
+│ 2017-01-01 20:09:47 │ remove_item_from_cart │
+│ 2017-01-01 20:57:25 │ view                  │
+│ 2017-01-01 21:00:14 │ remove_item_from_cart │
+└─────────────────────┴───────────────────────┘
+```
+
+* Queries to run that lead to unexpected result
+I'm trying to get a column with the total number of events that belong to the same type.
+
+The query would be:
+```sql
+SELECT
+    date,
+    event,
+    count(*) OVER (PARTITION BY event)
+FROM events
+ORDER BY date ASC
+LIMIT 10
+```
+
+**Expected behavior**
+Running it on Postgres, I get the expected result.
+The scripts to create a Postgres db locally, create the table and load the data can be found in this [gist](https://gist.github.com/xoelop/286d4599b12941142d7d0630ffbf4371)
+
+```
+> psql -h localhost -p 5432 -c 'select date, event, count(*) over (partition by event) from events order by date limit 10;'   
+        date         |         event         | count 
+---------------------+-----------------------+-------
+ 2017-01-01 02:13:08 | add_item_to_cart      |  2024
+ 2017-01-01 04:26:04 | add_item_to_cart      |  2024
+ 2017-01-01 08:45:35 | remove_item_from_cart |  2056
+ 2017-01-01 12:21:35 | buy                   |  1984
+ 2017-01-01 12:54:25 | view                  |  2014
+ 2017-01-01 15:40:57 | add_item_to_cart      |  2024
+ 2017-01-01 18:31:42 | buy                   |  1984
+ 2017-01-01 20:09:47 | remove_item_from_cart |  2056
+ 2017-01-01 20:57:25 | view                  |  2014
+ 2017-01-01 21:00:14 | remove_item_from_cart |  2056
+(10 rows)
+```
+
+**Actual behavior**
+But when running it on CH, the order is by `event, date`, even when I ask it to be just by `date`
+```
+> ch client -n -q 'set allow_experimental_window_functions = 1; select date, event, count(*) over (partition by event) count from events order by date limit 10 format PrettyCompact;'
+┌────────────────date─┬─event────────────┬─count─┐
+│ 2017-01-01 02:13:08 │ add_item_to_cart │  2024 │
+│ 2017-01-01 04:26:04 │ add_item_to_cart │  2024 │
+│ 2020-11-02 14:53:40 │ add_item_to_cart │  2024 │
+│ 2020-11-01 21:33:18 │ add_item_to_cart │  2024 │
+│ 2020-11-01 18:52:28 │ add_item_to_cart │  2024 │
+│ 2017-01-01 15:40:57 │ add_item_to_cart │  2024 │
+│ 2020-10-28 02:58:04 │ add_item_to_cart │  2024 │
+│ 2020-10-26 18:36:43 │ add_item_to_cart │  2024 │
+│ 2020-10-24 11:28:28 │ add_item_to_cart │  2024 │
+│ 2020-10-24 01:17:47 │ add_item_to_cart │  2024 │
+└─────────────────────┴──────────────────┴───────┘
+```
+
+Am I doing something wrong or this is the expected behavior? Is there a way to get the data actually sorted by just `date`? Thanks!

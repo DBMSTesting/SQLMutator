@@ -1,0 +1,107 @@
+ID: 65981
+Title: `NOT_FOUND_COLUMN_IN_BLOCK` while pushing to view with the analyzer
+Description:
+A `NOT_FOUND_COLUMN_IN_BLOCK` error is thrown in case of a completely valid query.
+
+https://fiddle.clickhouse.com/5b662228-9939-4cc1-8802-758ed59dd974
+
+**Does it reproduce on the most recent release?**
+
+Yes, even on master.
+
+**How to reproduce**
+
+The key part is the `WHERE id IN (SELECT id FROM event)`, without that it works. It also works without new analyzer.
+
+```
+SET allow_experimental_analyzer = 1;
+DROP TABLE IF EXISTS input;
+DROP TABLE IF EXISTS deduplicate;
+DROP TABLE IF EXISTS deduplicate_mv;
+DROP TABLE IF EXISTS event;
+
+CREATE TABLE input (json_message String) ENGINE = MergeTree ORDER BY json_message;
+
+CREATE TABLE deduplicate
+(
+    `id` UInt64
+)
+ENGINE = MergeTree
+ORDER BY (id);
+
+CREATE TABLE event
+(
+    `id` UInt64
+)
+ENGINE = MergeTree
+ORDER BY (id);
+
+CREATE MATERIALIZED VIEW deduplicate_mv TO deduplicate
+AS 
+WITH event AS
+    (
+        SELECT
+            JSONExtract(json_message, 'id', 'Nullable(UInt64)') AS id
+        FROM input
+        WHERE (id IS NOT NULL)
+    )
+SELECT DISTINCT *
+FROM event
+WHERE id NOT IN
+(
+    SELECT id
+    FROM deduplicate
+    WHERE id IN
+    (
+        SELECT id
+        FROM event
+    )
+);
+
+INSERT INTO input VALUES ('{"id":5}');
+```
+
+**Expected behavior**
+
+The insert happens and the data is also inserted into the second table.
+
+**Error message and/or stacktrace**
+
+
+```
+<Error> executeQuery: Code: 10. DB::Exception: Not found column __table1.id in block : while pushing to view default.deduplicate_mv (188e45d6-671a-42c4-a82b-1962bbd22128). (NOT_FOUND_COLUMN_IN_BLOCK) (version 24.7.1.1) (from 127.0.0.1:62988) (in query: INSERT INTO input VALUES ), Stack trace (when copying this message, always include the lines below):
+
+0. ./contrib/llvm-project/libcxx/include/exception:141: Poco::Exception::Exception(String const&, int) @ 0x00000000140a6b12
+1. ./build/./src/Common/Exception.cpp:101: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000ba51339
+2. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x0000000006704e4c
+3. DB::Exception::Exception<String const&, String>(int, FormatStringHelperImpl<std::type_identity<String const&>::type, std::type_identity<String>::type>, String const&, String&&) @ 0x0000000006fd8d2b
+4. ./build/./src/Interpreters/ActionsDAG.cpp:0: DB::ActionsDAG::appendInputsForUnusedColumns(DB::Block const&) @ 0x000000000fd9f0f8
+5. ./contrib/llvm-project/libcxx/include/vector:1548: DB::(anonymous namespace)::addExpressionStep(DB::QueryPlan&, std::shared_ptr<DB::ActionsAndProjectInputsFlag> const&, String const&, std::vector<std::shared_ptr<DB::ActionsDAG>, std::allocator<std::shared_ptr<DB::ActionsDAG>>>&) @ 0x000000001060274c
+6. ./contrib/llvm-project/libcxx/include/string:1499: DB::Planner::buildPlanForQueryNode() @ 0x00000000105fca82
+7. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:815: DB::Planner::buildQueryPlanIfNeeded() @ 0x00000000105f81fe
+8. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:815: DB::Planner::buildPlanForQueryNode() @ 0x00000000105ffc07
+9. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:815: DB::Planner::buildQueryPlanIfNeeded() @ 0x00000000105f81fe
+10. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:815: DB::Planner::buildPlanForQueryNode() @ 0x00000000105ffc07
+11. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:815: DB::Planner::buildQueryPlanIfNeeded() @ 0x00000000105f81fe
+12. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:603: DB::InterpreterSelectQueryAnalyzer::buildQueryPipeline() @ 0x00000000105f63db
+13. ./build/./src/Processors/Transforms/buildPushingToViewsChain.cpp:0: DB::ExecutingInnerQueryFromViewTransform::onConsume(DB::Chunk) @ 0x0000000011ca88be
+14. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:701: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<DB::ExceptionKeepingTransform::work()::$_1, void ()>>(std::__function::__policy_storage const*) @ 0x0000000011c15129
+15. ./build/./src/Processors/Transforms/ExceptionKeepingTransform.cpp:102: DB::runStep(std::function<void ()>, DB::ThreadStatus*, std::atomic<unsigned long>*) @ 0x0000000011c14fc9
+16. ./contrib/llvm-project/libcxx/include/__functional/function.h:818: ? @ 0x0000000011c14a02
+17. ./build/./src/Processors/Executors/ExecutionThreadContext.cpp:0: DB::ExecutionThreadContext::executeTask() @ 0x00000000119fc600
+18. ./build/./src/Processors/Executors/PipelineExecutor.cpp:272: DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x00000000119f3370
+19. ./contrib/llvm-project/libcxx/include/atomic:958: DB::PipelineExecutor::executeStep(std::atomic<bool>*) @ 0x00000000119f2f29
+20. ./build/./src/Server/TCPHandler.cpp:0: DB::TCPHandler::processInsertQuery() @ 0x000000001197f672
+21. ./build/./src/Server/TCPHandler.cpp:0: DB::TCPHandler::runImpl() @ 0x0000000011975a77
+22. ./contrib/llvm-project/libcxx/include/__memory/shared_ptr.h:593: DB::TCPHandler::run() @ 0x000000001198d459
+23. ./build/./base/poco/Net/src/TCPServerConnection.cpp:57: Poco::Net::TCPServerConnection::start() @ 0x000000001414b067
+24. ./contrib/llvm-project/libcxx/include/__memory/unique_ptr.h:48: Poco::Net::TCPServerDispatcher::run() @ 0x000000001414b53a
+25. ./build/./base/poco/Foundation/src/ThreadPool.cpp:219: Poco::PooledThread::run() @ 0x00000000140f66f2
+26. ./base/poco/Foundation/include/Poco/SharedPtr.h:139: Poco::ThreadImpl::runnableEntry(void*) @ 0x00000000140f41e3
+27. ? @ 0x00007c427d894ac3
+28. ? @ 0x00007c427d926850
+```
+
+**Additional context**
+
+> Add any other context about the problem here.

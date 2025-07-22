@@ -1,0 +1,76 @@
+ID: 49887
+Title: NO_SUCH_PROJECTION_IN_TABLE when doing ADD, MATERIALIZE, DROP projection on ReplicatedMergeTree
+Description:
+```
+CREATE TABLE test (
+    `c_id` String,
+    `p_id` String,
+    `d` String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/test/test_table', '1')
+ORDER BY (c_id, p_id);
+
+
+CREATE TABLE test_r2 (
+    `c_id` String,
+    `p_id` String,
+    `d` String
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{database}/test/test_table', '2')
+ORDER BY (c_id, p_id);
+
+
+INSERT INTO test SELECT '1', '11', '111' FROM numbers(3);
+
+INSERT INTO test SELECT '2', '22', '22' FROM numbers(3);
+
+select * from test;
+select min(c_id) from test group by d;
+
+
+-- do ADD, MATERIALIZE and DROP 
+ALTER TABLE test ADD PROJECTION d_order ( SELECT min(c_id) GROUP BY `d`);
+
+ALTER TABLE test MATERIALIZE PROJECTION d_order;
+
+ALTER TABLE test DROP PROJECTION d_order SETTINGS mutations_sync = 2;
+
+SELECT * FROM system.mutations WHERE database=currentDatabase() AND table='test' AND NOT is_done;
+
+
+select * from test;
+
+
+--DROP TABLE test;
+```
+
+Fails with an error
+
+```
+[davenger-xps] 2023.05.15 18:06:39.338512 [ 41829 ] {15bccf4d-1324-4a62-a8fc-8f7d99a03848} <Error> executeQuery: Code: 341. DB::Exception: Exception happened during execution of mutations '0000000000, 0000000001' with part 'all_1_1_0' reason: 'Code: 582. DB::Exception: There is no projection d_order in table. (NO_SUCH_PROJECTION_IN_TABLE) (version 23.5.1.1)'. This error maybe retryable or not. In case of unretryable error, mutation can be killed with KILL MUTATION query. (UNFINISHED) (version 23.5.1.1) (from 127.0.0.1:44518) (comment: 02597_projection_materialize_and_replication.sql) (in query: ALTER TABLE test DROP PROJECTION d_order SETTINGS mutations_sync = 2;), Stack trace (when copying this message, always include the lines below):
+
+0. /home/davenger/src/ClickHouse/contrib/llvm-project/libcxx/include/exception:134: std::exception::capture() @ 0x000000002be6f722 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+1. /home/davenger/src/ClickHouse/contrib/llvm-project/libcxx/include/exception:112: std::exception::exception[abi:v15000]() @ 0x000000002be6f6db in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+2. /home/davenger/src/ClickHouse/base/poco/Foundation/src/Exception.cpp:27: Poco::Exception::Exception(String const&, int) @ 0x0000000067d3afe0 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+3. /home/davenger/src/ClickHouse/src/Common/Exception.cpp:90: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000004068851e in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+4. /home/davenger/src/ClickHouse/src/Common/Exception.h:54: DB::Exception::Exception(String&&, int, bool) @ 0x000000002be526e7 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+5. /home/davenger/src/ClickHouse/src/Common/Exception.h:81: DB::Exception::Exception<char const*, String, String&, String&>(int, FormatStringHelperImpl<std::type_identity<char const*>::type, std::type_identity<String>::type, std::type_identity<String&>::type, std::type_identity<String&>::type>, char const*&&, String&&, String&, String&) @ 0x0000000059c21f93 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+6. /home/davenger/src/ClickHouse/src/Storages/MergeTree/MergeTreeMutationStatus.cpp:26: DB::checkMutationStatus(std::optional<DB::MergeTreeMutationStatus>&, std::set<String, std::less<String>, std::allocator<String>> const&) @ 0x0000000059c2176c in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+7. /home/davenger/src/ClickHouse/src/Storages/StorageReplicatedMergeTree.cpp:614: DB::StorageReplicatedMergeTree::waitMutationToFinishOnReplicas(std::vector<String, std::allocator<String>> const&, String const&) const @ 0x000000005858d7fb in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+8. /home/davenger/src/ClickHouse/src/Storages/StorageReplicatedMergeTree.cpp:6540: DB::StorageReplicatedMergeTree::waitMutation(String const&, unsigned long) const @ 0x000000005865e8f0 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+9. /home/davenger/src/ClickHouse/src/Storages/StorageReplicatedMergeTree.cpp:5365: DB::StorageReplicatedMergeTree::alter(DB::AlterCommands const&, std::shared_ptr<DB::Context const>, std::unique_lock<std::timed_mutex>&) @ 0x000000005865caf1 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+10. /home/davenger/src/ClickHouse/src/Interpreters/InterpreterAlterQuery.cpp:193: DB::InterpreterAlterQuery::executeToTable(DB::ASTAlterQuery const&) @ 0x0000000055cbdc12 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+11. /home/davenger/src/ClickHouse/src/Interpreters/InterpreterAlterQuery.cpp:64: DB::InterpreterAlterQuery::execute() @ 0x0000000055cb92ef in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+12. /home/davenger/src/ClickHouse/src/Interpreters/executeQuery.cpp:717: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000057232a1d in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+13. /home/davenger/src/ClickHouse/src/Interpreters/executeQuery.cpp:1173: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x000000005722ab62 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+14. /home/davenger/src/ClickHouse/src/Server/TCPHandler.cpp:420: DB::TCPHandler::runImpl() @ 0x000000005a86bd22 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+15. /home/davenger/src/ClickHouse/src/Server/TCPHandler.cpp:2043: DB::TCPHandler::run() @ 0x000000005a8924ca in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+16. /home/davenger/src/ClickHouse/base/poco/Net/src/TCPServerConnection.cpp:43: Poco::Net::TCPServerConnection::start() @ 0x000000006789fac5 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+17. /home/davenger/src/ClickHouse/base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x00000000678a066d in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+18. /home/davenger/src/ClickHouse/base/poco/Foundation/src/ThreadPool.cpp:188: Poco::PooledThread::run() @ 0x0000000067e706b4 in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+19. /home/davenger/src/ClickHouse/base/poco/Foundation/src/Thread.cpp:46: Poco::(anonymous namespace)::RunnableHolder::run() @ 0x0000000067e690ca in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+20. /home/davenger/src/ClickHouse/base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000067e668ef in /home/davenger/src/ClickHouse/build_Debug/programs/clickhouse
+21. ? @ 0x00007f44f4294b43 in ?
+22. ? @ 0x00007f44f4326a00 in ?
+
+```

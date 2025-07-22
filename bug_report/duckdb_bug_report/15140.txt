@@ -1,0 +1,139 @@
+ID: 15140
+Title: Reading files from GCS is SLOW
+Description:
+### What happens?
+
+Using Python, I tried reading files from GCS 3 methods: 
+1. duckdb + HTTPFS (official way)
+2. duckdb + fsspec + gcsfs (workaround)
+3. Usual GCloud API (REST API wrapper - no duckdb). 
+
+The first one took ~100 seconds, the second took ~17 seconds, and the third took ~15 seconds AND IT WASN'T EVEN CONCURRENT. Concurrency took the last one down to ~5 seconds.
+
+I even tried this because it seems a LOT faster to first download parquet files, and then read them locally using duckdb rather than access them remotely. I thought it'd be simpler to download these blobs using duckdb with everything already set-up, but I was very wrong. It is also possible that the cause for slowness in reading the parquet originally might be related to this bug, but I don't really know. If you wanted, I could do a similar comparison with reading parquets rather than reading blobs.
+
+Also, I'm posting this here because it doesn't seem python related.
+
+### To Reproduce
+
+The actual glob pattern used is similar to the one used below.
+
+
+## Option 1:
+Secrets are saved as environment variables
+```python
+import os
+import timeit
+import duckdb
+connection = duckdb.connect()
+connection.sql(f"""
+            INSTALL httpfs; 
+            LOAD httpfs;
+            CREATE SECRET (
+                TYPE GCS,
+                KEY_ID '{os.environ['HMAC_ACCESS_KEY']}',
+                SECRET '{os.environ['HMAC_SECRET_VALUE']}'
+            );""")
+print(timeit.timeit('''
+_ = connection.sql(
+    """
+    SELECT * 
+    FROM read_blob("gs://my_bucket/f1/f2/f3/pattern=*/f4/f5/*.parquet")
+    """
+).fetchall()''', number=5, globals=globals()))
+```
+> 496.505
+
+
+## Option 2:
+Authentication is automatic using the gcloud CLI which stores the credentials locally so it can be used with the CLI.
+```python
+import timeit
+import duckdb
+import gcsfs  # Not really needed, but to emphasize the use
+from fsspec import filesystem
+connection = duckdb.connect()
+connection.register_filesystem(filesystem("gs"))
+print(timeit.timeit('''
+_ = connection.sql(
+    """
+    SELECT * 
+    FROM read_blob("gs://my_bucket/f1/f2/f3/pattern=*/f4/f5/*.parquet")
+    """
+).fetchall()''', number=5, globals=globals()))
+```
+> 84.199
+
+
+## Option 3:
+**THIS WASN'T EVEN CONCURRENT**.
+```python
+import timeit
+from google.cloud.storage import Client, Bucket, Blob
+from io import BytesIO
+
+glob = "gs://my_bucket/f1/f2/f3/pattern=*/f4/f5/*.parquet"
+
+client = Client()
+glob = glob[5:]
+name, glob = glob.split('/', 1)
+bucket = client.get_bucket(name)
+
+
+def download_blob(blob: Blob):
+    with BytesIO() as f:
+        blob.download_to_file(f)
+        return f.getvalue()
+
+
+print(
+    timeit.timeit("""
+blobs = list(bucket.list_blobs(match_glob=glob))
+for blob in blobs:
+    download_blob(blob)    
+""", number=5, globals=globals())
+
+```
+> 78.314
+
+I also tried a more complex concurrent version of the regular API, where an 8-thread (python) thread-pool is created, and each thread uses a new connection is created for every thread. This took (along with the new connections) **26.665** seconds in total for 5 attempts (like in the other experiments).
+
+### OS:
+
+Ubuntu 20.04.6 LTS
+
+### DuckDB Version:
+
+1.1.13
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+Intel® Core™ i9-10940X CPU @ 3.30GHz × 28 , 188.4 GiB Memory
+
+### Full Name:
+
+Erez Zinman
+
+### Affiliation:
+
+Razor-Labs
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

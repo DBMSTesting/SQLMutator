@@ -1,0 +1,96 @@
+ID: 13743
+Title: planner: don't push down conditions from in subquery with aggregators even though the columns in conditions is not null
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+```
+create table s( a int not null, b int);  
+select ( 2, 0 ) in (select s.b, min(s.b) from s )as f;
+select ( 2, 0 ) in (select s.a, min(s.b) from s )as f;
+```
+2. What did you expect to see?
+results from MySQL:
+```
+mysql> select ( 2, 0 ) in (select s.b, min(s.b) from s )as f;
++------+
+| f    |
++------+
+| NULL |
++------+
+1 row in set (0.00 sec)
+
+mysql> select ( 2, 0 ) in (select s.a, min(s.b) from s )as f;
++------+
+| f    |
++------+
+| NULL |
++------+
+1 row in set (0.00 sec)
+```
+
+3. What did you see instead?
+Results from TiDB:
+```
+mysql> select ( 2, 0 ) in (select s.b, min(s.b) from s )as f;
++------+
+| f    |
++------+
+| NULL |
++------+
+1 row in set (0.00 sec)
+
+mysql> select ( 2, 0 ) in (select s.a, min(s.b) from s )as f;
++------+
+| f    |
++------+
+|    0 |
++------+
+1 row in set (0.00 sec)
+```
+The explain results:
+```
+mysql> explain select ( 2, 0 ) in (select s.b, min(s.b) from s )as f;
++--------------------------+----------+-----------+-------------------------------------------------------------------------------------------------+
+| id                       | count    | task      | operator info                                                                                   |
++--------------------------+----------+-----------+-------------------------------------------------------------------------------------------------+
+| HashLeftJoin_8           | 1.00     | root      | CARTESIAN left outer semi join, inner:StreamAgg_21, other cond:eq(0, Column#4), eq(2, Column#2) |
+| ├─TableDual_9            | 1.00     | root      | rows:1                                                                                          |
+| └─StreamAgg_21           | 1.00     | root      | funcs:min(Column#11), firstrow(Column#12)                                                       |
+|   └─TableReader_22       | 1.00     | root      | data:StreamAgg_13                                                                               |
+|     └─StreamAgg_13       | 1.00     | cop[tikv] | funcs:min(Column#2), firstrow(Column#2)                                                         |
+|       └─TableScan_20     | 10000.00 | cop[tikv] | table:s, range:[-inf,+inf], keep order:false, stats:pseudo                                      |
++--------------------------+----------+-----------+-------------------------------------------------------------------------------------------------+
+6 rows in set (0.01 sec)
+
+mysql> explain select ( 2, 0 ) in (select s.a, min(s.b) from s )as f;
++----------------------------+----------+-----------+--------------------------------------------------------------------------------+
+| id                         | count    | task      | operator info                                                                  |
++----------------------------+----------+-----------+--------------------------------------------------------------------------------+
+| HashLeftJoin_9             | 1.00     | root      | CARTESIAN left outer semi join, inner:Selection_11, other cond:eq(0, Column#4) |
+| ├─TableDual_10             | 1.00     | root      | rows:1                                                                         |
+| └─Selection_11             | 0.80     | root      | eq(2, Column#1)                                                                |
+|   └─StreamAgg_23           | 1.00     | root      | funcs:min(Column#11), firstrow(Column#12)                                      |
+|     └─TableReader_24       | 1.00     | root      | data:StreamAgg_15                                                              |
+|       └─StreamAgg_15       | 1.00     | cop[tikv] | funcs:min(Column#2), firstrow(Column#1)                                        |
+|         └─TableScan_22     | 10000.00 | cop[tikv] | table:s, range:[-inf,+inf], keep order:false, stats:pseudo                     |
++----------------------------+----------+-----------+--------------------------------------------------------------------------------+
+7 rows in set (0.00 sec)
+```
+The essential problem is :
+```
+mysql> select s.a, min(s.b) from s;
++---+----------+
+| a | min(s.b) |
++---+----------+
+| NULL |     NULL |
++---+----------+
+1 row in set (0.00 sec)
+
+mysql> select s.a, s.b from s;
+Empty set (0.00 sec)
+```
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+After the master merged with https://github.com/pingcap/tidb/pull/12075, there are still errors.

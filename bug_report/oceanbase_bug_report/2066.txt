@@ -1,0 +1,179 @@
+ID: 2066
+Title: [Bug]: 疑似多列联合主键导致偶发数据库连接失败 || [Bug]: Suspected multi-column joint primary key causes occasional database connection failure
+Description:
+**Describe the bug**
+我们有2个汇总统计表，表结构大致如下：
+
+```sql
+CREATE TABLE `order_stat_hourly` (
+    `merchant_id` int unsigned NOT NULL,
+    `period` timestamp NOT NULL COMMENT '每个周期的开始时间点，也就是每个小时的整点',
+    `user_id` int unsigned NOT NULL,
+    `pay_amount_sum` int unsigned NOT NULL DEFAULT '0',    
+    `vendor` varchar(4) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL,
+    `product_type` tinyint unsigned NOT NULL,
+    `product_id` smallint unsigned NOT NULL,
+    `status` tinyint NOT NULL DEFAULT '1',
+    UNIQUE KEY `uk_period_merchantId_userId_vendor_productId` (`period`,`merchant_id`,`user_id`,`vendor`,`product_id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    PARTITION BY RANGE (UNIX_TIMESTAMP( `period` ))
+        (
+        PARTITION P20240326 VALUES LESS THAN(UNIX_TIMESTAMP('2024-03-27'))
+        , PARTITION P20240327 VALUES LESS THAN(UNIX_TIMESTAMP('2024-03-28'))
+        , PARTITION P20240328 VALUES LESS THAN(UNIX_TIMESTAMP('2024-03-29'))
+    );
+
+
+CREATE TABLE `order_stat_daily` (
+    `id` int unsigned NOT NULL AUTO_INCREMENT,
+    `merchant_id` int unsigned NOT NULL,
+    `period` timestamp NOT NULL COMMENT '每个周期的开始时间点，也就是每天的0点',
+    `user_id` int unsigned NOT NULL,
+    `pay_amount_sum` int unsigned NOT NULL DEFAULT '0',
+    `status` tinyint NOT NULL DEFAULT '1',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_period_merchantId_userId` (`period`,`merchant_id`,`user_id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+`order_stat_hourly` 表 用于按小时汇总订单数据，该表使用 `period,  merchant_id, user_id, vendor, product_id` 作为联合主键，并按天分区。
+```sql
+SELECT SUM(pay_amount_sum) FROM order_stat_hourly WHERE period BETWEEN ? AND ? AND merchant_id = ? AND user_id = ?
+```
+当我们使用该表进行如上查询时，应用程序**偶发**会触发以下异常，偶发的频率大概是**每分钟 1~2 次**。
+然而，在其他所有条件都不变的情况下，我们将上述SQL中的数据表改为 `order_stat_daily` 时，该异常就不再触发，也就是恢复正常了。
+
+根据两个表的结构差异，我们怀疑大概率是因为 `order_stat_hourly` 表是用 **5个字段** 作为联合主键 的缘故。
+
+**Environment**
+<!-- Environment Details sometimes important -->
+- OS Version: CentOS 8.2 x86_64  
+- OB Version: `OceanBase_CE_V4.2.1.7`
+- JDBC 驱动是 `com.mysql:mysql-connector-j:8.4.0` 。
+  
+**Expected behavior**
+希望一切正常，不再偶发报错。
+
+**Actual Behavior**
+```
+org.springframework.dao.RecoverableDataAccessException: 
+### Error querying database.  Cause: com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+### The error occurred while setting parameters
+### SQL: SELECT SUM(pay_amount_sum) FROM order_stat_hourly WHERE period BETWEEN ? AND ? AND merchant_id = ? AND user_id = ?
+### Cause: com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+; Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.; nested exception is com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+	at org.springframework.jdbc.support.SQLExceptionSubclassTranslator.doTranslate(SQLExceptionSubclassTranslator.java:100)
+	at org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:73)	
+Caused by: com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+	at com.mysql.cj.jdbc.exceptions.SQLError.createCommunicationsException(SQLError.java:165)
+	at com.mysql.cj.jdbc.exceptions.SQLExceptionsMapping.translateException(SQLExceptionsMapping.java:55)
+Caused by: com.mysql.cj.exceptions.CJCommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+	at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)
+	at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance(NativeConstructorAccessorImpl.java:77)
+Caused by: java.io.EOFException: Can not read response from server. Expected to read 4 bytes, read 0 bytes before connection was unexpectedly lost.
+	at com.mysql.cj.protocol.FullReadInputStream.readFully(FullReadInputStream.java:58)
+	at com.mysql.cj.protocol.a.SimplePacketReader.readHeaderLocal(SimplePacketReader.java:72)
+```
+
+**Additional context**
+应用程序使用的是 HikariCP 的连接池，3个 OBServer 构成 `1-1-1` 的集群，3个OBProxy分别部署在与3个OBServer相同的机器上，并使用 ELB 实现 负载均衡。
+
+BTW， 使用 `order_stat_hourly` 表进行上述查询，比使用 `order_stat_daily` 会消耗更多的 数据库 CPU 资源（ 只查询 1-3天内的数据， 但并不算多的 `order_stat_hourly` 表查询 就会让 CPU 满载 ）。
+
+此外，我们还发现，在应用程序的 SQL 中添加 **弱一致性读** 的 SQL Hint，例如：`SELECT /*+ READ_CONSISTENCY(WEAK) */ FROM table_name` （ 任何表都可能会触发 ），也**大概率**会触发相同的错误。
+
+
+<!--This is a translation content dividing line, the content below is generated by machine, please do not modify the content below-->
+---
+**Describe the bug**
+We have 2 summary statistics tables, the table structure is roughly as follows:
+
+```sql
+CREATE TABLE `order_stat_hourly` (
+    `merchant_id` int unsigned NOT NULL,
+    `period` timestamp NOT NULL COMMENT 'The starting time of each period, that is, the hour on the hour',
+    `user_id` int unsigned NOT NULL,
+    `pay_amount_sum` int unsigned NOT NULL DEFAULT '0',
+    `vendor` varchar(4) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL,
+    `product_type` tinyint unsigned NOT NULL,
+    `product_id` smallint unsigned NOT NULL,
+    `status` tinyint NOT NULL DEFAULT '1',
+    UNIQUE KEY `uk_period_merchantId_userId_vendor_productId` (`period`,`merchant_id`,`user_id`,`vendor`,`product_id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    PARTITION BY RANGE (UNIX_TIMESTAMP( `period` ))
+        (
+        PARTITION P20240326 VALUES LESS THAN(UNIX_TIMESTAMP('2024-03-27'))
+        , PARTITION P20240327 VALUES LESS THAN(UNIX_TIMESTAMP('2024-03-28'))
+        , PARTITION P20240328 VALUES LESS THAN(UNIX_TIMESTAMP('2024-03-29'))
+    );
+
+
+CREATE TABLE `order_stat_daily` (
+    `id` int unsigned NOT NULL AUTO_INCREMENT,
+    `merchant_id` int unsigned NOT NULL,
+    `period` timestamp NOT NULL COMMENT 'The starting time of each period, which is 0 o'clock every day',
+    `user_id` int unsigned NOT NULL,
+    `pay_amount_sum` int unsigned NOT NULL DEFAULT '0',
+    `status` tinyint NOT NULL DEFAULT '1',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_period_merchantId_userId` (`period`,`merchant_id`,`user_id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+The `order_stat_hourly` table is used to summarize order data by hour. The table uses `period, merchant_id, user_id, vendor, product_id` as the joint primary key and is partitioned by day.
+```sql
+SELECT SUM(pay_amount_sum) FROM order_stat_hourly WHERE period BETWEEN ? AND ? AND merchant_id = ? AND user_id = ?
+```
+When we use this table to perform the above query, the application will trigger the following exception **occasionally**, and the frequency of the occurrence is about **1~2 times per minute**.
+However, when all other conditions remain unchanged, when we change the data table in the above SQL to `order_stat_daily`, the exception will no longer be triggered, that is, it will return to normal.
+
+Based on the structural differences between the two tables, we suspect that it is most likely because the `order_stat_hourly` table uses **5 fields** as the joint primary key.
+
+**Environment**
+<!-- Environment Details sometimes important -->
+- OS Version: CentOS 8.2 x86_64
+- OB Version: `OceanBase_CE_V4.2.1.7`
+- The JDBC driver is `com.mysql:mysql-connector-j:8.4.0`.
+  
+**Expected behavior**
+I hope everything goes fine and no more occasional errors occur.
+
+**Actual Behavior**
+```
+org.springframework.dao.RecoverableDataAccessException:
+### Error querying database. Cause: com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+### The error occurred while setting parameters
+### SQL: SELECT SUM(pay_amount_sum) FROM order_stat_hourly WHERE period BETWEEN ? AND ? AND merchant_id = ? AND user_id = ?
+### Cause: com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+; Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.; nested exception is com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+at org.springframework.jdbc.support.SQLExceptionSubclassTranslator.doTranslate(SQLExceptionSubclassTranslator.java:100)
+at org.springframework.jdbc.support.AbstractFallbackSQLExceptionTranslator.translate(AbstractFallbackSQLExceptionTranslator.java:73)
+Caused by: com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+at com.mysql.cj.jdbc.exceptions.SQLError.createCommunicationsException(SQLError.java:165)
+at com.mysql.cj.jdbc.exceptions.SQLExceptionsMapping.translateException(SQLExceptionsMapping.java:55)
+Caused by: com.mysql.cj.exceptions.CJCommunicationsException: Communications link failure
+The last packet successfully received from the server was 69 milliseconds ago. The last packet sent successfully to the server was 70 milliseconds ago.
+at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)
+at java.base/jdk.internal.reflect.NativeConstructorAccessorImpl.newInstance(NativeConstructorAccessorImpl.java:77)
+Caused by: java.io.EOFException: Can not read response from server. Expected to read 4 bytes, read 0 bytes before connection was unexpectedly lost.
+at com.mysql.cj.protocol.FullReadInputStream.readFully(FullReadInputStream.java:58)
+at com.mysql.cj.protocol.a.SimplePacketReader.readHeaderLocal(SimplePacketReader.java:72)
+```
+
+**Additional context**
+The application uses HikariCP's connection pool. Three OBServers form a `1-1-1` cluster. Three OBProxy are deployed on the same machine as the three OBServers, and ELB is used to achieve load balancing.
+
+BTW, using the `order_stat_hourly` table to perform the above query will consume more database CPU resources than using `order_stat_daily` (only querying data within 1-3 days, but not many `order_stat_hourly` table queries will fully load the CPU ).
+
+In addition, we also found that adding **weakly consistent read** SQL Hint in the application's SQL, for example: `SELECT /*+ READ_CONSISTENCY(WEAK) */ FROM table_name` (any table may trigger), There is also a **high probability** that the same error will be triggered.

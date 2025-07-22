@@ -1,0 +1,114 @@
+ID: 12816
+Title: list_resize segmentation fault on struct[] with struct padding value
+Description:
+### What happens?
+
+I have a table where one column is defined as a list of structs which for downstream processing need to be padded to all be the same length. Outside of relatively small table sizes and small resize values, I get a segmentation fault with no clear error message. This occurs within a few seconds of executing the command.
+
+I don't see any real movement in my computer's RAM usage, but that may not be relevant.
+Error message:
+```
+The Kernel crashed while executing code in the current cell or a previous cell. 
+Please review the code in the cell(s) to identify a possible cause of the failure. 
+Click [here](https://aka.ms/vscodeJupyterKernelCrash) for more info. 
+View Jupyter [log](command:jupyter.viewOutput) for further details.
+```
+Jupyter log:
+```
+12:32:50.179 [error] Disposing session as kernel process died ExitCode: undefined, Reason: 
+```
+When it crashes from the CLI, all I get is this:
+```
+Segmentation fault (core dumped)
+```
+
+### To Reproduce
+
+Here's a simple reproduction that crashes the kernel in a jupyter notebook:
+
+```
+import duckdb
+
+N = 1000
+
+conn = duckdb.connect()
+with duckdb.connect() as conn:
+    # Create the table with a column that contains lists of structs
+    conn.execute("""
+        CREATE TABLE test_table (
+            id INTEGER,
+            data STRUCT(a INTEGER, b DOUBLE, c VARCHAR)[]
+        )
+    """)
+
+    struct_data = [
+        {'a': 1, 'b': 1.1, 'c': 'one'},
+        {'a': 2, 'b': 2.2, 'c': 'two'},
+        {'a': 3, 'b': 3.3, 'c': 'three'}
+    ]
+
+    insert_query = "INSERT INTO test_table VALUES (?, ?)"
+    for i in range(1, N + 1):
+        conn.execute(insert_query, (i, struct_data))
+
+    padding_value = """
+        struct_pack(
+            a := 0,
+            b := 0.0,
+            c := 'padding'
+        )
+    """
+
+    conn.execute(f"""
+        CREATE OR REPLACE TABLE padded_test_table AS
+        SELECT 
+            id,
+            list_resize(data, 10000, {padding_value}) AS padded_data
+        FROM test_table
+    """)
+
+    # Fetch and print the result
+    result = conn.execute("SELECT * FROM padded_test_table").fetchdf()
+    print(result)
+```
+
+I was able to repro this using a .SQL file from the CLI, though it only failed when I used my actual dataset. 
+
+#### Workaround:
+I'm able to omit the padding value from `list_resize` and then pad manually with `list_transform`. I'm unsure what would be the most computationally efficient approach, though (I'm hoping that `list_resize` with a padding value would be faster).
+
+### OS:
+
+Ubuntu 22.04
+
+### DuckDB Version:
+
+1.0.0
+
+### DuckDB Client:
+
+Python (3.11.9)
+
+### Full Name:
+
+Ron Budnar
+
+### Affiliation:
+
+TrainerRoad
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

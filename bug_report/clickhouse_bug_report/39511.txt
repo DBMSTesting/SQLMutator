@@ -1,0 +1,188 @@
+ID: 39511
+Title: CREATE INDEX on ReplicatedMergeTree table in a Replicated database causes infinite failure loop
+Description:
+Hey,
+I'd like to report a bug using the new CREATE INDEX syntax.
+
+**Description** 
+
+- Using ClickHouse version 22.7.1.2484, in a cluster with 2 shards and 2 replicas for each shard (total of 4 nodes)
+- When using the new CREATE INDEX statement added in this version, on a ReplicatedMergeTree table that exists inside a database using the Replicated engine, the index is created but an infinite loop of exceptions begins in the log.
+- The only workaround i found is to manually edit the log_ptr in the ZooKeeper to point to the next log record, so it wont try to execute the problematic statement again.
+- The index is actually created successfully. 
+- This problem doesn't happen when using ALTER TABLE ... ADD INDEX statement.
+
+**How to reproduce?**
+
+1. `CREATE DATABASE tests ENGINE = Replicated('/dbs/test', '{shard}', '{replica}')`
+2. Execute this statement on each node in the cluster (my topology is 2 shards each with 2 replicas)
+3. `CREATE TABLE tests.local_testTable 
+(
+	InsertionTime Datetime32,
+	Blah1 String,
+	Blah2 Int32
+) 
+ENGINE=ReplicatedMergeTree 
+PARTITION BY toYYYYMM(InsertionTime)
+ORDER BY InsertionTime`
+4. `CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5`
+
+**The log**
+This is part of the log. the exception keeps happening. 
+
+clickhouse03  | 2022.07.22 22:12:02.642951 [ 236 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000005: Entry query-0000000005 is a dummy task
+clickhouse03  | 2022.07.22 22:12:02.644341 [ 236 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000006: Entry query-0000000006 hasn't been committed
+clickhouse03  | 2022.07.22 22:12:02.647018 [ 236 ] {} <Debug> DDLWorker(tests): Processing task query-0000000007 (CREATE INDEX IX_testsBlah_Blah2_MinMax ON local_testTable(Blah2) TYPE MINMAX GRANULARITY 5)
+clickhouse03  | 2022.07.22 22:12:02.653851 [ 236 ] {} <Debug> DDLWorker(tests): Executing query: CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5
+clickhouse03  | 2022.07.22 22:12:02.654110 [ 236 ] {3d53abd5-e239-4a93-911f-9aac7d44855e} <Debug> executeQuery: (from 0.0.0.0:0, user: ) /* ddl_entry=query-0000000007 */ CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5 (stage: Complete)
+clickhouse03  | 2022.07.22 22:12:02.654800 [ 236 ] {3d53abd5-e239-4a93-911f-9aac7d44855e} <Error> executeQuery: Code: 44. DB::Exception: Cannot add index IX_testsBlah_Blah2_MinMax: index with this name already exists. (ILLEGAL_COLUMN) (version 22.7.1.2484 (official build)) (from 0.0.0.0:0) (in query: /* ddl_entry=query-0000000007 */ CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5), Stack trace (when copying this message, always include the lines below):
+clickhouse03  |
+clickhouse03  | 0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /usr/bin/clickhouse
+clickhouse03  | 1. DB::AlterCommand::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x17042d3b in /usr/bin/clickhouse
+clickhouse03  | 2. DB::AlterCommands::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x1704cb4e in /usr/bin/clickhouse
+clickhouse03  | 3. DB::MergeTreeData::checkAlterIsPossible(DB::AlterCommands const&, std::__1::shared_ptr<DB::Context const>) const @ 0x1757c7e7 in /usr/bin/clickhouse
+clickhouse03  | 4. DB::InterpreterCreateIndexQuery::execute() @ 0x16b6f501 in /usr/bin/clickhouse
+clickhouse03  | 5. ? @ 0x16ecdbd7 in /usr/bin/clickhouse
+clickhouse03  | 6. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, std::__1::shared_ptr<DB::Context>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>, std::__1::optional<DB::FormatSettings> const&) @ 0x16ed2033 in /usr/bin/clickhouse
+clickhouse03  | 7. DB::DDLWorker::tryExecuteQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x166729b4 in /usr/bin/clickhouse
+clickhouse03  | 8. DB::DDLWorker::processTask(DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x1667135d in /usr/bin/clickhouse
+clickhouse03  | 9. DB::DDLWorker::scheduleTasks(bool) @ 0x1666f213 in /usr/bin/clickhouse
+clickhouse03  | 10. DB::DDLWorker::runMainThread() @ 0x16668f7c in /usr/bin/clickhouse
+clickhouse03  | 11. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1667d089 in /usr/bin/clickhouse
+clickhouse03  | 12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /usr/bin/clickhouse
+clickhouse03  | 13. ? @ 0xbb07a3d in /usr/bin/clickhouse
+clickhouse03  | 14. ? @ 0x7fe4948c0609 in ?
+clickhouse03  | 15. clone @ 0x7fe4947e5133 in ?
+clickhouse03  |
+clickhouse03  | 2022.07.22 22:12:02.655100 [ 236 ] {3d53abd5-e239-4a93-911f-9aac7d44855e} <Error> DDLWorker(tests): Query CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5 wasn't finished successfully: Code: 44. DB::Exception: Cannot add index IX_testsBlah_Blah2_MinMax: index with this name already exists. (ILLEGAL_COLUMN), Stack trace (when copying this message, always include the lines below):
+clickhouse03  |
+clickhouse03  | 0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /usr/bin/clickhouse
+clickhouse03  | 1. DB::AlterCommand::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x17042d3b in /usr/bin/clickhouse
+clickhouse03  | 2. DB::AlterCommands::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x1704cb4e in /usr/bin/clickhouse
+clickhouse03  | 3. DB::MergeTreeData::checkAlterIsPossible(DB::AlterCommands const&, std::__1::shared_ptr<DB::Context const>) const @ 0x1757c7e7 in /usr/bin/clickhouse
+clickhouse03  | 4. DB::InterpreterCreateIndexQuery::execute() @ 0x16b6f501 in /usr/bin/clickhouse
+clickhouse03  | 5. ? @ 0x16ecdbd7 in /usr/bin/clickhouse
+clickhouse03  | 6. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, std::__1::shared_ptr<DB::Context>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>, std::__1::optional<DB::FormatSettings> const&) @ 0x16ed2033 in /usr/bin/clickhouse
+clickhouse03  | 7. DB::DDLWorker::tryExecuteQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x166729b4 in /usr/bin/clickhouse
+clickhouse03  | 8. DB::DDLWorker::processTask(DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x1667135d in /usr/bin/clickhouse
+clickhouse03  | 9. DB::DDLWorker::scheduleTasks(bool) @ 0x1666f213 in /usr/bin/clickhouse
+clickhouse03  | 10. DB::DDLWorker::runMainThread() @ 0x16668f7c in /usr/bin/clickhouse
+clickhouse03  | 11. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1667d089 in /usr/bin/clickhouse
+clickhouse03  | 12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /usr/bin/clickhouse
+clickhouse03  | 13. ? @ 0xbb07a3d in /usr/bin/clickhouse
+clickhouse03  | 14. ? @ 0x7fe4948c0609 in ?
+clickhouse03  | 15. clone @ 0x7fe4947e5133 in ?
+clickhouse03  |  (version 22.7.1.2484 (official build))
+clickhouse03  | 2022.07.22 22:12:02.655153 [ 236 ] {3d53abd5-e239-4a93-911f-9aac7d44855e} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+clickhouse03  | 2022.07.22 22:12:02.659441 [ 236 ] {} <Error> DDLWorker(tests): Unexpected error, will try to restart main thread: Code: 341. DB::Exception: Unexpected error: 44
+clickhouse03  | Code: 44. DB::Exception: Cannot add index IX_testsBlah_Blah2_MinMax: index with this name already exists. (ILLEGAL_COLUMN) (version 22.7.1.2484 (official build)). (UNFINISHED), Stack trace (when copying this message, always include the lines below):
+clickhouse03  |
+clickhouse03  | 0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /usr/bin/clickhouse
+clickhouse03  | 1. DB::Exception::Exception<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >(int, fmt::v8::basic_format_string<char, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >::type>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&&) @ 0xba83198 in /usr/bin/clickhouse
+clickhouse03  | 2. DB::DDLWorker::processTask(DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x166718ad in /usr/bin/clickhouse
+clickhouse03  | 3. DB::DDLWorker::scheduleTasks(bool) @ 0x1666f213 in /usr/bin/clickhouse
+clickhouse03  | 4. DB::DDLWorker::runMainThread() @ 0x16668f7c in /usr/bin/clickhouse
+clickhouse03  | 5. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1667d089 in /usr/bin/clickhouse
+clickhouse03  | 6. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /usr/bin/clickhouse
+clickhouse03  | 7. ? @ 0xbb07a3d in /usr/bin/clickhouse
+clickhouse03  | 8. ? @ 0x7fe4948c0609 in ?
+clickhouse03  | 9. clone @ 0x7fe4947e5133 in ?
+clickhouse03  |  (version 22.7.1.2484 (official build))
+clickhouse03  | 2022.07.22 22:12:02.659643 [ 236 ] {} <Information> DDLWorker(tests): Cleaned DDLWorker state
+clickhouse03  | 2022.07.22 22:12:03.401779 [ 214 ] {} <Debug> DNSResolver: Updating DNS cache
+clickhouse03  | 2022.07.22 22:12:03.403668 [ 214 ] {} <Debug> DNSResolver: Updated DNS cache
+clickhouse03  | 2022.07.22 22:12:03.458538 [ 87 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 230.82 GiB.
+clickhouse02  | 2022.07.22 22:12:03.672911 [ 93 ] {} <Debug> DNSResolver: Updating DNS cache
+clickhouse02  | 2022.07.22 22:12:03.674850 [ 93 ] {} <Debug> DNSResolver: Updated DNS cache
+clickhouse02  | 2022.07.22 22:12:03.710897 [ 87 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 230.82 GiB.
+clickhouse02  | 2022.07.22 22:12:03.712491 [ 94 ] {} <Debug> system.query_log (396a2721-59d3-43e0-b261-e795b4974efa) (MergerMutator): Selected 6 parts from 202207_1_56_11 to 202207_61_61_0
+clickhouse02  | 2022.07.22 22:12:03.712565 [ 94 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 230.82 GiB.
+clickhouse02  | 2022.07.22 22:12:03.712737 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTask::PrepareStage: Merging 6 parts: from 202207_1_56_11 to 202207_61_61_0 into Compact
+clickhouse02  | 2022.07.22 22:12:03.713024 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTask::PrepareStage: Selected MergeAlgorithm: Horizontal
+clickhouse02  | 2022.07.22 22:12:03.713198 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTreeSequentialSource: Reading 2 marks from part 202207_1_56_11, total 90 rows starting from the beginning of the part
+clickhouse02  | 2022.07.22 22:12:03.713834 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTreeSequentialSource: Reading 2 marks from part 202207_57_57_0, total 2 rows starting from the beginning of the part
+clickhouse02  | 2022.07.22 22:12:03.714327 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTreeSequentialSource: Reading 2 marks from part 202207_58_58_0, total 1 rows starting from the beginning of the part
+clickhouse02  | 2022.07.22 22:12:03.714875 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTreeSequentialSource: Reading 2 marks from part 202207_59_59_0, total 2 rows starting from the beginning of the part
+clickhouse02  | 2022.07.22 22:12:03.715424 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTreeSequentialSource: Reading 2 marks from part 202207_60_60_0, total 1 rows starting from the beginning of the part
+clickhouse02  | 2022.07.22 22:12:03.715979 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTreeSequentialSource: Reading 2 marks from part 202207_61_61_0, total 2 rows starting from the beginning of the part
+clickhouse02  | 2022.07.22 22:12:03.721938 [ 52 ] {396a2721-59d3-43e0-b261-e795b4974efa::202207_1_61_12} <Debug> MergeTask::MergeProjectionsStage: Merge sorted 98 rows, containing 68 columns (68 merged, 0 gathered) in 0.0092471 sec., 10597.917184847141 rows/sec., 30.92 MiB/sec.
+clickhouse02  | 2022.07.22 22:12:03.724269 [ 52 ] {} <Debug> MemoryTracker: Peak memory usage Mutate/Merge: 4.12 MiB.
+clickhouse04  | 2022.07.22 22:12:04.150026 [ 138 ] {} <Debug> DNSResolver: Updating DNS cache
+clickhouse01  | 2022.07.22 22:12:04.149923 [ 157 ] {} <Debug> DNSResolver: Updating DNS cache
+clickhouse01  | 2022.07.22 22:12:04.151499 [ 157 ] {} <Debug> DNSResolver: Updated DNS cache
+clickhouse04  | 2022.07.22 22:12:04.151653 [ 138 ] {} <Debug> DNSResolver: Updated DNS cache
+clickhouse02  | 2022.07.22 22:12:07.627785 [ 235 ] {} <Debug> DDLWorker(tests): Initialized DDLWorker thread
+clickhouse02  | 2022.07.22 22:12:07.627859 [ 235 ] {} <Debug> DDLWorker(tests): Scheduling tasks
+clickhouse02  | 2022.07.22 22:12:07.628706 [ 235 ] {} <Debug> DDLWorker(tests): Will schedule 5 tasks starting from query-0000000003
+clickhouse02  | 2022.07.22 22:12:07.635462 [ 235 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000003: Entry query-0000000003 is a dummy task
+clickhouse02  | 2022.07.22 22:12:07.641258 [ 235 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000004: Entry query-0000000004 is a dummy task
+clickhouse02  | 2022.07.22 22:12:07.647493 [ 235 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000005: Entry query-0000000005 is a dummy task
+clickhouse02  | 2022.07.22 22:12:07.649054 [ 235 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000006: Entry query-0000000006 hasn't been committed
+clickhouse02  | 2022.07.22 22:12:07.651712 [ 235 ] {} <Debug> DDLWorker(tests): Processing task query-0000000007 (CREATE INDEX IX_testsBlah_Blah2_MinMax ON local_testTable(Blah2) TYPE MINMAX GRANULARITY 5)
+clickhouse02  | 2022.07.22 22:12:07.655342 [ 235 ] {} <Debug> DDLWorker(tests): Executing query: CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5
+clickhouse02  | 2022.07.22 22:12:07.655767 [ 235 ] {f347ba35-14b7-4709-b253-9bb15914d496} <Debug> executeQuery: (from 0.0.0.0:0, user: ) /* ddl_entry=query-0000000007 */ CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5 (stage: Complete)
+clickhouse02  | 2022.07.22 22:12:07.656909 [ 235 ] {f347ba35-14b7-4709-b253-9bb15914d496} <Error> executeQuery: Code: 44. DB::Exception: Cannot add index IX_testsBlah_Blah2_MinMax: index with this name already exists. (ILLEGAL_COLUMN) (version 22.7.1.2484 (official build)) (from 0.0.0.0:0) (in query: /* ddl_entry=query-0000000007 */ CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5), Stack trace (when copying this message, always include the lines below):
+clickhouse02  |
+clickhouse02  | 0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /usr/bin/clickhouse
+clickhouse02  | 1. DB::AlterCommand::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x17042d3b in /usr/bin/clickhouse
+clickhouse02  | 2. DB::AlterCommands::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x1704cb4e in /usr/bin/clickhouse
+clickhouse02  | 3. DB::MergeTreeData::checkAlterIsPossible(DB::AlterCommands const&, std::__1::shared_ptr<DB::Context const>) const @ 0x1757c7e7 in /usr/bin/clickhouse
+clickhouse02  | 4. DB::InterpreterCreateIndexQuery::execute() @ 0x16b6f501 in /usr/bin/clickhouse
+clickhouse02  | 5. ? @ 0x16ecdbd7 in /usr/bin/clickhouse
+clickhouse02  | 6. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, std::__1::shared_ptr<DB::Context>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>, std::__1::optional<DB::FormatSettings> const&) @ 0x16ed2033 in /usr/bin/clickhouse
+clickhouse02  | 7. DB::DDLWorker::tryExecuteQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x166729b4 in /usr/bin/clickhouse
+clickhouse02  | 8. DB::DDLWorker::processTask(DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x1667135d in /usr/bin/clickhouse
+clickhouse02  | 9. DB::DDLWorker::scheduleTasks(bool) @ 0x1666f213 in /usr/bin/clickhouse
+clickhouse02  | 10. DB::DDLWorker::runMainThread() @ 0x16668f7c in /usr/bin/clickhouse
+clickhouse02  | 11. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1667d089 in /usr/bin/clickhouse
+clickhouse02  | 12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /usr/bin/clickhouse
+clickhouse02  | 13. ? @ 0xbb07a3d in /usr/bin/clickhouse
+clickhouse02  | 14. ? @ 0x7f764702c609 in ?
+clickhouse02  | 15. clone @ 0x7f7646f51133 in ?
+clickhouse02  |
+clickhouse02  | 2022.07.22 22:12:07.657163 [ 235 ] {f347ba35-14b7-4709-b253-9bb15914d496} <Error> DDLWorker(tests): Query CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5 wasn't finished successfully: Code: 44. DB::Exception: Cannot add index IX_testsBlah_Blah2_MinMax: index with this name already exists. (ILLEGAL_COLUMN), Stack trace (when copying this message, always include the lines below):
+clickhouse02  |
+clickhouse02  | 0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /usr/bin/clickhouse
+clickhouse02  | 1. DB::AlterCommand::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x17042d3b in /usr/bin/clickhouse
+clickhouse02  | 2. DB::AlterCommands::apply(DB::StorageInMemoryMetadata&, std::__1::shared_ptr<DB::Context const>) const @ 0x1704cb4e in /usr/bin/clickhouse
+clickhouse02  | 3. DB::MergeTreeData::checkAlterIsPossible(DB::AlterCommands const&, std::__1::shared_ptr<DB::Context const>) const @ 0x1757c7e7 in /usr/bin/clickhouse
+clickhouse02  | 4. DB::InterpreterCreateIndexQuery::execute() @ 0x16b6f501 in /usr/bin/clickhouse
+clickhouse02  | 5. ? @ 0x16ecdbd7 in /usr/bin/clickhouse
+clickhouse02  | 6. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, std::__1::shared_ptr<DB::Context>, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>, std::__1::optional<DB::FormatSettings> const&) @ 0x16ed2033 in /usr/bin/clickhouse
+clickhouse02  | 7. DB::DDLWorker::tryExecuteQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x166729b4 in /usr/bin/clickhouse
+clickhouse02  | 8. DB::DDLWorker::processTask(DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x1667135d in /usr/bin/clickhouse
+clickhouse02  | 9. DB::DDLWorker::scheduleTasks(bool) @ 0x1666f213 in /usr/bin/clickhouse
+clickhouse02  | 10. DB::DDLWorker::runMainThread() @ 0x16668f7c in /usr/bin/clickhouse
+clickhouse02  | 11. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1667d089 in /usr/bin/clickhouse
+clickhouse02  | 12. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /usr/bin/clickhouse
+clickhouse02  | 13. ? @ 0xbb07a3d in /usr/bin/clickhouse
+clickhouse03  | 2022.07.22 22:12:07.664076 [ 236 ] {} <Debug> DDLWorker(tests): Initialized DDLWorker thread
+clickhouse02  | 14. ? @ 0x7f764702c609 in ?
+clickhouse03  | 2022.07.22 22:12:07.664137 [ 236 ] {} <Debug> DDLWorker(tests): Scheduling tasks
+clickhouse02  | 15. clone @ 0x7f7646f51133 in ?
+clickhouse03  | 2022.07.22 22:12:07.664819 [ 236 ] {} <Debug> DDLWorker(tests): Will schedule 5 tasks starting from query-0000000003
+clickhouse02  |  (version 22.7.1.2484 (official build))
+clickhouse02  | 2022.07.22 22:12:07.657214 [ 235 ] {f347ba35-14b7-4709-b253-9bb15914d496} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+clickhouse02  | 2022.07.22 22:12:07.662688 [ 235 ] {} <Error> DDLWorker(tests): Unexpected error, will try to restart main thread: Code: 341. DB::Exception: Unexpected error: 44
+clickhouse02  | Code: 44. DB::Exception: Cannot add index IX_testsBlah_Blah2_MinMax: index with this name already exists. (ILLEGAL_COLUMN) (version 22.7.1.2484 (official build)). (UNFINISHED), Stack trace (when copying this message, always include the lines below):
+clickhouse02  |
+clickhouse02  | 0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /usr/bin/clickhouse
+clickhouse02  | 1. DB::Exception::Exception<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >(int, fmt::v8::basic_format_string<char, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >::type>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&&) @ 0xba83198 in /usr/bin/clickhouse
+clickhouse02  | 2. DB::DDLWorker::processTask(DB::DDLTaskBase&, std::__1::shared_ptr<zkutil::ZooKeeper> const&) @ 0x166718ad in /usr/bin/clickhouse
+clickhouse02  | 3. DB::DDLWorker::scheduleTasks(bool) @ 0x1666f213 in /usr/bin/clickhouse
+clickhouse02  | 4. DB::DDLWorker::runMainThread() @ 0x16668f7c in /usr/bin/clickhouse
+clickhouse02  | 5. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::DDLWorker::*)(), DB::DDLWorker*>(void (DB::DDLWorker::*&&)(), DB::DDLWorker*&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0x1667d089 in /usr/bin/clickhouse
+clickhouse02  | 6. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /usr/bin/clickhouse
+clickhouse02  | 7. ? @ 0xbb07a3d in /usr/bin/clickhouse
+clickhouse02  | 8. ? @ 0x7f764702c609 in ?
+clickhouse02  | 9. clone @ 0x7f7646f51133 in ?
+clickhouse02  |  (version 22.7.1.2484 (official build))
+clickhouse02  | 2022.07.22 22:12:07.662752 [ 235 ] {} <Information> DDLWorker(tests): Cleaned DDLWorker state
+clickhouse03  | 2022.07.22 22:12:07.670201 [ 236 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000003: Entry query-0000000003 is a dummy task
+clickhouse03  | 2022.07.22 22:12:07.676692 [ 236 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000004: Entry query-0000000004 is a dummy task
+clickhouse03  | 2022.07.22 22:12:07.682419 [ 236 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000005: Entry query-0000000005 is a dummy task
+clickhouse03  | 2022.07.22 22:12:07.684090 [ 236 ] {} <Debug> DDLWorker(tests): Will not execute task query-0000000006: Entry query-0000000006 hasn't been committed
+clickhouse03  | 2022.07.22 22:12:07.687667 [ 236 ] {} <Debug> DDLWorker(tests): Processing task query-0000000007 (CREATE INDEX IX_testsBlah_Blah2_MinMax ON local_testTable(Blah2) TYPE MINMAX GRANULARITY 5)
+clickhouse03  | 2022.07.22 22:12:07.691499 [ 236 ] {} <Debug> DDLWorker(tests): Executing query: CREATE INDEX IX_testsBlah_Blah2_MinMax ON tests.local_testTable(Blah2) TYPE MINMAX GRANULARITY 5
+
+Thanks!

@@ -1,0 +1,170 @@
+ID: 6642
+Title: 19.13 Can't adjust last granule because it has 0 rows
+Description:
+19.13.3.26
+I was playing with a 'set' data skipping index, and I got this exception while changing granularity values.
+The table that I used:
+```
+CREATE TABLE skip_set
+(
+    `x` UInt64,
+    INDEX x_idx x TYPE set(0) GRANULARITY 2
+)
+ENGINE = MergeTree()
+ORDER BY tuple()
+SETTINGS index_granularity = 8192
+```
+These two queries use the skip index:
+```
+select count() from skip_set where x = 1;
+select count() from skip_set where x in (1,2,3);
+```
+These two queries do not use the skip index (#6601):
+```
+select count() from skip_set where x in (select toUInt64(1));
+select count() from skip_set where x in (select number from numbers(3))
+```
+The exceptions:
+1. set (0) GRANULARITY 8 index_granularity = 256
+```
+SET allow_experimental_data_skipping_indices = 1;
+drop table if exists skip_set;
+CREATE TABLE skip_set (x UInt64, INDEX x_idx x TYPE set (0) GRANULARITY 8) ENGINE = MergeTree () order BY tuple() SETTINGS index_granularity = 256;
+insert into skip_set (x) select number from numbers(100000);
+
+SELECT count()
+FROM skip_set
+WHERE x IN (1, 2, 3)
+
+┌─count()─┐
+│       3 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.010 sec. Processed 2.05 thousand rows, 16.38 KB (210.04 thousand rows/s., 1.68 MB/s.)
+
+SELECT count()
+FROM skip_set
+WHERE x IN
+(
+    SELECT toUInt64(1)
+)
+
+Received exception from server (version 19.13.3):
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Can't adjust last granule because it has 0 rows, but try to subtract 96 rows..
+```
+2. set (10) GRANULARITY 8 index_granularity = 256
+```
+drop table if exists skip_set;
+CREATE TABLE skip_set (x UInt64, INDEX x_idx x TYPE set (10) GRANULARITY 8) ENGINE = MergeTree () order BY tuple() SETTINGS index_granularity = 256;
+insert into skip_set (x) select number from numbers(100000);
+
+SELECT count()
+FROM skip_set
+WHERE x = 1
+
+Received exception from server (version 19.13.3):
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Can't adjust last granule because it has 0 rows, but try to subtract 96 rows..
+```
+3. set (0) GRANULARITY 1 index_granularity = 256
+```
+drop table if exists skip_set;
+CREATE TABLE skip_set (x UInt64, INDEX x_idx x TYPE set (0) GRANULARITY 1) ENGINE = MergeTree () order BY tuple() SETTINGS index_granularity = 256;
+insert into skip_set (x) select number from numbers(100000);
+
+SELECT count()
+FROM skip_set
+WHERE x = 1
+
+Received exception from server (version 19.13.3):
+Code: 33. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read all data. Bytes read: 0. Bytes expected: 8..
+
+SELECT count()
+FROM skip_set
+WHERE x IN
+(
+    SELECT toUInt64(1)
+)
+
+Received exception from server (version 19.13.3):
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Can't adjust last granule because it has 0 rows, but try to subtract 96 rows..
+```
+4. set (0) GRANULARITY 1 index_granularity = 8192
+```
+drop table if exists skip_set;
+CREATE TABLE skip_set (x UInt64, INDEX x_idx x TYPE set (0) GRANULARITY 1) ENGINE = MergeTree () order BY tuple() SETTINGS index_granularity = 8192;
+insert into skip_set (x) select number from numbers(100000);
+
+SELECT count()
+FROM skip_set
+WHERE x = 1
+
+Received exception from server (version 19.13.3):
+Code: 33. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read all data. Bytes read: 0. Bytes expected: 8..
+
+SELECT count()
+FROM skip_set
+WHERE x IN
+(
+    SELECT toUInt64(1)
+)
+
+┌─count()─┐
+│       1 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.006 sec. Processed 100.00 thousand rows, 800.00 KB (16.90 million rows/s., 135.22 MB/s.)
+```
+5. set (0) GRANULARITY 2 index_granularity = 8192
+```
+drop table if exists skip_set;
+CREATE TABLE skip_set (x UInt64, INDEX x_idx x TYPE set (0) GRANULARITY 2) 
+ENGINE = MergeTree () order BY tuple() SETTINGS index_granularity = 8192;
+insert into skip_set (x) select number from numbers(100000);
+
+SELECT count()
+FROM skip_set
+WHERE x = 1
+
+┌─count()─┐
+│       1 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.008 sec. Processed 16.38 thousand rows, 131.07 KB (2.15 million rows/s., 17.22 MB/s.)
+
+SELECT count()
+FROM skip_set
+WHERE x IN (1, 2, 3)
+
+┌─count()─┐
+│       3 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.007 sec. Processed 16.38 thousand rows, 131.07 KB (2.42 million rows/s., 19.39 MB/s.)
+
+SELECT count()
+FROM skip_set
+WHERE x IN
+(
+    SELECT toUInt64(1)
+)
+
+┌─count()─┐
+│       1 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.006 sec. Processed 100.00 thousand rows, 800.00 KB (16.94 million rows/s., 135.53 MB/s.)
+
+SELECT count()
+FROM skip_set
+WHERE x IN
+(
+    SELECT number
+    FROM numbers(3)
+)
+
+┌─count()─┐
+│       3 │
+└─────────┘
+
+1 rows in set. Elapsed: 0.005 sec. Processed 100.00 thousand rows, 800.02 KB (18.86 million rows/s., 150.85 MB/s.)
+```

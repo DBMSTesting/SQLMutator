@@ -1,0 +1,96 @@
+ID: 40730
+Title: add unique index may cause duplicate row value.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+There is no simple way to reproduce.
+We need to modify the code.
+Here is the test case:
+``` sql
+func TestCreateUniqueRowDuplicExist(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int default 0, b int default 0)")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	d := dom.DDL()
+	originalCallback := d.GetHook()
+	defer d.SetHook(originalCallback)
+	callback := &ddl.TestDDLCallback{}
+	onJobUpdatedExportedFunc := func(job *model.Job) {
+		if t.Failed() {
+			return
+		}
+		var err error
+		switch job.SchemaState {
+		case model.StateDeleteOnly:
+			_, err = tk1.Exec("insert into t values (5, 5)")
+			assert.NoError(t, err)
+		case model.StateWriteOnly:
+			_, err = tk1.Exec("insert into t values (5, 7)")
+			assert.NoError(t, err)
+			_, err = tk1.Exec("delete from t where b = 7")
+			assert.NoError(t, err)
+		case model.StateWriteReorganization:
+		}
+	}
+	callback.OnJobUpdatedExported.Store(&onJobUpdatedExportedFunc)
+	d.SetHook(callback)
+	tk.MustExec("alter table t add unique index idx(a)")
+	tk.MustExec("admin check table t")
+} 
+```
+
+besides:
+in onCreateIndex()
+
+``` sql
+	case model.StateWriteReorganization:
+		// reorganization -> public
+		tbl, err := getTable(d.store, schemaID, tblInfo)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+
+		var done bool
+		if job.MultiSchemaInfo != nil {
+			done, ver, err = doReorgWorkForCreateIndexMultiSchema(w, d, t, job, tbl, indexInfo)
+		} else {
+			done, ver, err = doReorgWorkForCreateIndex(w, d, t, job, tbl, indexInfo)
+		}
+		if !done {
+			return ver, err
+		}
+
+		sess, _ := w.sessPool.get()
+		se := newSession(sess)
+		se.execute(w.ctx, "insert into test.t values(5, 9)", "")
+
+		// Set column index flag.
+		AddIndexColumnFlag(tblInfo, indexInfo)
+```
+
+Modify the code to execute this query.
+
+
+
+### 2. What did you expect to see? (Required)
+test pass
+
+### 3. What did you see instead (Required)
+```
+[admin:8223]data inconsistency in table: t, index: idx, handle: 1, index-values:"handle: 3, values: [KindInt64 5]" != record-values:"handle: 1, values: [KindInt64 5]"
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

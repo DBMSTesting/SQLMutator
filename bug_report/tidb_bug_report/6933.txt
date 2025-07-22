@@ -1,0 +1,37 @@
+ID: 6933
+Title: incorrect plan produced by cascades planner when range is empty
+Description:
+Let's say we have the following table:
+```sql
+drop table if exists t;
+create table t(a decimal primary key);
+```
+
+The following query leads to an empty range, which indicates no data will be read from the storage:
+```sql
+TiDB(localhost:4000) > desc select * from t where a>5 and a<3;
++-------------------+------+------------------------------------+-------+
+| id                | task | operator info                      | count |
++-------------------+------+------------------------------------+-------+
+| IndexReader_9     | root | index:IndexScan_8                  | 0.00  |
+| └─IndexScan_8     | cop  | table:t, index:a, keep order:false | 0.00  |
++-------------------+------+------------------------------------+-------+
+2 rows in set (0.00 sec)
+```
+
+We can replace the whole operator DAG with a `TableDual` to further reduce the execution overhead.
+
+For further optimization, we can add a rule which operates on `TableDual` to remove the unnecessary execution overhead. For example, we can replace an **inner join** with a `TableDual` when one of its child is a `TableDual`, that is to say, the following DAG can be optimized to a single `TableDual` operator as well:
+```sql
+TiDB(localhost:4000) > desc select * from t join t1 where t.a>5 and t.a<3;
++------------------------+------+-----------------------------------------------+--------------+
+| id                     | task | operator info                                 | count        |
++------------------------+------+-----------------------------------------------+--------------+
+| HashRightJoin_9        | root | inner join, inner:IndexReader_14              | 100000000.00 |
+| ├─IndexReader_14       | root | index:IndexScan_13                            | 0.00         |
+| │ └─IndexScan_13       | cop  | table:t, index:a, keep order:false            | 0.00         |
+| └─TableReader_16       | root | data:TableScan_15                             | 10000.00     |
+|   └─TableScan_15       | cop  | table:t1, range:[-inf,+inf], keep order:false | 10000.00     |
++------------------------+------+-----------------------------------------------+--------------+
+5 rows in set (0.00 sec)
+```

@@ -1,0 +1,99 @@
+ID: 31138
+Title: REVOKE SELECT on another table alters order of applying GRANTS
+Description:
+**Describe what's wrong**
+
+It's possible to miss some grants on roles after ClickHouse restart
+
+**Does it reproduce on recent release?**
+
+Yes. 
+ClickHouse 21.8, 21.12
+
+
+
+**How to reproduce**
+```
+
+DROP ROLE some_role ;
+
+CREATE TABLE table1
+(
+    c1 Int8,
+    c2 Int8,
+    c3 Int8,
+    c4 Int8,
+    c5 Int8
+) ENGINE = MergeTree ORDER BY tuple();
+
+CREATE TABLE table2
+(
+    c1 Int8
+) ENGINE = MergeTree ORDER BY tuple();
+
+CREATE ROLE some_role ;
+GRANT  SHOW, SELECT ON default.* TO some_role;
+
+REVOKE SELECT (c1, c2, c3, c4, c5) ON table1 FROM some_role;
+```
+
+Wait couple of minutes:
+
+```
+# cat /var/lib/clickhouse/access/roles.list
+       some_role1c4d235d-1b68-2cb1-3454-4827cc0ed7b
+
+cat /var/lib/clickhouse/access/1c4d235d-1b68-2cb1-3454-4827cc0ed7b1.sql
+ATTACH ROLE some_role;
+ATTACH GRANT SHOW, SELECT ON default.* TO some_role;
+ATTACH REVOKE SELECT(c1, c2, c3, c4, c5) ON default.table1 FROM some_role;
+```
+
+```
+REVOKE SELECT (c1) ON table2 FROM some_role;
+
+# cat /var/lib/clickhouse/access/1c4d235d-1b68-2cb1-3454-4827cc0ed7b1.sql
+ATTACH ROLE some_role;
+ATTACH REVOKE SELECT(c1, c2) ON default.table1 FROM some_role;
+ATTACH GRANT SHOW, SELECT ON default.* TO some_role;
+ATTACH REVOKE SELECT(c3, c4, c5) ON default.table1 FROM some_role;
+ATTACH REVOKE SELECT(c1) ON default.table2 FROM some_role;
+
+SELECT *
+FROM system.grants
+WHERE role_name = 'some_role'
+
+┌─user_name─┬─role_name─┬─access_type─┬─database─┬─table──┬─column─┬─is_partial_revoke─┬─grant_option─┐
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c1     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c2     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SHOW        │ default  │ ᴺᵁᴸᴸ   │ ᴺᵁᴸᴸ   │                 0 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ ᴺᵁᴸᴸ   │ ᴺᵁᴸᴸ   │                 0 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c3     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c4     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c5     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table2 │ c1     │                 1 │            0 │
+└───────────┴───────────┴─────────────┴──────────┴────────┴────────┴───────────────────┴──────────────┘
+
+sudo service clickhouse-server restart
+
+SELECT *
+FROM system.grants
+WHERE role_name = 'some_role'
+
+┌─user_name─┬─role_name─┬─access_type─┬─database─┬─table──┬─column─┬─is_partial_revoke─┬─grant_option─┐
+│ ᴺᵁᴸᴸ      │ some_role │ SHOW        │ default  │ ᴺᵁᴸᴸ   │ ᴺᵁᴸᴸ   │                 0 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ ᴺᵁᴸᴸ   │ ᴺᵁᴸᴸ   │                 0 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c3     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c4     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table1 │ c5     │                 1 │            0 │
+│ ᴺᵁᴸᴸ      │ some_role │ SELECT      │ default  │ table2 │ c1     │                 1 │            0 │
+└───────────┴───────────┴─────────────┴──────────┴────────┴────────┴───────────────────┴──────────────┘
+```
+
+**Expected behavior**
+
+ClickHouse will apply grants in correct order.
+
+**Additional context**
+
+> Add any other context about the problem here.

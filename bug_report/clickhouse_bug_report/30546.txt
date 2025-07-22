@@ -1,0 +1,82 @@
+ID: 30546
+Title: Server crash when selecting from system.query_log if it is using Buffer table as a backend
+Description:
+**Describe what's wrong**
+
+Server crashes when selecting from system query.log
+
+**Does it reproduce on recent release?**
+Yes
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+I used latest 21.10 version (518c2c1bfed1660ca610719e57dca5f49fba9011), probably it reproduces on master too.
+* Non-default settings, if any
+I used following config for query_log:
+```xml
+<query_log>
+    <database>system</database>
+    <table>query_log</table>
+    <engine>ENGINE = Buffer('', '', 1, 1, 1, 1000000000000, 1000000000000, 1000000000000, 1000000000000)</engine>
+    <flush_interval_milliseconds>100</flush_interval_milliseconds>
+</query_log>
+```
+* Queries to run that lead to unexpected result
+```bash
+#! /bin/bash
+
+# Drop system.query_log to make sure that it is up to date with config.
+curl 'localhost:8123' -d 'drop table system.query_log'
+
+# It usually takes ~3000 iterations before crushing on my server.
+for i in {1..10000}
+do
+    curl 'localhost:8123' -d 'select * from system.query_log' 2> /dev/null > /dev/null
+    status=$?
+    echo "Iteration: $i; Status: $status"
+    if [[ "$status" != "0" ]]
+    then
+        break
+    fi
+done
+```
+
+**Error message and/or stacktrace**
+
+```
+2021.10.22 10:04:09.907246 [ 3794 ] {66884da9-bca0-4448-b326-2f7edec9a2ba} <Debug> executeQuery: (from [::1]:41068) select * from system.query_log
+2021.10.22 10:04:09.908571 [ 3794 ] {66884da9-bca0-4448-b326-2f7edec9a2ba} <Trace> ContextAccess (default): Access granted: SELECT(type, event_date, event_time, event_time_microseconds, query_start_time, query_start_time_microseconds, query_duration_ms, read_rows, read_bytes, written_rows, written_bytes, result_rows, result_bytes, memory_usage, current_database, query, formatted_query, normalized_query_hash, query_kind, databases, tables, columns, projections, views, exception_code, exception, stack_trace, is_initial_query, user, query_id, address, port, initial_user, initial_query_id, initial_address, initial_port, initial_query_start_time, initial_query_start_time_microseconds, interface, os_user, client_hostname, client_name, client_revision, client_version_major, client_version_minor, client_version_patch, http_method, http_user_agent, http_referer, forwarded_for, quota_key, revision, log_comment, thread_ids, ProfileEvents, Settings, used_aggregate_functions, used_aggregate_function_combinators, used_database_engines, used_data_type_families, used_dictionaries, used_formats, used_functions, used_storages, used_table_functions) ON system.query_log
+2021.10.22 10:04:09.908971 [ 3794 ] {66884da9-bca0-4448-b326-2f7edec9a2ba} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2021.10.22 10:04:09.910518 [ 3794 ] {66884da9-bca0-4448-b326-2f7edec9a2ba} <Trace> ParallelFormattingOutputFormat: Parallel formatting is being used
+2021.10.22 10:04:09.911209 [ 3955 ] {} <Trace> SystemLog (system.query_log): Flushing system log, 9 entries to flush up to offset 5403
+2021.10.22 10:04:09.913899 [ 3791 ] {} <Trace> BaseDaemon: Received signal 11
+2021.10.22 10:04:09.913985 [ 3955 ] {} <Trace> SystemLog (system.query_log): Flushed system log up to offset 5403
+2021.10.22 10:04:09.914224 [ 9608 ] {} <Fatal> BaseDaemon: ########################################
+2021.10.22 10:04:09.914303 [ 9608 ] {} <Fatal> BaseDaemon: (version 21.10.3.1, build id: 645A68B9CBFECFFC) (from thread 3963) (query_id: 66884da9-bca0-4448-b326-2f7edec9a2ba) Received signal Segmentation fault (11)
+2021.10.22 10:04:09.914344 [ 9608 ] {} <Fatal> BaseDaemon: Address: 0x10 Access: read. Address not mapped to object.
+2021.10.22 10:04:09.914369 [ 9608 ] {} <Fatal> BaseDaemon: Stack trace: 0xfb6d7d9 0x10af3a71 0x10af34c2 0x10b317a7 0x93c186d 0x93c2ce8 0x93bfdf0 0x93c20b3 0x7f6d887db6db 0x7f6d880f871f
+2021.10.22 10:04:09.923138 [ 9608 ] {} <Fatal> BaseDaemon: 3.1. inlined from /home/dakovalkov/ClickHouse/build/../contrib/libcxx/include/vector:1559: std::__1::vector<COW<DB::IColumn>::chameleon_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::chameleon_ptr<DB::IColumn> > >::operator[](unsigned long) const
+2021.10.22 10:04:09.923180 [ 9608 ] {} <Fatal> BaseDaemon: 3.2. inlined from ../src/Columns/ColumnTuple.h:99: DB::ColumnTuple::getColumn(unsigned long) const
+2021.10.22 10:04:09.923237 [ 9608 ] {} <Fatal> BaseDaemon: 3.3. inlined from ../src/DataTypes/Serializations/SerializationMap.cpp:106: void DB::SerializationMap::serializeTextImpl<DB::SerializationMap::serializeText(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const::$_0&, DB::SerializationMap::serializeText(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const::$_0&>(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::SerializationMap::serializeText(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const::$_0&, DB::SerializationMap::serializeText(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const::$_0&) const
+2021.10.22 10:04:09.923272 [ 9608 ] {} <Fatal> BaseDaemon: 3. ../src/DataTypes/Serializations/SerializationMap.cpp:175: DB::SerializationMap::serializeText(DB::IColumn const&, unsigned long, DB::WriteBuffer&, DB::FormatSettings const&) const @ 0xfb6d7d9 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.933703 [ 9608 ] {} <Fatal> BaseDaemon: 4. /home/dakovalkov/ClickHouse/build/../src/Processors/Formats/IRowOutputFormat.cpp:90: DB::IRowOutputFormat::write(std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > const&, unsigned long) @ 0x10af3a71 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.942135 [ 9608 ] {} <Fatal> BaseDaemon: 5.1. inlined from /home/dakovalkov/ClickHouse/build/../contrib/libcxx/include/functional:2236: std::__1::__function::__policy_func<void (std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > const&, unsigned long)>::operator bool() const
+2021.10.22 10:04:09.942203 [ 9608 ] {} <Fatal> BaseDaemon: 5.2. inlined from ../contrib/libcxx/include/functional:2412: std::__1::function<void (std::__1::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > > const&, unsigned long)>::operator bool() const
+2021.10.22 10:04:09.942219 [ 9608 ] {} <Fatal> BaseDaemon: 5. ../src/Processors/Formats/IRowOutputFormat.cpp:37: DB::IRowOutputFormat::consume(DB::Chunk) @ 0x10af34c2 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.953967 [ 9608 ] {} <Fatal> BaseDaemon: 6.1. inlined from /home/dakovalkov/ClickHouse/build/../contrib/libcxx/include/memory:3211: ~shared_ptr
+2021.10.22 10:04:09.954002 [ 9608 ] {} <Fatal> BaseDaemon: 6.2. inlined from ../src/Processors/Chunk.h:32: ~Chunk
+2021.10.22 10:04:09.954032 [ 9608 ] {} <Fatal> BaseDaemon: 6. ../src/Processors/Formats/Impl/ParallelFormattingOutputFormat.cpp:179: DB::ParallelFormattingOutputFormat::formatterThreadFunction(unsigned long, std::__1::shared_ptr<DB::ThreadGroupStatus> const&) @ 0x10b317a7 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.963998 [ 9608 ] {} <Fatal> BaseDaemon: 7.1. inlined from /home/dakovalkov/ClickHouse/build/../contrib/libcxx/include/functional:2210: std::__1::__function::__policy_func<void ()>::operator=(std::nullptr_t)
+2021.10.22 10:04:09.964048 [ 9608 ] {} <Fatal> BaseDaemon: 7.2. inlined from ../contrib/libcxx/include/functional:2533: std::__1::function<void ()>::operator=(std::nullptr_t)
+2021.10.22 10:04:09.964080 [ 9608 ] {} <Fatal> BaseDaemon: 7. ../src/Common/ThreadPool.cpp:273: ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x93c186d in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.974907 [ 9608 ] {} <Fatal> BaseDaemon: 8. /home/dakovalkov/ClickHouse/build/../src/Common/ThreadPool.cpp:0: ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()&&...)::'lambda'()::operator()() @ 0x93c2ce8 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.984050 [ 9608 ] {} <Fatal> BaseDaemon: 9.1. inlined from /home/dakovalkov/ClickHouse/build/../contrib/libcxx/include/functional:2210: std::__1::__function::__policy_func<void ()>::operator=(std::nullptr_t)
+2021.10.22 10:04:09.984085 [ 9608 ] {} <Fatal> BaseDaemon: 9.2. inlined from ../contrib/libcxx/include/functional:2533: std::__1::function<void ()>::operator=(std::nullptr_t)
+2021.10.22 10:04:09.984109 [ 9608 ] {} <Fatal> BaseDaemon: 9. ../src/Common/ThreadPool.cpp:273: ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x93bfdf0 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.994285 [ 9608 ] {} <Fatal> BaseDaemon: 10.1. inlined from /home/dakovalkov/ClickHouse/build/../contrib/libcxx/include/memory:1655: std::__1::unique_ptr<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>, std::__1::default_delete<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()> > >::reset(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>*)
+2021.10.22 10:04:09.994323 [ 9608 ] {} <Fatal> BaseDaemon: 10.2. inlined from ../contrib/libcxx/include/memory:1612: ~unique_ptr
+2021.10.22 10:04:09.994344 [ 9608 ] {} <Fatal> BaseDaemon: 10. ../contrib/libcxx/include/thread:293: void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()> >(void*) @ 0x93c20b3 in /home/dakovalkov/ClickHouse/build/programs/clickhouse
+2021.10.22 10:04:09.994396 [ 9608 ] {} <Fatal> BaseDaemon: 11. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+2021.10.22 10:04:09.994501 [ 9608 ] {} <Fatal> BaseDaemon: 12. /build/glibc-S9d2JN/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97: clone @ 0x12171f in /usr/lib/debug/lib/x86_64-linux-gnu/libc-2.27.so
+```

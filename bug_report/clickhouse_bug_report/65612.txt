@@ -1,0 +1,50 @@
+ID: 65612
+Title: maxIntersections() / maxIntersectionsPosition() crash inside WINDOW function
+Description:
+The `maxIntersections()` and `maxIntersectionsPosition()` aggregate functions always crash inside window functions.
+
+
+https://fiddle.clickhouse.com/4373e7f7-83ac-4dcf-9a69-a6b5d9e7be05
+
+The issue is present in head and all releases tested from this year, likely goes back earlier.
+
+Repro:
+
+```
+CREATE TABLE my_events (start UInt32, end UInt32) Engine = MergeTree ORDER BY tuple();
+INSERT INTO my_events VALUES (1, 3), (1, 6), (2, 5), (3, 7);
+SELECT start, end, maxIntersections(start, end) OVER () FROM my_events;
+```
+
+Crash log:
+
+```
+[f33760fc5bca] 2024.06.24 14:49:35.573843 [ 717 ] <Fatal> BaseDaemon: ########################################
+[f33760fc5bca] 2024.06.24 14:49:35.573915 [ 717 ] <Fatal> BaseDaemon: (version 24.7.1.165 (official build), build id: 0F22C8A494186D3BE68A07EC4D21069E665808E9, git hash: fb2f0e78f74c9fe56049d188ab045250007d4b2c) (from thread 708) (query_id: 7dc911fd-46e1-46da-8add-5282f9f452eb) (query: -- CRASH
+-- SELECT start, end, maxIntersectionsPosition(start, end) OVER (ORDER BY start,end) FROM my_events;
+
+-- CRASH
+-- SELECT start, end, maxIntersectionsPosition(start, end) OVER () FROM my_events;
+
+-- CRASH
+SELECT start, end, maxIntersections(start, end) OVER () FROM my_events;) Received signal Segmentation fault (11)
+[f33760fc5bca] 2024.06.24 14:49:35.573953 [ 717 ] <Fatal> BaseDaemon: Address: 0x48. Access: write. Address not mapped to object.
+[f33760fc5bca] 2024.06.24 14:49:35.573980 [ 717 ] <Fatal> BaseDaemon: Stack trace: 0x000000000d27282c 0x0000780b83cae420 0x000000000d6474bd 0x000000000e6660e1 0x0000000012de7f45 0x0000000012b180c7 0x0000000012b0c9b0 0x0000000012b0be42 0x0000000012b1bbea 0x000000000d082523 0x0000780b83ca2609 0x0000780b83bbd353
+[f33760fc5bca] 2024.06.24 14:49:35.574048 [ 717 ] <Fatal> BaseDaemon: 0. signalHandler(int, siginfo_t*, void*) @ 0x000000000d27282c
+[f33760fc5bca] 2024.06.24 14:49:35.574082 [ 717 ] <Fatal> BaseDaemon: 1. ? @ 0x0000780b83cae420
+[f33760fc5bca] 2024.06.24 14:49:35.574129 [ 717 ] <Fatal> BaseDaemon: 2. void DB::PODArrayBase<16ul, 32ul, DB::MixedArenaAllocator<4096ul, Allocator<false, false>, DB::AlignedArenaAllocator<8ul>, 8ul>, 0ul, 0ul>::realloc<DB::Arena*&>(unsigned long, DB::Arena*&) @ 0x000000000d6474bd
+[f33760fc5bca] 2024.06.24 14:49:35.574177 [ 717 ] <Fatal> BaseDaemon: 3. DB::IAggregateFunctionHelper<DB::(anonymous namespace)::AggregateFunctionIntersectionsMax<unsigned int>>::addBatchSinglePlace(unsigned long, unsigned long, char*, DB::IColumn const**, DB::Arena*, long) const @ 0x000000000e6660e1
+[f33760fc5bca] 2024.06.24 14:49:35.574223 [ 717 ] <Fatal> BaseDaemon: 4. DB::WindowTransform::work() @ 0x0000000012de7f45
+[f33760fc5bca] 2024.06.24 14:49:35.574259 [ 717 ] <Fatal> BaseDaemon: 5. DB::ExecutionThreadContext::executeTask() @ 0x0000000012b180c7
+[f33760fc5bca] 2024.06.24 14:49:35.574300 [ 717 ] <Fatal> BaseDaemon: 6. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012b0c9b0
+[f33760fc5bca] 2024.06.24 14:49:35.574340 [ 717 ] <Fatal> BaseDaemon: 7. DB::PipelineExecutor::execute(unsigned long, bool) @ 0x0000000012b0be42
+[f33760fc5bca] 2024.06.24 14:49:35.574399 [ 717 ] <Fatal> BaseDaemon: 8. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlobalPoolImpl<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x0000000012b1bbea
+[f33760fc5bca] 2024.06.24 14:49:35.574444 [ 717 ] <Fatal> BaseDaemon: 9. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000d082523
+[f33760fc5bca] 2024.06.24 14:49:35.574481 [ 717 ] <Fatal> BaseDaemon: 10. ? @ 0x0000780b83ca2609
+[f33760fc5bca] 2024.06.24 14:49:35.574514 [ 717 ] <Fatal> BaseDaemon: 11. ? @ 0x0000780b83bbd353
+[f33760fc5bca] 2024.06.24 14:49:35.703251 [ 717 ] <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 09D6D6D08232AC04D85BB56EF295B4C0)
+[f33760fc5bca] 2024.06.24 14:49:35.703504 [ 717 ] <Fatal> BaseDaemon: Report this error to https://github.com/ClickHouse/ClickHouse/issues
+[f33760fc5bca] 2024.06.24 14:49:35.703623 [ 717 ] <Fatal> BaseDaemon: Changed settings: output_format_pretty_color = 0, output_format_pretty_grid_charset = 'ASCII'
+```
+
+To venture a guess, though I don't have a build around to test this, the problem could be with `allocatesMemoryInArena()` returning `false` at https://github.com/ClickHouse/ClickHouse/blob/fb2f0e78f74c9fe56049d188ab045250007d4b2c/src/AggregateFunctions/AggregateFunctionMaxIntersections.cpp#L94

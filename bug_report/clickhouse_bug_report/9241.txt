@@ -1,0 +1,74 @@
+ID: 9241
+Title: Aggregator reserves too much place in tmp volume from each thread with max_bytes_before_external_group_by
+Description:
+**Describe the bug or unexpected behaviour**
+- The idea of external group by is to write intermediate data to tmp storage when aggregation requires more than max_bytes(rows)_before_external_group_by.
+- When aggregator starts to use tmp storage it reserves volume to dump its current memory state.
+https://github.com/ClickHouse/ClickHouse/blob/528d231a6b1c189f2240136104384602cd95de9b/dbms/src/Interpreters/Aggregator.cpp#L686-L687
+- Current size estimate that is used to reserve is taken from memory tracker as current_memory_usage for query.
+https://github.com/ClickHouse/ClickHouse/blob/528d231a6b1c189f2240136104384602cd95de9b/dbms/src/Interpreters/Aggregator.cpp#L657-L659
+- Aggregations by default use large number of threads and each thread reserves 
+
+**How to reproduce**
+* ClickHouse 20.1.1
+* 32 cores
+* tmp has 140G free space
+```
+df -h ~/clickhouse-server/tmp/
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda1       226G   85G  142G  38% /
+```
+* max_bytes_before_external_group_by is set to 10G
+Free space is less than max_bytes_before_external_group_by x (cores - 1) = 10G * 31 < 140G
+
+this query works: 5 threads x 10**10 < 140G
+```sql
+SET max_bytes_before_external_group_by = 10000000000;
+SET max_threads = 5;
+	select
+		uniq(l2.l_suppkey) as cntd,
+		l2.l_orderkey as l_orderkey
+	from
+		lineitem as l2
+	group by l2.l_orderkey
+```
+This query works
+this query works: 1 thread(as a result of limit) x 10**10 < 140G
+```sql
+SET max_bytes_before_external_group_by = 10000000000;
+	select
+		uniq(l2.l_suppkey) as cntd,
+		l2.l_orderkey as l_orderkey
+	from
+		(
+		 	select * from
+			lineitem as l2
+		limit 100000000000) as l2
+	group by l2.l_orderkey
+```
+This one fails
+```sql
+SET max_bytes_before_external_group_by = 10000000000;
+	select
+		uniq(l2.l_suppkey) as cntd,
+		l2.l_orderkey as l_orderkey
+	from
+		lineitem as l2
+	group by l2.l_orderkey
+```
+
+**Additional context**
+Log shows how we reserve place:
+```
+[hostname] 2020.02.20 11:04:21.315093 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390428 ] <Debug> Aggregator: Writing part of aggregation data into temporary file /home/qoega/clickhouse-server/tmp/tmp389187cqdaaa.
+[hostname] 2020.02.20 11:04:21.317913 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 389759 ] <Debug> DiskLocal: Reserving 9.32 GiB on disk `_tmp_default`, having unreserved 130.92 GiB.
+[hostname] 2020.02.20 11:04:21.318024 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 389759 ] <Debug> Aggregator: Writing part of aggregation data into temporary file /home/qoega/clickhouse-server/tmp/tmp389187dqdaaa.
+[hostname] 2020.02.20 11:04:21.318037 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390423 ] <Debug> DiskLocal: Reserving 9.32 GiB on disk `_tmp_default`, having unreserved 121.60 GiB.
+[hostname] 2020.02.20 11:04:21.318136 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390423 ] <Debug> Aggregator: Writing part of aggregation data into temporary file /home/qoega/clickhouse-server/tmp/tmp389187eqdaaa.
+[hostname] 2020.02.20 11:04:21.447534 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390401 ] <Debug> DiskLocal: Reserving 9.48 GiB on disk `_tmp_default`, having unreserved 112.27 GiB.
+[hostname] 2020.02.20 11:04:21.447701 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390401 ] <Debug> Aggregator: Writing part of aggregation data into temporary file /home/qoega/clickhouse-server/tmp/tmp389187fqdaaa.
+[hostname] 2020.02.20 11:04:21.465509 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390396 ] <Debug> DiskLocal: Reserving 9.49 GiB on disk `_tmp_default`, having unreserved 102.78 GiB.
+[hostname] 2020.02.20 11:04:21.465657 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390396 ] <Debug> Aggregator: Writing part of aggregation data into temporary file /home/qoega/clickhouse-server/tmp/tmp389187gqdaaa.
+[hostname] 2020.02.20 11:04:28.555271 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390428 ] <Trace> Aggregator: Max size of temporary block: 64018 rows, 0.733 MiB.
+[hostname] 2020.02.20 11:04:28.571139 {bdc05244-7655-4ec9-86dc-7b207deb08f5} [ 390396 ] <Trace> Aggregator: Max size of temporary block: 65981 rows, 0.755 MiB.
+```

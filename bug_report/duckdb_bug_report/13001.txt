@@ -1,0 +1,26 @@
+ID: 13001
+Title: Improve error messages in the presence of subqueries
+Description:
+Fixes #12988
+
+This PR improves error messages in the presence of subqueries, in particular missing columns. When there are subqueries, we run multiple bind phases, and in case of a failure each of these bind phases produces an error message. Choosing which error message is appropriate is non-trivial. We used to always take the "outer-most" error message, but that can produce confusing error messages.
+
+In this PR we rework the error messages so that:
+* Unsupported operators (e.g. window functions in a lateral join) first bind the child expressions, and prefer to throw errors found there
+* Missing column errors are combined, providing the best candidates found across the possible table names instead of only at the outer layer
+
+For example:
+
+```sql
+CALL dbgen(sf=0);
+
+
+SELECT * FROM orders, (SELECT SUM(l_returnfla) FROM lineitem) t2;
+-- v1.0:  LATERAL join cannot contain aggregates!
+-- New: Referenced column "l_returnfla" not found in FROM clause!
+
+SELECT (SELECT l_returnfla FROM lineitem) FROM orders;
+-- Binder Error: Referenced column "l_returnfla" not found in FROM clause!
+-- v1.0: Candidate bindings: "orders.o_clerk"
+-- New: Candidate bindings: "lineitem.l_returnflag", "lineitem.l_receiptdate", "lineitem.l_orderkey", "lineitem.l_linestatus", "orders.o_orderdate"
+```

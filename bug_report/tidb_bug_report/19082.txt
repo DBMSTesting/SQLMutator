@@ -1,0 +1,75 @@
+ID: 19082
+Title: Found inconsistent data index when transaction includes union-all queries
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+drop table if exists t;
+-- init
+create table t (
+    c_int       int,
+    c_double    double,
+    c_decimal   decimal(12, 6),
+    c_string    varchar(40) collate utf8mb4_bin,
+    c_datetime  datetime,
+    c_timestamp timestamp,
+    c_enum      enum ('a', 'b', 'c', 'd', 'e'),
+    c_set       set ('1', '2', '3', '4', '5'),
+    c_json      json,
+    primary key (c_int, c_string),
+    unique key (c_string),
+    key (c_enum),
+    key (c_set),
+    key (c_timestamp),
+    key (c_datetime),
+    key (c_decimal)
+);
+insert into t values
+(1,0.475933,15.260,'gold witch','2019-12-26 09:00:00','2019-12-25 13:03:12','e','1,4','{"int":17,"str":"ivory crest","datetime":"2020-01-06 10:00:00","enum":"a","set":"1,2,4"}'),
+(2,0.070684,74.820,'gold sloth','2019-12-26 03:00:00','2019-12-26 18:02:54','e','2','{"int":16,"str":"cream spider","datetime":"2020-01-04 02:00:00","enum":"a","set":"5"}'),
+(3,0.490952,85.290,'blue roach','2020-01-03 14:00:00','2019-12-25 03:47:00','d','1,4','{"int":18,"str":"light seer","datetime":"2020-01-04 12:00:00","enum":"c","set":"2"}'),
+(4,0.427215,55.340,'cerulean ant','2020-01-03 18:00:00','2019-12-29 17:11:56','a','1,2,5','{"int":11,"str":"orange cat","datetime":"2019-12-25 21:00:00","enum":"d","set":"4,5"}'),
+(5,0.327571,80.510,'black seer','2020-01-07 06:00:00','2020-01-06 09:41:17','e','1,3','{"int":8,"str":"light bard","datetime":"2020-01-04 04:00:00","enum":"c","set":"4,5"}'),
+(6,0.263039,1.790,'orange crest','2020-01-04 12:00:00','2019-12-27 05:27:06','e','1,4','{"int":3,"str":"gray warrior","datetime":"2020-01-03 20:00:00","enum":"b","set":"2,5"}'),
+(7,0.444086,47.430,'cyan bard','2020-01-06 06:00:00','2020-01-04 04:39:49','d','5','{"int":16,"str":"light fly","datetime":"2020-01-03 06:00:00","enum":"e","set":"1,4"}'),
+(8,0.733091,94.560,'yellow speaker','2020-01-04 04:00:00','2020-01-02 19:24:03','d','2,3,4,5','{"int":4,"str":"green vulture","datetime":"2019-12-30 13:00:00","enum":"e","set":"1,2,3"}'),
+(9,0.899852,80.660,'pink warrior','2020-01-04 16:00:00','2020-01-02 15:02:03','d','1,3,5','{"int":14,"str":"dark kangaroo","datetime":"2019-12-27 13:00:00","enum":"e","set":"1,4,5"}'),
+(10,0.277686,24.880,'black cat','2020-01-06 14:00:00','2020-01-06 03:57:43','d','1,3','{"int":6,"str":"gray carpet","datetime":"2020-01-06 10:00:00","enum":"c","set":"2"}'),
+(11,0.365868,97.450,'azure bard','2019-12-29 03:00:00','2019-12-31 09:48:56','a','4,5','{"int":3,"str":"white singer","datetime":"2019-12-25 19:00:00","enum":"c","set":"1,2,4,5"}'),
+(12,0.136982,9.990,'green seer','2019-12-29 07:00:00','2019-12-25 03:56:42','c','1,3,4','{"int":6,"str":"navy witch","datetime":"2019-12-27 05:00:00","enum":"d","set":"4"}'),
+(13,0.716163,85.410,'gray scourge','2020-01-03 06:00:00','2019-12-29 17:30:24','e','3,5','{"int":18,"str":"silver sloth","datetime":"2019-12-29 21:00:00","enum":"b","set":"1,2,3,4"}'),
+(14,0.319057,73.440,'dark crown','2020-01-06 04:00:00','2020-01-05 02:16:03','b','3,4,5','{"int":2,"str":"ivory fly","datetime":"2019-12-26 05:00:00","enum":"e","set":"1,2,3,4"}'),
+(15,0.459080,77.550,'silver vulture','2019-12-29 09:00:00','2019-12-30 16:06:20','d','3','{"int":20,"str":"dark sloth","datetime":"2019-12-31 07:00:00","enum":"a","set":"2,3,4"}'),
+(16,0.846275,1.020,'red kangaroo','2019-12-30 03:00:00','2020-01-02 15:00:37','a','3,5','{"int":6,"str":"white vulture","datetime":"2020-01-05 20:00:00","enum":"b","set":"1,5"}');
+-- txn
+begin;
+(select c_int, c_double, c_decimal, c_string, c_datetime, c_timestamp, c_enum, c_set from t where c_int between 4 and 8 for update) union all (select c_int, c_double, c_decimal, c_string, c_datetime, c_timestamp, c_enum, c_set from t where c_datetime > '2019-12-25 09:00:00' for update);
+update t set c_decimal = c_decimal + 5 where c_decimal <= 20;
+commit;
+mysql> select c_int, c_decimal from t where c_decimal > 2 order by c_decimal limit 3;
++-------+-----------+
+| c_int | c_decimal |
++-------+-----------+
+|    16 |  6.020000 |
+|     6 |  1.790000 |
+|    12 | 14.990000 |
++-------+-----------+
+3 rows in set (0.06 sec)
+
+mysql> admin check table t;
+ERROR 1105 (HY000): col c_decimal, handle 6, index:types.Datum{k:0x8, collation:"", decimal:0x6, length:0xc, i:0, b:[]uint8(nil), x:(*types.MyDecimal)(0xc003af4028)} != record:types.Datum{k:0x8, collation:"", decimal:0x6, length:0xc, i:0, b:[]uint8(nil), x:(*types.MyDecimal)(0xc003aca5c8)}
+```
+### 2. What did you expect to see? (Required)
+no error
+
+### 3. What did you see instead (Required)
+admin check table failed.
+
+### 4. What is your TiDB version? (Required)
+<!-- Paste the output of SELECT tidb_version() -->
+master, 4.0.X
+

@@ -1,0 +1,100 @@
+ID: 39469
+Title: Projection select query exception. Not found column toStartOfHour(datetime) in block.
+Description:
+
+**Describe what's wrong**
+
+I am testing projection. An exception was found during query: ```DB::Exception: Not found column toStartOfHour(datetime) in block.```
+
+**Does it reproduce on recent release?**
+
+v22.3.4.20-lts
+
+
+**How to reproduce**
+
+* My ClickHouse server version is 22.3.4.20 and 22.7.1
+
+```
+CREATE TABLE video_log
+(
+ `datetime` DateTime, -- 20,000 records per second
+ `user_id` UInt64, -- Cardinality == 100,000,000
+ `device_id` UInt64, -- Cardinality == 200,000,000
+ `domain` LowCardinality(String), -- Cardinality == 100
+ `bytes` UInt64, -- Ranging from 128 to 1152
+ `duration` UInt64 -- Ranging from 100 to 400
+)
+ENGINE = MergeTree
+PARTITION BY toDate(datetime) -- Daily partitioning
+ORDER BY (user_id, device_id); -- Can only favor one column here
+
+CREATE TABLE rng
+(
+ `user_id_raw` UInt64,
+ `device_id_raw` UInt64,
+ `domain_raw` UInt64,
+ `bytes_raw` UInt64,
+ `duration_raw` UInt64
+)
+ENGINE = GenerateRandom(1024);
+
+INSERT INTO video_log SELECT
+ toUnixTimestamp(toDateTime(today()))
+ + (rowNumberInAllBlocks() / 20000),
+ user_id_raw % 100000000 AS user_id,
+ device_id_raw % 200000000 AS device_id,
+ domain_raw % 100,
+ (bytes_raw % 1024) + 128,
+ (duration_raw % 300) + 100
+FROM rng
+LIMIT 17280000;
+
+ALTER TABLE video_log ADD PROJECTION p_norm
+ (
+ SELECT
+ datetime,
+ device_id,
+ bytes,
+ duration
+ ORDER BY device_id
+ );
+
+ALTER TABLE video_log MATERIALIZE PROJECTION p_norm;
+
+ALTER TABLE video_log ADD PROJECTION p_agg
+ (
+ SELECT
+ toStartOfHour(datetime) AS hour,
+ domain,
+ sum(bytes),
+ avg(duration)
+ GROUP BY
+ hour,
+ domain
+ );
+
+ALTER TABLE video_log MATERIALIZE PROJECTION p_agg;
+
+```
+```
+
+SELECT
+    toStartOfHour(datetime) AS hour,
+    sum(bytes),
+    avg(duration)
+FROM video_log
+WHERE (toDate(hour) = today()) AND (device_id = '100')
+GROUP BY hour
+
+Query id: ffc3bc0c-26cf-4415-9a00-d2184130c30d
+
+
+0 rows in set. Elapsed: 0.035 sec. 
+
+Received exception from server (version 22.7.1):
+Code: 10. DB::Exception: Received from localhost:9000. DB::Exception: Not found column toStartOfHour(datetime) in block. (NOT_FOUND_COLUMN_IN_BLOCK)
+
+```
+
+

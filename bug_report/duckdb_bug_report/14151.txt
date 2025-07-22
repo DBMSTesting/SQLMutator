@@ -1,0 +1,183 @@
+ID: 14151
+Title: Windows mingw64 non-cmake unity build fails due to Win32 and ICU defines
+Description:
+### What happens?
+
+duckdb does not build on Windows with cmake unity build turned off - there are two different errors
+
+1. Certain Win32 macros are enabled that conflict with symbols in duckdb sources - here's an example from `src/main/extension/extension_install.cpp`
+
+```
+In file included from mingw64/include/winsock2.h:10,
+                 from third_party/httplib/httplib.hpp:170,
+                 from src/main/extension/extension_install.cpp:17:
+src/main/extension/extension_install.cpp: In static member function 'static std::string duckdb::ExtensionHelper::ExtensionDirectory(duckdb::DatabaseInstance&, duckdb::FileSystem&)':
+src/main/extension/extension_install.cpp:101:44: error: 'class duckdb::FileSystem' has no member named 'CreateDirectoryA'; did you mean 'CreateDirectory'?
+  101 |                                         fs.CreateDirectory(extension_directory_prefix);
+      |                                            ^~~~~~~~~~~~~~~
+src/main/extension/extension_install.cpp:112:28: error: 'class duckdb::FileSystem' has no member named 'CreateDirectoryA'; did you mean 'CreateDirectory'?
+  112 |                         fs.CreateDirectory(extension_directory);
+      |                            ^~~~~~~~~~~~~~~
+src/main/extension/extension_install.cpp: In function 'void duckdb::WriteExtensionFiles(FileSystem&, const std::string&, const std::string&, void*, idx_t, ExtensionInstallInfo&)':
+src/main/extension/extension_install.cpp:261:12: error: 'class duckdb::FileSystem' has no member named 'MoveFileA'; did you mean 'MoveFile'?
+  261 |         fs.MoveFile(metadata_tmp_path, metadata_file_path);
+      |            ^~~~~~~~
+src/main/extension/extension_install.cpp:262:12: error: 'class duckdb::FileSystem' has no member named 'MoveFileA'; did you mean 'MoveFile'?
+  262 |         fs.MoveFile(temp_path, local_extension_path);
+```
+
+This is because Win32 defines `CreateDirectory` to be `CreateDirectoryA` - duckdb tries to prevent these defines in `src/include/duckdb/common/windows_undefs.hpp` - and tries to include it in every  source file that may be affected
+
+```c++
+#ifdef WIN32
+
+#ifdef CreateDirectory
+#undef CreateDirectory
+#endif
+
+#endif
+```
+
+This technique does not work because `windows_undefs.hpp` contains `#pragma once` - this keeps it from being expanded more than once - so conflicting Win32 defines can be in effect in a source file through direct or transitive includes even if `windows_undefs.hpp` is the last included header
+
+I fixed these errors by deleting `#pragma once` from `windows_undefs.hpp`
+
+2. ICU library undefines `__STRICT_ANSI__` in `extension/icu/third_party/icu/common/putil.cpp` - this conflicts with its use in standard header files - it generates a warning and various errors
+
+```c++
+#if U_PLATFORM == U_PF_MINGW && defined __STRICT_ANSI__
+/* tzset isn't defined in strict ANSI on MinGW. */
+#undef __STRICT_ANSI__
+#endif
+```
+
+Examples of build errors are
+
+```
+In file included from mingw64/include/c++/14.2.0/cstdlib:41,
+                 from mingw64/include/c++/14.2.0/stdlib.h:36,
+                 from extension/icu/third_party/icu/common/uassert.h:23,
+                 from extension/icu/third_party/icu/common/putil.cpp:67:
+mingw64/include/c++/14.2.0/x86_64-w64-mingw32/bits/c++config.h:667:2: warning: #warning "__STRICT_ANSI__ seems to have been undefined; this is not supported" [-Wcpp]
+  667 | #warning "__STRICT_ANSI__ seems to have been undefined; this is not supported"
+      |  ^~~~~~~
+In file included from mingw64/include/c++/14.2.0/bits/chrono.h:39,
+                 from mingw64/include/c++/14.2.0/condition_variable:40,
+                 from extension/icu/third_party/icu/common/umutex.h:24,
+                 from extension/icu/third_party/icu/common/putil.cpp:68:
+mingw64/include/c++/14.2.0/limits:2100:30: error: exponent has no digits
+ 2100 |         return __extension__ 0x1.0p-16382Q;
+```
+
+I fixed these errors by removing the undefine from `putil.cpp` - I also defined the feature-test macro `_POSIX_C_SOURCE=200809L` in case it's needed for `tzset`
+
+With these two fixes my non-cmake unity build succeeded - I can provide a PR if these changes sound fine
+
+The default release build - with cmake unity turned on - does work out of the box
+
+But as duckdb docs point out in https://duckdb.org/docs/dev/building/build_configuration
+
+```
+Miscellaneous Flags
+
+DISABLE_UNITY
+
+To improve compilation time, we use Unity Build to combine translation units. This can however hide include bugs, this flag disables using the unity build so these errors can be detected
+```
+
+The reason why cmake unity can hide bugs is that it generates source files in the build tree that combine files from the source tree through includes - the translation units of these generated sources can behave very differently from individually compiled sources
+
+```c++
+// build/src/optimizer/ub_duckdb_optimizer.cpp
+// Unity Build generated by CMake
+#include <src/optimizer/build_probe_side_optimizer.cpp>
+#include <src/optimizer/column_binding_replacer.cpp>
+#include <src/optimizer/column_lifetime_analyzer.cpp>
+```
+
+I can't say if cmake unity builds are worth it - but it seems to me non-cmake unity builds should be checked regularly to catch errors like these
+
+### To Reproduce
+
+I followed https://duckdb.org/docs/dev/building/build_instructions - it says to run `cmake` directly on Windows - this means any custom `cmake` configuration has to be gleaned from the top-level `Makefile` and duplicated on the `cmake` commandline
+
+I used the following `cmake` configuration on Windows MinGW64 - cmake unity is disabled - plus sanitizers are disabled because they are not supported on Windows - https://github.com/msys2/MINGW-packages/issues/3163
+
+```
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_EXTENSIONS="icu;parquet;json" -B build -DENABLE_SANITIZER=FALSE -DENABLE_UBSAN=0 -DDISABLE_UNITY=1
+```
+
+```
+-- Found Python3: mingw64/bin/python3.11.exe (found version "3.11.10") found components: Interpreter
+-- The C compiler identification is GNU 14.2.0
+-- The CXX compiler identification is GNU 14.2.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: mingw64/bin/cc.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: mingw64/bin/c++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Found Git: usr/bin/git.exe (found version "2.46.1")
+-- git hash 47e1d3d60b, version v1.1.2-dev40, extension folder 47e1d3d60b
+-- Extensions will be deployed to: build/repository
+-- Load extension 'icu' from 'extensions' @ 47e1d3d60b
+-- Load extension 'parquet' from 'extensions' @ 47e1d3d60b
+-- Load extension 'json' from 'extensions' @ 47e1d3d60b
+-- Extensions linked into DuckDB: [icu, parquet, json]
+-- Configuring done (3.5s)
+-- Generating done (1.8s)
+-- Build files have been written to: build
+```
+
+Build as usual afterwards
+
+```
+cmake --build build--config Release
+```
+
+### OS:
+
+Windows 11
+
+### DuckDB Version:
+
+latest github main branch commit 47e1d3
+
+### DuckDB Client:
+
+Windows executable
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Zartaj Majeed
+
+### Affiliation:
+
+NA
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

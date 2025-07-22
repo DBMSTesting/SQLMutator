@@ -1,0 +1,80 @@
+ID: 47792
+Title: When values requiring column type conversion are too long, TiDB may return an incorrect result set.
+Description:
+## Bug Report
+
+When values requiring column type conversion are too long, TiDB may return an incorrect result set.
+### 1. Minimal reproduce step (Required)
+```
+CREATE TABLE `t1` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'id',
+  `inspect_id` varchar(64) DEFAULT NULL COMMENT 'ID',
+  `tenant_id` varchar(64) DEFAULT NULL COMMENT 'ID',
+  `status` int(11) DEFAULT NULL,
+  `is_deleted` int(11) DEFAULT NULL COMMENT '(0,1)',
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+);
+insert into t1 values(1448096868005565712,1372816766597782118,30000,1,0),(1448096868005565713,1372816766597782118,30000,1,0),(1448096868005565714,1372816766597782118,30000,1,0);
+
+CREATE TABLE `t2` (
+  `id` bigint(64) NOT NULL AUTO_INCREMENT,
+  `status` int(2) DEFAULT NULL,
+  `is_deleted` int(2) DEFAULT '0',
+  `tag_status` int(2) DEFAULT NULL,
+  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
+);
+insert into t2 values(1372816766597782115,1,0,1),(137281676659782116,1,0,1),(1372816766597782117,1,0,1),(1372816766597782118,1,0,1);
+SELECT t1.id,t2.id,t1.*, t2.tag_status  FROM  t1 LEFT JOIN  t2 ON t1.inspect_id = t2.id  AND t1.STATUS = 1  AND t1.is_deleted = 0  AND t2.STATUS = 1  AND t2.is_deleted = 0  WHERE t1.tenant_id = '30000'  AND t1.inspect_id = '1372816766597782118';
+
+```
+### 2. What did you expect to see? (Required)
+```
+mysql> SELECT t1.id,t2.id,t1.*, t2.tag_status  FROM  t1 LEFT JOIN  t2 ON t1.inspect_id = t2.id  AND t1.STATUS = 1  AND t1.is_deleted = 0  AND t2.STATUS = 1  AND t2.is_deleted = 0  WHERE t1.tenant_id = '30000'  AND t1.inspect_id = '1372816766597782118';
++---------------------+---------------------+---------------------+---------------------+-----------+--------+------------+------------+
+| id                  | id                  | id                  | inspect_id          | tenant_id | status | is_deleted | tag_status |
++---------------------+---------------------+---------------------+---------------------+-----------+--------+------------+------------+
+| 1448096868005565712 | 1372816766597782118 | 1448096868005565712 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565713 | 1372816766597782118 | 1448096868005565713 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565714 | 1372816766597782118 | 1448096868005565714 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
++---------------------+---------------------+---------------------+---------------------+-----------+--------+------------+------------+
+```
+
+
+### 3. What did you see instead (Required)
+```
+mysql> SELECT t1.id,t2.id,t1.*, t2.tag_status  FROM  t1 LEFT JOIN  t2 ON t1.inspect_id = t2.id  AND t1.STATUS = 1  AND t1.is_deleted = 0  AND t2.STATUS = 1  AND t2.is_deleted = 0  WHERE t1.tenant_id = '30000'  AND t1.inspect_id = '1372816766597782118';
++---------------------+---------------------+---------------------+---------------------+-----------+--------+------------+------------+
+| id                  | id                  | id                  | inspect_id          | tenant_id | status | is_deleted | tag_status |
++---------------------+---------------------+---------------------+---------------------+-----------+--------+------------+------------+
+| 1448096868005565712 | 1372816766597782118 | 1448096868005565712 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565712 | 1372816766597782117 | 1448096868005565712 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565712 | 1372816766597782115 | 1448096868005565712 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565713 | 1372816766597782118 | 1448096868005565713 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565713 | 1372816766597782117 | 1448096868005565713 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565713 | 1372816766597782115 | 1448096868005565713 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565714 | 1372816766597782118 | 1448096868005565714 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565714 | 1372816766597782117 | 1448096868005565714 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
+| 1448096868005565714 | 1372816766597782115 | 1448096868005565714 | 1372816766597782118 | 30000     |      1 |          0 |          1 |
++---------------------+---------------------+---------------------+---------------------+-----------+--------+------------+------------+
+9 rows in set (0.00 sec)
+
+mysql> explain SELECT t1.id,t2.id,t1.*, t2.tag_status  FROM  t1 LEFT JOIN  t2 ON t1.inspect_id = t2.id  AND t1.STATUS = 1  AND t1.is_deleted = 0  AND t2.STATUS = 1  AND t2.is_deleted = 0  WHERE t1.tenant_id = '30000'  AND t1.inspect_id = '1372816766597782118';
++--------------------------------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------+
+| id                             | estRows | task      | access object | operator info                                                                                                             |
++--------------------------------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------+
+| Projection_6                   | 0.00    | root      |               | ddd.t1.id, ddd.t2.id, ddd.t1.id, ddd.t1.inspect_id, ddd.t1.tenant_id, ddd.t1.status, ddd.t1.is_deleted, ddd.t2.tag_status |
+| └─HashJoin_7               | 0.00    | root      |               | CARTESIAN left outer join, left cond:[eq(ddd.t1.status, 1) eq(ddd.t1.is_deleted, 0)]                                      |
+|   ├─TableReader_14(Build)  | 0.00    | root      |               | data:Selection_13                                                                                                         |
+|   │ └─Selection_13       | 0.00    | cop[tikv] |               | eq(1.372816766597782e+18, cast(ddd.t2.id, double BINARY)), eq(ddd.t2.is_deleted, 0), eq(ddd.t2.status, 1)                 |
+|   │   └─TableFullScan_12 | 4.00    | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                                                                            |
+|   └─TableReader_11(Probe)  | 0.00    | root      |               | data:Selection_10                                                                                                         |
+|     └─Selection_10         | 0.00    | cop[tikv] |               | eq(ddd.t1.inspect_id, "1372816766597782118"), eq(ddd.t1.tenant_id, "30000")                                               |
+|       └─TableFullScan_9    | 3.00    | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                                                                            |
++--------------------------------+---------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------+
+8 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+v6.5.4

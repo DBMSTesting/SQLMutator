@@ -1,0 +1,434 @@
+ID: 29817
+Title: Missing result without index
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Also see https://github.com/pingcap/tidb/issues/29476 which focusing on stabilising the test environment for `explaintest`.
+
+Enable expression indexes:
+```toml
+[experimental]
+allow-expression-index = true
+```
+
+Start the tidb-server with 'Europe/Amsterdam' time zone (Or play around with different time zones).
+
+```bash
+cd repos/tidb
+make
+rm -rf /tmp/tidb ; TZ='Europe/Amsterdam ./bin/tidb-server --config expression_index.toml
+```
+Execute
+```sql
+SELECT @@time_zone, @@system_time_zone;
+drop table if exists t;
+CREATE TABLE t (
+  `d` timestamp NULL DEFAULT NULL
+);
+insert into t values ('2021-08-13 04:10:44');
+select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
+select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
+alter table t add index ((d+timestamp'0000-00-00 00:00:00.00001'));
+select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
+select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
+
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+Same result regardless of index or not, like for MySQL or TiDB running with time zone UTC
+MySQL:
+```sql
+mysql> set @@sql_mode = '';
+Query OK, 0 rows affected (0,00 sec)
+
+mysql> -- in MySQL it will say CET, not 'Europe/Amsterdam'
+Query OK, 0 rows affected (0,00 sec)
+
+mysql> SELECT @@time_zone, @@system_time_zone;
++-------------+--------------------+
+| @@time_zone | @@system_time_zone |
++-------------+--------------------+
+| SYSTEM      | CET                |
++-------------+--------------------+
+1 row in set (0,00 sec)
+
+mysql> drop table if exists t;
+Query OK, 0 rows affected (0,01 sec)
+
+mysql> CREATE TABLE t (
+    ->   `d` timestamp NULL DEFAULT NULL
+    -> );
+Query OK, 0 rows affected (0,01 sec)
+
+mysql> insert into t values ('2021-08-13 04:10:44');
+Query OK, 1 row affected (0,00 sec)
+
+mysql> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+mysql> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+mysql> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | t     | NULL       | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | Using where |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0,00 sec)
+
+mysql> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | t     | NULL       | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | Using where |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0,00 sec)
+
+mysql> alter table t add index ((d+timestamp'0000-00-00 00:00:00.00001'));
+Query OK, 0 rows affected (0,02 sec)
+Records: 0  Duplicates: 0  Warnings: 0
+
+mysql> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+mysql> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+mysql> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++----+-------------+-------+------------+------+------------------+------------------+---------+-------+------+----------+-------+
+| id | select_type | table | partitions | type | possible_keys    | key              | key_len | ref   | rows | filtered | Extra |
++----+-------------+-------+------------+------+------------------+------------------+---------+-------+------+----------+-------+
+|  1 | SIMPLE      | t     | NULL       | ref  | functional_index | functional_index | 11      | const |    1 |   100.00 | NULL  |
++----+-------------+-------+------------+------+------------------+------------------+---------+-------+------+----------+-------+
+1 row in set, 1 warning (0,00 sec)
+
+mysql> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+| id | select_type | table | partitions | type | possible_keys | key  | key_len | ref  | rows | filtered | Extra       |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+|  1 | SIMPLE      | t     | NULL       | ALL  | NULL          | NULL | NULL    | NULL |    1 |   100.00 | Using where |
++----+-------------+-------+------------+------+---------------+------+---------+------+------+----------+-------------+
+1 row in set, 1 warning (0,00 sec)
+```
+
+TiDB with UTC:
+```sql
+tidb> set @@sql_mode = '';
+Query OK, 0 rows affected (0,00 sec)
+
+tidb> -- in MySQL it will say CET, not 'Europe/Amsterdam'
+Query OK, 0 rows affected (0,00 sec)
+
+tidb> SELECT @@time_zone, @@system_time_zone;
++-------------+--------------------+
+| @@time_zone | @@system_time_zone |
++-------------+--------------------+
+| SYSTEM      | UTC                |
++-------------+--------------------+
+1 row in set (0,00 sec)
+
+tidb> drop table if exists t;
+Query OK, 0 rows affected, 1 warning (0,00 sec)
+
+tidb> CREATE TABLE t (
+    ->   `d` timestamp NULL DEFAULT NULL
+    -> );
+Query OK, 0 rows affected (0,01 sec)
+
+tidb> insert into t values ('2021-08-13 04:10:44');
+Query OK, 1 row affected (0,00 sec)
+
+tidb> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+tidb> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+tidb> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                 |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                              |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | eq(plus(cast(test.t.d, decimal(19,0) BINARY), 0.00001), 20210813041044.00001) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                 |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                              |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | eq(plus(cast(test.t.d, decimal(19,0) BINARY), 0.00001), 20210813041044.00001) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> alter table t add index ((d+timestamp'0000-00-00 00:00:00.00001'));
+Query OK, 0 rows affected (2,52 sec)
+
+tidb> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+tidb> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+tidb> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                                                | operator info                                                                     |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| Projection_4                    | 10.00   | root      |                                                                              | test.t.d                                                                          |
+| └─IndexLookUp_10                | 10.00   | root      |                                                                              |                                                                                   |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:t, index:expression_index(`d` + TIMESTAMP '0000-00-00 00:00:00.00001') | range:[20210813041044.00001,20210813041044.00001], keep order:false, stats:pseudo |
+|   └─TableRowIDScan_9(Probe)     | 10.00   | cop[tikv] | table:t                                                                      | keep order:false, stats:pseudo                                                    |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+4 rows in set (0,00 sec)
+
+tidb> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                                                | operator info                                                                     |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| Projection_4                    | 10.00   | root      |                                                                              | test.t.d                                                                          |
+| └─IndexLookUp_10                | 10.00   | root      |                                                                              |                                                                                   |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:t, index:expression_index(`d` + TIMESTAMP '0000-00-00 00:00:00.00001') | range:[20210813041044.00001,20210813041044.00001], keep order:false, stats:pseudo |
+|   └─TableRowIDScan_9(Probe)     | 10.00   | cop[tikv] | table:t                                                                      | keep order:false, stats:pseudo                                                    |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+4 rows in set (0,00 sec)
+```
+### 3. What did you see instead (Required)
+
+TiDB with 'Europe/Amsterdam' time zone
+
+```sql
+tidb> set @@sql_mode = '';
+Query OK, 0 rows affected (0,00 sec)
+
+tidb> SELECT @@time_zone, @@system_time_zone;
++-------------+--------------------+
+| @@time_zone | @@system_time_zone |
++-------------+--------------------+
+| SYSTEM      | Europe/Amsterdam   |
++-------------+--------------------+
+1 row in set (0,00 sec)
+
+tidb> drop table if exists t;
+Query OK, 0 rows affected, 1 warning (0,00 sec)
+
+tidb> CREATE TABLE t (
+    ->   `d` timestamp NULL DEFAULT NULL
+    -> );
+Query OK, 0 rows affected (0,01 sec)
+
+tidb> insert into t values ('2021-08-13 04:10:44');
+Query OK, 1 row affected (0,00 sec)
+
+tidb> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
+Empty set (0,00 sec)
+
+tidb> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
+Empty set (0,00 sec)
+
+tidb> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                 |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                              |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | eq(plus(cast(test.t.d, decimal(19,0) BINARY), 0.00001), 20210813041044.00001) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                 |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                              |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | eq(plus(cast(test.t.d, decimal(19,0) BINARY), 0.00001), 20210813041044.00001) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> alter table t add index ((d+timestamp'0000-00-00 00:00:00.00001'));
+Query OK, 0 rows affected (2,52 sec)
+
+tidb> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
+Empty set (0,00 sec)
+
+tidb> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
+Empty set (0,00 sec)
+
+tidb> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                                                | operator info                                                                     |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| Projection_4                    | 10.00   | root      |                                                                              | test.t.d                                                                          |
+| └─IndexLookUp_10                | 10.00   | root      |                                                                              |                                                                                   |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:t, index:expression_index(`d` + TIMESTAMP '0000-00-00 00:00:00.00001') | range:[20210813041044.00001,20210813041044.00001], keep order:false, stats:pseudo |
+|   └─TableRowIDScan_9(Probe)     | 10.00   | cop[tikv] | table:t                                                                      | keep order:false, stats:pseudo                                                    |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+4 rows in set (0,00 sec)
+
+tidb> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                                                | operator info                                                                     |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| Projection_4                    | 10.00   | root      |                                                                              | test.t.d                                                                          |
+| └─IndexLookUp_10                | 10.00   | root      |                                                                              |                                                                                   |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:t, index:expression_index(`d` + TIMESTAMP '0000-00-00 00:00:00.00001') | range:[20210813041044.00001,20210813041044.00001], keep order:false, stats:pseudo |
+|   └─TableRowIDScan_9(Probe)     | 10.00   | cop[tikv] | table:t                                                                      | keep order:false, stats:pseudo                                                    |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+4 rows in set (0,00 sec)
+```
+
+TiDB with 'Asia/Shanghai' time zone
+
+```sql
+tidb> set @@sql_mode = '';
+Query OK, 0 rows affected (0,00 sec)
+
+tidb> SELECT @@time_zone, @@system_time_zone;
++-------------+--------------------+
+| @@time_zone | @@system_time_zone |
++-------------+--------------------+
+| SYSTEM      | Asia/Shanghai      |
++-------------+--------------------+
+1 row in set (0,00 sec)
+
+tidb> drop table if exists t;
+Query OK, 0 rows affected, 1 warning (0,00 sec)
+
+tidb> CREATE TABLE t (
+    ->   `d` timestamp NULL DEFAULT NULL
+    -> );
+Query OK, 0 rows affected (0,00 sec)
+
+tidb> insert into t values ('2021-08-13 04:10:44');
+Query OK, 1 row affected (0,00 sec)
+
+tidb> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+tidb> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------+
+| d                   |
++---------------------+
+| 2021-08-13 04:10:44 |
++---------------------+
+1 row in set (0,00 sec)
+
+tidb> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                 |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                              |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | eq(plus(cast(test.t.d, decimal(19,0) BINARY), 0.00001), 20210813041044.00001) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| id                      | estRows  | task      | access object | operator info                                                                 |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+| TableReader_7           | 8000.00  | root      |               | data:Selection_6                                                              |
+| └─Selection_6           | 8000.00  | cop[tikv] |               | eq(plus(cast(test.t.d, decimal(19,0) BINARY), 0.00001), 20210813041044.00001) |
+|   └─TableFullScan_5     | 10000.00 | cop[tikv] | table:t       | keep order:false, stats:pseudo                                                |
++-------------------------+----------+-----------+---------------+-------------------------------------------------------------------------------+
+3 rows in set (0,00 sec)
+
+tidb> alter table t add index ((d+timestamp'0000-00-00 00:00:00.00001'));
+Query OK, 0 rows affected (2,52 sec)
+
+tidb> select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
+Empty set (0,00 sec)
+
+tidb> select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
+Empty set (0,00 sec)
+
+tidb> explain select * from t where d+ timestamp'0000-00-00 00:00:00.00001' = timestamp'2021-08-13 04:10:44'+ timestamp'0000-00-00 00:00:00.00001';
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                                                | operator info                                                                     |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| Projection_4                    | 10.00   | root      |                                                                              | test.t.d                                                                          |
+| └─IndexLookUp_10                | 10.00   | root      |                                                                              |                                                                                   |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:t, index:expression_index(`d` + TIMESTAMP '0000-00-00 00:00:00.00001') | range:[20210813041044.00001,20210813041044.00001], keep order:false, stats:pseudo |
+|   └─TableRowIDScan_9(Probe)     | 10.00   | cop[tikv] | table:t                                                                      | keep order:false, stats:pseudo                                                    |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+4 rows in set (0,00 sec)
+
+tidb> explain select * from t where d + 0.00001 = timestamp'2021-08-13 04:10:44' + 0.00001;
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| id                              | estRows | task      | access object                                                                | operator info                                                                     |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+| Projection_4                    | 10.00   | root      |                                                                              | test.t.d                                                                          |
+| └─IndexLookUp_10                | 10.00   | root      |                                                                              |                                                                                   |
+|   ├─IndexRangeScan_8(Build)     | 10.00   | cop[tikv] | table:t, index:expression_index(`d` + TIMESTAMP '0000-00-00 00:00:00.00001') | range:[20210813041044.00001,20210813041044.00001], keep order:false, stats:pseudo |
+|   └─TableRowIDScan_9(Probe)     | 10.00   | cop[tikv] | table:t                                                                      | keep order:false, stats:pseudo                                                    |
++---------------------------------+---------+-----------+------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+
+4 rows in set (0,01 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+tidb_version(): Release Version: v5.4.0-alpha-119-gfb01f00d4
+Edition: Community
+Git Commit Hash: fb01f00d44975bb3b25313c5626b6489e372d3ff
+Git Branch: master
+UTC Build Time: 2021-11-15 14:44:41
+GoVersion: go1.16.2
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false

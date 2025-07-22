@@ -1,0 +1,62 @@
+ID: 6052
+Title: [Bug] input_format_defaults_for_omitted_fields break down Distributed tables
+Description:
+This issue blocks #6043 
+
+**Describe the bug**
+When input_format_defaults_for_omitted_fields is enabled Distributed tables doesn't work properly.
+
+**How to reproduce**
+Create cluster `test_sharding` with 2 shards
+```
+CREATE TABLE test_repl ON CLUSTER test_sharding
+(
+    `n` Int8
+)
+ENGINE ReplicatedMergeTree('/clickhouse/tables/{shard}/default/test', '{replica}')
+ORDER BY n;
+```
+```
+CREATE TABLE test_dist ON CLUSTER test_sharding AS default.test_repl
+ENGINE = Distributed(test_sharding, default, test_repl, n)
+```
+```
+SET input_format_defaults_for_omitted_fields = 1
+```
+```
+INSERT INTO default.test_dist SELECT *
+FROM system.numbers
+LIMIT 100
+
+Ok.
+```
+
+Looks like it's ok, but on second shard we have an error in log:
+
+> 2019.07.18 15:10:53.988325 [ 47 ] {2a5eca6f-1262-41d6-b62b-6f3ff8bb8222} <Error> executeQuery: Code: 210, e.displayText() = DB::NetException: I/O error: Broken pipe, while writing to socket (xxx.xxx.xxx.xx1:42784) (version 19.11.3.11 (official build)) (from xxx.xxx.xxx.xx1:42784) (in query: INSERT INTO default.test_repl (n) VALUES), Stack trace:
+>0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x22) [0x781c272]
+> 1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x22) [0x3a0a3e2]
+> 2. /usr/bin/clickhouse-server() [0x389b830]
+> 3. /usr/bin/clickhouse-server(DB::WriteBuffer::next()+0x29) [0x3a16d79]
+> 4. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x904) [0x3a15cf4]
+> 5. /usr/bin/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x3a1627b]
+> 6. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x725666f]
+> 7. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0xe9) [0x7256da9]
+> 8. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x81) [0x7927e41]
+> 9. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0x7924248]
+> 10. /usr/bin/clickhouse-server() [0xb2ac5bf]
+> 11. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76ba) [0x7f0bf96da6ba]
+> 12. /lib/x86_64-linux-gnu/libc.so.6(clone+0x6d) [0x7f0bf8f0341d]
+> 
+> 2019.07.18 15:10:53.988614 [ 47 ] {2a5eca6f-1262-41d6-b62b-6f3ff8bb8222} <Warning> TCPHandler: Client has gone away.
+
+Ok, let's try to select data from Distributed table:
+```
+SELECT count()
+FROM default.test_dist
+
+↗ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.) Received exception from server (version 19.11.3):
+Code: 102. DB::Exception: Received from localhost:9000. DB::NetException. DB::NetException: Unexpected packet from server xxx.xxx.xxx.xx2:9000 (expected TablesStatusResponse, got Data). 
+
+0 rows in set. Elapsed: 0.069 sec.
+```

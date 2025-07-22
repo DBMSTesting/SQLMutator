@@ -1,0 +1,48 @@
+ID: 21658
+Title: Queries using batch point get plan may be blocked when encounters locks of another alive transaction
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Run `CaseRCResolveLockBatchPointGet` which is implemented [here](https://github.com/pingcap/automated-tests/pull/543/files#diff-5235c0b2974a3c43dfcd805890740fb1a151a182d3162666bba3ee748893d211R1631), and with TiDB's failpoint API enabled.
+
+The procedure of the case:
+
+```sql
+create table t (id int primary key, v int);
+insert into t values (0, 0), (1, 10), (2, 20), (3, 30);
+```
+
+| session1 | session2 | result/comment |
+|---|---|---|
+| `set transaction isolation level read commited; begin pessimistic;` | | |
+| `select id, v from t where id = 1 or id = 2 or id = 3 order by id;` | | `(1, 10), (2, 20), (3, 30)` |
+| | `begin pessimistic;` | |
+| | `update t set v = v + 1 where id = 0;` | |
+| | `update t set v = v + 1 where id > 0;` | |
+| | | Enable failpoint `github.com/pingcap/tidb/store/tikv/beforeCommit` as `"pause"` at this time |
+| | `commit` | It will be blocked due to the failpoint. Don't wait for it and continue following steps. |
+| `select id, v from t where id = 1 or id = 2 or id = 3 order by id;` | | Blocked and maybe report timeout error. |
+
+
+### 2. What did you expect to see? (Required)
+
+In the last step above, session 1's transaction should push session2's transaction's `min_commit_ts`, and continue reading the old data bypassing the locks.
+
+### 3. What did you see instead (Required)
+
+Session 1 blocked and reports timeout error:
+
+```
+[2020/12/09 11:08:23.827 +00:00] [WARN] [backoff.go:342] ["txnLockFast backoffer.maxSleep 40000ms is exceeded, errors:\nbatchGet lockedKeys: 3 at 2020-12-09T11:08:19.652431113Z\nbatchGet lockedKeys: 3 at 2020-12-09T11:08:21.209817741Z\nbatchGet lockedKeys: 3 at 2020-12-09T11:08:23.827054497Z"]
+[2020/12/09 11:08:23.827 +00:00] [INFO] [conn.go:809] ["command dispatched failed"] [conn=577362351838199857] [connInfo="id:577362351838199857, addr:10.9.85.17:58554 status:11, collation:utf8mb4_general_ci, user:root"] [command=Query] [status="inTxn:1, autocommit:1"] [sql="select id, v from t where id = 1 or id = 2 or id = 3 order by id"] [txn_mode=PESSIMISTIC] [err="[tikv:9004]Resolve lock timeout\ngithub.com/pingcap/errors.AddStack\n\t/home/zyguan/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20201126102027-b0a155152ca3/errors.go:174\ngithub.com/pingcap/errors.Trace\n\t/home/zyguan/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20201126102027-b0a155152ca3/juju_adaptor.go:15\ngithub.com/pingcap/tidb/store/tikv.(*tikvSnapshot).batchGetSingleRegion\n\t/home/zyguan/go/src/github.com/pingcap/tidb/store/tikv/snapshot.go:346\ngithub.com/pingcap/tidb/store/tikv.(*tikvSnapshot).batchGetKeysByRegions\n\t/home/zyguan/go/src/github.com/pingcap/tidb/store/tikv/snapshot.go:243\ngithub.com/pingcap/tidb/store/tikv.(*tikvSnapshot).BatchGet\n\t/home/zyguan/go/src/github.com/pingcap/tidb/store/tikv/snapshot.go:153\ngithub.com/pingcap/tidb/kv.(*BufferBatchGetter).BatchGet\n\t/home/zyguan/go/src/github.com/pingcap/tidb/kv/utils.go:102\ngithub.com/pingcap/tidb/executor.(*BatchPointGetExec).initialize\n\t/home/zyguan/go/src/github.com/pingcap/tidb/executor/batch_point_get.go:340\ngithub.com/pingcap/tidb/executor.(*BatchPointGetExec).Next\n\t/home/zyguan/go/src/github.com/pingcap/tidb/executor/batch_point_get.go:143\ngithub.com/pingcap/tidb/executor.Next\n\t/home/zyguan/go/src/github.com/pingcap/tidb/executor/executor.go:277\ngithub.com/pingcap/tidb/executor.(*recordSet).Next\n\t/home/zyguan/go/src/github.com/pingcap/tidb/executor/adapter.go:129\ngithub.com/pingcap/tidb/server.(*tidbResultSet).Next\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/driver_tidb.go:298\ngithub.com/pingcap/tidb/server.(*clientConn).writeChunks\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/conn.go:1728\ngithub.com/pingcap/tidb/server.(*clientConn).writeResultset\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/conn.go:1688\ngithub.com/pingcap/tidb/server.(*clientConn).handleStmt\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/conn.go:1585\ngithub.com/pingcap/tidb/server.(*clientConn).handleQuery\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/conn.go:1451\ngithub.com/pingcap/tidb/server.(*clientConn).dispatch\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/conn.go:1027\ngithub.com/pingcap/tidb/server.(*clientConn).Run\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/conn.go:792\ngithub.com/pingcap/tidb/server.(*Server).onConn\n\t/home/zyguan/go/src/github.com/pingcap/tidb/server/server.go:459\nruntime.goexit\n\t/usr/local/lib/go/src/runtime/asm_amd64.s:1373"]
+[2020/12/09 11:08:23.880 +00:00] [INFO] [commit.go:92] ["2PC commitTS rejected by TiKV, retry with a newer commitTS"] [conn=577362351838199859] [txnStartTS=421399641765707777] [info="{StartTs:421399641765707777 AttemptedCommitTs:421399641831243777 Key:7480000000000000465f728000000000000000 MinCommitTs:421399642355531778}"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+master with some not-related changes (ba9789eed17cc9351b71b3507a3f0e4c23efc28b from https://github.com/pingcap/tidb/pull/21557), built with failpoints enabled.
+

@@ -1,0 +1,228 @@
+ID: 52409
+Title: too many slow query cause by generated plan so slow
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. Create table and load data.
+
+```sql
+sysbench --config-file=sysbench.conf mussel_minimal.lua --threads=400 --read_staleness=-5 --kv_read_timeout=300 --max_execution_time=400 --mysql-ignore-errors=all init
+
+sysbench --config-file=sysbench.conf mussel_minimal.lua --threads=400 --read_staleness=-5 --kv_read_timeout=300 --max_execution_time=400 --mysql-ignore-errors=all load
+```
+
+then manually split table by the following query:
+
+```sql
+split table t1 between ('000000000000000000000000000000', '', 0) and ('000000000000000000000000001000', '', 0) regions 1000;
+split table t1 between ('000000000000000000000000000000', '', 0) and ('000000000000000000000000010000', '', 0) regions 1000;
+```
+
+2. run workload.
+```sql
+sysbench --config-file=sysbench.conf mussel_minimal.lua --threads=400 --read_staleness=-5 --kv_read_timeout=300 --max_execution_time=400 --mysql-ignore-errors=all run
+```
+
+3. change `tidb_slow_log_threshold` to `100`.
+
+```sql
+set @@tidb_slow_log_threshold=100;
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+The `Optimize_time` of query should very fast, such as less than 2ms, but now, it is more than 100ms.
+
+### 3. What did you see instead (Required)
+
+#### The slow query
+
+Too many slow queries, and both are slow in plan optimization.
+
+<img width="1366" alt="image" src="https://github.com/pingcap/tidb/assets/26020263/df5e5ed1-289d-44c0-bfef-d888292e2042">
+
+<img width="1405" alt="image" src="https://github.com/pingcap/tidb/assets/26020263/c1854ef1-e49b-4fd4-9686-de4777d731be">
+
+Manual query slow query:
+```
+information_schema> select count(*), avg(query_time), avg(Compile_time), avg(Optimize_time), min(query) from `SLOW_QUERY` where time >= '2024-04-08 17:00:00' and time <= '2024-04-08 17:20:00' and query like 'select%from%t1%' group by digest\G
+***************************[ 1. row ]***************************
+count(*)           | 25208
+avg(query_time)    | 0.10134561429677091
+avg(Compile_time)  | 0.10055287557501584
+avg(Optimize_time) | 0.10036329993152973
+min(query)         | select pk, sk, ts, v from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000033' and sk >= '0000-0001-0003' and sk < '0000-0001-0003-0007' and ts = 1712562806941479469 order by sk asc;
+***************************[ 2. row ]***************************
+count(*)           | 25341
+avg(query_time)    | 0.101345887151178
+avg(Compile_time)  | 0.10050564118294443
+avg(Optimize_time) | 0.10032448115784695
+min(query)         | select pk, sk, ts, v from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000031' and sk like '0000-0001-0002-0004%' and ts = 1712562806941039906;
+***************************[ 3. row ]***************************
+count(*)           | 51100
+avg(query_time)    | 0.10137675831326841
+avg(Compile_time)  | 0.10056498785526415
+avg(Optimize_time) | 0.10037195223651657
+min(query)         | select pk, sk, ts, v from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000026' and sk = '0000-0001-0002-0004-0008' and ts >= 1712567101494056583 and ts < 1712567151494058023 order by ts desc limit 7;
+***************************[ 4. row ]***************************
+count(*)           | 25715
+avg(query_time)    | 0.1017754010321992
+avg(Compile_time)  | 0.10066140876363994
+avg(Optimize_time) | 0.10040071599055023
+min(query)         | select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000044' and sk < '0000-0001-0003-0007' and ts >= 1712567099668400756 and ts < 1712567149668401753         ) as tt where n <= 4 order by sk asc;
+***************************[ 5. row ]***************************
+count(*)           | 25390
+avg(query_time)    | 0.10178928403525021
+avg(Compile_time)  | 0.10066362784588423
+avg(Optimize_time) | 0.10040430890299325
+min(query)         | select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000068' and sk >= '0000-0001-0002-0004-0008' and ts >= 1712567021052157863 and ts < 1712567071052159164         ) as tt where n <= 10 order by sk asc;
+***************************[ 6. row ]***************************
+count(*)           | 76250
+avg(query_time)    | 0.1017248623464393
+avg(Compile_time)  | 0.10061991474393431
+avg(Optimize_time) | 0.10036892380224247
+min(query)         | select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000014' and sk >= '0000-0001-0002-0005' and sk < '0000-0001-0003-0006'         ) as tt where n <= 6 order by sk asc;
+***************************[ 7. row ]***************************
+count(*)           | 50732
+avg(query_time)    | 0.10179456989170534
+avg(Compile_time)  | 0.10066891067888113
+avg(Optimize_time) | 0.10040649207813587
+min(query)         | select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000026' and sk like '0000-0001%' and ts >= 1712567060163165959 and ts < 1712567110163167895         ) as tt where n <= 10 order by sk asc;
+***************************[ 8. row ]***************************
+count(*)           | 76015
+avg(query_time)    | 0.1013885306061831
+avg(Compile_time)  | 0.10048750521622024
+avg(Optimize_time) | 0.10031114924414927
+min(query)         | select pk, sk, ts, v from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000004' and sk = '0000-0001-0002-0004' order by ts desc limit 10;
+***************************[ 9. row ]***************************
+count(*)           | 25367
+avg(query_time)    | 0.10170552648732598
+avg(Compile_time)  | 0.10068133294902812
+avg(Optimize_time) | 0.1004135010544013
+min(query)         | select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000057' and sk >= '0000' and sk < '0000-0001-0002-0005' and ts >= 1712567001201832430 and ts < 1712567051201861267         ) as tt where n <= 2 order by sk asc;
+***************************[ 10. row ]***************************
+count(*)           | 76099
+avg(query_time)    | 0.10178204876077203
+avg(Compile_time)  | 0.10059196170902374
+avg(Optimize_time) | 0.10034570746149095
+min(query)         | select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000000007' and sk like '0000-0001-0003-0007%'         ) as tt where n <= 8 order by sk asc;
+``` 
+
+#### The TiDB log
+
+There are may following log during sysbench:
+
+```log
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:136] ["SyncWaitStatsLoad failed"] [error="sync load stats timeout"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.202 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.204 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+[2024/04/08 17:13:34.203 +08:00] [WARN] [rule_collect_plan_stats.go:116] ["RequestLoadStats failed"] [error="sync load stats channel is full and timeout sending task to channel"]
+```
+
+#### Slow log
+
+```log
+# Time: 2024-04-08T16:44:48.790874311+08:00
+# Txn_start_ts: 0
+# User@Host: root[root] @ [192.168.80.1](http://192.168.80.1/) [[192.168.80.1](http://192.168.80.1/)]
+# Conn_ID: 1560282450
+# Query_time: 0.101433254
+# Parse_time: 0.000081066
+# Compile_time: 0.100511049
+# Rewrite_time: 0.000113914
+# Optimize_time: 0.100259301
+# Wait_TS: 0
+# Cop_time: 0.000393904 Process_time: 0.000090485 Wait_time: 0.000025359 Request_count: 1 Process_keys: 1 Total_keys: 2 Get_snapshot_time: 0.000 Rocksdb_key_skipped_count: 1 Rocksdb_block_cache_hit_count: 8
+# DB: test
+# Is_internal: false
+# Digest: 2dd6d837e0bad7834f754b8611a01fb40195f7456c355709786028a6e70f277a
+# Stats: sbtest1:pseudo[0;0],t1:pseudo[1003129;0]
+# Num_cop_tasks: 1
+# Cop_proc_avg: 9.0485e-05 Cop_proc_addr: [192.168.80.2:23360](http://192.168.80.2:23360/)
+# Cop_wait_avg: 2.5359e-05 Cop_wait_addr: [192.168.80.2:23360](http://192.168.80.2:23360/)
+# Mem_max: 7412
+# Prepared: false
+# Plan_from_cache: false
+# Plan_from_binding: false
+# Has_more_results: false
+# KV_total: 0.00039338
+# PD_total: 0
+# Backoff_total: 0
+# Write_sql_response_total: 0.00003026
+# Result_rows: 1
+# Warnings: [{"Level":"Warning","Message":"sync load stats channel is full and timeout sending task to channel"}]
+# Succ: true
+# IsExplicitTxn: false
+# IsSyncStatsFailed: true
+# Plan: tidb_decode_plan('qgrwTDAJMTRfMTAJMAk4MDIuNTAJdGVzdC50MS5zawkxCXRpbWU6NTYyLjHCtXMsIGxvb3BzOjIJMi42MiBLQgkwIEJ5dGVzCjEJMV8xMwkwEUQ4bGUoQ29sdW1uIzYsIDEpFUkQNDUuN8I6SQAAMQFJ8FJOL0EKMgk1NF8xOAkwCTEwMDMuMTMJZXhlY3V0aW9uIGluZm86IGNvbmN1cnJlbmN5OjUsIGRhdGEgc291cmNlczpbVGFibGVSZWFkZXJfMTZdCRG9CDI5Li69ACgzLCBTaHVmZmxlQy5OAAGCAQQcCjMJMzNfMTQdhjRyb3dfbnVtYmVyKCktPhHYKCBvdmVyKHBhcnRpBaIIYnkgMToIcGssFQwcc2sgb3JkZXIuIABQdHMgZGVzYyByb3dzIGJldHdlZW4gCdkAdAEVDCBhbmQuEAA1QBQyLjQxbXMxhwA2AbABBAQKNCXEADcBtBQyNTMuOTE1xTaLAAAsFZcIdHM6AYMxmQwyLjM2LlkALdgRCBwKNQkzMV8xNh1hIXwEOlQlcyhhbmdlU2Nhbl8xNRFQEDQ0MC42LukBcCwgY29wX3Rhc2s6IHtudW06IDEsIG1heDogNDE3LaAgcHJvY19rZXlzBR0MdG90XwESFDogOTAuNQVMARMkd2FpdDogMjUuNAUTCHJwYyGcBTIBDEWwFCA0MDMuMwUggGNvcHJfY2FjaGVfaGl0X3JhdGlvOiAwLjAwLCBidWlsZAWUCF9kdQUaFG46IDYuMUmiMG1heF9kaXN0c3FsX2NdKhwgMX0JNjg5IEX5AAlBuAw2CTQ0BfwIXzAJNYAhGhQ6dDEsIHIhHww6WyIwYgEAFDU1NDgiIAUhEC0wMDAxAQUAMgEFCDUiLAUWVgEAYjcAIDYiKSwga2VlcEl6aDpmYWxzZSwgc3RhdHM6cHNldWRvCTEJdGlrdgX9BDp7JTUAMFVYEDF9LCBzIdA0ZGV0YWlsOiB7dG90YWwljghlc3MyowE6FwAoX3NpemU6IDM1NywhrgRhbA0tPDIsIGdldF9zbmFwc2hvdF8FcgwgOS42LcZkb2Nrc2RiOiB7a2V5X3NraXBwZWRfY291bnQl2gxibG9jQTk5yQ0cFDh9fX0sIAFOXq0AARwAOjJDAgRhbEVFDRpVSiUQDHdhbGwNGUQxODQuN8K1c30JTi9BCU4vQQo=')
+# Plan_digest: bf5ba0fe1dccb61010c9d044c7b9f1ec74bb29a2ffdc1aa6ca867f2736c134a2
+# Binary_plan: tidb_decode_binary_plan('3QvwPArYCwoHU29ydF8xMBKNCwoMU2VsZWN0aW9uXzEzEq0KCgpTaHVmZmxlXzE4EoQJCglXaW5kb3dfMTQSrQcROmA3EsoGCg5UYWJsZVJlYWRlcl8xNhKTBAoRCRPQYW5nZVNjYW5fMTUhfseTjGyPIEEp61G4HqWXk0AwATgCQAJKDAoKCgR0ZXN0EgJ0MVKVAXIBNQw6WyIwYgEAFDU1NDgiIAUhEC0wMDAxAQUAMgEFCDUiLAUWVgEAYjcA8Gk2IiksIGtlZXAgb3JkZXI6ZmFsc2UsIHN0YXRzOnBzZXVkb2qpAnRpa3ZfdGFzazp7dGltZTowcywgbG9vcHM6MX0sIHNjYW5fZGV0YWlsOiB7dG90YWxfcHJvY2Vzc19rZXlzOiAxLCB0QhcAMF9zaXplOiAzNTcsIHQFHgRrZQEtPDIsIGdldF9zbmFwc2hvdF8FcuggOS42NMK1cywgcm9ja3NkYjoge2tleV9za2lwcGVkX2NvdW50OiAxLCBibG9jazoge2NhY2hlX2hpdBEcFDh9fX0sIAFOBF9kVq0AARwUOiA5MC41BWoJlQh3YWkRhAgyNS4JhAB0IRAMd2FsbA0zKDE4NC43wrVzfXD/EQEEAXgRCiT/ASFq3mdHgCUhMgACJAFAAVIWZGF0YTpCMAIEWhYFihA0NDAuNgWKAGwlbBwyYssBY29wXyWJTCB7bnVtOiAxLCBtYXg6IDQxNy4xBSwMcHJvYy1KKXcAXwESNtcABdUAOhnQDHJwY18RTwEMBX8UIDQwMy4zBVQUY29wcl9jNVFEcmF0aW86IDAuMDAsIGJ1aWxkBZQIX2R1BRoUbjogNi4xIRAFnWhfZGlzdHNxbF9jb25jdXJyZW5jeTogMX1wsQUuJAEYjPu8SvR5OEIkAQAnYSAcLnQxLnBrLCARDABzHQwgdHM6ZGVzY1oUBbYQMi4zNm1VnwA2GVcYeekmMQhZj2F7IAFAAVKCAXJvdwH1gGJlcigpLT5Db2x1bW4jNiBvdmVyKHBhcnRpdGlvbiBieRV1NoEAaTEuIAAIdHMgAYk0IHJvd3MgYmV0d2VlbiAJ8gB0ARUMIGFuZC4QAAApFbMENDEds1pEAjUgOskAFDxleGVjdQWsFGluZm86IC5nAQg1LCBBYzQgc291cmNlczpbVGFibJmvAF1Nagg1MjlNPklqFDNiFFNodaEBAEM9tAA1WpoAPNz31W18PTlBKci6uI0GFIkxYwwPbGUoMVcMLCAxKRFtBDQ1ZS0ALA1tDDJw7BQuCQIYOuzT2218QUJPAAAKOf0RSgQ2MjK3ABQycPwUGAE=')
+# Resource_group: default
+# Request_unit_read: 0.5106090543619791
+select pk, sk, ts, v, n from (             select pk, sk, ts, v, row_number() over (partition by pk, sk order by ts desc) as n             from t1 as of timestamp now() - interval 5 second where pk = '000000000000000000000000005548' and sk like '0000-0001-0002-0005%'         ) as tt where n <= 1 order by sk asc;
+```
+
+### Analyze
+
+I guess the reason cause generated plan so slow was cause by wait load stats timeout:
+
+https://github.com/pingcap/tidb/blob/927f3c61ee9c36e60b9c24250ae7634ebf5b73e6/pkg/planner/core/rule_collect_plan_stats.go#L69
+
+https://github.com/pingcap/tidb/blob/927f3c61ee9c36e60b9c24250ae7634ebf5b73e6/pkg/planner/core/rule_collect_plan_stats.go#L116
+
+https://github.com/pingcap/tidb/blob/c7d4c9cebb207bf5bf4dd4e532c44fe9ad753774/pkg/statistics/handle/syncload/stats_syncload.go#L94-L95
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master:  035f5a3cc0cb03b7f501212950a83f706d5edded
+

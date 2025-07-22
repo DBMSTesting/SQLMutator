@@ -1,0 +1,146 @@
+ID: 16390
+Title: COPY WITH (file_size_bytes=...) uses excessive amount of memory
+Description:
+### What happens?
+
+I try to COPY a parquet file with large number of columns (e.g., 1600), and when I use `file_bytes_size` option, the memory utilization goes up a lot more quickly, often getting OOM error.
+
+Maybe large number of columns is not a root cause, but making the problem more apparent, I have not a good grasp on that.
+
+Below is one way of triggering OOM, but looking a bit closely shows that the memory utilization is like ~3x more even if there is no OOM when `file_bytes_size` is used. The value I pick for `file_bytes_size` doesn't seem to impact the outcome.
+
+### To Reproduce
+
+To repro, I want to have a file that has 1600 columns, so I ended up writing a bash script. Let me know if there are simpler ways to do inside DuckDB.
+
+First, a bash script that generates the first `query.sql` file:
+
+Create `query.sql` that is used for generate the parquet file
+```bash
+#!/usr/bin/env bash
+
+# Usage: ./make_query.sh <NUM_COLS> <NUM_ROWS>
+# Example: ./make_query.sh 5 10  (5 columns, 10 rows)
+
+if [ $# -ne 2 ]; then
+  echo "Usage: $0 <NUM_COLS> <NUM_ROWS>"
+  exit 1
+fi
+
+NUM_COLS=$1
+NUM_ROWS=$2
+
+# Start the query
+echo "COPY(SELECT" > query.sql
+
+# Add one line per column in the SELECT list
+# We reference the same 'i' each time, so row 1 has i=1 for all columns, etc.
+for (( col=1; col<NUM_COLS; col++ ))
+do
+  echo "  i AS col_${col}," >> query.sql
+done
+
+# Last column without a trailing comma
+echo "  i AS col_${NUM_COLS}" >> query.sql
+
+# FROM clause: generate_series(1, M) as t(i) returns M rows, i=1..M
+echo "FROM generate_series(1, ${NUM_ROWS}) AS t(i)) TO '/tmp/data.parquet' ;" >> query.sql
+
+echo "Created query.sql with $NUM_COLS columns and $NUM_ROWS rows."
+
+```
+
+Run it with the following command, and you get `query.sql`
+```bash
+-- params: $NUM_COLS $NUM_ROWS
+./make_query.sh 1600 1000000
+```
+
+Now, run `query.sql` on duckdb, which generates `/tmp/data.parquet` which has 1600 columns and 1M rows:
+```bash
+duckdb -f query.sql
+```
+
+Now, on duckdb:
+```sql
+-- first, inspect the original file
+DESCRIBE SELECT * FROM read_parquet('/tmp/data.parquet');
+```
+```
+┌─────────────┬─────────────┬─────────┬─────────┬─────────┬─────────┐
+│ column_name │ column_type │  null   │   key   │ default │  extra  │
+│   varchar   │   varchar   │ varchar │ varchar │ varchar │ varchar │
+├─────────────┼─────────────┼─────────┼─────────┼─────────┼─────────┤
+│ col_1       │ BIGINT      │ YES     │ NULL    │ NULL    │ NULL    │
+│ col_2       │ BIGINT      │ YES     │ NULL    │ NULL    │ NULL    │
+│ col_3       │ BIGINT      │ YES     │ NULL    │ NULL    │ NULL    │
+│   ·         │   ·         │  ·      │  ·      │  ·      │  ·      │
+│   ·         │   ·         │  ·      │  ·      │  ·      │  ·      │
+│   ·         │   ·         │  ·      │  ·      │  ·      │  ·      │
+│ col_1598    │ BIGINT      │ YES     │ NULL    │ NULL    │ NULL    │
+│ col_1599    │ BIGINT      │ YES     │ NULL    │ NULL    │ NULL    │
+│ col_1600    │ BIGINT      │ YES     │ NULL    │ NULL    │ NULL    │
+├─────────────┴─────────────┴─────────┴─────────┴─────────┴─────────┤
+│ 1600 rows (40 shown)                                    6 columns │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+So far so good, now time to do the transformation without the setting:
+
+```sql
+COPY (SELECT * FROM read_parquet('/tmp/data.parquet'))
+TO '/tmp/data_rewrite.parquet';
+```
+
+Now, do the transformation with `file_bytes_size` fails with OOM:
+
+```sql
+COPY (SELECT * FROM read_parquet('/tmp/data.parquet'))
+TO '/tmp/data_rewrite_with_size.parquet'
+WITH (file_size_bytes '512MB');
+```
+```console
+Out of Memory Error:
+failed to allocate data of size 24.7 MiB (28.7 GiB/28.7 GiB used)
+```
+
+
+### OS:
+
+Macos
+
+### DuckDB Version:
+
+1.2
+
+### DuckDB Client:
+
+Duckdb CLI
+
+### Hardware:
+
+I have 36GM of memory, and 16 cores
+
+### Full Name:
+
+Onder KALACI
+
+### Affiliation:
+
+Crunchy Data
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

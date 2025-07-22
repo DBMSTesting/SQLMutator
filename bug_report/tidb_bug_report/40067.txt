@@ -1,0 +1,118 @@
+ID: 40067
+Title: Unexpected behavior when tracing an INSERT statement in tidb_constraint_check_in_place_pessimistic = 0
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+Disable `tidb_constraint_check_in_place_pessimistic` and trace insert statements in a pessimistic transaction. 
+
+```sql
+/* init */ drop table if exists t;
+/* init */ create table t (id int primary key, v int);
+/* init */ insert into t values (1, 1);
+
+-- Example 1: the row already exists.
+/* t1 */ set @@tidb_constraint_check_in_place_pessimistic = 0;
+/* t1 */ begin;
+/* t1:query */ trace insert into t values (1, 1);
+/* t1 */ select @@tidb_current_ts;
+
+-- Example2 (t2): the row doesn't exist before.
+/* t2 */ set @@tidb_constraint_check_in_place_pessimistic = 0;
+/* t2 */ begin;
+/* t2:query */ trace insert into t values (2, 2);
+/* t3 */ begin;
+/* t3 */ select * from t where id = 2 for update;
+```
+
+### 2. What did you expect to see? (Required)
+
+The `trace` should not affect how the inner statement executes.
+
+In example 1, transaction t1 should not check whether the key already exists. The statement should be executed successfully, and the transaction can continue.
+
+In example 2, transaction t2 should not lock row 2 so that `t3`'s select for update statement should not be blocked.
+
+### 3. What did you see instead (Required)
+
+It seems the execution of the statement goes wrong. It still acquires the pessimistic lock, and when there is duplicated entry, the transaction will be aborted, which won't happen in a normal transaction when duplicated entry is found.
+
+```sql
+/* init */ drop table if exists t;
+-- init >> 0 rows affected
+/* init */ create table t (id int primary key, v int);
+-- init >> 0 rows affected
+/* init */ insert into t values (1, 1);
+-- init >> 1 rows affected
+/* t1 */ set @@tidb_constraint_check_in_place_pessimistic = 0;
+-- t1 >> 0 rows affected
+/* t1 */ begin;
+-- t1 >> 0 rows affected
+/* t1:query */ trace insert into t values (1, 1);
+-- t1 >> +-----------------------------------------------------------------------+-----------------+------------+
+-- t1    |                               operation                               |     startTS     |  duration  |
+-- t1    +-----------------------------------------------------------------------+-----------------+------------+
+-- t1    | trace                                                                 | 08:32:00.059508 | 1.757244ms |
+-- t1    |   └─session.ExecuteStmt                                               | 08:32:00.059518 | 1.73432ms  |
+-- t1    |     ├─executor.Compile                                                | 08:32:00.059532 | 44.37µs    |
+-- t1    |     └─session.runStmt                                                 | 08:32:00.059603 | 1.583314ms |
+-- t1    |       ├─executor.handleNoDelayExecutor                                | 08:32:00.059628 | 267.655µs  |
+-- t1    |       │ └─*executor.InsertExec.Next                                   | 08:32:00.059632 | 236.357µs  |
+-- t1    |       │   └─table.AddRecord                                           | 08:32:00.059649 | 121.515µs  |
+-- t1    |       ├─regionRequest.SendReqCtx                                      | 08:32:00.059931 | 810.584µs  |
+-- t1    |       │ └─rpcClient.SendRequest, region ID: 12, type: PessimisticLock | 08:32:00.059944 | 782.706µs  |
+-- t1    |       │   └─tikv.RPC                                                  | 08:32:00.059946 | 420.315µs  |
+-- t1    |       │     └─tikv.Wait                                               | 08:32:00.059946 | 26.94µs    |
+-- t1    |       │       └─tikv.GetSnapshot                                      | 08:32:00.059946 | 26.94µs    |
+-- t1    |       └─session.RollbackTxn                                           | 08:32:00.061157 | 8.046µs    |
+-- t1    +-----------------------------------------------------------------------+-----------------+------------+
+/* t1 */ select @@tidb_current_ts;
+-- t1 >> +-------------------+
+-- t1    | @@tidb_current_ts |
+-- t1    +-------------------+
+-- t1    |                 0 |
+-- t1    +-------------------+
+/* t2 */ set @@tidb_constraint_check_in_place_pessimistic = 0;
+-- t2 >> 0 rows affected
+/* t2 */ begin;
+-- t2 >> 0 rows affected
+/* t2:query */ trace insert into t values (2, 2);
+-- t2 >> +-----------------------------------------------------------------------+-----------------+------------+
+-- t2    |                               operation                               |     startTS     |  duration  |
+-- t2    +-----------------------------------------------------------------------+-----------------+------------+
+-- t2    | trace                                                                 | 08:32:00.064759 | 1.106161ms |
+-- t2    |   └─session.ExecuteStmt                                               | 08:32:00.064762 | 1.08969ms  |
+-- t2    |     ├─executor.Compile                                                | 08:32:00.064775 | 38.061µs   |
+-- t2    |     └─session.runStmt                                                 | 08:32:00.064828 | 999.8µs    |
+-- t2    |       ├─executor.handleNoDelayExecutor                                | 08:32:00.064848 | 114.082µs  |
+-- t2    |       │ └─*executor.InsertExec.Next                                   | 08:32:00.064852 | 96.569µs   |
+-- t2    |       │   └─table.AddRecord                                           | 08:32:00.064866 | 25.621µs   |
+-- t2    |       └─regionRequest.SendReqCtx                                      | 08:32:00.065001 | 765.244µs  |
+-- t2    |         └─rpcClient.SendRequest, region ID: 12, type: PessimisticLock | 08:32:00.065013 | 732.777µs  |
+-- t2    |           └─tikv.RPC                                                  | 08:32:00.065014 | 324.323µs  |
+-- t2    |             └─tikv.Wait                                               | 08:32:00.065014 | 46.184µs   |
+-- t2    |               └─tikv.GetSnapshot                                      | 08:32:00.065014 | 46.184µs   |
+-- t2    +-----------------------------------------------------------------------+-----------------+------------+
+/* t3 */ begin;
+-- t3 >> 0 rows affected
+/* t3 */ select * from t where id = 2 for update;
+-- t3 >> blocked
+```
+
+In example 1, the insert statement performs the pessimistic lock operation and the execution is finally failed. It makes things more weird that it then aborts the transaction, and leaves following log:
+
+```
+[2022/12/20 09:33:50.468 +00:00] [INFO] [adapter.go:942] ["Transaction abort for the safety of lazy uniqueness check. Note this may not be a uniqueness violation."] [conn=9021866739855524417] [error="[kv:1062]Duplicate entry '1' for key 't.PRIMARY'"] [statement="insert into t values (1, 1)"] [conn=9021866739855524417] [txnStartTS=438181253723979791] [forUpdateTS=438181253723979792]
+[2022/12/20 09:33:50.468 +00:00] [INFO] [tidb.go:271] ["rollbackTxn called due to ddl/autocommit failure"]
+[2022/12/20 09:33:50.468 +00:00] [WARN] [session.go:2215] ["run statement failed"] [conn=9021866739855524417] [schemaVersion=206] [error="[executor:8147]transaction aborted because lazy uniqueness check is enabled and an error occurred: [kv:1062]Duplicate entry '1' for key 't.PRIMARY'"] [session="{\n  \"currDBName\": \"test\",\n  \"id\": 9021866739855524417,\n  \"status\": 2,\n  \"strictMode\": true,\n  \"user\": {\n    \"Username\": \"root\",\n    \"Hostname\": \"127.0.0.1\",\n    \"CurrentUser\": false,\n    \"AuthUsername\": \"root\",\n    \"AuthHostname\": \"%\"\n  }\n}"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+Nightly at 2022-12-19, created by tiup playground.
+
+TiDB: f150d376517e126b6ca2396f423e1709ed9e151c
+TiKV: 416f7b7504a2766edb2c7b7b4a5b8c6e24485440

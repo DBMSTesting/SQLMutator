@@ -1,0 +1,84 @@
+ID: 21547
+Title: cannot use index if the type of prepare parameter does not match the column's
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```sql
+create table t1(a int, b int, primary key (a, b));
+create table t2(a int, b int, key (a));
+PREPARE stmt1 FROM 'SELECT a FROM t1 WHERE a = ?';
+PREPARE stmt2 FROM 'SELECT a FROM t2 WHERE a = ?';
+SET @pc = '123';
+```
+
+### 2. What did you expect to see? (Required)
+
+Use range scan.
+```sql
+mysql> explain SELECT a FROM t1 WHERE a = '321';
++--------------------------+---------+-----------+---------------+-------------------------------------------------+
+| id                       | estRows | task      | access object | operator info                                   |
++--------------------------+---------+-----------+---------------+-------------------------------------------------+
+| Projection_4             | 10.00   | root      |               | test.t1.a                                       |
+| └─TableReader_6          | 10.00   | root      |               | data:TableRangeScan_5                           |
+|   └─TableRangeScan_5     | 10.00   | cop[tikv] | table:t1      | range:[321,321], keep order:false, stats:pseudo |
++--------------------------+---------+-----------+---------------+-------------------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql> explain SELECT a FROM t2 WHERE a = '321';
++------------------------+---------+-----------+----------------------+-------------------------------------------------+
+| id                     | estRows | task      | access object        | operator info                                   |
++------------------------+---------+-----------+----------------------+-------------------------------------------------+
+| IndexReader_6          | 10.00   | root      |                      | index:IndexRangeScan_5                          |
+| └─IndexRangeScan_5     | 10.00   | cop[tikv] | table:t2, index:a(a) | range:[321,321], keep order:false, stats:pseudo |
++------------------------+---------+-----------+----------------------+-------------------------------------------------+
+2 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+Use full scan.
+```sql
+mysql> EXECUTE stmt1 USING @pc;
+Empty set (0.00 sec)
+
+mysql> explain for connection 2199023255557;
++---------------------------+----------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------+--------------------------------+--------+------+
+| id                        | estRows  | actRows | task      | access object | execution info                                                                                                                   | operator info                  | memory | disk |
++---------------------------+----------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------+--------------------------------+--------+------+
+| Projection_4              | 8000.00  | 0       | root      |               | time:218.9µs, loops:1, Concurrency:5                                                                                             | test.t1.a                      | N/A    | N/A  |
+| └─TableReader_7           | 8000.00  | 0       | root      |               | time:186.1µs, loops:1, cop_task: {num: 1, max: 114.7µs, proc_keys: 0, rpc_num: 1, rpc_time: 86µs, copr_cache_hit_ratio: 0.00}    | data:Selection_6               | N/A    | N/A  |
+|   └─Selection_6           | 8000.00  | 0       | cop[tikv] |               | tikv_task:{time:0s, loops:0}                                                                                                     | eq(cast(test.t1.a), 123)       | N/A    | N/A  |
+|     └─TableFullScan_5     | 10000.00 | 0       | cop[tikv] | table:t1      | tikv_task:{time:0s, loops:0}                                                                                                     | keep order:false, stats:pseudo | N/A    | N/A  |
++---------------------------+----------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------------+--------------------------------+--------+------+
+4 rows in set (0.00 sec)
+
+mysql> EXECUTE stmt2 USING @pc;
+Empty set (0.00 sec)
+
+mysql> explain for connection 2199023255557;
++-------------------------+----------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------------------------+--------------------------------+--------+------+
+| id                      | estRows  | actRows | task      | access object        | execution info                                                                                                                   | operator info                  | memory | disk |
++-------------------------+----------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------------------------+--------------------------------+--------+------+
+| IndexReader_10          | 8000.00  | 0       | root      |                      | time:149.3µs, loops:1, cop_task: {num: 1, max: 100.5µs, proc_keys: 0, rpc_num: 1, rpc_time: 77µs, copr_cache_hit_ratio: 0.00}    | index:Selection_9              | N/A    | N/A  |
+| └─Selection_9           | 8000.00  | 0       | cop[tikv] |                      | tikv_task:{time:0s, loops:0}                                                                                                     | eq(cast(test.t2.a), 123)       | N/A    | N/A  |
+|   └─IndexFullScan_8     | 10000.00 | 0       | cop[tikv] | table:t2, index:a(a) | tikv_task:{time:0s, loops:0}                                                                                                     | keep order:false, stats:pseudo | N/A    | N/A  |
++-------------------------+----------+---------+-----------+----------------------+----------------------------------------------------------------------------------------------------------------------------------+--------------------------------+--------+------+
+3 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+* commit 77572f873 (HEAD -> master, upstream/master, upstream/HEAD)
+| Author: Chengpeng Yan <41809508+Reminiscent@users.noreply.github.com>
+| Date:   Tue Dec 8 10:54:24 2020 +0800
+```

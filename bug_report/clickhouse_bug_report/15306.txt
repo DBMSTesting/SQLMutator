@@ -1,0 +1,89 @@
+ID: 15306
+Title: Issue with using arrayEnumerate with Clickhouse version 20.9.2.20 
+Description:
+We encountered a problem while doing update from 20.5.3.27 to version 20.9.2.20 on Clickhouse.
+We made materialized view:
+Example with arrayEnumerate:
+CREATE MATERIALIZED VIEW case.view_mv_local
+(
+    `event_time` DateTime,
+    `tenant_id` UInt32,
+    `case_id` UInt8,
+    `partner_id` UInt16
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toStartOfDay(event_time)
+ORDER BY (event_time,
+ tenant_id,
+ case_id,
+ partner_id)
+TTL event_time + toIntervalDay(7)
+SETTINGS index_granularity = 8192 AS
+SELECT 
+    toStartOfHour(event_time) AS event_time,
+    tenant_id,
+    case_id,
+    partner_ids[num] AS partner_id
+FROM case.view_local
+ARRAY JOIN arrayEnumerate(partner_ids) AS num
+GROUP BY 
+    event_time,
+    tenant_id,
+    case_id,
+    partner_id;
+
+After insert of data in Clickhouse we get this error:
+err:  clickhouse: Code: 8, e.displayText() = DB::Exception: Cannot find column session_id in source stream: while pushing to view case.view_mv_local (version 20.9.2.20 (official build))
+
+We have column session_id in table case.view_local but it wasn't mentioned in MV. This worked well until we did update of Clickhouse on our system. We realised that we have problem with (ARRAY JOIN arrayEnumerate(partner_ids) AS num). When we dont use it on newest version on Clickhouse and just put [1] for arrays, everything starts to work fine. 
+
+Example with [1]:
+CREATE MATERIALIZED VIEW case.view_mv_local
+(
+    `event_time` DateTime,
+    `tenant_id` UInt32,
+    `case_id` UInt8,
+    `partner_id` UInt16
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toStartOfDay(event_time)
+ORDER BY (event_time,
+ tenant_id,
+ case_id,
+ partner_id)
+TTL event_time + toIntervalDay(7)
+SETTINGS index_granularity = 8192 AS
+SELECT 
+    toStartOfHour(event_time) AS event_time,
+    tenant_id,
+    case_id,
+    partner_ids[1] AS partner_id
+FROM case.view_local
+GROUP BY 
+    event_time,
+    tenant_id,
+    case_id,
+    partner_id;
+
+source table:
+CREATE TABLE case.view_local
+(
+    `session_id` FixedString(11) CODEC(ZSTD(1)),
+    `tenant_id` UInt32 DEFAULT 0,
+    `case_id` UInt8 DEFAULT 0,
+    `partner_ids` Array(UInt16),
+    `event_time` DateTime
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(event_time)
+ORDER BY (tenant_id,
+ event_time)
+TTL event_time + toIntervalDay(60)
+SETTINGS index_granularity = 8192;
+
+Insert query:
+INSERT INTO case.view_local
+(session_id, tenant_id, case_id, partner_ids, event_time)
+VALUES('SsO12":{fvc', 559041, 5512, [12,13,54,40], '2020-09-25 11:00:55');
+
+Can you please tell me what could be the problem on Clickhouse in version 20.9.2.20 for arrayEnumerate?

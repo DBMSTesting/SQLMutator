@@ -1,0 +1,223 @@
+ID: 24090
+Title: Users change causes ClickHouse to crash.
+Description:
+Very peculiar behaviour with ContextAccess,ContextAccessParams and IPAddress implementation in particular.
+Can't reproduce locally (ASAN build included) but very reproducible in production under the load.
+
+Specific scenario:
+
+Non-default distributed user's config gets updated in zk, and ClickHouse tries to apply this change and crashes.
+
+There is a core dump which reveals a few interesting things.
+
+The first thread where the crash is happening:
+
+```
+Thread 1 (Thread 0x7fbac0228700 (LWP 395)):
+#0  0x000000000fda5fe3 in Poco::Net::IPAddress::family (this=<optimized out>) at ../contrib/poco/Foundation/include/Poco/AtomicCounter.h:302
+#1  0x000000000fda76fe in Poco::Net::IPAddress::operator= (this=this@entry=0x7fbac02236d0, addr=...) at ../contrib/poco/Net/src/IPAddress.cpp:227
+#2  0x000000000ebe1080 in DB::QuotaCache::getEnabledQuota (this=0x7fbbdc1c64c0, user_id=..., user_name=..., enabled_roles=..., client_address=..., client_key=...) at ../src/Access/QuotaCache.cpp:182
+#3  0x000000000eb5dc29 in DB::AccessControlManager::getEnabledQuota (this=<optimized out>, user_id=..., user_name=..., enabled_roles=..., address=..., custom_quota_key=...) at ../contrib/libcxx/include/memory:2586
+#4  0x000000000eb8a338 in DB::ContextAccess::setRolesInfo (this=this@entry=0x7fb4030b2a00, roles_info_=...) at ../contrib/libcxx/include/memory:3826
+#5  0x000000000eb8ab8e in DB::ContextAccess::setUser (this=0x7fb4030b2a00, user_=...) at ../contrib/libcxx/include/memory:3826
+#6  0x000000000eb8bd8a in DB::ContextAccess::<lambda(const UUID&, const AccessEntityPtr&)>::operator() (__closure=0x7faa03a2b3b8, entity=...) at ../src/Access/ContextAccess.cpp:191
+#7  std::__1::__invoke<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>&, const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&> (__f=...) at ../contrib/libcxx/include/type_traits:3519
+#8  std::__1::__invoke_void_return_wrapper<void>::__call<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>&, const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&> () at ../contrib/libcxx/include/__functional_base:348
+#9  std::__1::__function::__alloc_func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator() (__arg#1=..., __arg#0=..., this=0x7faa03a2b3b8) at ../contrib/libcxx/include/functional:1540
+#10 std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator()(const StrongTypedef<DB::UInt128, DB::UUIDTag> &, const std::__1::shared_ptr<DB::IAccessEntity const> &) (this=0x7faa03a2b3b0, __arg#0=..., __arg#1=...) at ../contrib/libcxx/include/functional:1714
+#11 0x000000000ebcb4e7 in std::__1::__function::__value_func<void (StrongTypedef<DB::UInt128, DB::UUIDTag> const&, std::__1::shared_ptr<DB::IAccessEntity const> const&)>::operator()(StrongTypedef<DB::UInt128, DB::UUIDTag> const&, std::__1::shared_ptr<DB::IAccessEntity const> const&) const (__args#1=..., __args#0=..., this=0x7faa03a2b3b0) at ../contrib/libcxx/include/functional:2471
+#12 std::__1::function<void (StrongTypedef<DB::UInt128, DB::UUIDTag> const&, std::__1::shared_ptr<DB::IAccessEntity const> const&)>::operator()(StrongTypedef<DB::UInt128, DB::UUIDTag> const&, std::__1::shared_ptr<DB::IAccessEntity const> const&) const (__arg#1=..., __arg#0=..., this=0x7faa03a2b3b0) at ../contrib/libcxx/include/functional:2473
+#13 DB::IAccessStorage::notify(std::__1::vector<std::__1::tuple<std::__1::function<void (StrongTypedef<DB::UInt128, DB::UUIDTag> const&, std::__1::shared_ptr<DB::IAccessEntity const> const&)>, StrongTypedef<DB::UInt128, DB::UUIDTag>, std::__1::shared_ptr<DB::IAccessEntity const> >, std::__1::allocator<std::__1::tuple<std::__1::function<void (StrongTypedef<DB::UInt128, DB::UUIDTag> const&, std::__1::shared_ptr<DB::IAccessEntity const> const&)>, StrongTypedef<DB::UInt128, DB::UUIDTag>, std::__1::shared_ptr<DB::IAccessEntity const> > > > const&) (notifications=...) at ../src/Access/IAccessStorage.cpp:411
+#14 0x000000000ebd389f in DB::MemoryAccessStorage::<lambda()>::operator() (__closure=<synthetic pointer>) at ../src/Access/MemoryAccessStorage.cpp:195
+#15 ext::basic_scope_guard<DB::MemoryAccessStorage::setAll(const std::__1::vector<std::__1::pair<StrongTypedef<DB::UInt128, DB::UUIDTag>, std::__1::shared_ptr<const DB::IAccessEntity> > >&)::<lambda()> >::invoke (this=<synthetic pointer>) at ../base/common/../ext/scope_guard.h:97
+#16 ext::basic_scope_guard<DB::MemoryAccessStorage::setAll(const std::__1::vector<std::__1::pair<StrongTypedef<DB::UInt128, DB::UUIDTag>, std::__1::shared_ptr<const DB::IAccessEntity> > >&)::<lambda()> >::~basic_scope_guard (this=<synthetic pointer>, __in_chrg=<optimized out>) at ../base/common/../ext/scope_guard.h:47
+#17 DB::MemoryAccessStorage::setAll (this=this@entry=0x7fbbdc03f6c8, all_entities=...) at ../src/Access/MemoryAccessStorage.cpp:195
+#18 0x000000000ec4694b in DB::UsersConfigAccessStorage::parseFromConfig (this=0x7fbbdc03f6a0, config=...) at ../src/Access/UsersConfigAccessStorage.cpp:511
+#19 0x000000000ec47c29 in DB::UsersConfigAccessStorage::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>::operator() (__closure=0x7fbbdc01cb88, __closure=0x7fbbdc01cb88, new_config=...) at ../contrib/poco/Foundation/include/Poco/AutoPtr.h:229
+#20 std::__1::__invoke<DB::UsersConfigAccessStorage::load(const String&, const String&, const String&, const GetZooKeeper&)::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>&, Poco::AutoPtr<Poco::Util::AbstractConfiguration> > (__f=...) at ../contrib/libcxx/include/type_traits:3519
+#21 std::__1::__invoke_void_return_wrapper<void>::__call<DB::UsersConfigAccessStorage::load(const String&, const String&, const String&, const GetZooKeeper&)::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>&, Poco::AutoPtr<Poco::Util::AbstractConfiguration> > () at ../contrib/libcxx/include/__functional_base:348
+#22 std::__1::__function::__alloc_func<DB::UsersConfigAccessStorage::load(const String&, const String&, const String&, const GetZooKeeper&)::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>, std::__1::allocator<DB::UsersConfigAccessStorage::load(const String&, const String&, const String&, const GetZooKeeper&)::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)> >, void(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>::operator() (__arg#0=..., this=0x7fbbdc01cb88) at ../contrib/libcxx/include/functional:1540
+#23 std::__1::__function::__func<DB::UsersConfigAccessStorage::load(const String&, const String&, const String&, const GetZooKeeper&)::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>, std::__1::allocator<DB::UsersConfigAccessStorage::load(const String&, const String&, const String&, const GetZooKeeper&)::<lambda(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)> >, void(Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>::operator()(Poco::AutoPtr<Poco::Util::AbstractConfiguration> &&) (this=0x7fbbdc01cb80, __arg#0=...) at ../contrib/libcxx/include/functional:1714
+#24 0x000000000fb1a8c4 in std::__1::__function::__value_func<void (Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>::operator()(Poco::AutoPtr<Poco::Util::AbstractConfiguration>&&) const (__args#0=..., this=0x7fbbdc01cb80) at ../contrib/libcxx/include/functional:2471
+#25 std::__1::function<void (Poco::AutoPtr<Poco::Util::AbstractConfiguration>)>::operator()(Poco::AutoPtr<Poco::Util::AbstractConfiguration>) const (__arg#0=..., this=0x7fbbdc01cb80) at ../contrib/libcxx/include/functional:2473
+#26 DB::ConfigReloader::reloadIfNewer (this=0x7fbbdc01ca80, force=<optimized out>, throw_on_error=<optimized out>, fallback_to_preprocessed=<optimized out>) at ../src/Common/Config/ConfigReloader.cpp:134
+#27 0x000000000fb1d457 in DB::ConfigReloader::run (this=0x7fbbdc01ca80) at ../src/Common/Config/ConfigReloader.cpp:69
+#28 0x000000000fb1d770 in std::__1::__invoke_constexpr<void (DB::ConfigReloader::* const&)(), DB::ConfigReloader* const&, , void>(void (DB::ConfigReloader::* const&)(), DB::ConfigReloader* const&) (__a0=@0x7fbb0ec29568: 0x7fbbdc01ca80, __f=@0x7fbb0ec29558: (void (DB::ConfigReloader::*)(class DB::ConfigReloader * const)) 0xfb1d430 <DB::ConfigReloader::run()>) at ../contrib/libcxx/include/type_traits:3466
+#29 std::__1::__apply_tuple_impl<void (DB::ConfigReloader::* const&)(), std::__1::tuple<DB::ConfigReloader*> const&, 0ul> (__t=..., __f=@0x7fbb0ec29558: (void (DB::ConfigReloader::*)(class DB::ConfigReloader * const)) 0xfb1d430 <DB::ConfigReloader::run()>) at ../contrib/libcxx/include/tuple:1415
+#30 std::__1::apply<void (DB::ConfigReloader::* const&)(), std::__1::tuple<DB::ConfigReloader*> const&> (__t=..., __f=@0x7fbb0ec29558: (void (DB::ConfigReloader::*)(class DB::ConfigReloader * const)) 0xfb1d430 <DB::ConfigReloader::run()>) at ../contrib/libcxx/include/tuple:1424
+#31 ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ConfigReloader::*)(), DB::ConfigReloader*>(void (DB::ConfigReloader::*&&)(), DB::ConfigReloader*&&)::{lambda()#1}::operator()() const (this=0x7fbb0ec29548) at ../src/Common/ThreadPool.h:172
+#32 0x00000000088e9b9d in std::__1::__function::__value_func<void ()>::operator()() const (this=0x7fbac0224230) at ../contrib/libcxx/include/functional:2471
+#33 std::__1::function<void ()>::operator()() const (this=0x7fbac0224230) at ../contrib/libcxx/include/functional:2473
+#34 ThreadPoolImpl<std::__1::thread>::worker (this=0x7fbbdc043800, thread_it=...) at ../src/Common/ThreadPool.cpp:243
+#35 0x00000000088e824f in ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}::operator()() const (this=<optimized out>, this=<optimized out>) at ../src/Common/ThreadPool.cpp:124
+#36 std::__1::__invoke<ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}&&, (ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}&&)...) (__f=...) at ../contrib/libcxx/include/type_traits:3519
+#37 std::__1::__thread_execute<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>&, std::__1::__tuple_indices<>) (__t=...) at ../contrib/libcxx/include/thread:273
+#38 std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}> >(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>) (__vp=0x7fbb2c3e6ba0) at ../contrib/libcxx/include/thread:284
+#39 0x00007fbbdcd7dfa3 in start_thread (arg=<optimized out>) at pthread_create.c:486
+#40 0x00007fbbdd01d4cf in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+
+```
+
+and another that does operate on the same user:
+
+```
+Thread 105 (Thread 0x7fb17221b700 (LWP 39001)):
+#0  __lll_lock_wait () at ../sysdeps/unix/sysv/linux/x86_64/lowlevellock.S:103
+#1  0x00007fbbdcd80714 in __GI___pthread_mutex_lock (mutex=mutex@entry=0x7fbbdc1c64c8) at ../nptl/pthread_mutex_lock.c:80
+#2  0x00000000088e7ace in DB::pthread_mutex_lock (arg=arg@entry=0x7fbbdc1c64c8) at ../src/Common/ThreadFuzzer.cpp:266
+#3  0x0000000010a62f59 in std::__1::__libcpp_mutex_lock (__m=__m@entry=0x7fbbdc1c64c8) at ../contrib/libcxx/include/__threading_support:322
+#4  std::__1::mutex::lock (this=this@entry=0x7fbbdc1c64c8) at ../contrib/libcxx/src/mutex.cpp:33
+#5  0x000000000ebe0f61 in std::__1::lock_guard<std::__1::mutex>::lock_guard (__m=..., this=<synthetic pointer>) at ../contrib/libcxx/include/__mutex_base:90
+#6  DB::QuotaCache::getEnabledQuota (this=0x7fbbdc1c64c0, user_id=..., user_name=..., enabled_roles=..., client_address=..., client_key=...) at ../src/Access/QuotaCache.cpp:175
+#7  0x000000000eb5dc29 in DB::AccessControlManager::getEnabledQuota (this=<optimized out>, user_id=..., user_name=..., enabled_roles=..., address=..., custom_quota_key=...) at ../contrib/libcxx/include/memory:2586
+#8  0x000000000eb8a338 in DB::ContextAccess::setRolesInfo (this=this@entry=0x7fbbbfa2c200, roles_info_=...) at ../contrib/libcxx/include/memory:3826
+#9  0x000000000eb8ab8e in DB::ContextAccess::setUser (this=0x7fbbbfa2c200, user_=...) at ../contrib/libcxx/include/memory:3826
+#10 0x000000000eb8bb72 in DB::ContextAccess::ContextAccess (this=0x7fbbbfa2c200, manager_=..., params_=...) at ../contrib/libcxx/include/optional:903
+#11 0x000000000eb6d6c6 in DB::AccessControlManager::ContextAccessCache::getContextAccess (this=0x7fbbdc021c00, params=...) at ../src/Access/AccessControlManager.cpp:65
+#12 0x000000000eb60fd4 in DB::AccessControlManager::getContextAccess (params=..., this=0x7fbbdc08cc48) at ../contrib/libcxx/include/memory:2586
+#13 DB::AccessControlManager::getContextAccess (this=this@entry=0x7fbbdc08cc48, user_id=..., current_roles=..., use_default_roles=use_default_roles@entry=true, settings=..., current_database=..., client_info=...) at ../src/Access/AccessControlManager.cpp:377
+#14 0x000000000ee0aef1 in DB::Context::setUser (this=this@entry=0x7fba65fab060, name=..., password=..., address=...) at ../contrib/libcxx/include/optional:912
+#15 0x000000000f4dd130 in DB::TCPHandler::receiveHello (this=0x7fba65fab000) at ../contrib/poco/Net/include/Poco/Net/Socket.h:596
+#16 0x000000000f4e1eb7 in DB::TCPHandler::runImpl (this=0x7fba65fab000) at ../src/Server/TCPHandler.cpp:86
+#17 0x000000000f4e33c9 in DB::TCPHandler::run (this=0x7fba65fab000) at ../src/Server/TCPHandler.cpp:1225
+#18 0x000000000fdcaa97 in Poco::Net::TCPServerConnection::start (this=this@entry=0x7fba65fab000) at ../contrib/poco/Net/src/TCPServerConnection.cpp:43
+#19 0x000000000fdcb078 in Poco::Net::TCPServerDispatcher::run (this=0x7fbbb5033f00) at ../contrib/poco/Net/src/TCPServerDispatcher.cpp:112
+#20 0x000000001039999e in Poco::PooledThread::run (this=0x7fb4f9fa6d80) at ../contrib/poco/Foundation/src/ThreadPool.cpp:199
+#21 0x0000000010396699 in Poco::ThreadImpl::runnableEntry (pThread=<optimized out>) at ../contrib/poco/Foundation/include/Poco/SharedPtr.h:401
+#22 0x00007fbbdcd7dfa3 in start_thread (arg=<optimized out>) at pthread_create.c:486
+#23 0x00007fbbdd01d4cf in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+```
+
+with the closer look at thread 1, we can follow `notify` function and it calls lambda that captures ContextAccess and the `params` in this object has a different representation of the IPAddress implementation.
+
+```
+(gdb) disassemble
+Dump of assembler code for function std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator()(const StrongTypedef<DB::UInt128, DB::UUIDTag> &, const std::__1::shared_ptr<DB::IAccessEntity const> &):
+Address range 0xeb8bd30 to 0xeb8be0e:
+   0x000000000eb8bd30 <+0>:	push   %r12
+   0x000000000eb8bd32 <+2>:	push   %rbp
+   0x000000000eb8bd33 <+3>:	push   %rbx
+   0x000000000eb8bd34 <+4>:	mov    %rdi,%rbx
+   0x000000000eb8bd37 <+7>:	sub    $0x10,%rsp
+   0x000000000eb8bd3b <+11>:	mov    (%rdx),%rax
+   0x000000000eb8bd3e <+14>:	test   %rax,%rax
+   0x000000000eb8bd41 <+17>:	je     0xeb8bd60 <std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator()(const StrongTypedef<DB::UInt128, DB::UUIDTag> &, const std::__1::shared_ptr<DB::IAccessEntity const> &)+48>
+   0x000000000eb8bd43 <+19>:	mov    0x3e8c296(%rip),%rcx        # 0x12a17fe0 <_ZTIN2DB4UserE+8>
+   0x000000000eb8bd4a <+26>:	cmp    0x3e8606f(%rip),%rcx        # 0x12a11dc0 <_ZTIN2DB13IAccessEntityE+8>
+   0x000000000eb8bd51 <+33>:	je     0xeb8bdc0 <std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator()(const StrongTypedef<DB::UInt128, DB::UUIDTag> &, const std::__1::shared_ptr<DB::IAccessEntity const> &)+144>
+   0x000000000eb8bd53 <+35>:	mov    (%rax),%rsi
+   0x000000000eb8bd56 <+38>:	mov    -0x8(%rsi),%rsi
+   0x000000000eb8bd5a <+42>:	cmp    0x8(%rsi),%rcx
+   0x000000000eb8bd5e <+46>:	je     0xeb8bdc0 <std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator()(const StrongTypedef<DB::UInt128, DB::UUIDTag> &, const std::__1::shared_ptr<DB::IAccessEntity const> &)+144>
+   0x000000000eb8bd60 <+48>:	pxor   %xmm0,%xmm0
+   0x000000000eb8bd64 <+52>:	movaps %xmm0,(%rsp)
+   0x000000000eb8bd68 <+56>:	mov    0x8(%rbx),%rax
+   0x000000000eb8bd6c <+60>:	lea    0x1c0(%rax),%rbp
+   0x000000000eb8bd73 <+67>:	mov    %rbp,%rdi
+   0x000000000eb8bd76 <+70>:	callq  0x10a62f50 <std::__1::mutex::lock()>
+   0x000000000eb8bd7b <+75>:	mov    %rsp,%r12
+   0x000000000eb8bd7e <+78>:	mov    0x8(%rbx),%rdi
+   0x000000000eb8bd82 <+82>:	mov    %r12,%rsi
+   0x000000000eb8bd85 <+85>:	callq  0xeb8a510 <DB::ContextAccess::setUser(std::__1::shared_ptr<DB::User const> const&) const>
+=> 0x000000000eb8bd8a <+90>:	mov    %rbp,%rdi
+   0x000000000eb8bd8d <+93>:	callq  0x10a62f90 <std::__1::mutex::unlock()>
+   0x000000000eb8bd92 <+98>:	mov    0x8(%rsp),%rbp
+   0x000000000eb8bd97 <+103>:	test   %rbp,%rbp
+   0x000000000eb8bd9a <+106>:	je     0xeb8bdae <std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)>, std::__1::allocator<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&)> >, void(const StrongTypedef<DB::UInt128, DB::UUIDTag>&, const std::__1::shared_ptr<const DB::IAccessEntity>&)>::operator()(const StrongTypedef<DB::UInt128, DB::UUIDTag> &, const std::__1::shared_ptr<DB::IAccessEntity const> &)+126>
+   0x000000000eb8bd9c <+108>:	mov    $0xffffffffffffffff,%rax
+   0x000000000eb8bda3 <+115>:	lock xadd %rax,0x8(%rbp)
+   0x000000000eb8bda9 <+121>:	test   %rax,%rax
+   0x000000000eb8bdac <+124>:	je     0xeb8bde0 <std::__1::__function::__func<DB::ContextAccess::ContextAccess(const DB::AccessControlManager&, const Params&)::<lambda(const UUID&, const AccessEntityPtr&--Type <RET> for more, q to quit, c to continue without paging--q
+Quit
+(gdb) x $rdi
+0x7fb75d659a60:	0x14758e00
+```
+
+the implementation vtable references Base class Poco::RefCountedObject, not the derived Poco::Net::Impl::IPv6AddressImpl, when in Thread 105 though it points to Poco::Net::Impl::IPv6AddressImpl.
+
+0x7fb75d659a60 - "mangled" object
+0x7fb4e8b5cb60 - legitimate object
+
+```
+(gdb) p *(Poco::Net::Impl::IPv6AddressImpl *) 0x7fb75d659a60
+$23 = (Poco::RefCountedObject) {
+  <Poco::Net::Impl::IPAddressImpl> = {
+    <Poco::RefCountedObject> = {
+      _vptr.RefCountedObject = 0x14758e00 <vtable for Poco::RefCountedObject+16>,
+      _counter = {
+        _counter = 1
+      }
+    }, <No data fields>},
+  members of Poco::Net::Impl::IPv6AddressImpl:
+  _addr = {
+    __in6_u = {
+      __u6_addr8 =  // hidden
+      __u6_addr16 = // hidden
+      __u6_addr32 = // hidden
+    }
+  },
+  _scope = 0
+}
+(gdb) p *(Poco::Net::Impl::IPv6AddressImpl *) 0x7fb4e8b5cb60
+$24 = (Poco::Net::Impl::IPv6AddressImpl) {
+  <Poco::Net::Impl::IPAddressImpl> = {
+    <Poco::RefCountedObject> = {
+      _vptr.RefCountedObject = 0x12b0e220 <vtable for Poco::Net::Impl::IPv6AddressImpl+16>,
+      _counter = {
+        _counter = 1
+      }
+    }, <No data fields>},
+  members of Poco::Net::Impl::IPv6AddressImpl:
+  _addr = {
+    __in6_u = {
+      __u6_addr8 =  // hidden
+      __u6_addr16 = // hidden
+      __u6_addr32 = // hidden
+    }
+  },
+  _scope = 0
+}
+```
+
+since IPAddress._pImpl is `Poco::Net::Impl::IPAddressImpl`, let's cast to this type to see the difference:
+
+```
+
+(gdb) p *(Poco::Net::Impl::IPAddressImpl *) 0x7fb75d659a60
+$25 = (Poco::RefCountedObject) {
+  _vptr.RefCountedObject = 0x14758e00 < +16>,
+  _counter = {
+    _counter = 1
+  }
+}
+
+(gdb) p *(Poco::Net::Impl::IPAddressImpl *) 0x7fb4e8b5cb60
+$26 = (Poco::Net::Impl::IPv6AddressImpl) {
+  <Poco::Net::Impl::IPAddressImpl> = {
+    <Poco::RefCountedObject> = {
+      _vptr.RefCountedObject = 0x12b0e220 <vtable for Poco::Net::Impl::IPv6AddressImpl+16>,
+      _counter = {
+        _counter = 1
+      }
+    }, <No data fields>},
+  members of Poco::Net::Impl::IPv6AddressImpl:
+  _addr = {
+    __in6_u = {
+      __u6_addr8 =  // hidden
+      __u6_addr16 = // hidden
+      __u6_addr32 = // hidden
+    }
+  },
+  _scope = 0
+}
+```
+
+So when it comes to an assignment operator https://github.com/ClickHouse/ClickHouse/blob/3abc891107ac1980cb5b23803ad58ebbda487b52/src/Access/QuotaCache.cpp#L192
+
+it essentially tries to run `pImpl()->family();` and crashes. 
+
+Version:
+
+Our own GCC-9.3.0 build on top of 20.8 ([March 1st](https://github.com/ClickHouse/ClickHouse/tree/bb2d03af3ec8e5592e292a2b8ae57b8b7714db98)) with minor changes that don't affect ContextAccess.
+
+@vitlibar @alexey-milovidov any help appreciated

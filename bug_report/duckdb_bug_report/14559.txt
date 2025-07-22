@@ -1,0 +1,47 @@
+ID: 14559
+Title: Out-Of-Core Updates & Deletes
+Description:
+This PR makes it possible to run `UPDATE` and `DELETE` statements where the changeset introduced by the `UPDATE` or `DELETE` exceeds memory. This can happen when running an `UPDATE` that updates a very large table, or by running a `DELETE` that deletes many non-contiguous rows (as contiguous deletes, such as what happens when running `DELETE FROM tbl`, use far less memory as per https://github.com/duckdb/duckdb/pull/11470).
+
+The way this works is that the `UndoBuffer`, which previously used an `ArenaAllocator`, is now modified to use buffer-managed blocks.
+
+* For regular operations, that is actually rather straightforward. When creating new entries we append to the `UndoBuffer` - only requiring us to pin the final block.
+* During a commit, rollback or clean-up of a transaction we do a full scan of the `UndoBuffer`. These scans only require us to pin individual blocks.
+
+The main challenge is in `UPDATE` statements.
+
+#### UpdateInfo rework
+
+The reason updates are challenging is that the `UPDATE` statements internally use a linked list, which was previously built using pointers. This PR reworks the `UpdateInfo` struct to instead hold `UndoBufferPointer` entries - which are essentially a reference to an undo-buffer allocated block plus an offset. The `UpdateSegment` class is reworked so that we correctly pin and unpin the `UpdateInfo` entries when we need to traverse the linked list.
+
+The `tuple_data` and `tuples` arrays, that specify which values are updated for which rows, are also no longer pointers (as these pointers can become invalidated if a buffer-managed block is evicted). Instead, we enforce that an `UpdateInfo` struct is always allocated in the following manner:
+
+```
+[UpdateInfo][TUPLES (sel_t[max])][DATA (T[max])]
+```
+
+We can then access the tuples and the data by looking forward past the struct to where these arrays reside.
+ 
+#### Performance
+
+My main consideration with this change was performance - as we no longer "just" follow pointers but instead need to pin and unpin whenever we use updates. However, after profiling, this does not seem to be a bottleneck. This is likely because the `UpdateInfo` already operates on a per-vector level, so we are only introducing an additional pin/unpin for every vector. Since these are designed to be lightweight when the data fits in memory, the performance impact in this scenario is minimal. In fact, because of our previous change of making the `UpdateInfo` always reside in contiguous memory, performance seems to have improved slightly.
+
+
+```sql
+CREATE TABLE integers(i INT);
+INSERT INTO integers FROM range(10000000);
+UPDATE integers SET i=i+1;
+# old: 0.23s, new: 0.19s
+
+# read from updated values
+BEGIN;
+UPDATE integers SET i=i+1;
+FROM integers;
+# old: 0.015s~, new: 0.015s~
+
+# update lineitem
+CALL dbgen(sf=1);
+UPDATE lineitem SET l_comment=concat(l_comment, l_comment);
+# old: 1.0s, new: 0.97s
+```
+

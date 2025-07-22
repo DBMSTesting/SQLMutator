@@ -1,0 +1,88 @@
+ID: 26758
+Title: query result is incorrect  
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```sql
+create table t1 (i1 integer, c1 char);
+insert into t1 values (2, 'a'), (1, 'b'), (3, 'c'), (0, null);
+create table t2 (i2 integer, c2 char, f2 float);
+insert into t2 values (0, 'c', null), (1, null, 0.1), (3, 'b', 0.01), (2, 'q', 0.12), (null, 'a', -0.1), (null, null, null);
+SELECT * FROM t2 AS _tmp_1 WHERE _tmp_1.i2=((SELECT count(1) FROM t1 AS _tmp_2 WHERE _tmp_2.i1=_tmp_1.i2));
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+```sql
+MySQL > SELECT * FROM t2 AS _tmp_1 WHERE _tmp_1.i2=((SELECT count(1) FROM t1 AS _tmp_2 WHERE _tmp_2.i1=_tmp_1.i2));
+                             ->
++----+--------+-----+
+| i2 | c2     | f2  |
++----+--------+-----+
+| 1  | <null> | 0.1 |
++----+--------+-----+
+
+```
+### 3. What did you see instead (Required)
+release-5.0
+```sql
+| Release Version: v5.0.4
+Edition: Community
+Git Commit Hash: 48c4b91d5d7c8f4aca68fffcc9f320c9a6e4cce2
+Git Branch: heads/refs/tags/v5.0.4
+UTC Build Time: 2021-07-26 13:36:17
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.55 sec)
+
+mysql> SELECT * FROM t2 AS _tmp_1 WHERE _tmp_1.i2=((SELECT count(1) FROM t1 AS _tmp_2 WHERE _tmp_2.i1=_tmp_1.i2));
++------+------+------+
+| i2   | c2   | f2   |
++------+------+------+
+|    2 | q    | 0.12 |
+|    2 | q    | 0.12 |
+|    0 | c    | NULL |
+|    0 | c    | NULL |
++------+------+------+
+4 rows in set (0.07 sec)
+```
+
+master(3642e8768768) && release-5.1  && release-4.0 (v4.0.14)
+```sql
+MySQL root@127.0.0.1:test> SELECT * FROM t2 AS _tmp_1 WHERE _tmp_1.i2=((SELECT count(1) FROM t1 AS _tmp_2 WHERE _tmp_2.i1=_tmp_1.i2));
++----+--------+--------+
+| i2 | c2     | f2     |
++----+--------+--------+
+| 0  | c      | <null> |
+| 1  | <null> | 0.1    |
++----+--------+--------+
+MySQL root@127.0.0.1:test> explain analyze SELECT * FROM t2 AS _tmp_1 WHERE _tmp_1.i2=((SELECT count(1) FROM t1 AS _tmp_2 WHERE _tmp_2.i1=_tmp_1.i2));
++--------------------------------+----------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+-----------+---------+
+| id                             | estRows  | actRows | task      | access object | execution info                                                                                                                                                                                                                                                                                                                       | operator info                                                                         | memory    | disk    |
++--------------------------------+----------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+-----------+---------+
+| Projection_14                  | 8000.00  | 2       | root      |               | time:422.8µs, loops:2, Concurrency:5                                                                                                                                                                                                                                                                                                 | test.t2.i2, test.t2.c2, test.t2.f2                                                    | 13.9 KB   | N/A     |
+| └─Selection_15                 | 8000.00  | 2       | root      |               | time:381.5µs, loops:2                                                                                                                                                                                                                                                                                                                | eq(test.t2.i2, ifnull(Column#8, 0))                                                   | 1.57 KB   | N/A     |
+|   └─HashJoin_16                | 10000.00 | 6       | root      |               | time:361.7µs, loops:3, build_hash_table:{total:301.5µs, fetch:291.7µs, build:9.83µs}, probe:{concurrency:5, total:1.62ms, max:333.2µs, probe:6.32µs, fetch:1.62ms}                                                                                                                                                                   | left outer join, equal:[eq(test.t2.i2, test.t1.i1)]                                   | 16.5 KB   | 0 Bytes |
+|     ├─Selection_20(Build)      | 6393.60  | 1       | root      |               | time:176.4µs, loops:2                                                                                                                                                                                                                                                                                                                | eq(test.t1.i1, ifnull(Column#8, 0))                                                   | 744 Bytes | N/A     |
+|     │ └─HashAgg_23             | 7992.00  | 4       | root      |               | time:147.9µs, loops:5, partial_worker:{wall_time:94.027µs, concurrency:5, task_num:1, tot_wait:136.918µs, tot_exec:13.116µs, tot_time:156.019µs, max:43.697µs, p95:43.697µs}, final_worker:{wall_time:178.255µs, concurrency:5, task_num:3, tot_wait:234.11µs, tot_exec:120.523µs, tot_time:358.682µs, max:116.905µs, p95:116.905µs} | group by:test.t1.i1, funcs:count(1)->Column#8, funcs:firstrow(test.t1.i1)->test.t1.i1 | 7.73 KB   | N/A     |
+|     │   └─TableReader_30       | 9990.00  | 4       | root      |               | time:24.7µs, loops:2, cop_task: {num: 1, max: 165.6µs, proc_keys: 0, rpc_num: 1, rpc_time: 154.7µs, copr_cache_hit_ratio: 0.00}                                                                                                                                                                                                      | data:Selection_29                                                                     | 173 Bytes | N/A     |
+|     │     └─Selection_29       | 9990.00  | 4       | cop[tikv] |               | tikv_task:{time:4.35µs, loops:4}                                                                                                                                                                                                                                                                                                     | not(isnull(test.t1.i1))                                                               | N/A       | N/A     |
+|     │       └─TableFullScan_28 | 10000.00 | 4       | cop[tikv] | table:_tmp_2  | tikv_task:{time:1.19µs, loops:4}                                                                                                                                                                                                                                                                                                     | keep order:false, stats:pseudo                                                        | N/A       | N/A     |
+|     └─TableReader_19(Probe)    | 10000.00 | 6       | root      |               | time:89.6µs, loops:2, cop_task: {num: 1, max: 96.2µs, proc_keys: 0, rpc_num: 1, rpc_time: 82.6µs, copr_cache_hit_ratio: 0.00}                                                                                                                                                                                                        | data:TableFullScan_18                                                                 | 218 Bytes | N/A     |
+|       └─TableFullScan_18       | 10000.00 | 6       | cop[tikv] | table:_tmp_1  | tikv_task:{time:9.19µs, loops:6}                                                                                                                                                                                                                                                                                                     | keep order:false, stats:pseudo                                                        | N/A       | N/A     |
++--------------------------------+----------+---------+-----------+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+-----------+---------+
+
+10 rows in set
+
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

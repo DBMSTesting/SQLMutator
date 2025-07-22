@@ -1,0 +1,65 @@
+ID: 50890
+Title: add index ddl hang after upgrade cluster and resume ddl jobs
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+1. deploy a 7.1.2 cluster 
+2. `set global tidb_ddl_enable_fast_reorg=1;  set global tidb_enable_dist_task=1`
+3. do add index 
+4. duraing add index, upgrade the cluster to nightly (c76fe3ff97d89d77330)
+5. check the add index ddl jobs
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+ddl job will continue and add index success
+
+### 3. What did you see instead (Required)
+add index jobs hang 
+```sql
+
+MySQL [(none)]> select now();
++---------------------+
+| now()               |
++---------------------+
+| 2024-02-01 15:36:55 |
++---------------------+
+1 row in set (0.00 sec)
+
+MySQL [(none)]> admin show ddl jobs;
++--------+---------+-----------------------+----------------------------------+----------------------+-----------+----------+-----------+---------------------+---------------------+---------------------+----------+
+| JOB_ID | DB_NAME | TABLE_NAME            | JOB_TYPE                         | SCHEMA_STATE         | SCHEMA_ID | TABLE_ID | ROW_COUNT | CREATE_TIME         | START_TIME          | END_TIME            | STATE    |
++--------+---------+-----------------------+----------------------------------+----------------------+-----------+----------+-----------+---------------------+---------------------+---------------------+----------+
+|    254 | sbtest1 | sbtest2               | add index /* ingest */           | write reorganization |        88 |      232 |         0 | 2024-02-01 10:20:46 | 2024-02-01 10:20:46 | NULL                | running  |
+|    255 | sbtest1 | sbtest3               | add index /* txn-merge */        | write reorganization |        88 |      228 |   5000000 | 2024-02-01 10:20:46 | 2024-02-01 10:20:46 | NULL                | running  |
+|    256 | sbtest1 | sbtest1               | add index /* txn-merge */        | delete only          |        88 |      242 |         0 | 2024-02-01 10:20:46 | 2024-02-01 10:20:46 | NULL                | queueing
+```
+
+tidb log
+```log
+[2024/02/01 10:24:28.268 +08:00] [INFO] [scheduler_manager.go:196] ["schedule task loop start"]
+[2024/02/01 10:24:31.291 +08:00] [INFO] [sync_upgrade.go:106] ["update global state to normal running finished"] [category=upgrading]
+[2024/02/01 10:24:31.291 +08:00] [INFO] [upgrade_handler.go:81] ["upgrade operation success"] [category=upgrading] [operation=finish] [hasDone=false]
+[2024/02/01 10:24:32.221 +08:00] [INFO] [job_table.go:335] ["get global state and global state change"] [category=ddl] [oldState=true] [currState=false]
+[2024/02/01 10:24:32.222 +08:00] [INFO] [manager.go:364] ["get owner"] ["owner info"="[ddl] /tidb/ddl/fg/owner ownerManager 7c96174d-841e-46fa-b89a-d5cc72e58e57"] ["owner key"=/tidb/ddl/fg/owner/db48d6278e7f025] [ownerID=7c96174d-841e-46fa-b89a-d5cc72e58e57] [op="sync upgrading state"]
+[2024/02/01 10:24:32.223 +08:00] [INFO] [manager.go:428] ["set owner op value"] ["owner key"=/tidb/ddl/fg/owner/db48d6278e7f025] [ownerID=7c96174d-841e-46fa-b89a-d5cc72e58e57] ["old Op"="sync upgrading state"] [op=none] []
+[2024/02/01 10:24:32.223 +08:00] [INFO] [job_table.go:350] ["the owner sets owner operator value"] [category=ddl] [ownerOp=none]
+[2024/02/01 10:24:32.229 +08:00] [INFO] [ddl_worker.go:1170] ["run DDL job"] [worker="worker 2, tp add index"] [category=ddl] [jobID=254] [category=ddl] [job="ID:254, Type:add index, State:queueing, SchemaState:write reorganization, SchemaID:88, TableID:232, RowCount:5000000, ArgLen:0, start time: 2024-02-01 10:20:46.207 +0800 CST, Err:<nil>, ErrCount:0, SnapshotVersion:447415332741316617, LocalMode: false, UniqueWarnings:0"]
+[2024/02/01 10:24:32.230 +08:00] [INFO] [index.go:901] ["index backfill state running"] [category=ddl] ["job ID"=254] [table=sbtest2] ["ingest mode"=true] [index=idxc]
+[2024/02/01 10:24:32.234 +08:00] [INFO] [reorg.go:899] ["job get table range for old version ReorgMetas"] [category=ddl] [jobID=254] ["job ReorgMeta version"=0] ["physical table ID"=232] [startKey=7480000000000000e85f728000000000000001] ["current endKey"=7480000000000000e85f7280000000004e5a75] ["endKey next"=7480000000000000e85f7280000000004e5a7500]
+[2024/02/01 10:24:32.236 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+[2024/02/01 10:24:32.237 +08:00] [INFO] [handle.go:195] ["task not resumable"] [taskKey=ddl/backfill/254]
+[2024/02/01 10:24:32.542 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+[2024/02/01 10:24:32.841 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+[2024/02/01 10:24:33.141 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+[2024/02/01 10:24:33.442 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+[2024/02/01 10:24:33.742 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+[2024/02/01 10:24:34.042 +08:00] [ERROR] [converter.go:61] ["unmarshal task error"] [error="unexpected end of JSON input"]
+```
+### 4. What is your TiDB version? (Required)
+v7.1.2 -> nightly (c76fe3ff97d89d77330)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

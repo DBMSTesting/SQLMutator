@@ -1,0 +1,62 @@
+ID: 18356
+Title: Crash when updating tuples?
+Description:
+**Describe the bug**
+
+I have a table like
+
+```
+CREATE TABLE IF NOT EXISTS xxx
+(
+    time DateTime CODEC(DoubleDelta, LZ4),
+
+    xxx String,
+    total SimpleAggregateFunction(sum, UInt64) CODEC(T64, LZ4),
+
+    agg1 SimpleAggregateFunction(sumMap, Tuple(Array(Int16), Array(UInt64))),
+    agg2 SimpleAggregateFunction(sumMap, Tuple(Array(Int16), Array(UInt64))),
+...
+) ENGINE = AggregatingMergeTree()
+order by (xxx, time)
+```
+
+I realized i double-inserted data into it so want to halve the counts. Already did for the total column, now doing for the `aggX` columns:
+
+```
+alter table xxx update agg1 = (agg1.1, arrayMap(x -> toUInt64(x / 2), agg1.2)), same for agg2 etc
+where time BETWEEN xxx AND yyy;
+```
+
+Crashes the server straight away (I am using your docker image):
+
+```
+[clickhouse] 2020.12.22 10:00:03.914392 [ 1352057 ] <Fatal> BaseDaemon: ########################################
+[clickhouse] 2020.12.22 10:00:03.940787 [ 1352057 ] <Fatal> BaseDaemon: (version 20.11.3.3 (official build), build id: C88CD350740ED614) (from thread 1349936) (query_id: 70ca4e69-7cb9-453e-b26d-95bc3d59dc54) Received signal Segmentation fault (11)
+[clickhouse] 2020.12.22 10:00:03.940881 [ 1352057 ] <Fatal> BaseDaemon: Address: 0x52080d8 Access: write. Attempted access has violated the permissions assigned to the memory area.
+[clickhouse] 2020.12.22 10:00:03.940927 [ 1352057 ] <Fatal> BaseDaemon: Stack trace: 0x7c8e078 0xb4ec8d5 0xb4089dd 0xb40fd73 0xb40b46a 0x91e211a 0x91e1aee 0x920d946 0x920e001 0xd93f141 0xd94331d 0xe4f9ac1 0xdb7f94f 0xdb805be 0xd903000 0xdc8c7da 0xdc8b3ad 0xe305ad6 0xe311fa7 0x10a96cdf 0x10a986ee 0x10bc58d9 0x10bc186a 0x7f2029af2609 0x7f2029a08293
+[clickhouse] 2020.12.22 10:00:03.941022 [ 1352057 ] <Fatal> BaseDaemon: 2. void DB::PODArrayBase<8ul, 4096ul, Allocator<false, false>, 15ul, 16ul>::resize<>(unsigned long) @ 0x7c8e078 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941061 [ 1352057 ] <Fatal> BaseDaemon: 3. ? @ 0xb4ec8d5 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941080 [ 1352057 ] <Fatal> BaseDaemon: 4. ? @ 0xb4089dd in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941111 [ 1352057 ] <Fatal> BaseDaemon: 5. ? @ 0xb40fd73 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941141 [ 1352057 ] <Fatal> BaseDaemon: 6. ? @ 0xb40b46a in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941193 [ 1352057 ] <Fatal> BaseDaemon: 7. DB::IFunction::executeImplDryRun(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x91e211a in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941246 [ 1352057 ] <Fatal> BaseDaemon: 8. DB::DefaultExecutable::executeDryRun(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long) @ 0x91e1aee in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941273 [ 1352057 ] <Fatal> BaseDaemon: 9. DB::ExecutableFunctionAdaptor::executeWithoutLowCardinalityColumns(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) @ 0x920d946 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941306 [ 1352057 ] <Fatal> BaseDaemon: 10. DB::ExecutableFunctionAdaptor::execute(std::__1::vector<DB::ColumnWithTypeAndName, std::__1::allocator<DB::ColumnWithTypeAndName> >&, std::__1::shared_ptr<DB::IDataType const> const&, unsigned long, bool) @ 0x920e001 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941342 [ 1352057 ] <Fatal> BaseDaemon: 11. DB::ExpressionAction::execute(DB::Block&, bool) const @ 0xd93f141 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.941383 [ 1352057 ] <Fatal> BaseDaemon: 12. DB::ExpressionActions::execute(DB::Block&, bool) const @ 0xd94331d in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942002 [ 1352057 ] <Fatal> BaseDaemon: 13. DB::ExpressionStep::ExpressionStep(DB::DataStream const&, std::__1::shared_ptr<DB::ExpressionActions>) @ 0xe4f9ac1 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942052 [ 1352057 ] <Fatal> BaseDaemon: 14. DB::MutationsInterpreter::addStreamsForLaterStages(std::__1::vector<DB::MutationsInterpreter::Stage, std::__1::allocator<DB::MutationsInterpreter::Stage> > const&, DB::QueryPlan&) const @ 0xdb7f94f in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942088 [ 1352057 ] <Fatal> BaseDaemon: 15. DB::MutationsInterpreter::validate() @ 0xdb805be in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942804 [ 1352057 ] <Fatal> BaseDaemon: 16. DB::InterpreterAlterQuery::execute() @ 0xd903000 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942855 [ 1352057 ] <Fatal> BaseDaemon: 17. ? @ 0xdc8c7da in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942894 [ 1352057 ] <Fatal> BaseDaemon: 18. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool) @ 0xdc8b3ad in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942916 [ 1352057 ] <Fatal> BaseDaemon: 19. DB::TCPHandler::runImpl() @ 0xe305ad6 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942948 [ 1352057 ] <Fatal> BaseDaemon: 20. DB::TCPHandler::run() @ 0xe311fa7 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.942982 [ 1352057 ] <Fatal> BaseDaemon: 21. Poco::Net::TCPServerConnection::start() @ 0x10a96cdf in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.943013 [ 1352057 ] <Fatal> BaseDaemon: 22. Poco::Net::TCPServerDispatcher::run() @ 0x10a986ee in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.943044 [ 1352057 ] <Fatal> BaseDaemon: 23. Poco::PooledThread::run() @ 0x10bc58d9 in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.943072 [ 1352057 ] <Fatal> BaseDaemon: 24. Poco::ThreadImpl::runnableEntry(void*) @ 0x10bc186a in /usr/bin/clickhouse
+[clickhouse] 2020.12.22 10:00:03.943142 [ 1352057 ] <Fatal> BaseDaemon: 25. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+[clickhouse] 2020.12.22 10:00:03.943181 [ 1352057 ] <Fatal> BaseDaemon: 26. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+```

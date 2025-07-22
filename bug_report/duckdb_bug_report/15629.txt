@@ -1,0 +1,28 @@
+ID: 15629
+Title: Fetch only required columns for `DELETE` to update table indexes
+Description:
+This PR addresses a performance bottleneck in `DELETE` operations on indexed tables.
+
+When rows are deleted from a table, the ART indexes are updated accordingly in `RowGroupCollection::RemoveFromIndexes` during transaction cleanup. Additionally, @taniabogatsch introduced the delete indexes in [PR #15092](https://github.com/duckdb/duckdb/pull/15092) to track transaction-local deletions. Currently, the main branch fetches all columns of the deleted rows to update both the global indexes and the delete indexes.
+
+This implementation causes a significant performance bottleneck for `DELETE` operations on tables with even a simple primary key and a heavyweight column, such as a long string or a large JSON column. It is also inefficient for indexed tables with a large number of columns. For example, consider the following table:
+
+```sql
+CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR);
+INSERT INTO t SELECT i, REPEAT(HASH(i)::TEXT, 64) FROM RANGE(10000000) s(i);
+```
+
+And the following `DELETE` statement that randomly deletes ~10,000 rows:
+
+```sql
+DELETE FROM t WHERE id IN (
+    SELECT DISTINCT HASH(i * 3 + 5) % 10000000 AS i
+    FROM RANGE(10000) s(i)
+);
+```
+
+By changing the hash constants `3` and `5` each time, we can simulate multiple random batch deletions. On my MacBook, this statement takes **~10 seconds** to complete on average for the latest nightly build. With this PR, the execution time is reduced to **less than 1 second**.
+
+### Why Does This Matter?
+
+This bottleneck was identified in the [MyDuck Server](https://github.com/apecloud/myduckserver) project, where we perform Change Data Capture (CDC) from MySQL/Postgres to DuckDB. We use manual `DELETE` + `INSERT` operations to apply CDC updates to DuckDB tables and found that it was slow unless no indexes were created. Tables in MySQL/Postgres often contain at least one large string column, such as `xxx_comment`, `xxx_detail`, or `xxx_message`. Even if we ignore all secondary indexes and only keep the primary key, each update may still block for many seconds, preventing the DuckDB replica from keeping up with frequent primary updates.

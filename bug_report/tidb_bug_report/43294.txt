@@ -1,0 +1,90 @@
+ID: 43294
+Title: Failed DML in RC pessimistic transaction may break data consistency
+Description:
+# *SURPRISE!*
+
+### 1. Minimal reproduce step (Required)
+
+#### Case 1:
+
+```sql
+/* init */ DROP TABLE IF EXISTS t;
+-- init >> 0 rows affected
+/* init */ CREATE TABLE t(id INT primary key, v int not null, index (id));
+-- init >> 0 rows affected
+/* init */ INSERT INTO t VALUES (1, 1);
+-- init >> 1 rows affected
+/* t1 */ set @@tidb_txn_assertion_level = "strict";
+-- t1 >> 0 rows affected
+/* t1 */ set transaction isolation level read committed;
+-- t1 >> 0 rows affected
+/* t1 */ begin;
+-- t1 >> 0 rows affected
+/* t1 */ insert into t values (0, 0);
+-- t1 >> 1 rows affected
+/* t2 */ begin;
+-- t2 >> 0 rows affected
+/* t1 */ update t set v = null where id in (1);
+-- t1 >> E1048: Column 'v' cannot be null
+/* t2 */ delete from t where id = 1;
+-- t2 >> 1 rows affected
+/* t1 */ delete from t where id in (1, 2);
+-- t1 >> blocked
+/* t2 */ commit;
+-- t2 >> 0 rows affected
+-- t1 >> resumed
+-- t1 >> 1 rows affected
+/* t1 */ commit;
+-- t1 >> E8141: assertion failed: key: 74800000000000007f5f698000000000000001038000000000000001038000000000000001, assertion: Exist, start_ts: 440944433986535435, existing start ts: 0, existing commit ts: 0
+```
+
+#### Case 2:
+
+```sql
+/* init */ DROP TABLE IF EXISTS t;
+-- init >> 0 rows affected
+/* init */ CREATE TABLE t(id INT primary key, v int not null, v2 int, index (id), unique index (v2));
+-- init >> 0 rows affected
+/* init */ INSERT INTO t VALUES (1, 1, 1);
+-- init >> 1 rows affected
+/* t1 */ set @@tidb_txn_assertion_level = "off";
+-- t1 >> 0 rows affected
+/* t1 */ set transaction isolation level read committed;
+-- t1 >> 0 rows affected
+/* t1 */ begin;
+-- t1 >> 0 rows affected
+/* t1 */ insert into t values (0, 0, 0);
+-- t1 >> 1 rows affected
+/* t2 */ begin;
+-- t2 >> 0 rows affected
+/* t1 */ update t set v = null where id in (1);
+-- t1 >> E1048: Column 'v' cannot be null
+/* t2 */ update t set id = 10 where id = 1;
+-- t2 >> 1 rows affected
+/* t1 */ delete from t where id in (1, 2);
+-- t1 >> blocked
+/* t2 */ commit;
+-- t2 >> 0 rows affected
+-- t1 >> resumed
+-- t1 >> 1 rows affected
+/* t1 */ commit;
+-- t1 >> 0 rows affected
+/* t1 */ admin check table t;
+-- t1 >> E8223: data inconsistency in table: t, index: v2, handle: 10, index-values:"" != record-values:"handle: 10, values: [KindInt64 1]"
+```
+
+### 2. What did you expect to see? (Required)
+
+Everything goes well, and the transaction `t1` in both cases should see the result of transaction `t2`.
+
+### 3. What did you see instead (Required)
+
+For case 1, assertion failed.
+For case 2, assertion fails too. If assertion is disabled, it leads to data inconsistency.
+
+It's likely to be caused by the failed DML not correctly cleaning the membuffer or the value cache of BatchPointGet.
+
+### 4. What is your TiDB version? (Required)
+
+master (cd33faf209b67582a548a8bd916570fd44297bbd)
+The first report of this problem is on a20e7fd3a462c4ae122f7b65d60e89e4c65a7b39 which is included in 7.1 branch. Whether it affects older versions is not confirmed yet.

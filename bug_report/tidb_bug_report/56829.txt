@@ -1,0 +1,70 @@
+ID: 56829
+Title: The index data and table data of the TTL table are inconsistent
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+1. startup a TiDB cluster;
+2. create table `cache`;
+```sql
+CREATE TABLE `cache` (
+  `cache_key` varchar(512) NOT NULL,
+  `cache_value` json NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `expires` int(11) DEFAULT '-1' COMMENT 'cache will expire after n seconds',
+  `expired_at` datetime GENERATED ALWAYS AS (if(`expires` > 0, date_add(`updated_at`, interval `expires` second), date_add(`updated_at`, interval 99 year))) VIRTUAL,
+  PRIMARY KEY (`cache_key`) /*T![clustered_index] CLUSTERED */,
+  KEY `idx_c_on_created_at` (`created_at`),
+  KEY `idx_c_on_expired_at` (`expired_at`),
+  KEY `idx_expired_at` (`expired_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`expired_at` + INTERVAL 0 DAY */ /*T![ttl] TTL_ENABLE='ON' */ /*T![ttl] TTL_JOB_INTERVAL='15m' */
+```
+3. run the following command
+```go
+func main() {
+	// Open a connection to the database.
+	// Replace the parameters with your own values for the database.
+	db, err := sql.Open("mysql", "root@tcp(localhost:4000)/test")
+	if err != nil {
+		fmt.Println("Error connecting to the database:", err)
+		return
+	}
+	defer db.Close()
+
+	for i := 0; i < 1000000; i++ {
+		dateStr := time.Now().Format("2006-01-02 15:04:05")
+		sqlStr := fmt.Sprintf("INSERT INTO `cache` (`cache_key`, `cache_value`, `created_at`, `updated_at`, `expires`) VALUES ('%s', '\"%s\"', '%s', '%s', %d) ON DUPLICATE KEY UPDATE expires = expires + 1", dateStr, dateStr, dateStr, dateStr, 60)
+		_, err = db.Exec(sqlStr)
+		if err != nil {
+			panic(err)
+		}
+		if i%10 == 0 {
+			oldTime := time.Now().Add(-time.Minute).Format("2006-01-02 15:04:05")
+			updateStr := fmt.Sprintf("UPDATE `cache` set `updated_at` = '%s' where `cache_key` = '%s'", dateStr, oldTime)
+			_, err = db.Exec(updateStr)
+			if err != nil {
+				panic(err)
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+```
+4. admin check table `cache`;
+
+### 2. What did you expect to see? (Required)
+admin check table should be ok.
+
+### 3. What did you see instead (Required)
+![image](https://github.com/user-attachments/assets/9f53ca59-3ed3-4ef7-989c-d1c28d6a8e91)
+
+### 4. What is your TiDB version? (Required)
+release-7.5
+
+<!-- Paste the output of SELECT tidb_version() -->
+

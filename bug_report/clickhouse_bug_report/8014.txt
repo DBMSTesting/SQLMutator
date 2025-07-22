@@ -1,0 +1,94 @@
+ID: 8014
+Title: Bloom Indexing operation causing OOMs
+Description:
+I've enabled a bloom index on an Array(String) column, and I've noticed that because of this I'm seeing extremely high memory usage which is causing Clickhouse (version 19.17.4.11) to OOM.
+
+![image](https://user-images.githubusercontent.com/433045/70079324-607a9200-15b9-11ea-8671-fbcd500e3807.png)
+
+As a result, it looks like there are a whole bunch of merges getting backed and not making progress. Server has 32G of RAM. Using perf, the one of the highest functions shown is `DB::BloomFilter::addHashWithSeed` which is why I think this is a result of the Bloom index.
+```
+metrics_qa :) select database, table, elapsed, progress, num_parts, formatReadableSize(memory_usage) from merges;
+
+SELECT 
+    database, 
+    table, 
+    elapsed, 
+    progress, 
+    num_parts, 
+    formatReadableSize(memory_usage)
+FROM merges
+
+┌─database─┬─table──────┬───────elapsed─┬─────────────progress─┬─num_parts─┬─formatReadableSize(memory_usage)─┐
+│ default    │ histograms │ 138.927456092 │ 0.009250563257249815 │        12 │ 2.05 GiB                         │
+│ default    │ histograms │ 138.861809743 │    0.055173005336291 │        11 │ 2.23 GiB                         │
+│ default    │ histograms │ 138.829303978 │  0.05388030194829263 │        13 │ 2.24 GiB                         │
+│ default    │ histograms │ 138.759085752 │ 0.011949443797662702 │        16 │ 2.00 GiB                         │
+│ default    │ histograms │  138.74322428 │  0.01942913601668529 │        12 │ 2.06 GiB                         │
+│ default    │ histograms │ 138.717364362 │ 0.022370385001223802 │        12 │ 2.19 GiB                         │
+│ default    │ histograms │ 138.685355371 │  0.03908257269084415 │         8 │ 2.23 GiB                         │
+│ default    │ histograms │ 138.649866072 │   0.0982202348644684 │         4 │ 2.38 GiB                         │
+│ default    │ histograms │ 138.368147204 │  0.07558041003556983 │         4 │ 1.99 GiB                         │
+│ default    │ histograms │ 138.286842186 │  0.04993548174615153 │         5 │ 2.05 GiB                         │
+│ default    │ histograms │ 138.251910277 │  0.06261820639570424 │         5 │ 2.20 GiB                         │
+│ default    │ histograms │ 138.243255183 │ 0.058333314776566905 │         5 │ 2.15 GiB                         │
+│ default    │ histograms │ 138.219877609 │  0.27229364749861407 │        11 │ 2.05 GiB                         │
+└──────────┴────────────┴───────────────┴──────────────────────┴───────────┴──────────────────────────────────┘
+
+13 rows in set. Elapsed: 0.046 sec. 
+
+metrics_qa :) select database, table, elapsed, progress, num_parts, formatReadableSize(memory_usage) from merges;
+
+SELECT 
+    database, 
+    table, 
+    elapsed, 
+    progress, 
+    num_parts, 
+    formatReadableSize(memory_usage)
+FROM merges
+
+┌─database─┬─table──────┬──────elapsed─┬──────────────progress─┬─num_parts─┬─formatReadableSize(memory_usage)─┐
+│ default    │ histograms │ 14.460548537 │ 0.0014619944948044384 │        12 │ 599.14 MiB                       │
+│ default    │ histograms │ 14.380980342 │  0.010725400336827147 │        11 │ 612.94 MiB                       │
+│ default    │ histograms │ 14.373428775 │  0.008424919941005757 │        13 │ 553.63 MiB                       │
+│ default    │ histograms │ 14.337396365 │  0.002216634563745533 │        16 │ 614.03 MiB                       │
+│ default    │ histograms │ 14.331145173 │ 0.0037643951032327754 │        12 │ 608.00 MiB                       │
+│ default    │ histograms │ 14.218492431 │  0.003320279777547132 │        12 │ 535.20 MiB                       │
+│ default    │ histograms │ 14.163099015 │   0.00516794349630997 │         8 │ 485.54 MiB                       │
+│ default    │ histograms │ 14.133526059 │   0.01824524486646472 │         4 │ 506.90 MiB                       │
+│ default    │ histograms │ 14.103848452 │  0.013445953096215605 │         4 │ 457.70 MiB                       │
+│ default    │ histograms │ 14.071331435 │   0.01034111655563959 │         5 │ 570.38 MiB                       │
+│ default    │ histograms │ 13.857877555 │  0.012459197155920572 │         5 │ 543.93 MiB                       │
+│ default    │ histograms │  13.84478482 │  0.008966428243041204 │         5 │ 428.58 MiB                       │
+│ default    │ histograms │ 13.820244621 │    0.0316512274015483 │        11 │ 429.94 MiB                       │
+└──────────┴────────────┴──────────────┴───────────────────────┴───────────┴──────────────────────────────────┘
+
+13 rows in set. Elapsed: 0.043 sec. 
+
+metrics_qa :) select database, table, elapsed, progress, num_parts, formatReadableSize(memory_usage) from merges;
+
+SELECT 
+    database, 
+    table, 
+    elapsed, 
+    progress, 
+    num_parts, 
+    formatReadableSize(memory_usage)
+FROM merges
+
+┌─database─┬─table──────┬──────elapsed─┬─────────────progress─┬─num_parts─┬─formatReadableSize(memory_usage)─┐
+│ default    │ histograms │ 79.471550264 │ 0.005503541730779245 │        12 │ 1.33 GiB                         │
+│ default    │ histograms │ 79.391981317 │  0.03652433628216813 │        11 │ 1.50 GiB                         │
+│ default    │ histograms │ 79.384428457 │ 0.034385429061546756 │        13 │ 1.49 GiB                         │
+│ default    │ histograms │ 79.348397932 │ 0.008764624022166247 │        16 │ 1.56 GiB                         │
+│ default    │ histograms │ 79.342144671 │ 0.013883736778589699 │        12 │ 1.49 GiB                         │
+│ default    │ histograms │ 79.229500032 │ 0.016518391893296982 │        12 │ 1.69 GiB                         │
+│ default    │ histograms │ 79.174108339 │  0.02235135562154062 │         8 │ 1.35 GiB                         │
+│ default    │ histograms │ 79.144535614 │ 0.059905220644892496 │         4 │ 1.46 GiB                         │
+│ default    │ histograms │ 79.114858427 │  0.05633146665572432 │         4 │ 1.52 GiB                         │
+│ default    │ histograms │ 79.082340708 │ 0.032979777123391125 │         5 │ 1.38 GiB                         │
+│ default    │ histograms │ 78.868886937 │  0.04081461137284325 │         5 │ 1.42 GiB                         │
+│ default    │ histograms │ 78.855796039 │ 0.035865712972164815 │         5 │ 1.30 GiB                         │
+│ default    │ histograms │ 78.831255279 │  0.17175445457604885 │        11 │ 1.45 GiB                         │
+└──────────┴────────────┴──────────────┴──────────────────────┴───────────┴──────────────────────────────────┘
+```

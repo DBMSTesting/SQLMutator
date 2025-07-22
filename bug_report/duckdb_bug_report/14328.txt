@@ -1,0 +1,50 @@
+ID: 14328
+Title: GetWALIfExists: Avoid eagerly creating WAL file
+Description:
+This skips side effect of actually creating a WAL file when calling `GetWALSize()`.
+This should have negligible effect, given in most cases this is delayed, but cleans it up a bit.
+
+Workflow where this does makes a minor differences, is for example something like:
+```sql
+duckdb file.db -c "CREATE TABLE T AS SELECT 42;"
+```
+to create a DuckDB file with no wal, and then:
+```
+duckdb file.db -c "CHECKPOINT;"
+```
+
+Before this PR, this would create a WAL file, after this not.
+
+----
+
+I tried to check using MacOS's Instruments System Call Traces, and after copy pasting the logs to files `log_A` and `log_B`:
+
+```sql
+SELECT 'log_A', count(*) FROM read_csv('log_A') UNION ALL SELECT 'log_B', count(*) FROM read_csv('log_B');
+```
+```
+┌─────────┬──────────────┐
+│ 'log_A' │ count_star() │
+│ varchar │    int64     │
+├─────────┼──────────────┤
+│ log_A   │          440 │
+│ log_B   │          421 │
+└─────────┴──────────────┘
+```
+```sql
+FROM
+    (SELECT Signature, count(*) as count FROM read_csv('log_A') GROUP BY Signature) AS A,
+    (SELECT Signature, count(*) as count FROM read_csv('log_B') GROUP BY Signature) AS B
+    WHERE A.Signature = B.Signature AND A.count != B.count;
+```
+```
+┌──────────────────────────────────────────┬───────┬──────────────────────────────────────────┬───────┐
+│                Signature                 │ count │                Signature                 │ count │
+│                 varchar                  │ int64 │                 varchar                  │ int64 │
+├──────────────────────────────────────────┼───────┼──────────────────────────────────────────┼───────┤
+│ mach_vm_deallocate_trap                  │    18 │ mach_vm_deallocate_trap                  │    17 │
+│ mach_vm_map_trap                         │    27 │ mach_vm_map_trap                         │    21 │
+│ access(path, amode:F_OK) = 0 (reachable) │     5 │ access(path, amode:F_OK) = 0 (reachable) │     3 │
+└──────────────────────────────────────────┴───────┴──────────────────────────────────────────┴───────┘
+```
+(these accounts only for 9 differences, but I am too lazy to figure out how to join better)

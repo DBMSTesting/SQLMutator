@@ -1,0 +1,143 @@
+ID: 13974
+Title: CTE with "multiple recursive references" produces incomplete results.
+Description:
+### What happens?
+
+The following recursive CTE fails to produce the expected result,
+probably because there are (in SQLite's terminology) "multiple recursive references".
+(Notice the inner query: "select array_agg(node) from cte". )
+
+In the following, to facilitate understanding of the problem,
+the solution, and the test case, I've used 
+https://rosettacode.org/wiki/Topological_sort
+
+Specifically, I've included a CSV file which can be loaded as shown below.
+
+The output is incomplete but otherwise as expected:
+```
+┌────────┬──────────────┬───────────────────────┐
+│ indexx │     node     │         done          │
+│ int32  │   varchar    │       varchar[]       │
+├────────┼──────────────┼───────────────────────┤
+│      0 │ synopsys     │ [synopsys]            │
+│      0 │ std          │ [std]                 │
+│      0 │ ieee         │ [ieee]                │
+│      1 │ std_cell_lib │ [synopsys, std, ieee] │
+│      1 │ gtech        │ [synopsys, std, ieee] │
+│      1 │ dware        │ [synopsys, std, ieee] │
+└────────┴──────────────┴───────────────────────┘
+```
+
+Here is a synopsis of the expected solution:
+```
+0: ieee std synopsys
+1: dware gtech ramlib std_cell_lib
+2: dw01 dw02 dw05 dw06 dw07
+3: des_system_lib dw03 dw04
+```
+
+
+### To Reproduce
+
+```
+create or replace table edges as from 'edges.csv';
+
+-- (indexx, node, done)
+with recursive cte as (
+      -- base case: all the right-most nodes
+      select distinct 0 as indexx, e.to_node as node, [node] as done
+      from edges e
+      where not exists (select 1 from edges e2 where e2.from_node = e.to_node)
+    union all
+      -- If there is an edge from e.from_node to cte.node
+      -- then there is a path of length (indexx + 1) to cte.node ....
+      select indexx + 1, e.from_node as node, (select array_agg(node) from cte) as done
+      from cte join
+           edges e
+           ON e.to_node = cte.node
+           -- ... provided all the pre-requisites for e.from_node are in done
+           and NOT EXISTS (select from_node f, to_node t FROM edges
+                           where f = e.from_node and NOT array_contains(done, t))
+  )
+  select * from cte;
+```
+
+### edges.csv
+```
+from_node,to_node
+des_system_lib,std
+des_system_lib,synopsys
+des_system_lib,std_cell_lib
+des_system_lib,dw02
+des_system_lib,dw01
+des_system_lib,ramlib
+des_system_lib,ieee
+dw01,ieee
+dw01,dware
+dw01,gtech
+dw02,ieee
+dw02,dware
+dw03,std
+dw03,synopsys
+dw03,dware
+dw03,dw02
+dw03,dw01
+dw03,ieee
+dw03,gtech
+dw04,ieee
+dw04,dw01
+dw04,dware
+dw04,gtech
+dw05,ieee
+dw05,dware
+dw06,ieee
+dw06,dware
+dw07,ieee
+dw07,dware
+dware,ieee
+gtech,ieee
+ramlib,std
+ramlib,ieee
+std_cell_lib,ieee
+```
+
+
+### OS:
+
+MacOS
+
+### DuckDB Version:
+
+1.0, 1.1
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Peter Koppstein
+
+### Affiliation:
+
+Princeton University
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

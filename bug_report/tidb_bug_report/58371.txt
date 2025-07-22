@@ -1,0 +1,73 @@
+ID: 58371
+Title: Inaccurate estimated rows in mixed CNF and DNF conditions
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+create table t( id int, a int, b int, index idx(id, a));
+insert into t values (1, 1, 1), (2, 2, 2), (3, 3, 3), (4, 4, 4), (5, 5, 5);
+insert into t select * from t where id<>2;
+insert into t select * from t where id<>2;
+insert into t select * from t where id<>2;
+insert into t select * from t where id<>2;
+analyze table t;
+explain select * from t where ( id > 1 or ( a>0 and id=0 )) and ( id < 3 or ( a>0 and id=6 ));
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> explain  analyze select * from t use index(idx) where ( id > 1 or ( a>0 and id=0 )) and ( id < 3 or ( a>0 and id=6 ));
++-------------------------------+---------+---------+-----------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------+---------+------+
+| id                            | estRows | actRows | task      | access object             | execution info                                                                                                                                                                                                                                                                                                                                 | operator info                                                                                                              | memory  | disk |
++-------------------------------+---------+---------+-----------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------+---------+------+
+| IndexLookUp_8                 | 12.82   | 1       | root      |                           | time:2.07ms, loops:2, index_task: {total_time: 1.26ms, fetch_handle: 1.25ms, build: 931ns, wait: 1.52µs}, table_task: {total_time: 647.6µs, num: 1, concurrency: 5}, next: {wait_index: 1.43ms, wait_table_lookup_build: 30.6µs, wait_table_lookup_resp: 583.9µs}                                                                              |                                                                                                                            | 9.13 KB | N/A  |
+| ├─Selection_7(Build)          | 12.82   | 1       | cop[tikv] |                           | time:1.25ms, loops:3, cop_task: {num: 1, max: 1.16ms, proc_keys: 1, rpc_num: 1, rpc_time: 1.14ms, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}, tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_process_keys_size: 55, total_keys: 4, get_snapshot_time: 34.4µs, rocksdb: {key_skipped_count: 1, block: {}}}  | or(gt(test.t.id, 1), and(gt(test.t.a, 0), eq(test.t.id, 0))), or(lt(test.t.id, 3), and(gt(test.t.a, 0), eq(test.t.id, 6))) | N/A     | N/A  |
+| │ └─IndexRangeScan_5          | 16.02   | 1       | cop[tikv] | table:t, index:idx(id, a) | tikv_task:{time:0s, loops:1}                                                                                                                                                                                                                                                                                                                   | range:[0,0], (1,3), [6,6], keep order:false                                                                                | N/A     | N/A  |
+| └─TableRowIDScan_6(Probe)     | 12.82   | 1       | cop[tikv] | table:t                   | time:553.1µs, loops:2, cop_task: {num: 1, max: 456.2µs, proc_keys: 1, rpc_num: 1, rpc_time: 427.3µs, copr_cache_hit_ratio: 0.00, distsql_concurrency: 15}, tikv_task:{time:0s, loops:1}, scan_detail: {total_process_keys: 1, total_process_keys_size: 45, total_keys: 1, get_snapshot_time: 21.3µs, rocksdb: {block: {}}}                     | keep order:false                                                                                                           | N/A     | N/A  |
++-------------------------------+---------+---------+-----------+---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------+---------+------+
+```
+
+### 3. What did you see instead (Required)
+
+```
+explain select * from t where ( id > 1 or ( a>0 and id=0 )) and ( id < 3 or ( a>0 and id=6 ));
++-------------------------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------+
+| id                      | estRows | task      | access object | operator info                                                                                                              |
++-------------------------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------+
+| TableReader_7           | 12.82   | root      |               | data:Selection_6                                                                                                           |
+| └─Selection_6           | 12.82   | cop[tikv] |               | or(gt(test.t.id, 1), and(gt(test.t.a, 0), eq(test.t.id, 0))), or(lt(test.t.id, 3), and(gt(test.t.a, 0), eq(test.t.id, 6))) |
+|   └─TableFullScan_5     | 65.00   | cop[tikv] | table:t       | keep order:false                                                                                                           |
++-------------------------+---------+-----------+---------------+----------------------------------------------------------------------------------------------------------------------------+
+```
+
+The total selectivity is the product of the selectivities of the two CNF items, then the estRows equals `65 * (49/65) * (17/65) = 12.82`, but the ranges `id > 1, id < 3` for the column id can probably be merged.
+```
+mysql> explain select * from t where ( id > 1 or ( a>0 and id=0 ));
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| id                      | estRows | task      | access object | operator info                                                |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| TableReader_7           | 49.00   | root      |               | data:Selection_6                                             |
+| └─Selection_6           | 49.00   | cop[tikv] |               | or(gt(test.t.id, 1), and(gt(test.t.a, 0), eq(test.t.id, 0))) |
+|   └─TableFullScan_5     | 65.00   | cop[tikv] | table:t       | keep order:false                                             |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql> explain select * from t where  ( id < 3 or ( a>0 and id=6 ));
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| id                      | estRows | task      | access object | operator info                                                |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+| TableReader_7           | 17.00   | root      |               | data:Selection_6                                             |
+| └─Selection_6           | 17.00   | cop[tikv] |               | or(lt(test.t.id, 3), and(gt(test.t.a, 0), eq(test.t.id, 6))) |
+|   └─TableFullScan_5     | 65.00   | cop[tikv] | table:t       | keep order:false                                             |
++-------------------------+---------+-----------+---------------+--------------------------------------------------------------+
+3 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+v6.5.11

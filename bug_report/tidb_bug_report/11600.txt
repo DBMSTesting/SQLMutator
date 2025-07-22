@@ -1,0 +1,95 @@
+ID: 11600
+Title: Data race in `(*HashJoinExec).Close()` since `fetchInnerAndBuildHashTable` is still running
+Description:
+In https://internal.pingcap.net/idc-jenkins/blue/rest/organizations/jenkins/pipelines/tidb_ghpr_unit_test/runs/4865/nodes/69/log/?start=0 we get two data races while testing #8891.
+
+<details><summary>First race</summary>
+
+```
+[2019-08-03T12:01:21.380Z] ==================
+[2019-08-03T12:01:21.380Z] WARNING: DATA RACE
+[2019-08-03T12:01:21.380Z] Read at 0x00c0012f2c60 by goroutine 98:
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/distsql.(*selectResult).Close()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/distsql/select_result.go:261 +0x268
+<snip>
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor.func1()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/adapter.go:410 +0x3e
+<snip>
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/sessionctx/binloginfo_test.(*testBinlogSuite).TestDeleteSchema()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/sessionctx/binloginfo/binloginfo_test.go:432 +0x1f1
+<snip>
+[2019-08-03T12:01:21.380Z] 
+[2019-08-03T12:01:21.380Z] Previous write at 0x00c0012f2c60 by goroutine 88:
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/distsql.(*selectResult).getSelectResp()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/distsql/select_result.go:176 +0xaa0
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/distsql.(*selectResult).Next()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/distsql/select_result.go:149 +0xf0
+<snip>
+[2019-08-03T12:01:21.380Z] 
+[2019-08-03T12:01:21.380Z] Goroutine 98 (running) created at:
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/check.(*suiteRunner).forkCall()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/pkg/mod/github.com/pingcap/check@v0.0.0-20190102082844-67f458068fc8/check.go:727 +0x4a7
+<snip>
+[2019-08-03T12:01:21.380Z] 
+[2019-08-03T12:01:21.380Z] Goroutine 88 (finished) created at:
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/executor.(*HashJoinExec).fetchInnerAndBuildHashTable()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/join.go:539 +0x187
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/executor.(*HashJoinExec).Next.func1()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/join.go:506 +0x53
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/util.WithRecovery()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/util/misc.go:81 +0x5a
+[2019-08-03T12:01:21.380Z] ==================
+```
+
+</details>
+<details><summary>Second race</summary>
+
+```
+[2019-08-03T12:01:21.380Z] ==================
+[2019-08-03T12:01:21.380Z] WARNING: DATA RACE
+[2019-08-03T12:01:21.380Z] Write at 0x00c001734940 by goroutine 98:
+[2019-08-03T12:01:21.380Z]   github.com/pingcap/tidb/executor.(*TableReaderExecutor).Close()
+[2019-08-03T12:01:21.380Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/table_reader.go:242 +0x44b
+<snip>
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/tidb/sessionctx/binloginfo_test.(*testBinlogSuite).TestDeleteSchema()
+[2019-08-03T12:01:21.381Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/sessionctx/binloginfo/binloginfo_test.go:432 +0x1f1
+<snip>
+[2019-08-03T12:01:21.381Z] 
+[2019-08-03T12:01:21.381Z] Previous read at 0x00c001734940 by goroutine 88:
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/tidb/executor.(*tableResultHandler).nextChunk()
+[2019-08-03T12:01:21.381Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/table_reader.go:219 +0x69
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/tidb/executor.(*TableReaderExecutor).Next()
+<snip>
+[2019-08-03T12:01:21.381Z] 
+[2019-08-03T12:01:21.381Z] Goroutine 98 (running) created at:
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/check.(*suiteRunner).forkCall()
+[2019-08-03T12:01:21.381Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/pkg/mod/github.com/pingcap/check@v0.0.0-20190102082844-67f458068fc8/check.go:727 +0x4a7
+<snip>
+[2019-08-03T12:01:21.381Z] 
+[2019-08-03T12:01:21.381Z] Goroutine 88 (finished) created at:
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/tidb/executor.(*HashJoinExec).fetchInnerAndBuildHashTable()
+[2019-08-03T12:01:21.381Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/join.go:539 +0x187
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/tidb/executor.(*HashJoinExec).Next.func1()
+[2019-08-03T12:01:21.381Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/executor/join.go:506 +0x53
+[2019-08-03T12:01:21.381Z]   github.com/pingcap/tidb/util.WithRecovery()
+[2019-08-03T12:01:21.381Z]       /home/jenkins/workspace/tidb_ghpr_unit_test/go/src/github.com/pingcap/tidb/util/misc.go:81 +0x5a
+[2019-08-03T12:01:21.381Z] ==================
+```
+
+</details>
+
+Both races have the same stack trace involving `(*HashJoinExec).Close()`. In goroutine 98 the `HashJoinExec` is being closed after the DELETE statement is finished...
+
+https://github.com/pingcap/tidb/blob/cfee8c09843b4b061880fa4d83529b2cfdbe3be2/executor/adapter.go#L410
+
+However, some time before, in `(*HashJoinExec).Next` when the hash table was not prepared...
+
+https://github.com/pingcap/tidb/blob/cfee8c09843b4b061880fa4d83529b2cfdbe3be2/executor/join.go#L503-L506
+
+it spawned a goroutine to build the hash table, which itself spawned goroutine 88 to fetch the rows...
+
+https://github.com/pingcap/tidb/blob/cfee8c09843b4b061880fa4d83529b2cfdbe3be2/executor/join.go#L535-L539
+
+and somehow this `fetchInnerRows` is still running when the HashJoinExec is closed. 
+
+cc @lysu, looks like #8337 again.

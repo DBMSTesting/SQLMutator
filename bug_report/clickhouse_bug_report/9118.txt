@@ -1,0 +1,82 @@
+ID: 9118
+Title: Subrequest in ClickHouse without "where" optimization
+Description:
+I have a simplified table in ClickHouse, which stores events of trigger status change
+
+```
+CREATE TABLE trigger_events_test (
+ `CreatedAt` DateTime,
+ `Id` UUID,
+ `TriggerId` Int,
+ `Status` Enum8('Ok' = 1,
+ 'Problem1' = 2,
+ 'Problem2' = 3,
+ 'Problem3' = 4,
+ 'Problem4' = 5,
+ 'Disabled' = 6)
+) ENGINE = MergeTree() PARTITION BY (toYYYYMM(CreatedAt)) ORDER BY (CreatedAt, TriggerId) SETTINGS index_granularity = 8192;
+```
+
+Let's say the table contains 5 records:
+
+```
+INSERT into trigger_events_test(CreatedAt, Id, TriggerId, Status)
+values
+('2020-02-14 10:16:00', '9be6f472-aa15-418f-ac6d-e8ceb8dc462e', 1, 'Problem1'),
+('2020-02-14 10:17:00', '260bbf0c-fbbc-44b4-835f-dfb3cdad11f1', 1, 'Ok'),
+('2020-02-14 10:18:00', 'cb35f07e-a539-4932-8f26-d95df8de6686', 1, 'Problem2'),
+('2020-02-14 10:19:00', '7c5a78d7-8b41-4353-89c2-232edcbb2457', 1, 'Problem3'),
+('2020-02-14 10:20:00', '260bbf0c-fbbc-44b4-835f-dfb3cdad11f1', 1, 'Ok'),
+```
+
+I want to select the history of trigger (id=1) status change with status duration based on previous status. So I can make query
+
+```
+SELECT 
+   Id,
+   TriggerId,
+   Status,
+   CreatedAt,
+   if(neighbor(TriggerId,1) = TriggerId, neighbor(CreatedAt,1,now()), now()) AS DateEnd,
+   ABS(CreatedAt - DateEnd) AS Duration
+FROM trigger_events_test 
+   ORDER BY TriggerId ASC, CreatedAt ASC
+```
+
+which produces correct answer
+
+Id                                  |TriggerId|Status  |CreatedAt          |DateEnd            |Duration|
+------------------------------------|---------|--------|-------------------|-------------------|--------|
+9be6f472-aa15-418f-ac6d-e8ceb8dc462e|        1|Problem1|2020-02-14 10:16:00|2020-02-14 10:17:00|      60|
+260bbf0c-fbbc-44b4-835f-dfb3cdad11f1|        1|Ok      |2020-02-14 10:17:00|2020-02-14 10:18:00|      60|
+cb35f07e-a539-4932-8f26-d95df8de6686|        1|Problem2|2020-02-14 10:18:00|2020-02-14 10:19:00|      60|
+7c5a78d7-8b41-4353-89c2-232edcbb2457|        1|Problem3|2020-02-14 10:19:00|2020-02-14 10:20:00|      60|
+260bbf0c-fbbc-44b4-835f-dfb3cdad11f1|        1|Ok      |2020-02-14 10:20:00|2020-02-14 10:54:15|    2055|
+
+But actually I want to filter records by date from both ends and by statuses. I made subrequest that returns not that I expected.
+
+```
+SELECT *
+FROM (SELECT 
+       Id,
+       TriggerId,
+       Status,
+       CreatedAt,
+       if(neighbor(TriggerId,1) = TriggerId, neighbor(CreatedAt,1,now()), now()) AS DateEnd,
+       ABS(CreatedAt - DateEnd) AS Duration
+   FROM trigger_events_test 
+       ORDER BY TriggerId ASC, CreatedAt ASC)
+WHERE Status IN ('Problem1', 'Problem2', 'Problem3', 'Problem4') AND (DateEnd >= '2020-02-14 10:17:00' AND CreatedAt <= now())
+```
+
+Result:
+
+Id                                  |TriggerId|Status  |CreatedAt          |DateEnd            |Duration|
+------------------------------------|---------|--------|-------------------|-------------------|--------|
+9be6f472-aa15-418f-ac6d-e8ceb8dc462e|        1|Problem1|2020-02-14 10:16:00|2020-02-14 10:18:00|     120|
+cb35f07e-a539-4932-8f26-d95df8de6686|        1|Problem2|2020-02-14 10:18:00|2020-02-14 10:19:00|      60|
+7c5a78d7-8b41-4353-89c2-232edcbb2457|        1|Problem3|2020-02-14 10:19:00|2020-02-14 10:58:03|    2343|
+
+As u can see "Problem1" now returns 120 sec duration and Problem3 thinks it has not completed yet. I asume that ClickHouse optomizes query, and do where condition in subquery.
+
+Can anybody help me to figure out how to make a right request?

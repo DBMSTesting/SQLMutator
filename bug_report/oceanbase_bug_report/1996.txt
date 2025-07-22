@@ -1,0 +1,424 @@
+ID: 1996
+Title: [Bug]: In `WHERE` clause, `ROUND`ing a  `decimal` type parameter produces unexpected results
+Description:
+**Describe the bug**
+master分支版本，`ROUND` `decimal`类型的表达式出现在`WHERE`子句中产生预期之外的结果
+
+**Fast Reproduce Steps(Required)**
+
+```sql
+create table t_m ( 
+  c_ydogyq1 int ,
+  c_reoxwl34 int ,
+  primary key(c_reoxwl34, c_ydogyq1),
+  unique(c_ydogyq1)) partition by hash(c_ydogyq1) partitions 9;
+
+insert into t_m (c_ydogyq1, c_reoxwl34) values 
+  (396667551, 217625229), 
+  (-368695015, -1288002677), 
+  (1741309262, -712324340), 
+  (970953275, -1454379871);
+
+insert into t_m (c_ydogyq1, c_reoxwl34) values 
+  (-67297980, 2067893465), 
+  (-1207838033, -1056992339), 
+  (-1158059535, -2115635925), 
+  (-408147330, 697196005);
+
+SELECT
+  ref_1.c_ydogyq1 as p0, 
+  round(cast(40 as decimal), ref_1.c_ydogyq1) as p2,
+  round(cast(40 as decimal), ref_1.c_ydogyq1) = 0 as p3
+FROM
+  t_m as ref_1
+WHERE
+  round(cast(40 as decimal), ref_1.c_ydogyq1) = 0
+  ;
+```
+
+
+
+**Expected behavior**
+第三列的表达式和WHERE子句中一样，当第3列为0时，这一行不应该出现在结果中
+
+**Actual Behavior**
+OB的单节点版本有预期之外的结果，第二列和第三列结果无误，但是，有一些第三列为0的行出现在结果中
+```
+mysql> SELECT
+    ->   ref_1.c_ydogyq1 as p0, 
+    ->   round(cast(40 as decimal), ref_1.c_ydogyq1) as p2,
+    ->   round(cast(40 as decimal), ref_1.c_ydogyq1) = 0 as p3
+    -> 
+    -> FROM
+    ->   t_m as ref_1
+    -> WHERE
+    ->   round(cast(40 as decimal), ref_1.c_ydogyq1) = 0
+    ->   ;
++-------------+----+----+
+| p0          | p2 | p3 |
++-------------+----+----+
+|  -408147330 |  0 |  1 |
+|   -67297980 |  0 |  1 |
+| -1158059535 |  0 |  1 |
+|  -368695015 |  0 |  1 |
+| -1207838033 |  0 |  1 |
+|  1741309262 | 40 |  0 |
++-------------+----+----+
+6 rows in set (0.02 sec)
+
+mysql> 
+```
+
+
+
+**Environment**
+```
+Linux bass1 6.5.0-28-generic #29~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Thu Apr  4 14:39:20 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+
+observer (OceanBase_CE 4.3.2.0)
+
+REVISION: 1-d66ce5ddb37300d9178cc9b9655b679bb567eb6b
+BUILD_BRANCH: develop
+BUILD_TIME: May 24 2024 19:45:57
+BUILD_FLAGS: RelWithDebInfo
+BUILD_INFO: 
+
+Copyright (c) 2011-present OceanBase Inc.
+```
+
+
+分布式部署配置文件
+```
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.11
+    - name: server2
+      ip: 10.0.10.12
+    - name: server3
+      ip: 10.0.10.13
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+  server2:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer2
+    zone: zone2
+  server3:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer3
+    zone: zone3
+  tag: latest
+  include: obd/observer.include.yaml
+  global: 
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '30G'
+    # diag_syslog_per_error_limit: '4'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+obproxy-ce:
+  servers:
+    - 10.0.10.8
+  global:
+    listen_port: 10004
+    prometheus_listen_port: 10005
+    syslog_level: 'WARN'
+    home_path: /root/data/obproxy
+    root_password: ''
+  include: obd/obproxy.include.yaml
+  depends:
+    - oceanbase-ce
+ ```
+
+分布式租户配置：
+```
+DROP TENANT mysql FORCE;
+DROP RESOURCE POOL pool_for_tenant_mysql;
+
+CREATE RESOURCE UNIT 4c7g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '7G';
+create resource pool pool_test unit='4c7g', unit_num=1, zone_list=('zone1' ,'zone2', 'zone3');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF, ob_query_timeout=5000000;
+```
+
+单节点部署配置文件：
+```
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.21
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+    # The directory for data storage. The default value is home_path/store.
+    # data_dir: /data
+    # The directory for clog, ilog, and slog. The default value is the same as the data_dir value.
+    # redo_dir: /redo
+  tag: latest
+  include: obd/observer.include.yaml
+  global: 
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '40G'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+
+```
+
+单节点租户配置：
+```
+DROP TENANT mysql FORCE;
+DROP RESOURCE POOL pool_for_tenant_mysql;
+
+CREATE RESOURCE UNIT 4c7g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '7G';
+create resource pool pool_test unit='4c7g', unit_num=1, zone_list=('zone1');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF, ob_query_timeout=5000000;
+```
+
+
+**Additional Context** 
+我们是来自北京航空航天大学网络空间安全学院的BASS团队，主要从事系统软件安全、操作系统和程序分析研究，研发自动化程序测试框架检测软件缺陷。我们使用自研的数据库漏洞测试工具在OceanBase中找到了上述可能的漏洞。
+
+<!--This is a translation content dividing line, the content below is generated by machine, please do not modify the content below-->
+---
+**Describe the bug**
+In the master branch version, expressions of type `ROUND` and `decimal` appear in the `WHERE` clause and produce unexpected results.
+
+**Fast Reproduce Steps(Required)**
+
+```sql
+create table t_m (
+  c_ydogyq1 int ,
+  c_reoxwl34 int,
+  primary key(c_reoxwl34, c_ydogyq1),
+  unique(c_ydogyq1)) partition by hash(c_ydogyq1) partitions 9;
+
+insert into t_m (c_ydogyq1, c_reoxwl34) values
+  (396667551, 217625229),
+  (-368695015, -1288002677),
+  (1741309262, -712324340),
+  (970953275, -1454379871);
+
+insert into t_m (c_ydogyq1, c_reoxwl34) values
+  (-67297980, 2067893465),
+  (-1207838033, -1056992339),
+  (-1158059535, -2115635925),
+  (-408147330, 697196005);
+
+SELECT
+  ref_1.c_ydogyq1 as p0,
+  round(cast(40 as decimal), ref_1.c_ydogyq1) as p2,
+  round(cast(40 as decimal), ref_1.c_ydogyq1) = 0 as p3
+FROM
+  t_m as ref_1
+WHERE
+  round(cast(40 as decimal), ref_1.c_ydogyq1) = 0
+  ;
+```
+
+
+
+**Expected behavior**
+The expression in the third column is the same as in the WHERE clause. When the third column is 0, this row should not appear in the result.
+
+**Actual Behavior**
+The single-node version of OB has unexpected results. The results in the second and third columns are correct. However, some rows with the third column 0 appear in the results.
+```
+mysql> SELECT
+    -> ref_1.c_ydogyq1 as p0,
+    -> round(cast(40 as decimal), ref_1.c_ydogyq1) as p2,
+    -> round(cast(40 as decimal), ref_1.c_ydogyq1) = 0 as p3
+    ->
+    -> FROM
+    ->t_m as ref_1
+    -> WHERE
+    -> round(cast(40 as decimal), ref_1.c_ydogyq1) = 0
+    -> ;
++-------------+----+----+
+| p0 | p2 | p3 |
++-------------+----+----+
+| -408147330 | 0 | 1 |
+| -67297980 | 0 | 1 |
+| -1158059535 | 0 | 1 |
+| -368695015 | 0 | 1 |
+| -1207838033 | 0 | 1 |
+| 1741309262 | 40 | 0 |
++-------------+----+----+
+6 rows in set (0.02 sec)
+
+mysql>
+```
+
+
+
+**Environment**
+```
+Linux bass1 6.5.0-28-generic #29~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Thu Apr 4 14:39:20 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+
+observer (OceanBase_CE 4.3.2.0)
+
+REVISION: 1-d66ce5ddb37300d9178cc9b9655b679bb567eb6b
+BUILD_BRANCH: develop
+BUILD_TIME: May 24 2024 19:45:57
+BUILD_FLAGS: RelWithDebInfo
+BUILD_INFO:
+
+Copyright (c) 2011-present OceanBase Inc.
+```
+
+
+Distributed deployment configuration file
+```
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.11
+    - name: server2
+      ip: 10.0.10.12
+    - name: server3
+      ip: 10.0.10.13
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+  server2:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer2
+    zone: zone2
+  server3:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer3
+    zone: zone3
+  tag: latest
+  include: obd/observer.include.yaml
+  global:
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '30G'
+    # diag_syslog_per_error_limit: '4'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+obproxy-ce:
+  servers:
+    - 10.0.10.8
+  global:
+    listen_port: 10004
+    prometheus_listen_port: 10005
+    syslog_level: 'WARN'
+    home_path: /root/data/obproxy
+    root_password: ''
+  include: obd/obproxy.include.yaml
+  depends:
+    - oceanbase-ce
+ ```
+
+Distributed tenant configuration:
+```
+DROP TENANT mysql FORCE;
+DROP RESOURCE POOL pool_for_tenant_mysql;
+
+CREATE RESOURCE UNIT 4c7g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '7G';
+create resource pool pool_test unit='4c7g', unit_num=1, zone_list=('zone1','zone2', 'zone3');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF, ob_query_timeout=5000000;
+```
+
+Single node deployment configuration file:
+```
+user:
+  username: root
+  key_file: private_key
+oceanbase-ce:
+  servers:
+    - name: server1
+      ip: 10.0.10.21
+  server1:
+    mysql_port: 10000
+    rpc_port: 10001
+    home_path: /root/data/observer1
+    zone: zone1
+    # The directory for data storage. The default value is home_path/store.
+    # data_dir: /data
+    # The directory for clog, ilog, and slog. The default value is the same as the data_dir value.
+    # redo_dir: /redo
+  tag: latest
+  include: obd/observer.include.yaml
+  global:
+    # for default system config used by farm, please see tools/deploy/obd/observer.include.yaml
+    # You can also specify the configuration directly below (stored locally, switching the working directory and redeploying will still take effect)
+    production_mode: false
+    devname: eth0
+    syslog_level: 'WARN'
+    syslog_io_bandwidth_limit: '30M'
+    log_disk_size: '40G'
+    max_syslog_file_count: '4'
+    cpu_count: '6'
+    datafile_size: '10G'
+    datafile_next: '5G'
+    datafile_maxsize: '30G'
+    root_password: ''
+    memory_limit: '9G'
+    system_memory: '1G'
+
+```
+
+Single node tenant configuration:
+```
+DROP TENANT mysql FORCE;
+DROP RESOURCE POOL pool_for_tenant_mysql;
+
+CREATE RESOURCE UNIT 4c7g MAX_CPU 4, MIN_CPU 4, MEMORY_SIZE '7G';
+create resource pool pool_test unit='4c7g', unit_num=1, zone_list=('zone1');
+create tenant test resource_pool_list=('pool_test'), primary_zone='RANDOM',comment 'test tenant', charset='utf8' set ob_tcp_invited_nodes='%', recyclebin=OFF, ob_query_timeout=5000000;
+```
+
+
+**Additional Context**
+We are the BASS team from the School of Cyberspace Security of Beihang University. We are mainly engaged in system software security, operating system and program analysis research, and develop automated program testing framework to detect software defects. We used a self-developed database vulnerability testing tool to find the above possible vulnerabilities in OceanBase.

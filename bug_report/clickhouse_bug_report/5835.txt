@@ -1,0 +1,66 @@
+ID: 5835
+Title: Distributed table SELECT returns inconsistent results
+Description:
+
+
+**Describe the bug**
+We are moving data from a production machine to a cluster of three servers with sharding and replication, which shall replace the original machine.
+When querying our distributed table, it returns different results for the same query.
+
+**How to reproduce**
+19.9.2.4
+
+our exemplary tables for node 1 of 3 (containing shard 1 replica 1 and shard 3 replica 2):
+
+```
+CREATE TABLE IF NOT EXISTS ds1.seg_events AS data.temp_events
+ENGINE = ReplicatedMergeTree('/clickhouse/{cluster}/tables/{shard-1}/events', '{replica-1}')
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY (...)
+SETTINGS index_granularity=8192;
+
+CREATE TABLE IF NOT EXISTS ds3.seg_events AS data.temp_events
+ENGINE = ReplicatedMergeTree('/clickhouse/{cluster}/tables/{shard-2}/events', '{replica-2}')
+PARTITION BY toYYYYMMDD(timestamp)
+ORDER BY (...)
+SETTINGS index_granularity=8192;
+
+CREATE TABLE IF NOT EXISTS data.events AS data.temp_events
+        ENGINE = Distributed(
+          '{cluster}',
+          '',
+          seg_events,
+          rand());
+```
+
+and similarly on the other 2 nodes, with different shards/replicas of course, resulting in a pattern like this:
+
+Server 1:
+shard 1, replica 1, "ds1.seg_events"
+shard 3, replica 2, "ds3.seg_events"
+
+Server 2:
+shard 2, replica 1, "ds2.seg_events"
+shard 1, replica 2, "ds1.seg_events
+
+Server 3:
+shard 3, replica 1, "ds3.seg_events"
+shard 2, replica 2, "ds2.seg_events"
+
+**Expected behavior**
+We expect the query to return the same value as on the original server. Which it sometimes does, but most of the time not.
+
+**Error message and/or stacktrace**
+No errors in the log
+
+**Issue**
+A query like "SELECT SUM(category_id) FROM data.events;" returns a different result each time. There seem to be different sums it can be, among which the correct one is also included as confirmed with the original database.
+
+Running this query locally on each of the shards and then adding them up manually consistently yields the correct sum. Hence problem seems to be in the distributed view.
+
+Running the distributed query on the 3 server cluster yields one 7 different results at random, of which one has a rate of occurrence about double that of the others. This would be consistent with a random selection of 1 of 2 possibilities on each server, leading me to believe the distributed engine selects the replica to use on each server at random and doesn't always take the main one as it should.
+This is kind of corroborated by the fact that when disabling one node, the query now only returns two different results with about the same rate of incidence.
+
+Perhaps the error lies within our distributed expression, probably the empty database field.
+
+

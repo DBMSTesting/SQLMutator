@@ -1,0 +1,75 @@
+ID: 63637
+Title: map inside if statement with default empty map value fails when accessed through distributed table
+Description:
+clickhouse version: 24.4.1.2088
+
+Using `if(..., some_map, map())` appears to fail with `allow_experimental_analyzer=1` when queried through a distributed table.
+
+our setup:
+
+create table:
+```sql
+    `resource_attributes` Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+```
+
+```sql
+-- Query through distributed table, analyzer on
+
+SELECT if(1, resource_attributes, map())
+FROM tracing.otel_traces
+LIMIT 1
+FORMAT `Null`
+SETTINGS allow_experimental_analyzer = 1
+
+Received exception from server (version 24.4.1):
+Code: 10. DB::Exception: Received from localhost:9000. DB::Exception: Not found column if(1_UInt8, __table1.resource_attributes, _CAST([]_Map(Nothing, Nothing), 'Map(Nothing, Nothing)'_String)) in block. There are only columns: __table1.resource_attributes: While executing Remote. (NOT_FOUND_COLUMN_IN_BLOCK)
+
+
+-- Query through distributed table, analyzer off
+SELECT if(1, resource_attributes, map())
+FROM tracing.otel_traces
+LIMIT 1
+FORMAT `Null`
+SETTINGS allow_experimental_analyzer = 0
+
+Ok.
+
+0 rows in set. Elapsed: 0.833 sec.
+
+
+-- Query through local table, analyzer on
+SELECT if(1, resource_attributes, map())
+FROM tracing.otel_traces_local
+LIMIT 1
+SETTINGS allow_experimental_analyzer = 1
+
+Query id: e209cf69-2621-476a-8b25-c1e5ed1f5e78
+
+Ok.
+
+0 rows in set. Elapsed: 0.001 sec.
+```
+
+This should reproduce it from what I am seeing:
+
+```sql
+CREATE TABLE default.bug_repro_local
+(
+    `id` String CODEC(ZSTD(1)),
+    `attributes` Map(LowCardinality(String), String) CODEC(ZSTD(1))
+)
+ENGINE = MergeTree
+ORDER BY (id);
+
+CREATE TABLE default.bug_repro
+(
+    `id` String CODEC(ZSTD(1)),
+    `attributes` Map(LowCardinality(String), String) CODEC(ZSTD(1))
+)
+ENGINE = Distributed('all-shards', 'default', 'bug_repro_local', rand());
+
+SELECT if(1, attributes, map()) from default.bug_repro limit 1 SETTINGS allow_experimental_analyzer=1;
+SELECT if(1, attributes, map()) from default.bug_repro limit 1 SETTINGS allow_experimental_analyzer=0;
+SELECT if(1, attributes, map()) from default.bug_repro_local limit 1 SETTINGS allow_experimental_analyzer=1;
+```
+

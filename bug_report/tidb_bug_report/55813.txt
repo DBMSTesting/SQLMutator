@@ -1,0 +1,80 @@
+ID: 55813
+Title: FK constraint might not enforced when child table is in state write_only
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+use the case in the design doc: https://github.com/pingcap/tidb/blob/b71f6c33d69ff8884d4ef3d15f9db485fba9926f/docs/design/2022-06-22-foreign-key.md#L104-L115
+
+steps:
+1. apply this diff to code of v8.1.0, after that we will wait when create child table and it's in write-only state, and on 4001 node, we skip load schema diff of child table, so we can make a case that 4000 and 4001 have different version
+```diff
+diff --git a/pkg/ddl/ddl_worker.go b/pkg/ddl/ddl_worker.go
+index 916458f1d0..1dc34f79f0 100644
+--- a/pkg/ddl/ddl_worker.go
++++ b/pkg/ddl/ddl_worker.go
+@@ -1430,6 +1430,9 @@ func waitSchemaChanged(d *ddlCtx, waitTime time.Duration, latestSchemaVersion in
+                         return nil
+                 }
+         }
++        if job.TableName == "child" {
++                time.Sleep(time.Hour)
++        }
+
+         return checkAllVersions(d, job, latestSchemaVersion, timeStart)
+ }
+diff --git a/pkg/infoschema/builder.go b/pkg/infoschema/builder.go
+index d03b07d7d1..62347c888e 100644
+--- a/pkg/infoschema/builder.go
++++ b/pkg/infoschema/builder.go
+@@ -659,6 +659,9 @@ func applyCreateTable(b *Builder, m *meta.Meta, dbInfo *model.DBInfo, tableID in
+                         fmt.Sprintf("(Table ID %d)", tableID),
+                 )
+         }
++        if tblInfo.Name.L == "child" && config.GetGlobalConfig().Port == 4001 {
++                return []int64{}, nil
++        }
+
+         b.updateBundleForCreateTable(tblInfo, tp)
+```
+2. start 2 tidb on port 4000 and 4001
+3. connect 4000, and run below, it will block on create `child`, check `admin show ddl jobs 1` to make sure child is in write_only state.
+```sql
+CREATE TABLE parent (
+    id INT KEY
+);
+
+insert into parent values(1)
+
+CREATE TABLE child (
+    id INT,
+    pid INT,
+    INDEX idx_pid (pid),
+    FOREIGN KEY (pid) REFERENCES parent(id) ON DELETE CASCADE
+);
+```
+3. start 2 sessions, and run the case in the design doc
+
+|connect 4000 session| 4001 session|
+|---|---|
+|begin||
+|insert into child values(1,1)||
+||begin|
+||delete from parent where id=1; // it blocks until prev txn commit|
+|commit||
+||commit|
+|select * from child; // we can see 1 row||
+||select * from parent;// empty result|
+
+### 2. What did you expect to see? (Required)
+FK constraint enforced
+### 3. What did you see instead (Required)
+it's not
+### 4. What is your TiDB version? (Required)
+8.1.0
+<!-- Paste the output of SELECT tidb_version() -->
+

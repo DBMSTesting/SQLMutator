@@ -1,0 +1,54 @@
+ID: 20454
+Title: coprocessor layer may encounter deadlock due to OOM
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+Currently coprocessor process may encounter deadlock in some cases. 
+
+Here is one example to meet this error:
+We can simulate other executors consuming during the coprocessor process which cause the OOM Action. If the response channel was empty at that time, the workers would all get stucked in `waitIfNeeded` function which will cause the deadlock.
+```golang
+// run is a worker function that get a copTask from channel, handle it and
+// send the result back.
+func (worker *copIteratorWorker) run(ctx context.Context) {
+	defer worker.wg.Done()
+	for task := range worker.taskCh {
+		respCh := worker.respChan
+		if respCh == nil {
+			respCh = task.respChan
+		}
+		worker.handleTask(ctx, task, respCh)
+		close(task.respChan)
+		worker.maxID.setMaxIDIfLarger(task.id)
+		worker.actionOnExceed.destroyTokenIfNeeded(func() {
+			worker.sendRate.putToken()
+		})
+		worker.memTracker.Consume(1000) // Simulating other executor memory consuming
+		worker.actionOnExceed.waitIfNeeded()
+		worker.memTracker.Consume(-1000)
+		if worker.vars != nil && worker.vars.Killed != nil && atomic.LoadUint32(worker.vars.Killed) == 1 {
+			return
+		}
+		select {
+		case <-worker.finishCh:
+			return
+		default:
+		}
+	}
+}
+```
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

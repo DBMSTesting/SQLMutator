@@ -1,0 +1,50 @@
+ID: 52080
+Title: data inconsistency after adding indexes with multi-schema optimization in partition table
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+``` SQL
+func TestMultiSchemaAddIndexMerge(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	defer ingesttestutil.InjectMockBackendMgr(t, store)()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustExec("use test")
+
+	tk.MustExec("create table t (a int, b int) PARTITION BY HASH (`a`) PARTITIONS 4;")
+	tk.MustExec("insert into t values (1, 1), (2, 2), (3, 3);")
+
+	first := true
+	var tk2Err error
+	ingest.MockExecAfterWriteRow = func() {
+		if !first {
+			return
+		}
+		_, tk2Err = tk2.Exec("insert into t values (4, 4), (5, 5);")
+		first = false
+	}
+
+	tk.MustExec("alter table t add index idx1(a), add index idx2(b);")
+	require.False(t, first)
+	require.NoError(t, tk2Err)
+	tk.MustExec("admin check table t;")
+}
+```
+
+### 2. What did you expect to see? (Required)
+Test pass
+### 3. What did you see instead (Required)
+``` 
+Messages:   	sql:admin check table t;, [], error stack [admin:8223]data inconsistency in table: t, index: idx2, handle: 5, index-values:"" != record-values:"handle: 5, values: [KindInt64 5]"
+
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

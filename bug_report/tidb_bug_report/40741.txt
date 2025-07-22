@@ -1,0 +1,101 @@
+ID: 40741
+Title: coprocessor paging Limit1 exec return enough data but not stop
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+With TiKV
+
+```
+set @@tidb_enable_paging = 1;
+
+CREATE TABLE `ge1` (
+  `actor_login` varchar(40) NOT NULL DEFAULT '',
+  `id` bigint(20) NOT NULL DEFAULT '0',
+  `type` varchar(29) NOT NULL DEFAULT 'Event',
+  `action` varchar(11) NOT NULL DEFAULT '',
+  `created_at` datetime NOT NULL DEFAULT '1970-01-01 00:00:00',
+  `repo_id` bigint(20) NOT NULL DEFAULT '0',
+  KEY (`repo_id`,`type`,`action`,`created_at`,`actor_login`))
+PARTITION BY LIST COLUMNS(`type`)
+( PARTITION `watch_event` VALUES IN ('WatchEvent'));
+
+insert into ge1 value  ('xxy'        , 26332576530 , 'WatchEvent' , 'started' , '2023-01-10 12:00:06' , 41986369 ),
+('DuWen'        , 26332576530 , 'WatchEvent' , 'started' , '2023-01-10 12:00:06' , 200039032 ),
+('zzt'        , 26332576530 , 'WatchEvent' , 'started' , '2023-01-10 12:00:06' , 41986369 ),
+('mmw'        , 26332576530 , 'WatchEvent' , 'started' , '2023-01-10 12:00:06' , 41986369 );
+
+trace SELECT actor_login FROM ge1 WHERE type = 'WatchEvent' AND action = 'started' AND repo_id = 41986369 ORDER BY created_at limit 1;
+```
+
+### 2. What did you expect to see? (Required)
+
+distsql.Select only send one region request and the query is done.
+
+### 3. What did you see instead (Required)
+
+distsql.Select send many request.
+In paging protocol, Limit1 return 1 record and repeat like that many times.
+
+```
+mysql> trace  SELECT actor_login FROM ge1 WHERE type = 'WatchEvent' AND action = 'started' AND repo_id = 41986369 ORDER BY created_at
+  limit 1;
++-------------------------------------------------------------------------+-----------------+------------+
+| operation                                                               | startTS         | duration   |
++-------------------------------------------------------------------------+-----------------+------------+
+| trace                                                                   | 09:55:02.867053 | 2.78515ms  |
+|   ├─session.ExecuteStmt                                                 | 09:55:02.867059 | 822.572µs  |
+|   │ ├─executor.Compile                                                  | 09:55:02.867071 | 360.035µs  |
+|   │ └─session.runStmt                                                   | 09:55:02.867461 | 401.826µs  |
+|   │   └─distsql.Select                                                  | 09:55:02.867535 | 249.714µs  |
+|   │     ├─loadRegion                                                    | 09:55:02.867542 | 203.403µs  |
+|   │     └─regionRequest.SendReqCtx                                      | 09:55:02.867879 | 530.428µs  |
+|   │       ├─rpcClient.SendRequest, region ID: 94, type: Cop             | 09:55:02.867895 | 499.737µs  |
+|   │       │ └─tikv.RPC                                                  | 09:55:02.867896 | 254.083µs  |
+|   │       │   └─tikv.Wait                                               | 09:55:02.867896 | 75.331µs   |
+|   │       │     └─tikv.GetSnapshot                                      | 09:55:02.867896 | 75.331µs   |
+|   │       └─regionRequest.SendReqCtx                                    | 09:55:02.868492 | 383.865µs  |
+|   │         ├─rpcClient.SendRequest, region ID: 94, type: Cop           | 09:55:02.868503 | 356.645µs  |
+|   │         │ └─tikv.RPC                                                | 09:55:02.868504 | 162.243µs  |
+|   │         │   └─tikv.Wait                                             | 09:55:02.868504 | 12.23µs    |
+|   │         │     └─tikv.GetSnapshot                                    | 09:55:02.868504 | 12.23µs    |
+|   │         └─regionRequest.SendReqCtx                                  | 09:55:02.868949 | 396.416µs  |
+|   │           ├─rpcClient.SendRequest, region ID: 94, type: Cop         | 09:55:02.868959 | 378.745µs  |
+|   │           │ └─tikv.RPC                                              | 09:55:02.868960 | 182.463µs  |
+|   │           │   └─tikv.Wait                                           | 09:55:02.868960 | 20.23µs    |
+|   │           │     └─tikv.GetSnapshot                                  | 09:55:02.868960 | 20.23µs    |
+|   │           └─regionRequest.SendReqCtx                                | 09:55:02.869408 | 290.994µs  |
+|   │             └─rpcClient.SendRequest, region ID: 94, type: Cop       | 09:55:02.869413 | 272.044µs  |
+|   │               └─tikv.RPC                                            | 09:55:02.869413 | 95.791µs   |
+|   │                 └─tikv.Wait                                         | 09:55:02.869413 | 9.2µs      |
+|   │                   └─tikv.GetSnapshot                                | 09:55:02.869413 | 9.2µs      |
+|   ├─*executor.ProjectionExec.Next                                       | 09:55:02.867888 | 1.898597ms |
+|   │ └─*executor.TopNExec.Next                                           | 09:55:02.867891 | 1.889587ms |
+|   │   ├─*executor.IndexReaderExecutor.Next                              | 09:55:02.867897 | 630.339µs  |
+|   │   ├─*executor.IndexReaderExecutor.Next                              | 09:55:02.868549 | 1.215127ms |
+|   │   └─*executor.IndexReaderExecutor.Next                              | 09:55:02.869774 | 2.08µs     |
+|   └─*executor.ProjectionExec.Next                                       | 09:55:02.869794 | 10.87µs    |
+|     └─*executor.TopNExec.Next                                           | 09:55:02.869795 | 490ns      |
++-------------------------------------------------------------------------+-----------------+------------+
+33 rows in set (0.00 sec)
+```
+
+This is from a case from some user, and above is the minimal reproduction.
+In that original case, select * limit 1 is painfully slow, because of this bug, it use so many RPCs.
+
+![image](https://user-images.githubusercontent.com/1420062/213601438-3d2c317b-ef8b-480e-a78d-b0fe903c85c5.png)
+
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master 8ec2612ba2315592d25d55d54f93a7ecd6bb1e6b
+
+After https://github.com/pingcap/tidb/pull/36108 the plan change to ` TopN->IndexReader->Limit[TiKV]`, which active this bug.
+If the plan is `Limit1->IndexReader->Limit1[TiKV]`, the top Limit on TiDB side make the query exit and hide the coprocessor paging bug.

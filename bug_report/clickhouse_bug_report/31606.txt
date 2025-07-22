@@ -1,0 +1,79 @@
+ID: 31606
+Title: row policies multiple OR to IN rewrite bug.
+Description:
+**Describe what's wrong**
+
+If you have more than 2 row policies with the same column used in conditions, ClickHouse tries to rewrite them in IN clause, but it doesn't work.
+
+**Does it reproduce on recent release?**
+
+Yes. 
+ClickHouse 21.11, 21.8
+
+**How to reproduce**
+
+```
+CREATE TABLE test_row
+(
+    `key` UInt32,
+    `value` UInt32
+)
+ENGINE = MergeTree
+ORDER BY key;
+
+INSERT INTO test_row SELECT
+    number,
+    number
+FROM numbers(10);
+
+CREATE ROW POLICY IF NOT EXISTS key_1 ON test_row FOR SELECT USING key =1 TO default;
+CREATE ROW POLICY IF NOT EXISTS key_2 ON test_row FOR SELECT USING key =2 TO default;
+
+ SELECT * FROM test_row;
+
+SELECT *
+FROM test_row
+
+Query id: c282f548-cf06-45b6-a187-b0ee37062514
+
+┌─key─┬─value─┐
+│   1 │     1 │
+│   2 │     2 │
+└─────┴───────┘
+
+2 rows in set. Elapsed: 0.005 sec.
+
+CREATE ROW POLICY IF NOT EXISTS key_3 ON test_row FOR SELECT USING key =3 TO default;
+
+SELECT *
+FROM test_row
+
+
+0 rows in set. Elapsed: 0.017 sec.
+
+Received exception from server (version 21.12.1):
+Code: 35. DB::Exception: Received from localhost:9000. DB::Exception: Number of arguments for function "or" should be at least 2: passed 1: While processing or(key IN (1, 2, 3)), key, value. (TOO_FEW_ARGUMENTS_FOR_FUNCTION)
+
+SET optimize_min_equality_disjunction_chain_length = 10;
+
+SELECT *
+FROM test_row
+WHERE 1
+
+Query id: 74325911-824d-4121-80de-cb5d9819cf77
+
+
+0 rows in set. Elapsed: 0.003 sec.
+
+Received exception from server (version 21.12.1):
+Code: 35. DB::Exception: Received from localhost:9000. DB::Exception: Number of arguments for function "or" should be at least 2: passed 1: While processing or(key IN (1, 2, 3)), key, value. (TOO_FEW_ARGUMENTS_FOR_FUNCTION)
+```
+
+**Expected behavior**
+
+Query works.
+
+
+**Additional context**
+
+Looks like that or chain rewrite doesn't work correctly for row policies.

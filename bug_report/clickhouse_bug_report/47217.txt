@@ -1,0 +1,90 @@
+ID: 47217
+Title: Regression in nested SELECT (might be related to WINDOW function)
+Description:
+**Describe the issue**
+We have a table
+
+```
+┌─name─────────────┬─type───────────────────┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┬─ttl_expression─┐
+│ control_plane_id │ LowCardinality(String) │              │                    │         │ ZSTD(1)          │                │
+│ kind             │ LowCardinality(String) │              │                    │         │ ZSTD(1)          │                │
+│ name             │ LowCardinality(String) │              │                    │         │ ZSTD(1)          │                │
+│ state            │ LowCardinality(String) │              │                    │         │ ZSTD(1)          │                │
+│ size             │ UInt64                 │              │                    │         │                  │                │
+│ timestamp        │ DateTime               │              │                    │         │ DoubleDelta, LZ4 │                │
+└──────────────────┴────────────────────────┴──────────────┴────────────────────┴─────────┴──────────────────┴────────────────┘
+```
+
+To export data, we're running the query
+```sql
+INSERT INTO FUNCTION s3('https://s3..._{_partition_id}.csv.gz', 'CSV', auto, 'gzip') PARTITION BY formatDateTime(subtractHours(now(), 1), '%Y-%m-%d_%H:00') SELECT
+    control_plane_id,
+    backup_id,
+    backup_size,
+    created,
+    deleted
+FROM
+(
+    SELECT
+        control_plane_id,
+        name AS backup_id,
+        max(size) OVER wndw AS backup_size,
+        minIf(timestamp, state = 'done') OVER wndw AS created,
+        maxIf(timestamp, state = 'deleted_by_user') OVER wndw AS deleted
+    FROM default.backup_events
+    WHERE state IN ('done', 'deleted_by_user')
+    WINDOW wndw AS (PARTITION BY backup_id)
+    LIMIT 1 BY backup_id
+)
+WHERE (created < toStartOfHour(now())) AND ((deleted = 0) OR ((deleted >= subtractHours(toStartOfHour(now()), 1)) AND (deleted < toStartOfHour(now()))))
+```
+
+But this started to fail. Specifically the SELECT with sub-SELECT. The inner most SELECT still runs fine.
+
+It fails with the error:
+```
+Received exception from server (version 23.2.1):
+Code: 10. DB::Exception: Received from clickhouse-metrics.us-west-2.aws.clickhouse-dev.com:9440. DB::Exception: Not found column state in block control_plane_id LowCardinality(String) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, String(size = 1))), name LowCardinality(String) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, String(size = 1))), size UInt64 UInt64(size = 0), timestamp DateTime UInt32(size = 0), equals(state, 'done') LowCardinality(UInt8) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, UInt8(size = 1))), equals(state, 'deleted_by_user') LowCardinality(UInt8) ColumnLowCardinality(size = 0, UInt8(size = 0), ColumnUnique(size = 1, UInt8(size = 1))), max(size) OVER wndw UInt64 UInt64(size = 0), minIf(timestamp, equals(state, 'done')) OVER wndw DateTime UInt32(size = 0), maxIf(timestamp, equals(state, 'deleted_by_user')) OVER wndw DateTime UInt32(size = 0). (NOT_FOUND_COLUMN_IN_BLOCK)
+```
+
+On ClickHouse `22.12.1` the query still run fine. As far as we could test it started failing at least with `22.13.1` and as you see from the error it at least still fails with `23.2.1`.
+
+
+**How to reproduce**
+
+* Which ClickHouse server versions are incompatible
+`22.13.1` and onwards, at least `22.12.1` is working correctly.
+
+* Which interface to use, if matters
+ClickHouse client. But via cURL and the HTTP interface it fails also with a 500 status.
+
+* `CREATE TABLE` statements for all tables involved
+```
+SHOW CREATE TABLE backup_events
+
+Query id: d461ec58-efb3-49f2-91f5-8df7e0e79cca
+
+┌─statement──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ CREATE TABLE default.backup_events
+(
+    `control_plane_id` LowCardinality(String) CODEC(ZSTD(1)),
+    `kind` LowCardinality(String) CODEC(ZSTD(1)),
+    `name` LowCardinality(String) CODEC(ZSTD(1)),
+    `state` LowCardinality(String) CODEC(ZSTD(1)),
+    `size` UInt64,
+    `timestamp` DateTime CODEC(DoubleDelta, LZ4)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')
+PARTITION BY toYYYYMM(timestamp)
+PRIMARY KEY control_plane_id
+ORDER BY (control_plane_id, timestamp)
+SETTINGS index_granularity = 8192 │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+* Queries to run that lead to unexpected result
+See above
+
+**Error message and/or stacktrace**
+See above
+

@@ -1,0 +1,131 @@
+ID: 20597
+Title: tidb_batch_insert should not hit executor OOM quota
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+My understanding of `tidb_batch_insert` is that it is not documented intentionally. I think there is a valid use case for incrementally committing data however. See: https://github.com/pingcap/tidb/issues/18038
+
+This bug report is about `tidb_batch_insert`. Consider the following sample data:
+
+```sql
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1 (
+ pk VARBINARY(36) NOT NULL PRIMARY KEY,
+ b BIGINT NOT NULL,
+ c BIGINT NOT NULL,
+ pad VARBINARY(2048),
+ INDEX (b),
+ INDEX (c)
+);
+INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM dual;
+INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c;
+INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c;
+INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c;
+```
+
+If I use the MySQL command line client, I can select 1 billion rows with:
+```
+$ mysql test --quick -e "SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c;" > /dev/null
+```
+
+(The `--quick` option is required to prevent a client OOM. It retrieves one row at a time from the server.)
+
+The memory for the above query remains stable, as observed in both `top` and in `select * from information_schema.processlist`:
+
+```sql
+mysql> select *, format_bytes(mem) from information_schema.processlist\G
+*************************** 1. row ***************************
+               ID: 7
+             USER: root
+             HOST: 127.0.0.1
+               DB: NULL
+          COMMAND: Query
+             TIME: 0
+            STATE: autocommit
+             INFO: select *, format_bytes(mem) from information_schema.processlist
+           DIGEST: 1ca560039f00cd76cc5aa081d57a76777af29383eae786850ca4a920e360773b
+              MEM: 64540
+         TxnStart: 
+format_bytes(mem): 63.03 KiB
+*************************** 2. row ***************************
+               ID: 6
+             USER: root
+             HOST: 127.0.0.1
+               DB: test
+          COMMAND: Query
+             TIME: 745
+            STATE: autocommit
+             INFO: SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c
+           DIGEST: 93c940d9486707218fc41341aa7c108788312daebcac7af39a40b7efa8aeb2ca
+              MEM: 12350624
+         TxnStart: 10-22 19:56:07.101(420326451996524548)
+format_bytes(mem): 11.78 MiB
+2 rows in set (0.00 sec)
+```
+
+However, if I set `enable-batch-dml = true` in my tidb.toml file and attempt to execute this same query as an `INSERT .. SELECT` I reach query OOM. This is despite setting `tidb_dml_batch_size=20000` + `tidb_batch_insert=1`:
+
+```sql
+SET tidb_dml_batch_size=20000;
+SET tidb_batch_insert=1;
+INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c;
+```
+
+Output:
+```sql
+mysql> INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c;
+ERROR 1105 (HY000): Out Of Memory Quota![conn_id=9]
+```
+
+During this time, I can see the memory growing at a constant rate:
+
+```sql
+mysql> select *, format_bytes(mem) from information_schema.processlist where id = 9\G
+*************************** 1. row ***************************
+               ID: 9
+             USER: root
+             HOST: 127.0.0.1
+               DB: test
+          COMMAND: Query
+             TIME: 40
+            STATE: autocommit
+             INFO: INSERT INTO t1 SELECT uuid(), FLOOR(RAND()*5), FLOOR(RAND()*1000000), HEX(RANDOM_BYTES(1000)) FROM t1 a JOIN t1 b JOIN t1 c
+           DIGEST: 2279da97a82e38809b19698286f9991190b943460983a7cf4212132d319fa7d1
+              MEM: 905574977
+         TxnStart: 10-22 20:10:46.751(420326682591494147)
+format_bytes(mem): 863.62 MiB
+1 row in set (0.00 sec)
+```
+
+### 2. What did you expect to see? (Required)
+
+Because the `tidb_dml_batch_size` is 20K, I expect the memory usage to be stable as TiDB continues to incrementally commit. 
+
+The expected result is that this query should be able to run for however long it takes to insert 1B rows.
+
+### 3. What did you see instead (Required)
+
+```
+ERROR 1105 (HY000): Out Of Memory Quota![conn_id=9]
+```
+
+### 4. What is your TiDB version? (Required)
+
+```sql
+mysql> SELECT tidb_version()\G
+*************************** 1. row ***************************
+tidb_version(): Release Version: v4.0.0-beta.2-1407-ge30220099
+Edition: Community
+Git Commit Hash: e302200999045d81b19d08d5ec240d3438674abb
+Git Branch: master
+UTC Build Time: 2020-10-22 03:05:47
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+1 row in set (0.00 sec)
+```

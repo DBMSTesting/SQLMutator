@@ -1,0 +1,92 @@
+ID: 14601
+Title: import + pivot + export creates un-importable dump 
+Description:
+### What happens?
+
+If you create a table from a pivot command, export the db, import it again elsewhere, do another pivot, then export again, the exported database will not be importable because of a bug in the schema.sql wherein there are multiple lines that start with `CREATE TYPE __pivot_enum_0_0 AS ENUM`
+
+### To Reproduce
+
+```py
+# demonstrate bug
+import numpy as np
+import pandas as pd
+import duckdb
+from pathlib import Path
+
+TEMP_PATH0 = "/tmp/duckdemo0"
+TEMP_PATH1 = "/tmp/duckdemo1"
+N = 1000
+df = pd.DataFrame({"a":np.random.choice(["u", "v", "w"], N, True),
+                   "b":np.random.choice(["x", "y", "z"], N, True),
+                   "c":np.random.randn(N),})
+conn0 = duckdb.connect(":memory:0")
+
+ddf = conn0.from_df(df)
+ddf.create("input_data")
+
+xx = conn0.query("pivot input_data on a using max(c) group by b;")
+xx.create("xx")
+conn0.execute(f"EXPORT DATABASE '{TEMP_PATH0}'  (FORMAT PARQUET);")
+conn1 = duckdb.connect(":memory:1")
+conn1.execute(f"IMPORT DATABASE '{TEMP_PATH0}';")
+yy = conn1.query("pivot input_data on b using max(c) group by a;")
+yy.create("yy")
+conn1.execute(f"EXPORT DATABASE '{TEMP_PATH1}'  (FORMAT PARQUET);")
+with (Path(TEMP_PATH1) / "schema.sql").open("r") as f:
+    print(f.read())
+
+# CREATE TYPE __pivot_enum_0_0 AS ENUM ( 'x', 'y', 'z' );
+# CREATE TYPE __pivot_enum_0_0 AS ENUM ( 'u', 'v', 'w' );
+
+# CREATE TABLE input_data(a VARCHAR, b VARCHAR, c DOUBLE);
+# CREATE TABLE xx(b VARCHAR, u DOUBLE, v DOUBLE, w DOUBLE);
+# CREATE TABLE yy(a VARCHAR, x DOUBLE, y DOUBLE, z DOUBLE);
+
+# Renames the pivot type. Breaks importing even though it's never used.
+
+conn2 = duckdb.connect(":memory:2")
+conn2.execute(f"IMPORT DATABASE '{TEMP_PATH1}';")
+# Fails with message:
+# CatalogException: Catalog Error: Type with name "__pivot_enum_0_0" already exists!
+```
+
+### OS:
+
+Ubuntu 22.04.5 LTS x86_64
+
+### DuckDB Version:
+
+1.1.1
+
+### DuckDB Client:
+
+python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Michael Hankin
+
+### Affiliation:
+
+Mothball Labs
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

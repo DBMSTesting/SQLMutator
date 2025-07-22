@@ -1,0 +1,22 @@
+ID: 6090
+Title: Distributed GLOBAL JOIN column membership issue
+Description:
+ClickHouse version: 19.11.0
+
+This issue is closely related to #5976.
+
+**TL;DR**: the attached test should work, but it does not: [00974.zip](https://github.com/yandex/ClickHouse/files/3414134/00974.zip). 
+
+Here goes my understanding of the bug. 
+
+First of all, during the syntax analysis of the query, table aliases are stripped off the identifiers in the ON-clause, so the condition starts to look like `a = c` or `c = a`. In non-distributed setting it is perfectly OK, as the information about the original membership of columns is saved in `ASTIdentifier::semantic->membership` field.
+
+When query is distributed, after being rewritten, it is transmitted to the remote replicas via TCP interface in plaintext, so the membership information which is hidden in `ASTIdentifier` becomes lost. If the remote replica receives the query in which ON-clause looks like "`c = a`", it results in error due to #5976.
+
+As a consequence, it becomes impossible to write query with ON-clause involving two columns with the same name unless you rename one of them by involving a subquery.
+
+**PS**. I spent quite a long time trying to understand why this query still works when there is a single local replica of the distributed table. The explanation is rather surprising (at least it was for me!), so I provide it here.
+
+It seems like the issue above does not apply for distributed queries that go to local shards. Note that `prefer_localhost_replica = 0` simply makes ClickHouse treat all shards of distributed tables as remote, so the first three SELECT queries in the test are in fact local distributed queries, while the last three SELECT queries are done in remote manner.
+
+When shard is considered local (first three queries in the attached test), the corresponding local stream simply instantiates the interpreter for select query and passes AST there. Here is caveat: with the AST we implicitly pass the semantics associated to identifiers, in particular, their membership values. This leads to the strange behavior as the rewritten query (with ON-clause "`c = a`") is definitely incorrect (according to #5976), but it suddenly works only because identifiers inherited their membership from the syntax analysis of the original query.

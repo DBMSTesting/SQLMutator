@@ -1,0 +1,107 @@
+ID: 16359
+Title: Having set a memory limit, an UDF cannot complete
+Description:
+### What happens?
+
+Following up on #16319 and #16352 and #16166
+
+I have set a memory limit of 500MB. This is more than enough memory to compute a **single row** in the result. Instead, the operation goes out of memory. I expect that the query below should _just work_ with a _fetchone()_ pattern and not already fail on the con.execute step.
+
+When setting 1000MB as memory limit the operation greatly exceeds that limit.  Similar to #16166 it fills up the client interface.
+
+Below is still not the issue that I am fundamentally trying to solve, which seems to relate to the ensemble of all the mentioned issues.
+
+### To Reproduce
+
+```python
+import functools
+
+import duckdb
+import pickle
+import datetime
+from typing import T
+
+
+class MyPickleSerializer:
+    sql_type = 'BINARY'
+
+    def marshall(self, obj, clazz: T):
+        return pickle.dumps(obj, pickle.HIGHEST_PROTOCOL)
+
+    def unmarshall(self, obj, clazz: T) -> T:
+        return pickle.loads(obj)
+
+
+def magic_function(serializer: MyPickleSerializer, obj):
+    return [[x.hour, x.minute] for x in obj]
+
+
+def embedding_udf(serializer: MyPickleSerializer, serialized: bytes, clazz: str) -> list[str]:
+    deserialized = serializer.unmarshall(serialized, clazz)
+    return [x for x in magic_function(serializer, deserialized) if len(x) > 0]
+
+
+with duckdb.connect("udf_test.duckdb") as con:
+    serializer = MyPickleSerializer()
+
+    if True:
+        con.execute("""
+            drop table if exists data_udf;
+            create table data_udf (object binary);
+        """)
+
+        today = datetime.datetime.now()
+
+        print("data generating")
+        data = [[serializer.marshall([today + datetime.timedelta(days=i)] * 100000, list)] for i in range(0, 10000)] # 10000 may be lower, DuckDB's insert performance is suboptimal
+        print("data generated\ninsert start")
+        con.executemany("""insert into data_udf (object) values (?);""", data)
+        print("insert ends")
+
+    con.create_function('embedding', functools.partial(embedding_udf, serializer), return_type=list[str])
+
+    con.execute("""SET memory_limit = '500MB';""") # duckdb.duckdb.OutOfMemoryException: Out of Memory Error: failed to pin block of size 256.0 KiB (476.7 MiB/476.8 MiB used)
+    con.execute("""SET memory_limit = '1000MB';""") # Operation greatly exceeds the 1000MB
+
+    con.execute("SELECT embedding(object, 'list') AS x FROM data_udf;")
+```
+
+### OS:
+
+Linux 
+
+### DuckDB Version:
+
+1.2.1
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+i7-8700 16GB memory
+
+### Full Name:
+
+Stefan de Koinnk
+
+### Affiliation:
+
+Stichting OpenGeo
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [x] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

@@ -1,0 +1,61 @@
+ID: 8223
+Title: table scan is chosen while index scan is available when `IfNull` is eliminated
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+```sql
+CREATE TABLE `t` (
+  `a` int(11) NOT NULL,
+  `b` int(11) NOT NULL,
+  PRIMARY KEY (`a`,`b`)
+)
+insert into t values(1,2);
+explain select * from (select * from t union all select ifnull(a,b), b from t) sub where a > 0;
+```
+
+2. What did you expect to see?
+Choose index scan for both children of union, because:
+```
+mysql> explain select ifnull(a,b) from t where a > 0;
++-------------------+-------+------+---------------------------------------------------------------------+
+| id                | count | task | operator info                                                       |
++-------------------+-------+------+---------------------------------------------------------------------+
+| IndexReader_9     | 0.33  | root | index:IndexScan_8                                                   |
+| └─IndexScan_8     | 0.33  | cop  | table:t, index:a, b, range:(0,+inf], keep order:false, stats:pseudo |
++-------------------+-------+------+---------------------------------------------------------------------+
+2 rows in set (0.00 sec)
+```
+
+
+3. What did you see instead?
+
+```
+mysql> explain select * from (select * from t union all select ifnull(a,b), b from t) sub where a > 0;
++------------------------+-------+------+-------------------------------------------------------------------------------+
+| id                     | count | task | operator info                                                                 |
++------------------------+-------+------+-------------------------------------------------------------------------------+
+| Union_11               | 0.67  | root |                                                                               |
+| ├─IndexReader_17       | 0.33  | root | index:IndexScan_16                                                            |
+| │ └─IndexScan_16       | 0.33  | cop  | table:t, index:a, b, range:(0 +inf,+inf +inf], keep order:false, stats:pseudo |
+| └─TableReader_21       | 0.33  | root | data:Selection_20                                                             |
+|   └─Selection_20       | 0.33  | cop  | gt(test.t., 0)                                                                |
+|     └─TableScan_19     | 1.00  | cop  | table:t, range:[-inf,+inf], keep order:false, stats:pseudo                    |
++------------------------+-------+------+-------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+Note that `gt(test.t., 0)` is another problem which would be fixed in https://github.com/pingcap/tidb/issues/8221
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select version();
++--------------------------------------+
+| version()                            |
++--------------------------------------+
+| 5.7.10-TiDB-v2.1.0-rc.3-151-gbb6d0a9 |
++--------------------------------------+
+1 row in set (0.00 sec)
+```

@@ -1,0 +1,93 @@
+ID: 32670
+Title: Trigger OOM if tidb_mem_quota_query restriction is bypassed in case of three table associations
+Description:
+### 1. Minimal reproduce step (Required)
+
+a.swapoff -a
+b.tidb config:
+server_configs:
+  tidb:
+    enable-batch-dml: true
+    mem-quota-query: 4294967296
+    performance.server-memory-quota: 30064771072
+    performance.txn-total-size-limit: 1073741824
+
+c.Execute the following SQL:
+select
+	B.code as c0,
+	C.br_name as c1,
+	sum(A.ss_num) as m0,
+	sum(A.a_ss_num) as m1,
+	sum(A.cb_num) as m2
+from
+	test.A2 as A,
+	test.B as B,
+	test.C as C
+where
+	B.code = ‘1010’
+	and
+A.s_id = B.s_id
+	and
+A.b_code = C.b_code
+group by
+	B.code,
+	C.br_name;
+
+Table A is A partitioned table, about 200 million data, partition by day, 700+ partitions.
+
+### 2. What did you expect to see? (Required)
+
+Return：The last packet successfully received from the server was 92,000 milliseconds ago.  The last packet sent successfully to the server was 92,000 milliseconds ago.
+Out of Memory Quota is not triggered, the system memory is full，process killed by oom-killer.
+
+### 3. What did you see instead (Required)
+
+Returns Out of Memory Quota information instead of restarting TiDB.
+
+### 4. What is your TiDB version? (Required)
+5.4.0
+
+### 5. Other information
+Capture the heap to see the information：
+
+https://asktug.com/uploads/default/original/4X/d/e/5/de5ba0de957cf9e245a5c958746cd1829c258139.png
+
+github.com/pingcap/tidb/util/chunk.NewColumn (/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/chunk/column.go:0)
+
+> github.com/pingcap/tidb/util/chunk.New (/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/chunk/chunk.go:0)
+
+> github.com/pingcap/tidb/executor.(*HashJoinExec).fetchBuildSideRows (/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/join.go:0)
+
+> github.com/pingcap/tidb/executor.(*HashJoinExec).fetchAndBuildHashTable.func2 (/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/executor/join.go:0)
+
+> github.com/pingcap/tidb/util.WithRecovery (/home/jenkins/agent/workspace/build-common/go/src/github.com/pingcap/tidb/util/misc.go:0)
+
+The fetchAndBuildHashTable class is associated with 10GB of memory.
+
+https://asktug.com/uploads/default/original/4X/e/8/e/e8e658905dbe66c4baf4aa716d42c79f119b21d6.png
+
+The scanning results of A are first HashJoin with C, C Build, and A Probe. Then the results of A and C are HashJoin with B, A and C Build, and B Probe. There are problems in this step, and the results of A and C are too large.
+
+The execution plan is as follows:
+
+id                                 |estRows    |task     |access object                                                   |operator info                                                                                                                                                                                                                                                  |
+-----------------------------------+-----------+---------+----------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+Projection_746                     |234.96     |root     |                                                                |test.B.code, test.C.br_name, Column#212, Column#213, Column#214                                                                                                                                                     |
+└─HashAgg_747                      |234.96     |root     |                                                                |group by:test.C.br_name, test.B.code, funcs:sum(test.A2.ss_num)->Column#212, funcs:sum(test.A2.a_ss_num)->Column#213, funcs:sum(test.a|
+  └─Projection_748                 |570.93     |root     |                                                                |test.A2.ss_num, test.A2.a_ss_num, test.A2.cb_num, test.B.code, test.C.br_name                    |
+    └─HashJoin_750                 |570.93     |root     |                                                                |inner join, equal:[eq(test.A2.s_id, test.B.s_id)]                                                                                                                                                         |
+      ├─HashJoin_752(Build)        |570.93     |root     |                                                                |inner join, equal:[eq(test.C.b_code, test.A2.b_code)]                                                                                                                                                  |
+      │ ├─TableReader_755(Build)   |293.71     |root     |                                                                |data:Selection_754                                                                                                                                                                                                                                             |
+      │ │ └─Selection_754          |293.71     |cop[tikv]|                                                                |not(isnull(test.C.b_code))                                                                                                                                                                                                                |
+      │ │   └─TableFullScan_753    |294.00     |cop[tikv]|table:C                                      |keep order:false, stats:pseudo                                                                                                                                                                                                                                 |
+      │ └─PartitionUnion_756(Probe)|11328532.00|root     |                                                                |                                                                                                                                                                                                                                                               |
+      │   ├─TableReader_758        |236500.00  |root     |                                                                |data:TableFullScan_757                                                                                                                                                                                                                                         |
+      │   │ └─TableFullScan_757    |236500.00  |cop[tikv]|table:A, partition:prt_before  |keep order:false                                                                                                                                                                                                                                  |
+       .........................                                                                                                                                                                                                                            |
+      │   └─TableReader_2220       |10000.00   |root     |                                                                |data:TableFullScan_2219                                                                                                                                                                                                                                        |
+      │     └─TableFullScan_2219   |10000.00   |cop[tikv]|table:A, partition:prt_after   |keep order:false, stats:pseudo                                                                                                                                                                                                                                 |
+      └─IndexReader_2222(Probe)    |6436.00    |root     |                                                                |index:IndexRangeScan_2221                                                                                                                                                                                                                                      |
+        └─IndexRangeScan_2221      |6436.00    |cop[tikv]|table:B, index:PRIMARY(code, tenant_id, s_id)|range:["1010","1010"], keep order:false                                                                                                                                                                                                                |
+
+More information:https://asktug.com/t/topic/574076
+

@@ -1,0 +1,138 @@
+ID: 13763
+Title: Incorrect correlation aggregate computation for constant X
+Description:
+### What happens?
+
+The population correlation coefficient is defined as 
+
+$$ \text{corr}(X, Y)=\frac{\text{cov}(X, Y)}{\sigma_X \sigma_Y},
+\quad
+ \sigma = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (x_i - \mu)^2}
+$$
+
+where  $\sigma_X, \sigma_Y$ are [standard deviations](https://en.wikipedia.org/wiki/Standard_deviation).
+
+When we have a constant `X`, the standard deviation $\sigma_X$ will be 0 since the mean $\mu=x_1=\cdots=x_N$, and thus `corr(X, Y)` should be `NaN`. However, this is all mathematically speaking. When doing floating point arithmetic, there are [roundoff errors](https://en.wikipedia.org/wiki/Round-off_error). For example,
+```
+>>> a = np.array([5.4, 5.4, 5.4])
+>>> a.mean()
+5.400000000000001
+>>> a.mean() == 5.4
+False
+>>> a.std()
+8.881784197001252e-16
+```
+DuckDB's `stddev` [implementation](https://github.com/duckdb/duckdb/blob/a6e32b115826ba543e32a733cb92f68fd0549186/src/include/duckdb/core_functions/aggregate/algebraic/stddev.hpp#L33) uses [Welford's algorithm](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm) which accumulates the mean differences and is thus immune to this problem. Fantastic!
+
+However, the [`Combine`](https://github.com/duckdb/duckdb/blob/a6e32b115826ba543e32a733cb92f68fd0549186/src/include/duckdb/core_functions/aggregate/algebraic/stddev.hpp#L59) method, when used in a multithreaded context, makes the results non-deterministically.
+
+These tiny near-zero standard deviations will then create non-deterministic correlations for `corr` aggregations!
+
+
+### To Reproduce
+
+```python
+import pandas as pd
+import numpy as np
+import duckdb
+
+num_rows = 1_000_000
+data = {
+    's': np.random.choice(list('ABCDEFG'), num_rows),
+    'x': [3.7] * num_rows,  # constant value
+    'y': range(num_rows)
+}
+df = pd.DataFrame(data)
+
+con = duckdb.connect()
+
+for i in range(2):
+    res = con.query("""
+        select s,
+            stddev(x),
+            corr(x, y)
+        from df
+        group by s
+    """).df()
+    print(res)
+
+con.sql("SET threads=1")
+
+for i in range(2):
+    res = con.query("""
+        select s,
+            stddev(x),
+            corr(x, y)
+        from df
+        group by s
+    """).df()
+    print(res)
+```
+may produce:
+```
+   s     stddev(x)  corr(x, y)
+0  A  4.450146e-16   -0.183090
+1  D  2.439442e-16   -0.219159
+2  E  0.000000e+00         NaN
+3  G  1.795092e-16    0.247403
+4  B  0.000000e+00         NaN
+5  C  1.637839e-16    0.227031
+6  F  0.000000e+00         NaN
+
+   s     stddev(x)  corr(x, y)
+0  C  1.700127e-16    0.058311
+1  A  0.000000e+00         NaN
+2  D  1.555774e-16   -0.181494
+3  B  1.691312e-16    0.091954
+4  G  0.000000e+00         NaN
+5  E  2.059132e-16    0.111619
+6  F  0.000000e+00         NaN
+```
+
+`set threads=1` deterministically produces
+```
+   s  stddev(x)  corr(x, y)
+0  E        0.0         NaN
+1  B        0.0         NaN
+2  C        0.0         NaN
+3  D        0.0         NaN
+4  G        0.0         NaN
+5  A        0.0         NaN
+6  F        0.0         NaN
+```
+
+### OS:
+
+Ubuntu 22.04.2 LTS, aarch64
+
+### DuckDB Version:
+
+1.0.0 & 1.0.1.dev5143
+
+### DuckDB Client:
+
+Python
+
+### Full Name:
+
+Mark T.
+
+### Affiliation:
+
+bq
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

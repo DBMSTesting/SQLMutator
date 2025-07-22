@@ -1,0 +1,226 @@
+ID: 72798
+Title: The TCP query hang live
+Description:
+> Please make sure that the version you're using is still supported (you can find the list [here](https://github.com/ClickHouse/ClickHouse/blob/master/SECURITY.md#scope-and-supported-versions)).
+
+`v24.11.1.1049` and `v24.12.1.850`
+
+**Company or project name**
+
+CMSS
+
+**Describe what's wrong**
+
+When I use TCP to insert data into one table, the TCP query hang live.
+
+**Does it reproduce on the most recent release?**
+
+When I use `v24.11.1.1049`, no problem.
+
+```text
+[root@Hua-ASUS-PC huafeeng (⎈|N/A:N/A)]# python
+Python 3.11.9 (main, Apr 29 2024, 20:30:52) [GCC 9.4.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> from clickhouse_driver import Client
+>>> client = Client('localhost',user='user',password='password')
+>>> client.execute('CREATE TABLE IF NOT EXISTS test (x Int32) ENGINE = Memory')
+[]
+>>> client.execute('INSERT INTO test (x) VALUES', [{'x': 100}])
+1
+>>> client.execute('SELECT version()')
+[('24.11.1.1049',)]
+>>>
+```
+
+**Enable crash reporting**
+
+Not enable.
+
+**How to reproduce**
+
+```text
+[root@Hua-ASUS-PC huafeeng (⎈|N/A:N/A)]# python
+Python 3.11.9 (main, Apr 29 2024, 20:30:52) [GCC 9.4.0] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> from clickhouse_driver import Client
+>>> client = Client('localhost',user='user',password='password')
+>>> client.execute('CREATE TABLE IF NOT EXISTS test (x Int32) ENGINE = Memory')
+[]
+>>> client.execute('INSERT INTO test (x) VALUES', [{'x': 101}])
+^CTraceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/root/.pyenv/versions/3.11.9/lib/python3.11/site-packages/clickhouse_driver/client.py", line 376, in execute
+    rv = self.process_insert_query(
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.11.9/lib/python3.11/site-packages/clickhouse_driver/client.py", line 607, in process_insert_query
+    rv = self.send_data(sample_block, data,
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.11.9/lib/python3.11/site-packages/clickhouse_driver/client.py", line 665, in send_data
+    self.receive_profile_events()
+  File "/root/.pyenv/versions/3.11.9/lib/python3.11/site-packages/clickhouse_driver/client.py", line 734, in receive_profile_events
+    packet = self.connection.receive_packet()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.11.9/lib/python3.11/site-packages/clickhouse_driver/connection.py", line 574, in receive_packet
+    packet.type = packet_type = read_varint(self.fin)
+                                ^^^^^^^^^^^^^^^^^^^^^
+  File "clickhouse_driver/varint.pyx", line 62, in clickhouse_driver.varint.read_varint
+  File "clickhouse_driver/bufferedreader.pyx", line 55, in clickhouse_driver.bufferedreader.BufferedReader.read_one
+  File "clickhouse_driver/bufferedreader.pyx", line 237, in clickhouse_driver.bufferedreader.BufferedSocketReader.read_into_buffer
+KeyboardInterrupt
+>>> client.execute('SELECT version()')
+[('24.12.1.850',)]
+>>>
+```
+
+**Expected behavior**
+
+It's OK, and return 1.
+
+**Error message and/or stacktrace**
+
+The TCP query hang live, and it throw timeout error:
+
+```text
+Code: 32. DB::Exception: Attempt to read after eof. (ATTEMPT_TO_READ_AFTER_EOF) (version 24.12.1.850 (official build))
+stack_trace:                           0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000d6a5c1b
+1. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x000000000844418c
+2. DB::Exception::Exception<>(int, FormatStringHelperImpl<>) @ 0x000000000845170b
+3. DB::throwReadAfterEOF() @ 0x000000000d7359b8
+4. DB::TCPHandler::receivePacketsExpectData(DB::QueryState&) @ 0x0000000013487a09
+5. DB::TCPHandler::processInsertQuery(DB::QueryState&) @ 0x000000001347ef2d
+6. DB::TCPHandler::runImpl() @ 0x00000000134709a8
+7. DB::TCPHandler::run() @ 0x000000001348ba38
+8. Poco::Net::TCPServerConnection::start() @ 0x00000000163aa987
+9. Poco::Net::TCPServerDispatcher::run() @ 0x00000000163aae19
+10. Poco::PooledThread::run() @ 0x00000000163765dc
+11. Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000016374b7d
+12. ? @ 0x00007f9abb7dd609
+13. ? @ 0x00007f9abb702353
+```
+
+**Additional context**
+
+Sometimes I find that `curl localhost:9000` also hang up. After restart clickhouse instance, it is OK again.
+
+```bash
+ch_client_settings="{ distributed_ddl_task_timeout=360, idle_connection_timeout=1800, max_estimated_execution_time=600, max_execution_time=600, max_execution_time_leaf=450, max_memory_usage=68719476736, receive_timeout=600, send_timeout=600, skip_unavailable_shards=1, tcp_keep_alive_timeout=580, max_partitions_per_insert_block=1000 }"
+```
+
+When I use `v24.12.1.850`, it has problem, my app log is:
+
+```text
+[2024-12-04 22:06:44,680] - [DEBUG] - [connection] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Connected to ClickHouse server version 24.12.1, revision: 54474
+[2024-12-04 22:06:44,682] - [DEBUG] - [connection] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Query: INSERT INTO db.table
+
+VALUES
+[2024-12-04 22:06:44,682] - [DEBUG] - [connection] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Block "" send time: 0.000113
+[2024-12-04 22:06:44,685] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column sub_system
+[2024-12-04 22:06:44,685] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column module
+[2024-12-04 22:06:44,685] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column key
+[2024-12-04 22:06:44,686] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column comment
+[2024-12-04 22:06:44,686] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column extra
+[2024-12-04 22:06:44,687] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column value
+[2024-12-04 22:06:44,687] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column sign
+[2024-12-04 22:06:44,687] - [DEBUG] - [native] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Writing column version
+[2024-12-04 22:06:44,688] - [DEBUG] - [connection] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=Block "" send time: 0.003384
+[2024-12-04 22:16:44,811] - [ERROR] - [flask_restful_module] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=At "custom_abort_error_handler", class_exception=Exception, exception=Traceback (most recent call last):
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask_restful/__init__.py", line 295, in error_router
+    return self.handle_error(e)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask_restful/__init__.py", line 310, in handle_error
+    _handle_flask_propagate_exceptions_config(current_app, e)
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask/app.py", line 1484, in full_dispatch_request
+    rv = self.dispatch_request()
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask/app.py", line 1469, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask_restful/__init__.py", line 489, in wrapper
+    resp = resource(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask/views.py", line 109, in view
+    return current_app.ensure_sync(self.dispatch_request)(**kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask_restful/__init__.py", line 604, in dispatch_request
+    resp = meth(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/flask_httpauth.py", line 174, in decorated
+    return self.ensure_sync(f)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/e/Projects/wsl/alioth-proj/eos-alogger/micro-service/ch/src/alogger_micro_service_ch/resources/internal/ch.py", line 1833, in post
+    clickhouse_hosts_walk(
+  File "/mnt/e/Projects/wsl/alioth-proj/eos-alogger/micro-service/ch/src/alogger_micro_service_ch/common/clickhouse_module.py", line 1555, in clickhouse_hosts_walk
+    iter_result = iter_hook(
+                  ^^^^^^^^^^
+  File "/mnt/e/Projects/wsl/alioth-proj/eos-alogger/micro-service/ch/src/alogger_micro_service_ch/resources/internal/ch.py", line 1815, in iter_hook
+    raise e
+  File "/mnt/e/Projects/wsl/alioth-proj/eos-alogger/micro-service/ch/src/alogger_micro_service_ch/resources/internal/ch.py", line 1793, in iter_hook
+    result = pool.fetchall(
+             ^^^^^^^^^^^^^^
+  File "/mnt/e/Projects/wsl/alioth-proj/eos-alogger/micro-service/ch/src/alogger_micro_service_ch/common/clickhouse_module.py", line 696, in fetchall
+    conn, cursor = self.__execute(
+                   ^^^^^^^^^^^^^^^
+  File "/mnt/e/Projects/wsl/alioth-proj/eos-alogger/micro-service/ch/src/alogger_micro_service_ch/common/clickhouse_module.py", line 379, in __execute
+    cursor.execute(operation, parameters)
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/dbutils/steady_db.py", line 605, in tough_method
+    result = method(*args, **kwargs)  # try to execute
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/clickhouse_driver/dbapi/cursor.py", line 111, in execute
+    response = execute(
+               ^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/clickhouse_driver/client.py", line 376, in execute
+    rv = self.process_insert_query(
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/clickhouse_driver/client.py", line 607, in process_insert_query
+    rv = self.send_data(sample_block, data,
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/clickhouse_driver/client.py", line 665, in send_data
+    self.receive_profile_events()
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/clickhouse_driver/client.py", line 734, in receive_profile_events
+    packet = self.connection.receive_packet()
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.cache/pypoetry/virtualenvs/alogger-micro-service-ch-lzC6xeo5-py3.11/lib/python3.11/site-packages/clickhouse_driver/connection.py", line 577, in receive_packet
+    packet.type = packet_type = read_varint(self.fin)
+                                ^^^^^^^^^^^^^^^^^^^^^
+  File "clickhouse_driver/varint.pyx", line 62, in clickhouse_driver.varint.read_varint
+  File "clickhouse_driver/bufferedreader.pyx", line 55, in clickhouse_driver.bufferedreader.BufferedReader.read_one
+  File "clickhouse_driver/bufferedreader.pyx", line 237, in clickhouse_driver.bufferedreader.BufferedSocketReader.read_into_buffer
+TimeoutError: timed out
+, exception_args=['timed out']
+[2024-12-04 22:16:44,813] - [ERROR] - [flask_restful_module] - [139966081869568] >>> [a1e5d3aa-d3ad-40a6-b847-f07ea2dae014] - msg=127.0.0.1 - - "POST /v1/internal/ch/db-table 500"
+```
+
+When I use `v24.11.1.1049`, it does not have problem, it quickly returns the result, my app log is:
+
+```text
+[2024-12-04 21:50:35,955] - [DEBUG] - [connection] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Connected to ClickHouse server version 24.11.1, revision: 54471
+[2024-12-04 21:50:35,956] - [DEBUG] - [connection] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Query: INSERT INTO db.table
+
+VALUES
+[2024-12-04 21:50:35,957] - [DEBUG] - [connection] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Block "" send time: 0.000134
+[2024-12-04 21:50:35,959] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column sub_system
+[2024-12-04 21:50:35,960] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column module
+[2024-12-04 21:50:35,960] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column key
+[2024-12-04 21:50:35,961] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column comment
+[2024-12-04 21:50:35,961] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column extra
+[2024-12-04 21:50:35,962] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column value
+[2024-12-04 21:50:35,962] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column sign
+[2024-12-04 21:50:35,963] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Writing column version
+[2024-12-04 21:50:35,964] - [DEBUG] - [connection] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Block "" send time: 0.004258
+[2024-12-04 21:50:35,964] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column host_name
+[2024-12-04 21:50:35,965] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column current_time
+[2024-12-04 21:50:35,965] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column thread_id
+[2024-12-04 21:50:35,966] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column type
+[2024-12-04 21:50:35,966] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column name
+[2024-12-04 21:50:35,967] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column value
+[2024-12-04 21:50:35,968] - [DEBUG] - [connection] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Block "" send time: 0.000160
+[2024-12-04 21:50:35,997] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column host_name
+[2024-12-04 21:50:35,998] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column current_time
+[2024-12-04 21:50:35,999] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column thread_id
+[2024-12-04 21:50:35,999] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column type
+[2024-12-04 21:50:36,000] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column name
+[2024-12-04 21:50:36,000] - [DEBUG] - [native] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=Reading column value
+[2024-12-04 21:50:36,002] - [INFO] - [app] - [139966081869568] >>> [64457f79-3f3c-4bde-8517-94cd11e18d2a] - msg=127.0.0.1 - - "POST /v1/internal/ch/db-table 201"
+```
+
+`v24.11.1.2557` has this problem also.

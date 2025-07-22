@@ -1,0 +1,44 @@
+ID: 43768
+Title: lightning will skip importing data when "partial write" + "server is busy"
+Description:
+close https://github.com/pingcap/tiflash/issues/7340
+
+In https://github.com/pingcap/tidb/pull/42780 I changed the logic for "partial write", which means lightning should write partial data of a job to TiKV, ingest them, and then write rest data, ingest, ...
+
+```golang
+	for {
+		err := local.writeToTiKV(ctx, job)
+		if err != nil {
+			if !local.isRetryableImportTiKVError(err) {
+				return err
+			}
+			// if it's retryable error, we retry from scanning region
+			log.FromContext(ctx).Warn("meet retryable error when writing to TiKV",
+				log.ShortError(err), zap.Stringer("job stage", job.stage))
+			job.convertStageTo(needRescan)
+			job.lastRetryableErr = err
+			return nil
+		}
+
+		err = local.ingest(ctx, job)
+		if err != nil {
+			if !local.isRetryableImportTiKVError(err) {
+				return err
+			}
+			log.FromContext(ctx).Warn("meet retryable error when ingesting",
+				log.ShortError(err), zap.Stringer("job stage", job.stage))
+			job.lastRetryableErr = err
+			return nil
+		}
+
+		if job.writeResult == nil || job.writeResult.remainingStartKey == nil {
+			return nil
+		}
+		job.keyRange.start = job.writeResult.remainingStartKey
+		job.convertStageTo(regionScanned)
+	}
+```
+
+However, above code introduce https://github.com/pingcap/tidb/issues/43363 and this bug 😢 
+
+`writeToTiKV` and `ingest` has two output, one is the returned `err`, the other is `job.stage`. If we want to continue the for-loop to write rest data after a "partial write", we should only allow `err == nil && job.stage == ingested`. This bug is caused by we continue for `err == nil && job.stage == wrote`, where `wrote` means the job should be retried to ingest later.

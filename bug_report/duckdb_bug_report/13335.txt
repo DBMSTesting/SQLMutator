@@ -1,0 +1,17 @@
+ID: 13335
+Title: Fix reordering semi joins
+Description:
+The fuzzer has been producing a number of issue and they are related to our incorrect implementation of reordering semi joins. 
+
+The problem is the following scenario. 
+Suppose multiple LHS relations have a condition in a semi join. For example, suppose you have a join tree like ((A ⨝ B) ⋉ C). (sort of an example in test_4950.test)
+
+And lets suppose the join condition looks like A.x = C.y AND B.x = C.z. Originally, each comparison is extracted as a potential filter. Doing so can result in reorderings that look like ( B ⨝ (A ⋉ C)). This reordering is invalid since all columns from C will be lost after the join with A, and the condition B.x = C.z will no longer be possible.
+
+if we make a conjunction expressions and populate the left set and right set of the hyperedge with all the relations from the conditions in the conjunction expression, we can prevent these types of invalid reorderings. 
+
+TL;DR, semi&anti join filters can only be applied when all relations on the left side are present.
+
+Another issue we had was that we extracted all relations on the right side of the join as reorderable. This is also wrong because it can result in join trees where a relation A previously on the right side of the semi join is now above the semi join. This will result in more columns being projected as the columns from A are now in the result, when previously they would be lost after the semi join.
+
+Another issue I encountered was when the left child of a semi join has a cross product. During relation extraction, the cross product filter isn't extracted. This is fine, because we would create cross products ourselves if we don't find a valid join tree. The problem, however, is that cross products were made between ALL relations, since we only reordered inner joins. With semi&anti joins, this should not be allowed, since the original positions of the relations relative to the semi/anti join needs to be respected. 

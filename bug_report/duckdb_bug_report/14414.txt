@@ -1,0 +1,95 @@
+ID: 14414
+Title: `str_split('', '')` gives `['',]`, not `[]`
+Description:
+### What happens?
+
+`str_split('foo', '')` gives [f, o, o], as expected. A length 3 string -> length 3 array. I would expect length N string to give a length N array. But `str_split('', '')` gives `['',]`, not an empty array.
+
+### To Reproduce
+
+```
+SELECT str_split(a, ''), len(str_split(a, '')) FROM UNNEST(['foo', '', NULL]) AS t(a);
+```
+
+gives
+
+```
+┌──────────────────┬───────────────────────┐
+│ str_split(a, '') ┆ len(str_split(a, '')) │
+╞══════════════════╪═══════════════════════╡
+│ [f, o, o]        ┆                     3 │
+│ []               ┆                     1 │
+│                  ┆                       │
+└──────────────────┴───────────────────────┘
+```
+
+But maybe this isn't a bug? Or maybe we should consider the "inverse", string_agg. It would be desirable if these functions were perfect inverses of each other. In other words, we want both `string_agg(str_split(x, ''), '') = x` and`str_split(string_agg(x, ''), '') = x`. Unfortunately( as I explain below,  read on) this is impossible to achieve. I think this means string_agg should be changed too.
+
+In other words, here is a table of `str_split(inp, '')` behaviors:
+
+| inp | current str_split(inp, '') | proposed str_split(inp, '') | current string_agg(str_split(inp, ''), '') | proposed string_agg(str_split(inp, ''), '')
+|--------|--------|--------|--------|--------|
+| "foo" | ["f", "o", "o"] | ["f", "o", "o"] | "foo" | "foo" |
+| "" | ["",] | [] |  "" | "" |
+| NULL | NULL | NULL | NULL | NULL | 
+
+and a table of `string_agg(inp, '')` behaviors (`SELECT list_aggregate(a, 'string_agg', '') as joined, strlen(list_aggregate(a, 'string_agg', '')) as len FROM UNNEST([['f', 'o', 'o'], [''], [], NULL]) AS t(a);`)
+
+| inp | current string_agg(inp, '') | proposed string_agg(inp, '') | current str_split(string_agg(inp, ''), '') | proposed str_split(string_agg(inp, ''), '') |
+|--------|--------|--------|--------|--------|
+| ["f", "o", "o"]  | "foo" | "foo" | ["f", "o", "o"]  | ["f", "o", "o"]  |
+| ["",] |  "" |  "" | ["",] | [] |
+| [] | NULL | "" | NULL | [] |
+| NULL | NULL | NULL | NULL | NULL |
+
+So, unfortunately, no matter what we do here, we will never be able to always achieve `string_agg(str_split(x, ''), '') = x`, because for `string_agg([], '')`, the only sane choices for a result would be NULL or '', and both of these values in the codomain are already taken by `string_agg(['',], '')` and `string_agg(NULL, '')`. So, in terms of invertability, both the current and proposed behaviors are equally imperfect, it just is a matter of for which inputs the user will footgun themselves with:
+- currently: `str_split(string_agg([], ''), '') = NULL` (not invertible), but `str_split(string_agg(['',], ''), '') = ['',]` (invertible)
+- proposed: `str_split(string_agg([], ''), '') = []` (invertible), but `str_split(string_agg(['',], ''), '') = []` (not invertible)
+
+In summary (warning, contains opinions™️) :
+- I "feel" like `str_split(<str of length N>, '')` should yield `<array of length N>`
+- I "feel" like it would be more common for a user to do `str_split(string_agg([], ''), '')` instead of `str_split(string_agg(['',], ''), '')`, so I think the proposed behavior would lead to fewer footguns
+- Both the current and proposed behaviors are imperfect in terms of inveritibility, but due to the two points above, I think my proposed behavior is slightly better than current.
+- This would be a breaking change for people who are relying on current behavior.
+
+Feel free to close if this is intended, but it surprised me.
+
+### OS:
+
+https://shell.duckdb.org/
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+@duckdb/duckdb-wasm@1.29.1-dev3.0
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Nick Crews
+
+### Affiliation:
+
+Ship Creek Group
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

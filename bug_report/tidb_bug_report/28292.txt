@@ -1,0 +1,115 @@
+ID: 28292
+Title: binlog column mismatch when delete in pessimistic transaction
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+First found from a user  https://asktug.com/t/topic/153774/13
+
+Trigger condition:
++ Partition table
++ Enable binlog
++ Pessimistic tranaction mode
++ Delete in tranaction
+
+Reproduce in UT, add this to `sessionctx/binloginfo/binloginfo_test.go`
+
+```
+func (s *testBinlogSuite) TestXXX(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
+	tk.Se.GetSessionVars().BinlogClient = s.client
+	tk.MustExec("set @@tidb_txn_mode = 'pessimistic'")
+	tk.MustExec(`CREATE TABLE xxx (
+machine_id int(11) DEFAULT NULL,
+date datetime DEFAULT NULL,
+code int(11) DEFAULT NULL,
+value decimal(20,3) DEFAULT NULL,
+KEY stat_data_index1 (machine_id,date,code)
+) PARTITION BY RANGE ( TO_DAYS(date) ) (
+PARTITION p0 VALUES LESS THAN (TO_DAYS('2021-09-04')),
+PARTITION p1 VALUES LESS THAN (TO_DAYS('2021-09-19')),
+PARTITION p2 VALUES LESS THAN (TO_DAYS('2021-10-04')),
+PARTITION p3 VALUES LESS THAN (TO_DAYS('2021-10-19')),
+PARTITION p4 VALUES LESS THAN (TO_DAYS('2021-11-04')))`)
+
+	tk.MustExec("INSERT INTO xxx value(123, '2021-09-22 00:00:00', 666, 123.24)")
+	tk.MustExec("BEGIN")
+	tk.MustExec("DELETE FROM xxx WHERE machine_id = 123 and date = '2021-09-22 00:00:00'")
+	tk.MustExec("COMMIT")
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+No error
+
+### 3. What did you see instead (Required)
+
+```
+----------------------------------------------------------------------
+FAIL: binloginfo_test.go:744: testBinlogSuite.TestXXX
+
+binloginfo_test.go:763:
+    tk.MustExec("DELETE FROM xxx WHERE machine_id = 123 and date = '2021-09-22 00:00:00'")
+/home/genius/project/src/github.com/pingcap/tidb/util/testkit/testkit.go:217:
+    tk.c.Assert(err, check.IsNil, check.Commentf("sql:%s, %v, error stack %v", sql, args, errors.ErrorStack(err)))
+... value *errors.fundamental = EncodeRow error: data and columnID count not match 6 vs 5 ("EncodeRow error: data and columnID count not match 6 vs 5")
+... sql:DELETE FROM xxx WHERE machine_id = 123 and date = '2021-09-22 00:00:00', [], error stack EncodeRow error: data and columnID count not match 6 vs 5
+github.com/pingcap/tidb/tablecodec.EncodeOldRow
+	/home/genius/project/src/github.com/pingcap/tidb/tablecodec/tablecodec.go:305
+github.com/pingcap/tidb/table/tables.(*TableCommon).addDeleteBinlog
+	/home/genius/project/src/github.com/pingcap/tidb/table/tables/tables.go:1146
+github.com/pingcap/tidb/table/tables.(*TableCommon).RemoveRecord
+	/home/genius/project/src/github.com/pingcap/tidb/table/tables/tables.go:1091
+github.com/pingcap/tidb/table/tables.(*partitionedTable).RemoveRecord
+	/home/genius/project/src/github.com/pingcap/tidb/table/tables/partition.go:1161
+github.com/pingcap/tidb/executor.(*DeleteExec).removeRow
+	/home/genius/project/src/github.com/pingcap/tidb/executor/delete.go:207
+github.com/pingcap/tidb/executor.(*DeleteExec).deleteOneRow
+	/home/genius/project/src/github.com/pingcap/tidb/executor/delete.go:62
+github.com/pingcap/tidb/executor.(*DeleteExec).deleteSingleTableByChunk
+	/home/genius/project/src/github.com/pingcap/tidb/executor/delete.go:112
+github.com/pingcap/tidb/executor.(*DeleteExec).Next
+	/home/genius/project/src/github.com/pingcap/tidb/executor/delete.go:50
+github.com/pingcap/tidb/executor.Next
+	/home/genius/project/src/github.com/pingcap/tidb/executor/executor.go:285
+github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelayExecutor
+	/home/genius/project/src/github.com/pingcap/tidb/executor/adapter.go:590
+github.com/pingcap/tidb/executor.(*ExecStmt).handlePessimisticDML
+	/home/genius/project/src/github.com/pingcap/tidb/executor/adapter.go:609
+github.com/pingcap/tidb/executor.(*ExecStmt).handleNoDelay
+	/home/genius/project/src/github.com/pingcap/tidb/executor/adapter.go:469
+github.com/pingcap/tidb/executor.(*ExecStmt).Exec
+	/home/genius/project/src/github.com/pingcap/tidb/executor/adapter.go:420
+github.com/pingcap/tidb/session.runStmt
+	/home/genius/project/src/github.com/pingcap/tidb/session/session.go:1786
+github.com/pingcap/tidb/session.(*session).ExecuteStmt
+	/home/genius/project/src/github.com/pingcap/tidb/session/session.go:1680
+github.com/pingcap/tidb/util/testkit.(*TestKit).Exec
+	/home/genius/project/src/github.com/pingcap/tidb/util/testkit/testkit.go:170
+github.com/pingcap/tidb/util/testkit.(*TestKit).MustExec
+	/home/genius/project/src/github.com/pingcap/tidb/util/testkit/testkit.go:216
+github.com/pingcap/tidb/sessionctx/binloginfo_test.(*testBinlogSuite).TestXXX
+	/home/genius/project/src/github.com/pingcap/tidb/sessionctx/binloginfo/binloginfo_test.go:763
+reflect.Value.call
+	/usr/local/go/src/reflect/value.go:543
+reflect.Value.Call
+	/usr/local/go/src/reflect/value.go:339
+github.com/pingcap/check.(*suiteRunner).forkTest.func1
+	/home/genius/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:850
+github.com/pingcap/check.(*suiteRunner).forkCall.func1
+	/home/genius/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:739
+runtime.goexit
+	/usr/local/go/src/runtime/asm_amd64.s:1581
+```
+
+It should be caused by https://github.com/pingcap/tidb/pull/26373
+The mismatched column might be the additional `ExtraPidColumn`
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

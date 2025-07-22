@@ -1,0 +1,66 @@
+ID: 45036
+Title: TableRangeScan is not selected when autocommit=OFF
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+CREATE TABLE ads_txn (
+  `cusno` varchar(10) NOT NULL,
+  `txn_dt` varchar(8) NOT NULL,
+  `unn_trno` decimal(22,0) NOT NULL,
+  `aml_cntpr_accno` varchar(64) DEFAULT NULL,
+  `acpayr_accno` varchar(35) DEFAULT NULL,
+  PRIMARY KEY (`cusno`,`txn_dt`,`unn_trno`) NONCLUSTERED
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+PARTITION BY LIST COLUMNS(`txn_dt`)
+(PARTITION `p20000101` VALUES IN ('20000101'),
+ PARTITION `p20220101` VALUES IN ('20220101'),
+ PARTITION `p20230516` VALUES IN ('20230516'));
+
+analyze table ads_txn;
+
+explain update ads_txn s set aml_cntpr_accno = trim(acpayr_accno) where s._tidb_rowid between 1 and 100000;
+set autocommit=OFF;
+explain update ads_txn s set aml_cntpr_accno = trim(acpayr_accno) where s._tidb_rowid between 1 and 100000;
+
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+Both plans are TableRangeScan:
+```
++--------------------------+----------+-----------+---------------+--------------------------------------------------+
+| id                       | estRows  | task      | access object | operator info                                    |
++--------------------------+----------+-----------+---------------+--------------------------------------------------+
+| Update_4                 | N/A      | root      |               | N/A                                              |
+| └─TableReader_7          | 10000.00 | root      | partition:all | data:TableRangeScan_6                            |
+|   └─TableRangeScan_6     | 10000.00 | cop[tikv] | table:s       | range:[1,100000], keep order:false, stats:pseudo |
++--------------------------+----------+-----------+---------------+--------------------------------------------------+
+3 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+TableFullScan when autocommit=OFF:
+```
++-------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
+| id                            | estRows  | task      | access object | operator info                                                                                                                                     |
++-------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
+| Update_5                      | N/A      | root      |               | N/A                                                                                                                                               |
+| └─Projection_6                | 8000.00  | root      |               | test.ads_txn.cusno, test.ads_txn.txn_dt, test.ads_txn.unn_trno, test.ads_txn.aml_cntpr_accno, test.ads_txn.acpayr_accno, test.ads_txn._tidb_rowid |
+|   └─SelectLock_7              | 8000.00  | root      |               | for update 0                                                                                                                                      |
+|     └─TableReader_10          | 8000.00  | root      | partition:all | data:Selection_9                                                                                                                                  |
+|       └─Selection_9           | 8000.00  | cop[tikv] |               | ge(test.ads_txn._tidb_rowid, 1), le(test.ads_txn._tidb_rowid, 100000)                                                                             |
+|         └─TableFullScan_8     | 10000.00 | cop[tikv] | table:s       | keep order:false, stats:pseudo                                                                                                                    |
++-------------------------------+----------+-----------+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+v6.5.2
+
+<!-- Paste the output of SELECT tidb_version() -->
+

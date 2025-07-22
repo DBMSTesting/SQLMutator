@@ -1,0 +1,70 @@
+ID: 9854
+Title: ClickHouse deadlock on a intensive concurrent merges / inserts / moves on rhel7
+Description:
+Loaded system working on GCP on rhel7 
+```
+[gcp@clickhouse-1 ~]$ uname -a
+Linux clickhouse-1 3.10.0-1062.4.3.el7.x86_64 #1 SMP Tue Nov 12 10:42:40 EST 2019 x86_64 x86_64 x86_64 GNU/Linux
+[gcp@clickhouse-1 ~]$ cat /etc/redhat-release
+Red Hat Enterprise Linux Server release 7.7 (Maipo)
+```
+
+Inserts and merges happen all the time, system work stable.
+After quite a big amount of moves started (about 1Tb), and about 1h of proper work 
+ClickHouse suddenly stuck and stop responding to most of the queries.
+
+Reproduced several times on ClickHouse version 19.16.10.44 and later on 20.1.6.30. 
+Core dumps were collected and analyzed.
+
+Most of the threads wait for mutex in `DB::MergeTreeData::lockParts` which is owned by thread 9, which has the following stacktrace:
+```
+Thread 9 (Thread 0x7fd139b7d700 (LWP 3684)):
+#0  pthread_rwlock_rdlock () at ../nptl/sysdeps/unix/sysv/linux/x86_64/pthread_rwlock_rdlock.S:47
+#1  0x00000000064330e1 in std::__shared_mutex_pthread::lock_shared (this=<optimized out>) at /opt/rh/devtoolset-8/root/usr/include/c++/8/shared_mutex:139
+#2  std::shared_mutex::lock_shared (this=<optimized out>) at /opt/rh/devtoolset-8/root/usr/include/c++/8/shared_mutex:335
+#3  std::shared_lock<std::shared_mutex>::shared_lock (__m=..., this=<synthetic pointer>) at /opt/rh/devtoolset-8/root/usr/include/c++/8/shared_mutex:553
+#4  DB::MergeTreeData::removePartContributionToColumnSizes (this=0x7fd12385f800, part=std::shared_ptr<const DB::MergeTreeDataPart> (use count 5, weak count 0) = {...}) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/MergeTree/MergeTreeData.cpp:2669
+#5  0x0000000006437419 in DB::MergeTreeData::renameTempPartAndReplace (this=0x7fd12385f800, part=std::shared_ptr<DB::MergeTreeDataPart> (use count 2, weak count 0) = {...}, increment=<optimized out>, out_transaction=<optimized out>, lock=..., out_covered_parts=<optimized out>) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/MergeTree/MergeTreeData.cpp:2112
+#6  0x00000000064376b3 in DB::MergeTreeData::renameTempPartAndReplace (this=0x7fd12385f800, part=std::shared_ptr<DB::MergeTreeDataPart> (use count 2, weak count 0) = {...}, increment=increment@entry=0x0, out_transaction=out_transaction@entry=0x0) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/MergeTree/MergeTreeData.cpp:2136
+#7  0x0000000006456295 in DB::MergeTreeDataMergerMutator::renameMergedTemporaryPart (this=this@entry=0x7fd12385fde8, new_data_part=std::shared_ptr<DB::MergeTreeDataPart> (use count 2, weak count 0) = {...}, parts=std::vector of length 7, capacity 7 = {...}, out_transaction=out_transaction@entry=0x0) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp:1201
+#8  0x0000000006389dbf in DB::StorageMergeTree::merge (this=0x7fd12385f800, aggressive=<optimized out>, partition_id=..., final=<optimized out>, deduplicate=<optimized out>, out_disable_reason=<optimized out>) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/StorageMergeTree.cpp:611
+#9  0x000000000638c65e in DB::StorageMergeTree::mergeMutateTask (this=0x7fd12385f800) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/StorageMergeTree.cpp:771
+#10 0x000000000640a878 in std::function<DB::BackgroundProcessingPoolTaskResult ()>::operator()() const (this=<optimized out>) at /opt/rh/devtoolset-8/root/usr/include/c++/8/bits/std_function.h:260
+#11 DB::BackgroundProcessingPool::threadFunction (this=0x7fd13dff45d0) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/MergeTree/BackgroundProcessingPool.cpp:203
+#12 0x000000000640b274 in DB::BackgroundProcessingPool::<lambda()>::operator() (__closure=0x7fd137e00010) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Storages/MergeTree/BackgroundProcessingPool.cpp:70
+#13 std::__invoke_impl<void, const DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::<lambda()>&> (__f=...) at /opt/rh/devtoolset-8/root/usr/include/c++/8/bits/invoke.h:60
+#14 std::__invoke<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::<lambda()>&> (__fn=...) at /opt/rh/devtoolset-8/root/usr/include/c++/8/bits/invoke.h:95
+#15 std::__apply_impl<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::<lambda()>&, const std::tuple<>&> (__t=empty std::tuple, __f=...) at /opt/rh/devtoolset-8/root/usr/include/c++/8/tuple:1678
+#16 std::apply<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int)::<lambda()>&, const std::tuple<>&> (__t=empty std::tuple, __f=...) at /opt/rh/devtoolset-8/root/usr/include/c++/8/tuple:1687
+#17 ThreadFromGlobalPool::<lambda()>::operator()(void) const (this=0x7fd137e00000) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Common/ThreadPool.h:156
+#18 0x0000000003542cb3 in std::function<void ()>::operator()() const (this=0x7fd139b785f0) at /opt/rh/devtoolset-8/root/usr/include/c++/8/bits/std_function.h:260
+#19 ThreadPoolImpl<std::thread>::worker (this=<optimized out>, thread_it=...) at /usr/src/debug/ClickHouse-19.16.9.37-stable/dbms/src/Common/ThreadPool.cpp:221
+#20 0x00000000078b907f in execute_native_thread_routine ()
+#21 0x00007fd140a43ea5 in start_thread (arg=0x7fd139b7d700) at pthread_create.c:307
+#22 0x00007fd1405688cd in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:111
+```
+Thread 9 waits for `rwlock`  in `DB::MergeTreeData::removePartContributionToColumnSizes`.
+```
+(gdb) l
+2664	    }
+2665	}
+2666	
+2667	void MergeTreeData::removePartContributionToColumnSizes(const DataPartPtr & part)
+2668	{
+2669	    std::shared_lock<std::shared_mutex> lock(part->columns_lock);
+2670	
+2671	    for (const auto & column : part->columns)
+2672	    {
+2673	        ColumnSize & total_column_size = column_sizes[column.name];
+```
+
+The state of mutex in memory looks strange - `__nr_readers` is 4294967295 (-1 in uint32), and no writers. No other threads that can lock the mutex for write was found by analyzing core dump.
+
+```
+(gdb) p *(pthread_rwlock_t *)($rdi)
+$41 = {__data = {__lock = 1, __nr_readers = 4294967295, __readers_wakeup = 0, __writer_wakeup = 0, __nr_readers_queued = 0, __nr_writers_queued = 0, __writer = 0, __shared = 0, __pad1 = 0, __pad2 = 0, __flags = 0}, __size = "\001\000\000\000\377\377\377\377", '\000' <repeats 47 times>, __align = -4294967295}
+```
+
+The state of other threads show that this lock lasts for a long time (i.e. it doesn't look like thread 9 is taking normal read lock, but it stuck there).
+
+More details are here: https://gist.github.com/filimonov/fde5d6e0909af5937d836e22c27833f9

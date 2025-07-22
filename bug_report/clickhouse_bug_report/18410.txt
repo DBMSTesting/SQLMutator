@@ -1,0 +1,64 @@
+ID: 18410
+Title: Server drops connections if multiple clients insert into the same table
+Description:
+**Describe the bug**
+I'm trying to input several CSV tables into the same table in parallel. I tried to use both native protocol via `clichouse-client` and HTTP via `curl`. Sooner or later, one of the connections is dropped by the server, I don't see any related messages in the server log. The issue occurs only if several clients insert data simultaneously, the consequent insertions by the only client works well. Note that in my case ClickHouse table partitions correspond to CVS files, i.e. each client inserts data to its own partition. Any number of parallel insertions caused the issue, I've tried from 2 to 10.
+
+The server and clients are located on the same host, 20 CPU cores, 64GB / 256GB (I tried different set-ups) RAM, `top` shows small CPU & RAM usage during insertions.
+
+**How to reproduce**
+* Which ClickHouse server version to use: `20.12.3.3`
+* Which interface to use, if matters: native via `clickhouse-client`, HTTP via `curl`
+* Non-default settings, if any: I tried to use `clichouse-client --input_format_parallel_parsing=0`, it changed nothing
+* `CREATE TABLE` statements for all tables involved
+```sql
+CREATE TABLE db.table
+(
+    oid UInt64 CODEC(Delta, LZ4),
+    nobs UInt16 CODEC(T64, LZ4),
+    filter UInt8 CODEC(T64, LZ4),
+    fieldid UInt16 CODEC(T64, LZ4),
+    rcid UInt8 CODEC(Delta, LZ4),
+    ra Float64 CODEC(Gorilla),
+    dec Float64 CODEC(Gorilla),
+    h3index10 UInt64 MATERIALIZED geoToH3(ra, dec, 10) CODEC(Delta, LZ4),
+    mjd Float64,
+    mag Float32,
+    magerr Float32,
+    clrcoeff Float32,
+    catflags UInt16 CODEC(T64, LZ4)
+)
+ENGINE = MergeTree()
+PARTITION BY fieldid
+ORDER BY (h3index10, oid, mjd)
+PRIMARY KEY h3index10
+```
+* A part of the data I've used, in .tar.gz archive (17GB packed, 100 GB unpacked), it should be enough to reproduce the issue:
+https://drive.google.com/file/d/1H6CXsdLnpVHbXtpo_AIpJ-Pi6WSlgZzD/view?usp=sharing
+* Queries to run that lead to unexpected result
+
+I provide individual commands, which are failed with the corresponded errors being run in parallel
+
+1)
+```sh
+clickhouse-client --query "INSERT INTO db.table FORMAT CSV" -h localhost \
+    < filename.csv
+```
+
+```
+DB::NetException: Connection reset by peer, while reading from socket (127.0.0.1:9000): while receiving packet from localhost:9000
+
+Code: Code: 210. DB::NetException: Connection reset by peer, while writing to socket (127.0.0.1:9000): data for INSERT was parsed from stdin
+```
+
+2)
+```sh
+curl -X POST \
+    "http://localhost:8123/?query=INSERT%20INTO%20db.table%20FORMAT%20CSV" \
+    -T filename.csv \
+    -H "Transfer-Encoding: chunked"
+```
+
+```
+Failed connect to localhost:8123; Connection refused
+```

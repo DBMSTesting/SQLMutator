@@ -1,0 +1,124 @@
+ID: 54688
+Title: index_hash_join hang when context canceled
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+Context canceled may occur at any time if the sql is interrupted during execution.
+
+
+I try to inject context cancel to indexhashjoin, to reproduce the issue.
+Patch this diff to index_lookup_join.go
+``` diff
+-- a/pkg/executor/join/index_lookup_hash_join.go
++++ b/pkg/executor/join/index_lookup_hash_join.go
+@@ -784,6 +784,7 @@ func (iw *indexHashJoinInnerWorker) joinMatchedInnerRow2Chunk(ctx context.Contex
+                        case iw.resultCh <- joinResult:
+                        case <-ctx.Done():
+                        }
++                       failpoint.InjectCall("joinMatchedInnerRow2Chunk")
+                        joinResult, ok = iw.getNewJoinResult(ctx)
+                        if !ok {
+                                return false, joinResult
+```
+
+Run the UT
+``` go
+func TestIssueXXXXX(t *testing.T) {
+	val := runtime.GOMAXPROCS(1)
+	defer func() {
+		runtime.GOMAXPROCS(val)
+	}()
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t, s;")
+	tk.MustExec("create table t(a int, index(a));")
+	tk.MustExec("create table s(a int, index(a));")
+	tk.MustExec("insert into t values(1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13), (14), (15), (16);")
+	tk.MustExec("insert into s values(1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13), (14), (15), (16);")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("insert into s select * from s")
+	tk.MustExec("set @@tidb_index_lookup_join_concurrency=1;")
+	tk.MustExec("set @@tidb_index_join_batch_size=1000000;")
+
+	for i := 0; i <= 100; i++ {
+		rs, err := tk.Exec("select /*+ INL_HASH_JOIN(s) */ * from t join s on t.a=s.a")
+		require.NoError(t, err)
+		context, cancel := context.WithCancel(context.Background())
+		require.NoError(t, failpoint.EnableCall("github.com/pingcap/tidb/pkg/executor/join/joinMatchedInnerRow2Chunk",
+			func() {
+				cancel()
+			},
+		))
+		_, err = session.GetRows4Test(context, nil, rs)
+		rs.Close()
+	}
+}
+```
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+Can run successfully.
+
+### 3. What did you see instead (Required)
+Hang forever.
+goroutine in master.
+```
+goroutine 93 [chan send, 1 minutes]:
+github.com/pingcap/tidb/pkg/executor/join.(*IndexNestedLoopHashJoin).handleResult(...)
+        /home/wshwsh12/project/tidb2/pkg/executor/join/index_lookup_hash_join.go:307
+github.com/pingcap/tidb/pkg/executor/join.(*IndexNestedLoopHashJoin).runUnordered(0xc001161bf8?, {0x6d07400?, 0xc00839b4f0?}, 0xc00839b4a0)
+        /home/wshwsh12/project/tidb2/pkg/executor/join/index_lookup_hash_join.go:259 +0x125
+github.com/pingcap/tidb/pkg/executor/join.(*IndexNestedLoopHashJoin).Next(0xc007976388, {0x6d07400?, 0xc00839b400?}, 0xc00839b4a0)
+        /home/wshwsh12/project/tidb2/pkg/executor/join/index_lookup_hash_join.go:231 +0xbf
+github.com/pingcap/tidb/pkg/executor/internal/exec.Next({0x6d07400, 0xc00839b400}, {0x6d36680, 0xc007976388}, 0xc00839b4a0)
+        /home/wshwsh12/project/tidb2/pkg/executor/internal/exec/executor.go:410 +0x2de
+github.com/pingcap/tidb/pkg/executor.(*ExecStmt).next(0xc0090644b0, {0x6d07400, 0xc00839b400}, {0x6d36680, 0xc007976388}, 0xc00839b4a0)
+        /home/wshwsh12/project/tidb2/pkg/executor/adapter.go:1242 +0x6e
+github.com/pingcap/tidb/pkg/executor.(*recordSet).Next(0xc008b74230, {0x6d07400?, 0xc00839b400?}, 0xc00839b4a0)
+        /home/wshwsh12/project/tidb2/pkg/executor/adapter.go:169 +0x125
+github.com/pingcap/tidb/pkg/session.GetRows4Test({0x6d07400, 0xc00839b400}, {0x0?, 0x0?}, {0x6d07550, 0xc006bc3f40})
+        /home/wshwsh12/project/tidb2/pkg/session/tidb.go:346 +0xc8
+github.com/pingcap/tidb/pkg/executor/test/jointest.TestIssueXXXXX(0xc000bbb040)
+        /home/wshwsh12/project/tidb2/pkg/executor/test/jointest/join_test.go:936 +0x305
+testing.tRunner(0xc000bbb040, 0x635e2f0)
+        /home/wshwsh12/sdk/go1.22.1/src/testing/testing.go:1689 +0xfb
+created by testing.(*T).Run in goroutine 1
+        /home/wshwsh12/sdk/go1.22.1/src/testing/testing.go:1742 +0x390
+```
+
+goroutine in v6.5.6
+```
+goroutine 99 [chan send, 1 minutes]:
+github.com/pingcap/tidb/executor.(*IndexNestedLoopHashJoin).Next(0x5e88098?, {0x5e88098, 0xc007f2dc20}, 0xc007f2dcc0)
+        /home/wshwsh12/project/tidb/executor/index_lookup_hash_join.go:241 +0x1ff
+github.com/pingcap/tidb/executor.Next({0x5e88098, 0xc007f2dc20}, {0x5e8b760, 0xc007d50c08}, 0xc007f2dcc0)
+        /home/wshwsh12/project/tidb/executor/executor.go:328 +0x4ee
+github.com/pingcap/tidb/executor.(*ExecStmt).next(0xc007a44e10, {0x5e88098, 0xc007f2dc20}, {0x5e8b760, 0xc007d50c08}, 0xc007f2dcc0)
+        /home/wshwsh12/project/tidb/executor/adapter.go:1154 +0x6e
+github.com/pingcap/tidb/executor.(*recordSet).Next(0xc007f2dbd0, {0x5e88098?, 0xc007f2dc20?}, 0xc007f2dcc0)
+        /home/wshwsh12/project/tidb/executor/adapter.go:155 +0xb2
+github.com/pingcap/tidb/session.GetRows4Test({0x5e88098, 0xc007f2dc20}, {0x0?, 0x0?}, {0x5e888f8, 0xc007f2ba40})
+        /home/wshwsh12/project/tidb/session/tidb.go:347 +0xc8
+github.com/pingcap/tidb/executor_test.TestIssueXXXXX(0xc00078e680)
+        /home/wshwsh12/project/tidb/executor/join_test.go:2979 +0x2c5
+testing.tRunner(0xc00078e680, 0x554f9d8)
+        /home/wshwsh12/sdk/go1.22.1/src/testing/testing.go:1689 +0xfb
+created by testing.(*T).Run in goroutine 1
+        /home/wshwsh12/sdk/go1.22.1/src/testing/testing.go:1742 +0x390
+```
+
+### 4. What is your TiDB version? (Required)
+master, v6.5.6
+<!-- Paste the output of SELECT tidb_version() -->
+

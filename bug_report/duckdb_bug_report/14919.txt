@@ -1,0 +1,100 @@
+ID: 14919
+Title: JSON/CSV auto detection of ISO 8601 Timestamp strings with time zone offset
+Description:
+### What happens?
+
+## Overview
+
+Hi duckDB team,
+
+In the documentation, it appears that the `read_json_auto` function should handle properly parsing `ISO 8601` formatted timestamp strings: https://duckdb.org/docs/data/json/loading_json#json-read-functions
+
+> dateformat	Specifies the date format to use when parsing dates. See [Date Format]	VARCHAR	'iso'
+
+Unfortunately, it doesn't look like this parsing works when the timestamps have a timezone offset attached (see to reproduce below).
+
+I would've expected the `json_read_auto` to correctly infer this column's type as `TIMESTAMPTZ`. 
+
+Normally, it wouldn't be a big deal to cast the column, but we use DuckDB to load arbitrary JSON data from our customers, so the type inference is especially helpful to make sure we are able to process our customer's data as intended.
+
+Thanks for the help 🙏 
+
+## To Reproduce
+
+JSON file `test.json`:
+```json
+{
+  "timestamp": "2024-11-12T20:47:01.917818Z"
+}
+```
+
+duckdb SQL:
+```sql
+CREATE
+OR REPLACE TABLE test_data AS
+SELECT *
+FROM read_json_auto('test.json');
+
+DESCRIBE test_data;
+```
+
+output:
+
+| column_name | column_type | null | key | default | extra |
+| ----- | ----- | ---- | ---- | ---- | ---- |
+| timestamp | VARCHAR | YES | | |
+
+
+## Some investigation
+
+Digging into the [code](https://github.com/duckdb/duckdb/blob/c29c67bb971362cd1e9143305acffebb1bc9bd63/extension/json/json_scan.cpp#L101-L101) a bit, it looks like the JSON scanner doesn't have the ability to auto-infer `TIMESTAMPTZ` column types. Additionally, it looks like the scanner infers timestamp strings with a `Z` offset as plain `TIMESTAMP` types without a time zone using the format `"%Y-%m-%dT%H:%M:%SZ"`. I think this could be dangerous as other values in the data may have offsets in different timezones, so I would expect this to be treated as a `TIMESTAMPTZ` type value. 
+
+Another strange finding, it looks like the [CSV scanner](https://github.com/duckdb/duckdb/blob/c29c67bb971362cd1e9143305acffebb1bc9bd63/src/include/duckdb/execution/operator/csv_scanner/sniffer/csv_sniffer.hpp#L204-L204) also does not support inferring `TIMESTAMPTZ` type columns. Strangely, the formats accepted for the CSV scanner differ from the formats for the JSON scanner. Namely, the format mentioned above, `"%Y-%m-%dT%H:%M:%SZ"`, is not present in the list of supported formats for CSV. 
+
+## Related work
+
+If found this [Issue](https://github.com/duckdb/duckdb/issues/1627) and [MR](https://github.com/duckdb/duckdb/pull/1632) from some time ago that seemed to add offset parsing support to the `TIMEZONE` data type, but it looks like it has been removed.
+
+There is an [issue](https://github.com/duckdb/duckdb/issues/12469) currently open related to multiple timestamp string formats in a column, which seems related to the auto detected format strings.
+
+## Other info
+
+### OS:
+
+macOS 13.6.9 - x86-64 arch
+
+### DuckDB Version:
+
+v1.1.1
+
+### DuckDB Client:
+
+Python
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Ian McGraw
+
+### Affiliation:
+
+Arthur AI
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,42 @@
+ID: 14914
+Title: Add automatic sampling regression fix 2
+Description:
+This PR adds sampling only for integral types. Currently each thread collects a sample during `RowGroupCollection::Append()` and on `::Finalize` the samples are merged. 
+
+**Caveats**
+If a table contains non-integral type columns, the sample just includes `NULL` for those columns. This is to avoid possible errors in the future when string sampling is supported. In addition to that keeping the columns means the same filters that are applied to a table can be applied to a sample without having to re-write the columns. 
+
+**How it works**
+There are two forms of sampling that occur. "Random" sampling and "Reservoir" sampling. The switch from fast to slow happens when ~60 DataChunks are ingested.
+
+Reservior sampling works just like Reservoir Sampling based on the 2005 paper "Weighted Random Sampling" by Efraimidis and Spirakis. The reservoir size is 2048. Each sample added has a random "weight" which is a value from 0 to 1. The idea is that the higher the value, the more likely the sample is kept around. The weights are stored in a heap so you always have access to the least weighted sample. Using the least weighted sample, you can also determine how many samples you need to skip before adding another sample. 
+
+The drawback with reservoir sampling is that in the early stages of sampling, managing the heap is expensive. Many samples need to be replaced, but this also means replacing the values on the heap. Each time a value is replaced on the heap we run O(log(n)). That doesn't seem expensive but in the first N chunks we ingest, we have to pop and push to the heap N times (we should have about 1 sample from each chunk). When we are ingesting our N*1000th chunk, however, there is a chance we might not even update our sample, so the sample is very quick. 
+
+To speed up sampling, we introduce "RANDOM" sampling, which has the same statistical properties of Reservoir sampling when the number of row seems is still few. The idea is, if we ingest 2 chunks, then our sample includes ½ values from both chunks. 3 chunks, then 1/3 from all three etc. No weights are assigned to the samples, they are just picked at random, although they are repeatable, since they use a seed of 1. Since there are no weights, there is no heap, and we don't have to always push and reorder the heap. Once enough chunks are ingested however, we assign weights to the samples and continue with slow sampling. 
+
+**Why switch from random to reservoir?**
+Once you have ingested 2048 chunks random sampling breaks down, because you need <1 value per chunk going forward, and our "random" sampling method will not update the sample with uniformity moving forward.
+
+**How are the weights determined when the switch from slow to fast happens?**
+
+I ran the sampling with just slow and found the minimum weight X.  when 120 chunks were ingested. Each sample in the chunk after 120 chunks gets a weight between X and 1. This is a way to simulate slow sampling happening from the beginning.
+
+**How to determine if we are still "RANDOM" Sampling**
+If the heap that stores the reservoir weights is empty, then we are in fast sampling. If there are weights, then we are slow samplings. Currently it is only possible to go from fast sampling to slow, slow sampling to fast sampling is not possible.
+
+**What happens during serialization? What is stored?**
+During serialization, if a table has less than 204800 rows, 1% of the table is stored, otherwise 2048 rows. The IngestionSample is first converted to a ReservoirSample then stored. This is because previous versions of DuckDB can only store ReservoirSamples. Since the presence of "weights" determines if we are in "fast" sampling or "slow" sampling, there is no major difference between storing a "fast" sample vs. a "slow" sample. When the sample is deserialized, then we convert it back into an IngestionSample.
+
+**Querying a table sample**
+This PR also adds a `pragma_table_sample` function so that the sample can be queried and verified. 
+
+**Actual Sampling**
+We don't actually store exactly 2048 values for the sample, we store up to 40 * 2048 values. This is because we don't want to replace values in the Chunk when ingesting blocks. Instead, we append to our "sample", and keep a vector of 2048 indexes to keep track of what values in the data chunk are actually in the sample. When we need to serialize or when our data chunk fills up, then we "Shrink" the sample
+
+**Other things to know**
+- If a table is updated in any way **besides** appending, the sample is destroyed
+- The samples aren't totally uniform, but the behavior does not vary significantly from straight sampling
+- Again, only integer types are sampled for now, Will plan to sample string types next
+
+

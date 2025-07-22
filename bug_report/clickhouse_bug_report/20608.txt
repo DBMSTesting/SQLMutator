@@ -1,0 +1,134 @@
+ID: 20608
+Title: Random Segfaults inside LXD
+Description:
+I have 4 well working clickhouse severs for several years in lxd containers (ubuntu Xenial host, LXD 2.11, ubuntu xenial guest), each on own hardware server (Dell, ECC ram) - no problems at all. I've added few more servers with fresh ubuntu/lxd and after data migration (no problems) and few days, crashed occured on most of them. After such crash usually it's restarted (systemd) and few other crashes (with different segfaults) occurs.
+
+I'll describe the simplest case I've found
+
+**How to reproduce**
+* Clickhouse version 21.1.3.32 (repo.yandex.ru)
+* Ubuntu Bionic server with LXD 4.11 (not sure if lxd is the problem)
+* Ubuntu Bionic guest system
+* Fresh clickhouse installation, 1 week after install, no tables yet, no data ingest
+
+I've created first table, after 1h server have crashed
+
+```
+2021.02.15 16:05:58.521301 [ 36975 ] {3ad195ec-c64a-4ab5-a3d7-506094048faf} <Debug> executeQuery: (from [::ffff:127.0.0.1]:35030, using production parser) create table ingest ( `timestamp` DateTime, `msec` UInt32, `name` String, `publisher` String, `crypto` String, `user_id` String, `message` String ) ENGINE = Null
+2021.02.15 16:05:58.521458 [ 36975 ] {3ad195ec-c64a-4ab5-a3d7-506094048faf} <Trace> ContextAccess (default): Access granted: CREATE TABLE ON stat.ingest
+2021.02.15 16:05:58.522884 [ 36975 ] {3ad195ec-c64a-4ab5-a3d7-506094048faf} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2021.02.15 16:05:58.523055 [ 36975 ] {} <Debug> TCPHandler: Processed in 0.00212946 sec.
+...
+2021.02.15 17:06:01.790833 [ 36975 ] {} <Trace> TCPHandler: Closing idle connection
+2021.02.15 17:06:01.790958 [ 36975 ] {} <Debug> TCPHandler: Done processing connection.
+2021.02.15 17:06:01.874636 [ 36973 ] {} <Trace> BaseDaemon: Received signal 11
+2021.02.15 17:06:01.875058 [ 12833 ] {} <Fatal> BaseDaemon: ########################################
+2021.02.15 17:06:01.875228 [ 12833 ] {} <Fatal> BaseDaemon: (version 21.1.3.32 (official build), build id: 63BC1671E8C217170F9B6C6346099FD1F76E784F) (from thread 36975) (no query) Received signal Segmentation fault (11)
+2021.02.15 17:06:01.875354 [ 12833 ] {} <Fatal> BaseDaemon: Address: 0x691cb50 Access: read. Attempted access has violated the permissions assigned to the memory area.
+2021.02.15 17:06:01.875439 [ 12833 ] {} <Fatal> BaseDaemon: Stack trace: 0x87c128d 0x7fdfe8aed980
+2021.02.15 17:06:01.875565 [ 12833 ] {} <Fatal> BaseDaemon: 0. ? @ 0x87c128d in /usr/bin/clickhouse
+2021.02.15 17:06:01.875653 [ 12833 ] {} <Fatal> BaseDaemon: 1. ? @ 0x12980 in /lib/x86_64-linux-gnu/libpthread-2.27.so
+2021.02.15 17:06:02.061967 [ 12833 ] {} <Fatal> BaseDaemon: Checksum of the binary: 003EF5DF043D774D279E882540C9EE6B, integrity check passed.
+2021.02.15 17:06:11.920628 [ 36971 ] {} <Fatal> Application: Child process was terminated by signal 11.
+```
+
+Systemd tried to start it but it crashed again
+
+```
+2021.02.15 17:06:42.475898 [ 12860 ] {} <Trace> BaseDaemon: Received signal 11
+2021.02.15 17:06:42.476107 [ 12867 ] {} <Fatal> BaseDaemon: ########################################
+2021.02.15 17:06:42.476215 [ 12867 ] {} <Fatal> BaseDaemon: (version 21.1.3.32 (official build), build id: 63BC1671E8C217170F9B6C6346099FD1F76E784F) (from thread 12865) (no query) Received signal Segmentation fault (11)
+2021.02.15 17:06:42.476393 [ 12867 ] {} <Fatal> BaseDaemon: Address: 0x7d690 Access: read. Address not mapped to object.
+2021.02.15 17:06:42.476521 [ 12867 ] {} <Fatal> BaseDaemon: Stack trace: 0xfac99a8 0x8610e6a 0x877a0d3 0x1176a4bf 0x1175d642 0x1176e909 0x1175d642 0x117b4e7c 0xebcc72c 0xebbd65e 0x865044d 0x86529af 0x864d87d 0x8651433 0x7f5ec99386db 0x7f5ec945d71f
+2021.02.15 17:06:42.476734 [ 12867 ] {} <Fatal> BaseDaemon: 2. sallocx @ 0xfac99a8 in /usr/bin/clickhouse
+2021.02.15 17:06:42.476835 [ 12867 ] {} <Fatal> BaseDaemon: 3. operator delete(void*, unsigned long) @ 0x8610e6a in /usr/bin/clickhouse
+2021.02.15 17:06:42.477035 [ 12867 ] {} <Fatal> BaseDaemon: 4. DB::ASTIdentifier::~ASTIdentifier() @ 0x877a0d3 in /usr/bin/clickhouse
+2021.02.15 17:06:42.477324 [ 12867 ] {} <Fatal> BaseDaemon: 5. DB::ParserCreateTableQuery::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1176a4bf in /usr/bin/clickhouse
+2021.02.15 17:06:42.477479 [ 12867 ] {} <Fatal> BaseDaemon: 6. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 17:06:42.477542 [ 12867 ] {} <Fatal> BaseDaemon: 7. DB::ParserCreateQuery::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1176e909 in /usr/bin/clickhouse
+2021.02.15 17:06:42.477640 [ 12867 ] {} <Fatal> BaseDaemon: 8. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 17:06:42.477780 [ 12867 ] {} <Fatal> BaseDaemon: 9. DB::tryParseQuery(DB::IParser&, char const*&, char const*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, bool, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, bool, unsigned long, unsigned long) @ 0x117b4e7c in /usr/bin/clickhouse
+2021.02.15 17:06:42.477938 [ 12867 ] {} <Fatal> BaseDaemon: 10. DB::DatabaseOnDisk::parseQueryFromMetadata(Poco::Logger*, DB::Context const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, bool, bool) @ 0xebcc72c in /usr/bin/clickhouse
+2021.02.15 17:06:42.478038 [ 12867 ] {} <Fatal> BaseDaemon: 11. ? @ 0xebbd65e in /usr/bin/clickhouse
+2021.02.15 17:06:42.478141 [ 12867 ] {} <Fatal> BaseDaemon: 12. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0x865044d in /usr/bin/clickhouse
+2021.02.15 17:06:42.478299 [ 12867 ] {} <Fatal> BaseDaemon: 13. ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()>(void&&, void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()&&...)::'lambda'()::operator()() @ 0x86529af in /usr/bin/clickhouse
+2021.02.15 17:06:42.478385 [ 12867 ] {} <Fatal> BaseDaemon: 14. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x864d87d in /usr/bin/clickhouse
+2021.02.15 17:06:42.478480 [ 12867 ] {} <Fatal> BaseDaemon: 15. ? @ 0x8651433 in /usr/bin/clickhouse
+2021.02.15 17:06:42.478586 [ 12867 ] {} <Fatal> BaseDaemon: 16. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+2021.02.15 17:06:42.478652 [ 12867 ] {} <Fatal> BaseDaemon: 17. clone @ 0x12171f in /lib/x86_64-linux-gnu/libc-2.27.so
+2021.02.15 17:06:42.675329 [ 12867 ] {} <Fatal> BaseDaemon: Checksum of the binary: 003EF5DF043D774D279E882540C9EE6B, integrity check passed.
+2021.02.15 17:06:42.675492 [ 12867 ] {} <Information> SentryWriter: Not sending crash report
+2021.02.15 17:06:52.492024 [ 12858 ] {} <Fatal> Application: Child process was terminated by signal 11.
+```
+
+When I've logged and restarted server - it crashed again during start
+
+```
+2021.02.15 18:37:01.321375 [ 13679 ] {} <Trace> BaseDaemon: Received signal 11
+2021.02.15 18:37:01.321848 [ 13686 ] {} <Fatal> BaseDaemon: ########################################
+2021.02.15 18:37:01.322088 [ 13686 ] {} <Fatal> BaseDaemon: (version 21.1.3.32 (official build), build id: 63BC1671E8C217170F9B6C6346099FD1F76E784F) (from thread 13684) (no query) Received signal Segmentation fault (11)
+2021.02.15 18:37:01.322232 [ 13686 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+2021.02.15 18:37:01.322433 [ 13686 ] {} <Fatal> BaseDaemon: Stack trace: 0x11752a31 0x1175605b 0x1175d642 0x1175680f 0x1175d642 0x11752698 0x1175d642 0x1175d642 0x117585c0 0x1175d642 0x11758e20 0x1175d642 0x11759d19 0x1175d642 0x11752698 0x1175d642 0x1175d642 0x11752d36 0x1175d642 0x1175d642 0x1175326b 0x1175d642 0x11752698 0x1175d642 0x1175d642 0x117577fd 0x1175d642 0x1175608e 0x1175d642 0x1175d642
+2021.02.15 18:37:01.322643 [ 13686 ] {} <Fatal> BaseDaemon: 2. ? @ 0x11752a31 in /usr/bin/clickhouse
+2021.02.15 18:37:01.322968 [ 13686 ] {} <Fatal> BaseDaemon: 3. DB::ParserPrefixUnaryOperatorExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175605b in /usr/bin/clickhouse
+2021.02.15 18:37:01.323100 [ 13686 ] {} <Fatal> BaseDaemon: 4. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.323294 [ 13686 ] {} <Fatal> BaseDaemon: 5. DB::ParserUnaryMinusExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175680f in /usr/bin/clickhouse
+2021.02.15 18:37:01.323461 [ 13686 ] {} <Fatal> BaseDaemon: 6. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.323577 [ 13686 ] {} <Fatal> BaseDaemon: 7. DB::ParserLeftAssociativeBinaryOperatorList::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x11752698 in /usr/bin/clickhouse
+2021.02.15 18:37:01.323717 [ 13686 ] {} <Fatal> BaseDaemon: 8. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.323827 [ 13686 ] {} <Fatal> BaseDaemon: 9. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.323930 [ 13686 ] {} <Fatal> BaseDaemon: 10. DB::ParserDateOperatorExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x117585c0 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324119 [ 13686 ] {} <Fatal> BaseDaemon: 11. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324238 [ 13686 ] {} <Fatal> BaseDaemon: 12. DB::ParserTimestampOperatorExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x11758e20 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324345 [ 13686 ] {} <Fatal> BaseDaemon: 13. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324473 [ 13686 ] {} <Fatal> BaseDaemon: 14. DB::ParserIntervalOperatorExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x11759d19 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324580 [ 13686 ] {} <Fatal> BaseDaemon: 15. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324711 [ 13686 ] {} <Fatal> BaseDaemon: 16. DB::ParserLeftAssociativeBinaryOperatorList::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x11752698 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324820 [ 13686 ] {} <Fatal> BaseDaemon: 17. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.324923 [ 13686 ] {} <Fatal> BaseDaemon: 18. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325069 [ 13686 ] {} <Fatal> BaseDaemon: 19. DB::ParserVariableArityOperatorList::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x11752d36 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325186 [ 13686 ] {} <Fatal> BaseDaemon: 20. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325321 [ 13686 ] {} <Fatal> BaseDaemon: 21. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325442 [ 13686 ] {} <Fatal> BaseDaemon: 22. DB::ParserBetweenExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175326b in /usr/bin/clickhouse
+2021.02.15 18:37:01.325558 [ 13686 ] {} <Fatal> BaseDaemon: 23. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325692 [ 13686 ] {} <Fatal> BaseDaemon: 24. DB::ParserLeftAssociativeBinaryOperatorList::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x11752698 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325809 [ 13686 ] {} <Fatal> BaseDaemon: 25. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.325958 [ 13686 ] {} <Fatal> BaseDaemon: 26. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.326066 [ 13686 ] {} <Fatal> BaseDaemon: 27. DB::ParserNullityChecking::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x117577fd in /usr/bin/clickhouse
+2021.02.15 18:37:01.326179 [ 13686 ] {} <Fatal> BaseDaemon: 28. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.326321 [ 13686 ] {} <Fatal> BaseDaemon: 29. DB::ParserPrefixUnaryOperatorExpression::parseImpl(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175608e in /usr/bin/clickhouse
+2021.02.15 18:37:01.326435 [ 13686 ] {} <Fatal> BaseDaemon: 30. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.326548 [ 13686 ] {} <Fatal> BaseDaemon: 31. DB::IParserBase::parse(DB::IParser::Pos&, std::__1::shared_ptr<DB::IAST>&, DB::Expected&) @ 0x1175d642 in /usr/bin/clickhouse
+2021.02.15 18:37:01.512885 [ 13686 ] {} <Fatal> BaseDaemon: Checksum of the binary: 003EF5DF043D774D279E882540C9EE6B, integrity check passed.
+2021.02.15 18:37:01.513051 [ 13686 ] {} <Information> SentryWriter: Not sending crash report
+2021.02.15 18:37:11.338651 [ 13677 ] {} <Fatal> Application: Child process was terminated by signal 11.
+```
+
+Here is full error log
+
+[stat-2.log](https://github.com/ClickHouse/ClickHouse/files/5994229/stat-2.log)
+
+There are plenty strange errors
+
+Typo in file name `?oynchronous_metric_log.sql`
+
+```
+2021.02.15 18:39:42.522045 [ 13730 ] {} <Error> Application: Caught exception while loading metadata: Code: 60, e.displayText() = DB::Exception: Table name is empty, but database name is not: Cannot attach table `system`.`` from metadata file /var/lib/clickhouse/store/1cc/1cc09b77-258b-4285-8bef-eb92299ad514/?oynchronous_metric_log.sql from query ATTACH DATABASE system UUID 'b1b0ef8b-11c5-42a4-8115-94a04e0b8450' ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) SETTINGS index_granularity = 8192: while loading database `system` from path /var/lib/clickhouse/metadata/system, Stack trace (when copying this message, always include the lines below):
+```
+
+Typo in metric_log field name `8rofileEvent_RegexpCreated`
+
+```
+2021.02.15 18:46:39.352066 [ 14192 ] {} <Error> auto DB::IBackgroundJobExecutor::jobExecutingTask()::(anonymous class)::operator()() const: Code: 16, e.displayText() = DB::Exception: There is no physical column 8rofileEvent_RegexpCreated in table., Stack trace (when copying this message, always include the lines below):
+```
+
+I've removed files in storage, and servers started fine.
+
+Yesterday after one restart during boot I've found another typo, in zookeeper host name (should be zk-gr-b-1 instead of uk-gr-b-1)
+
+```
+2021.02.16 13:10:27.491675 [ 1351 ] {} <Error> ZooKeeper: Cannot use ZooKeeper host uk-gr-b-1.us-hadoop.l:2181, reason: Host not found: uk-gr-b-1.us-hadoop.l
+2021.02.16 13:10:27.501168 [ 1351 ] {} <Trace> ZooKeeper: Initialized, hosts: zk-gr-b-3.us-hadoop.l:2181,zk-gr-b-1.us-hadoop.l:2181,zk-gr-b-2.us-hadoop.l:2181
+```
+
+All it looks like memory problem, but I have ECC ram, and such issues occurred on 4 different hardware servers in past several weeks.

@@ -1,0 +1,72 @@
+ID: 6224
+Title: Attempt to ALTER TABLE DELETE using column with skipping index in expression results in a complete loss of table data
+Description:
+I have lost 3m data in table trying to ALTER DELETE using column with skipping index in expression.
+
+**How to reproduce**
+*  ClickHouse server version 19.11.3 revision 54423,  ClickHouse server version 19.5.4 revision 54417
+* settings
+<pre>SELECT   name, value FROM system.settings WHERE changed;
+┌─name────────────────────────────────────────┬─value───────┐
+│ use_uncompressed_cache                      │ 0           │
+│ distributed_directory_monitor_batch_inserts │ 1           │
+│ load_balancing                              │ random      │
+│ max_memory_usage                            │ 10000000000 │
+│ allow_experimental_data_skipping_indices    │ 1           │
+└─────────────────────────────────────────────┴─────────────┘
+</pre>
+**scenario:**
+<pre>
+CREATE TABLE a
+(   name String, status Enum8('alive' = 0, 'rip' = 1), 
+    INDEX idx_status status TYPE set(2) GRANULARITY 1 )
+ENGINE = MergeTree()  ORDER BY name  SETTINGS index_granularity = 8192;
+
+insert into a values ('Jon','alive'),('Ramsey','rip');
+
+select * from a;
+
+┌─name───┬─status─┐
+│ Jon    │ alive  │
+│ Ramsey │ rip    │
+└────────┴────────┘
+
+2 rows in set. Elapsed: 0.001 sec. 
+
+CREATE TABLE b
+(   name String,   status Enum8('alive' = 0, 'rip' = 1))
+ENGINE = MergeTree()  ORDER BY name
+SETTINGS index_granularity = 8192;
+
+insert into b values ('Jon','alive'),('Ramsey','rip');
+
+
+ALTER TABLE a
+    DELETE WHERE status = 'rip';
+
+
+SELECT * FROM a;
+
+Ok.
+
+<b>0 rows in set. Elapsed: 0.003 sec. </b>
+</pre>
+All data in table lost.
+Same operation but without skipping index on column:
+<pre>
+
+ALTER TABLE b
+    DELETE WHERE status = 'rip';
+
+select * from b;
+
+┌─name─┬─status─┐
+│ Jon  │ alive  │
+└──────┴────────┘
+
+1 rows in set. Elapsed: 0.003 sec.
+</pre>
+
+**Expected behavior**
+Mutation error.
+

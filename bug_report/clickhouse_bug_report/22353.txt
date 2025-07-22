@@ -1,0 +1,96 @@
+ID: 22353
+Title: Update nested type subcolumns with different size may throw error.
+Description:
+**Describe the bug**
+
+I have a table with nested type column, when I update part of them and change the size of value, it will throw error when select.
+
+**Does it reproduce on recent release?**
+```
+dell123 :) select version()
+
+┌─version()─┐
+│ 21.4.1.1  │
+└───────────┘
+```
+
+**How to reproduce**
+```
+dell123 :) create table test_wide_nested(id Int, `info.id` Array(Int), `info.name` Array(String), `info.age` Array(Int)) Engine=MergeTree order by tuple() settings min_bytes_for_wide_part=0
+
+dell123 :) insert into test_wide_nested select number, [number,number+1] , ['aa','bb'],[number, number*2] from numbers(5);
+
+dell123 :) select * from test_wide_nested;
+
+SELECT *
+FROM test_wide_nested
+
+Query id: 210bba17-0b83-4712-8721-5cb5495bbaca
+
+┌─id─┬─info.id─┬─info.name───┬─info.age─┐
+│  0 │ [0,1]   │ ['aa','bb'] │ [0,0]    │
+│  1 │ [1,2]   │ ['aa','bb'] │ [1,2]    │
+│  2 │ [2,3]   │ ['aa','bb'] │ [2,4]    │
+│  3 │ [3,4]   │ ['aa','bb'] │ [3,6]    │
+│  4 │ [4,5]   │ ['aa','bb'] │ [4,8]    │
+└────┴─────────┴─────────────┴──────────┘
+
+5 rows in set. Elapsed: 0.027 sec.
+
+dell123 :) alter table test_wide_nested update `info.id` =[100,200,300], `info.age`=[10,20,30]  where id = 1 settings mutations_sync=1;
+
+ALTER TABLE test_wide_nested
+    UPDATE `info.id` = [100, 200, 300], `info.age` = [10, 20, 30] WHERE id = 1
+SETTINGS mutations_sync = 1
+
+Query id: 5d7cb91e-2241-4fb1-8739-4b5ae22dc7a4
+
+Ok.
+
+0 rows in set. Elapsed: 0.130 sec.
+
+dell123 :) select * from test_wide_nested;
+
+SELECT *
+FROM test_wide_nested
+
+Query id: 7fd04eb3-f16c-45d8-a325-b84569ca9050
+
+
+0 rows in set. Elapsed: 0.030 sec.
+
+Received exception from server (version 21.4.1):
+Code: 33. DB::Exception: Received from localhost:9000. DB::Exception: Cannot read all array values: read just 10 of 11: (while reading column info.name): (while reading from part /mnt/disk4/hewenting/tmp_ck/data/store/28c/28c3a03f-2107-4cb0-9d4f-ce3928a55dcb/all_1_1_0_2/ from mark 0 with max_rows_to_read = 5): While executing MergeTreeThread.
+
+dell123 :)
+dell123 :) select * from test_wide_nested limit 2;
+
+SELECT *
+FROM test_wide_nested
+LIMIT 2
+
+Query id: 033e1787-a49a-4ffe-9ed8-47e58ebb38c9
+
+┌─id─┬─info.id───────┬─info.name────────┬─info.age───┐
+│  0 │ [0,1]         │ ['aa','bb']      │ [0,0]      │
+│  1 │ [100,200,300] │ ['aa','bb','aa'] │ [10,20,30] │
+└────┴───────────────┴──────────────────┴────────────┘
+```
+
+
+* Which ClickHouse server version to use
+```
+dell123 :) select version()
+:-] ;
+
+┌─version()─┐
+│ 21.4.1.1  │
+└───────────┘
+```
+
+I find the reason is that when update Array type  `info.id`  it will update the `info.size0.bin` and `info%2Eid.bin`  files, and  hard link other files like `info%2Ename.*`, so there is a possible that subcolumns in nested type 's offset may be different. 
+
+I think when we  update nested data type subcolumns , Do we need a check to see the size of value is the same in  nested type subcolumns?
+Need it throw error when update in my example ?
+
+**Need discussion.**

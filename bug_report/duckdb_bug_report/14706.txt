@@ -1,0 +1,154 @@
+ID: 14706
+Title: `ORDER BY` is not respected for query involving co-related sub-queries using JSON functions.
+Description:
+### What happens?
+
+The `ORDER BY` is not respected for large LIMITS in the query. The results are not consistent across executions and there are large chunks which appear out of order. Looks like multiple threads don't merge in the results in the right relative order.
+When I test the same query with:
+`set threads to 1;`
+I do get consistent and correct results. 
+
+
+### To Reproduce
+
+## What is the db file and what this  query does?
+The db zip file attached, has two tables `parent` and `child` with `1-N` logical relationship, not define explicitly in the tables as foreign key, this is by design.
+This query simply output the parent object and it's children in json format, ordered by name and id, at both parent and child level, using co-related subquery.
+
+DB file: 
+[big-parent-child.db.zip](https://github.com/user-attachments/files/17629556/big-parent-child.db.zip)
+
+## Steps to repro:
+1. Unzip the attached duckdb file.
+2. Open duckdb CLI with the unzipped duckdb file:
+    `duckdb big-parent-child.db`
+3. Paste the following query in the duckdb CLI and run.
+```
+-- uncomment the below line to fix the issue
+-- set threads to 1; 
+copy (
+SELECT
+  JSON_OBJECT(
+    'parent',
+    JSON_OBJECT(
+      'edges',
+      (
+        SELECT
+          COALESCE(
+            JSON_GROUP_ARRAY(
+              JSON_OBJECT(
+                'node',
+                JSON_OBJECT(
+                  'parent_id',
+                  "parent_id",
+                  'parent_name',
+                  "parent_name",
+                  'parent_value',
+                  "parent_value",
+                  'children',
+                  JSON_OBJECT('edges', "children_edges")
+                )
+              )
+            ),
+            json_array()
+          )
+        FROM
+          (
+            SELECT
+              (
+                SELECT
+                  COALESCE(
+                    JSON_GROUP_ARRAY(
+                      JSON_OBJECT(
+                        'node',
+                        JSON_OBJECT('child_id', "child_id", 'child_name', "child_name", 'child_value', "child_value")
+                      )
+                    ),
+                    json_array()
+                  )
+                FROM
+                  (
+                    SELECT
+                      "c"."child_name" AS "child_name",
+                      "c"."child_id" AS "child_id",
+                      "c"."child_value" AS "child_value"
+                    FROM
+                      "child" AS "c"
+                    WHERE
+                      ("c"."parent_id" = "p_1"."parent_id")
+                      AND ("c"."child_id" IS NOT NULL)
+                    ORDER BY
+                      "child_name" ASC,
+                      "child_id" ASC
+                    LIMIT
+                      300
+                  ) AS "items_2"
+              ) AS "children_edges",
+              "p_1"."parent_value",
+              "p_1"."parent_name",
+              "p_1"."parent_id"
+              FROM
+                (
+                  SELECT
+                    "p"."parent_name" AS "parent_name",
+                    "p"."parent_id" AS "parent_id",
+                    "p"."parent_value" AS "parent_value"
+                  FROM
+                    "parent" AS "p"
+                ) AS "p_1"
+              ORDER BY
+                "parent_name" DESC,
+                "parent_id" ASC
+              LIMIT
+                1000
+          ) AS "p_1"
+      )
+    )
+) as result
+) to 'res-x.json';
+-- for successive execution change the name of the file
+```
+4. Re run the above query with a different file name to capture the second execution result.
+5. Compare the two files.
+
+
+
+### OS:
+
+aarch64
+
+### DuckDB Version:
+
+1.1.2 f680b7d08f and 1.1.3 19864453f7
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Beant Singh
+
+### Affiliation:
+
+Highspot
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

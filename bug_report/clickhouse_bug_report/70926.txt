@@ -1,0 +1,274 @@
+ID: 70926
+Title: The `AND()` logical function returns an incorrect data type, causing certain SQL queries to fail.
+Description:
+**Describe what's wrong**
+The `AND()` logical function returns an incorrect data type, causing certain SQL queries to fail.
+
+**How to reproduce**
+* Which ClickHouse server version to use: `24.10.1.1(master commit e9c6fd33008939a42a4911e28205ff7034adb789)`
+* Which interface to use, if it matters: `MySQL Shell`
+* Non-default settings, if any: 
+```xml
+            <distributed_product_mode>allow</distributed_product_mode>
+            <distributed_foreground_insert>1</distributed_foreground_insert>
+            <allow_experimental_parallel_reading_from_replicas>1</allow_experimental_parallel_reading_from_replicas>
+            <allow_experimental_inverted_index>1</allow_experimental_inverted_index>
+            <allow_experimental_full_text_index>1</allow_experimental_full_text_index>
+            <allow_experimental_join_condition>1</allow_experimental_join_condition>
+            <allow_experimental_query_deduplication>1</allow_experimental_query_deduplication>
+```
+
+* init database:
+```sql
+create table t1 ( 
+  c1 Int32 primary key ,
+  c2 Int32
+);
+insert into t1 (c1, c2) values (1, 1);
+
+-- return normally
+select c2 from t1 where and(c2, c2);
+
+-- error
+select c1 from t1 where and(c2, c2);
+```
+
+previous SQLs produce:
+```
+mysql> select c2 from t1 where and(c2, c2);
+
++------+
+| c2   |
++------+
+|    1 |
++------+
+1 row in set (0.01 sec)
+Read 1 rows, 4.00 B in 0.00686 sec., 145 rows/sec., 583.09 B/sec.
+
+mysql> select c1 from t1 where and(c2, c2);
+ERROR 59 (00000): Code: 59. DB::Exception: Illegal type Int32 of column for filter. Must be UInt8 or Nullable(UInt8) or Const variants of them.: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder). (ILLEGAL_TYPE_OF_COLUMN_FOR_FILTER) (version 24.10.1.1)
+```
+
+**Expected behavior**
+[`AND()`](https://clickhouse.com/docs/en/sql-reference/functions/logical-functions) should return type `UInt8` or `Nullable(UInt8)`. Therefore, `select c1 from t1 where and(c2, c2);` should be valid sql.
+
+**Additional context**
+We are using 2 clickhouse-servers and 3 clickhouse-keepers. The executable is built by:
+```shell
+CC=clang-18 CXX=clang++-18 \
+cmake -B build -S . \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DENABLE_LIBRARIES=OFF \
+    -DSANITIZE=address
+
+cd build
+ninja clickhouse-server clickhouse-client
+```
+and build docker image based on official image:
+```dockerfile
+FROM clickhouse/clickhouse-server:latest
+
+# replace
+COPY ./clickhouse /usr/bin/clickhouse
+```
+
+docker compose config:
+```yaml
+services:
+  main1:
+    image: "${CH_IMAGE}"
+    user: "101"
+    networks:
+      chnet:
+        ipv4_address: ${CH_SUBNET}.1
+    volumes:
+      - ${CH_ROOT}/main1/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ${CH_ROOT}/main1/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    depends_on:
+      - main-keeper1
+      - main-keeper2
+      - main-keeper3
+    environment:
+      - ASAN_OPTIONS=detect_leaks=0:use_sigaltstack=false
+
+  main2:
+    image: "${CH_IMAGE}"
+    user: "101"
+    networks:
+      chnet:
+        ipv4_address: ${CH_SUBNET}.2
+    volumes:
+      - ${CH_ROOT}/main2/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ${CH_ROOT}/main2/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+    depends_on:
+      - main-keeper1
+      - main-keeper2
+      - main-keeper3
+    environment:
+      - ASAN_OPTIONS=detect_leaks=0:use_sigaltstack=false
+
+  main-keeper1:
+    image: "${CHK_IMAGE}"
+    user: "101"
+    networks:
+      chnet:
+        ipv4_address: ${CH_SUBNET}.5
+    volumes:
+      - ${CH_ROOT}/main-keeper1/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+    # caps for get_mempolicy
+    cap_add:
+      - SYS_NICE
+
+  main-keeper2:
+    image: "${CHK_IMAGE}"
+    user: "101"
+    networks:
+      chnet:
+        ipv4_address: ${CH_SUBNET}.6
+    volumes:
+      - ${CH_ROOT}/main-keeper2/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+    # caps for get_mempolicy
+    cap_add:
+      - SYS_NICE
+
+  main-keeper3:
+    image: "${CHK_IMAGE}"
+    user: "101"
+    networks:
+      chnet:
+        ipv4_address: ${CH_SUBNET}.7
+    volumes:
+      - ${CH_ROOT}/main-keeper3/etc/clickhouse-keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml
+    # caps for get_mempolicy
+    cap_add:
+      - SYS_NICE
+
+networks:
+  chnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CH_SUBNET}.0/24
+          gateway: ${CH_SUBNET}.254
+
+```
+
+
+config.xml
+```xml
+<clickhouse replace="true">
+    <logger>
+        <level>debug</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>1000M</size>
+        <count>3</count>
+    </logger>
+    <display_name>cluster_2S_1R node 1</display_name>
+    <listen_host>0.0.0.0</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <mysql_port>9004</mysql_port>
+    <postgresql_port>9005</postgresql_port>
+    <user_directories>
+        <users_xml>
+            <path>users.xml</path>
+        </users_xml>
+        <local_directory>
+            <path>/var/lib/clickhouse/access/</path>
+        </local_directory>
+    </user_directories>
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+    <remote_servers>
+        <default>
+            <shard>
+                <replica>
+                    <host>clickhouse-01</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>clickhouse-02</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </default>
+    </remote_servers>
+    <send_crash_reports>
+        <enabled>true</enabled>
+    </send_crash_reports>
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper-01</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-02</host>
+            <port>9181</port>
+        </node>
+        <node>
+            <host>clickhouse-keeper-03</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+    <macros>
+        <shard>01</shard>
+        <replica>01</replica>
+    </macros>
+</clickhouse>
+
+```
+users.xml
+```xml
+<?xml version="1.0"?>
+<clickhouse replace="true">
+    <profiles>
+        <default>
+            <max_memory_usage>20000000000</max_memory_usage>
+            <use_uncompressed_cache>0</use_uncompressed_cache>
+            <load_balancing>in_order</load_balancing>
+            <log_queries>1</log_queries>
+            <distributed_product_mode>allow</distributed_product_mode>
+            <allow_experimental_parallel_reading_from_replicas>1</allow_experimental_parallel_reading_from_replicas>
+            <allow_experimental_inverted_index>1</allow_experimental_inverted_index>
+            <allow_experimental_full_text_index>1</allow_experimental_full_text_index>
+            <allow_experimental_join_condition>1</allow_experimental_join_condition>
+            <allow_experimental_query_deduplication>1</allow_experimental_query_deduplication>
+        </default>
+    </profiles>
+    <users>
+        <default>
+            <access_management>1</access_management>
+            <profile>default</profile>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <password></password>
+            <quota>default</quota>
+            <access_management>1</access_management>
+            <named_collection_control>1</named_collection_control>
+            <show_named_collections>1</show_named_collections>
+            <show_named_collections_secrets>1</show_named_collections_secrets>
+        </default>
+    </users>
+    <quotas>
+        <default>
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>
+
+```
+
+#### about us
+We are the BASS team from the School of Cyber Science and Technology at Beihang University. Our main focus is on system software security, operating systems, and program analysis research, as well as the development of automated program testing frameworks for detecting software defects. Using our self-developed database vulnerability testing tool, we have identified the potential above-mentioned vulnerability that may lead to database error.

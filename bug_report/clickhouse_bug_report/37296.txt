@@ -1,0 +1,45 @@
+ID: 37296
+Title: sequenceMatch() and sequenceCount() return wrong results when run over a distributed table
+Description:
+**Describe what's wrong**
+We have noticed that `sequenceCount` (and `sequenceMatch` as further tests have shown) behave in different ways when run against a distributed and local tables. 
+
+**Does it reproduce on recent release?**
+We are able to reproduce the issue on 22.3.5 version.
+
+**How to reproduce**
+1. Create a shard server and populate a demo table:
+```
+CREATE TABLE test (`time` Int32, `number` Int32) ENGINE = MergeTree ORDER BY time;
+INSERT INTO test VALUES (1, 1), (2, 3), (3, 2);
+```
+2. Validate that `sequenceMatch` / `sequenceCount` works there:
+```
+SELECT sequenceMatch('(?1)(?2)')(toUInt64(time), number = 1, number = 2) FROM test;
+┌─sequenceMatch('(?1)(?2)')(toUInt64(time), equals(number, 1), equals(number, 2))─┐
+│                                                                               1 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+3. Create a master server and set up the shard to be a part of the cluster
+4. Create a distributed table on the master server:
+```
+CREATE TABLE test (`time` Int32, `number` Int32) ENGINE = Distributed('test', 'test', 'test');
+```
+6. Run that very same query on master server:
+```
+SELECT sequenceMatch('(?1)(?2)')(toUInt64(time), number = 1, number = 2) FROM test;
+┌─sequenceMatch('(?1)(?2)')(toUInt64(time), equals(number, 1), equals(number, 2))─┐
+│                                                                               0 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Expected behavior**
+We believe `sequence*` functions shall work on both local and distributed tables.
+
+**Error message and/or stacktrace**
+N/A
+
+**Additional context**
+Changing the query in any way to "break" distributed queries, e.g. replace the query with `SELECT sequenceMatch('(?1)(?2)')(toUInt64(time), number = 1, number = 2) FROM (SELECT * FROM test);` makes the `sequence*` functions work again. 
+
+It's important to note that the functions do not work `even when` the shard contains the _whole_ sequence (so it's not connected to incorrect merging of the results which would be plausible to assume if part of the events were on the first server, and another part on the other).

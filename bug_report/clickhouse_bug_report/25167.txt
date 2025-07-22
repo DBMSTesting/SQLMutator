@@ -1,0 +1,123 @@
+ID: 25167
+Title: Data corruption in subquery 
+Description:
+We faced issue with data corruption while using subquery with condition.
+Without `WHERE` clause, CH returns expected real data, when added filter by some column, returned random data with corruption
+
+CH version: 21.3.2.5
+
+Table structure:
+```
+CREATE TABLE akabylbekov.corr_data
+(
+    `date` Date,
+    `url_id` UInt64,
+    `event_type` UInt16,
+    `count` UInt64
+)
+ENGINE = MergeTree
+PARTITION BY date
+ORDER BY (date, url_id, event_type)
+SETTINGS index_granularity = 8192
+```
+
+query data from table:
+```
+SELECT *
+FROM corr_data
+WHERE date = '2021-03-18'
+
+┌───────date─┬───url_id─┬─event_type─┬─count─┐
+│ 2021-03-18 │ 44511786 │         10 │    23 │
+│ 2021-03-18 │ 44512643 │         10 │    36 │
+│ 2021-03-18 │ 44667472 │         10 │   135 │
+│ 2021-03-18 │ 44668020 │         10 │   370 │
+│ 2021-03-18 │ 45671815 │          0 │    89 │
+│ 2021-03-18 │ 45710887 │          0 │   865 │
+│ 2021-03-18 │ 45741149 │          0 │    13 │
+│ 2021-03-18 │ 45744981 │          0 │    69 │
+│ 2021-03-18 │ 45745327 │          0 │    61 │
+│ 2021-03-18 │ 46115896 │         10 │   127 │
+└────────────┴──────────┴────────────┴───────┘
+
+10 rows in set. Elapsed: 0.007 sec.
+```
+
+using subquery for request data from table without filter:
+```
+SELECT
+    date,
+    url_id,
+    event_type,
+    count
+FROM 
+(
+    SELECT
+        date,
+        url_id,
+        event_type,
+        toUInt64(sum(count)) AS count
+    FROM corr_data
+    WHERE (event_type != 7) AND (url_id != 0) AND (date = '2021-03-18')
+    GROUP BY
+        date,
+        url_id,
+        event_type
+)
+ORDER BY date ASC
+
+Query id: aea8e5a2-96fe-47f3-8280-53bbd0534ce5
+
+┌───────date─┬───url_id─┬─event_type─┬─count─┐
+│ 2021-03-18 │ 45671815 │          0 │    89 │
+│ 2021-03-18 │ 46115896 │         10 │   127 │
+│ 2021-03-18 │ 45744981 │          0 │    69 │
+│ 2021-03-18 │ 44667472 │         10 │   135 │
+│ 2021-03-18 │ 44512643 │         10 │    36 │
+│ 2021-03-18 │ 44668020 │         10 │   370 │
+│ 2021-03-18 │ 45710887 │          0 │   865 │
+│ 2021-03-18 │ 45741149 │          0 │    13 │
+│ 2021-03-18 │ 45745327 │          0 │    61 │
+│ 2021-03-18 │ 44511786 │         10 │    23 │
+└────────────┴──────────┴────────────┴───────┘
+```
+
+using subquery for request data from table with WHERE `clause`:
+```
+SELECT
+    date,
+    url_id,
+    event_type,
+    count
+FROM 
+(
+    SELECT
+        date,
+        url_id,
+        event_type,
+        toUInt64(sum(count)) AS count
+    FROM corr_data
+    WHERE (event_type != 7) AND (url_id != 0) AND (date = '2021-03-18')
+    GROUP BY
+        date,
+        url_id,
+        event_type
+)
+WHERE url_id != 0
+ORDER BY date ASC
+
+Query id: 02d4b7e5-55a9-49fe-a424-baf993485a6b
+
+┌───────date─┬──────────────url_id─┬─event_type─┬─count─┐
+│ 1970-01-01 │                  12 │          0 │    69 │
+│ 1970-01-01 │     140201843247376 │         10 │   135 │
+│ 1970-01-01 │                   0 │         10 │   370 │
+│ 1970-01-01 │            93968240 │          0 │    13 │
+│ 1971-11-11 │           100908384 │          0 │   865 │
+│ 1971-11-11 │ 5264788298690218256 │         10 │    36 │
+│ 1971-11-13 │            93968400 │         10 │   127 │
+│ 2005-02-28 │ 5264788298690218256 │         10 │    23 │
+│ 2007-07-05 │           255539744 │          0 │    89 │
+│ 2072-07-20 │                   0 │          0 │    61 │
+└────────────┴─────────────────────┴────────────┴───────┘
+```

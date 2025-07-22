@@ -1,0 +1,75 @@
+ID: 39811
+Title: tidb_decode_key cannot decode every key in information_schema.tikv_region_status
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+tidb_decode_key cannot decode a key with empty row data (like `t<table>id_r`), which appear for tables with TiFlash for example, since tiflash replicas only want table row data, no index data etc.
+
+
+### 1. Minimal reproduce step (Required)
+
+Use something like `tiup playground nightly` to setup the environment, including tiflash.
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+create table key_decode_test (a int primary key, b varchar(255));
+select table_name, tidb_decode_key(start_key), tidb_decode_key(end_key), start_key, end_key from information_schema.tikv_region_status where table_name = 'key_decode_test';
+alter table key_decode_test set tiflash replica 1;
+select table_name, tidb_decode_key(start_key), tidb_decode_key(end_key), start_key, end_key from information_schema.tikv_region_status where table_name = 'key_decode_test';
+```
+
+Which will show something like `7480000000000000FF505F720000000000FA` instead of something like `{"handle":"{}","table_id":80}` (Notice that the handle value may be a string and not an actual json object)
+
+
+### 2. What did you expect to see? (Required)
+```
+tidb> select table_name, tidb_decode_key(start_key), tidb_decode_key(end_key), start_key, end_key from information_schema.tikv_region_status where table_name = 'key_decode_test';
++-----------------+--------------------------------+--------------------------+--------------------------------------+--------------------------------------+
+| table_name      | tidb_decode_key(start_key)     | tidb_decode_key(end_key) | start_key                            | end_key                              |
++-----------------+--------------------------------+--------------------------+--------------------------------------+--------------------------------------+
+| key_decode_test | {"handle":{}}                  | {"table_id":81}          | 7480000000000000FF505F720000000000FA | 7480000000000000FF5100000000000000F8 |
++-----------------+--------------------------------+--------------------------+--------------------------------------+--------------------------------------+
+1 row in set (0.00 sec)
+```
+### 3. What did you see instead (Required)
+```
+tidb> create table key_decode_test (a int primary key, b varchar(255));
+Query OK, 0 rows affected (0.10 sec)
+
+tidb> select table_name, tidb_decode_key(start_key), tidb_decode_key(end_key), start_key, end_key from information_schema.tikv_region_status where table_name = 'key_decode_test';
++-----------------+----------------------------+------------------------------+--------------------------------------+--------------------------------------+
+| table_name      | tidb_decode_key(start_key) | tidb_decode_key(end_key)     | start_key                            | end_key                              |
++-----------------+----------------------------+------------------------------+--------------------------------------+--------------------------------------+
+| key_decode_test | {"table_id":80}            | {"table_id":281474976710651} | 7480000000000000FF5000000000000000F8 | 748000FFFFFFFFFFFFFB00000000000000F8 |
++-----------------+----------------------------+------------------------------+--------------------------------------+--------------------------------------+
+1 row in set (0.01 sec)
+
+tidb> alter table key_decode_test set tiflash replica 1;
+Query OK, 0 rows affected (0.08 sec)
+
+tidb> select table_name, tidb_decode_key(start_key), tidb_decode_key(end_key), start_key, end_key from information_schema.tikv_region_status where table_name = 'key_decode_test';
++-----------------+--------------------------------------+--------------------------+--------------------------------------+--------------------------------------+
+| table_name      | tidb_decode_key(start_key)           | tidb_decode_key(end_key) | start_key                            | end_key                              |
++-----------------+--------------------------------------+--------------------------+--------------------------------------+--------------------------------------+
+| key_decode_test | 7480000000000000FF505F720000000000FA | {"table_id":81}          | 7480000000000000FF505F720000000000FA | 7480000000000000FF5100000000000000F8 |
++-----------------+--------------------------------------+--------------------------+--------------------------------------+--------------------------------------+
+1 row in set, 1 warning (0.00 sec)
+
+tidb> alter table key_decode_test add index (b);
+Query OK, 0 rows affected (0.54 sec)
+
+tidb> select table_name, tidb_decode_key(start_key), tidb_decode_key(end_key), start_key, end_key from information_schema.tikv_region_status where table_name = 'key_decode_test';
++-----------------+--------------------------------------+--------------------------------------+--------------------------------------+--------------------------------------+
+| table_name      | tidb_decode_key(start_key)           | tidb_decode_key(end_key)             | start_key                            | end_key                              |
++-----------------+--------------------------------------+--------------------------------------+--------------------------------------+--------------------------------------+
+| key_decode_test | {"table_id":80}                      | 7480000000000000FF505F720000000000FA | 7480000000000000FF5000000000000000F8 | 7480000000000000FF505F720000000000FA |
+| key_decode_test | 7480000000000000FF505F720000000000FA | {"table_id":81}                      | 7480000000000000FF505F720000000000FA | 7480000000000000FF5100000000000000F8 |
++-----------------+--------------------------------------+--------------------------------------+--------------------------------------+--------------------------------------+
+2 rows in set, 2 warnings (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

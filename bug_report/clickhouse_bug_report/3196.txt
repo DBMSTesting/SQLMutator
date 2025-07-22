@@ -1,0 +1,111 @@
+ID: 3196
+Title: Distributed "local" join does not work
+Description:
+setup: 3 nodes + zk
+configs (c1, c2, c3): https://gist.github.com/tkroman/370de81a425e3dfc0a77add66054ddb9
+
+relevant part:
+```xml
+ <remote_servers>
+        <mycluster>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <default_database>shard_0</default_database>
+                    <host>host.docker.internal</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <default_database>shard_1</default_database>
+                    <host>host.docker.internal</host>
+                    <port>9001</port>
+                </replica>
+            </shard>
+            <shard>
+                <weight>1</weight>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <default_database>shard_2</default_database>
+                    <host>host.docker.internal</host>
+                    <port>9002</port>
+                </replica>
+            </shard>
+        </mycluster>
+    </remote_servers>
+```
+
+steps to reproduce:
+put 3 config files somewhere on your file system, then run
+
+```bash
+docker run -it -p2181:2181 zookeeper
+
+docker run -d --name c1 --ulimit nofile=262144:262144 -p8123:8123 -p 9000:9000 -v c1.xml:/etc/clickhouse-server/config.xml yandex/clickhouse-server:18.12.14
+
+docker run -d --name c2 --ulimit nofile=262144:262144 -p8124:8124 -p 9001:9001 -v c2.xml:/etc/clickhouse-server/config.xml yandex/clickhouse-server:18.12.14
+
+docker run -d --name c3 --ulimit nofile=262144:262144 -p8125:8125 -p 9002:9002 -v c3.xml:/etc/clickhouse-server/config.xml yandex/clickhouse-server:18.12.14
+```
+
+create 3 databases representing shards on 3 corresponding nodes (basically ports in this example):
+
+```bash
+curl localhost:8123 -d "create database shard_0"
+curl localhost:8124 -d "create database shard_1"
+curl localhost:8125 -d "create database shard_2"
+```
+
+create 3 tables/shards:
+
+```
+curl localhost:8123 -d "create table shard_0.sharded(d Date) engine = MergeTree(d,tuple(d),8192)"
+curl localhost:8124 -d "create table shard_1.sharded(d Date) engine = MergeTree(d,tuple(d),8192)"
+curl localhost:8125 -d "create table shard_2.sharded(d Date) engine = MergeTree(d,tuple(d),8192)"
+```
+
+create 3 distributed tables:
+
+```
+curl localhost:8123 -d "create table dstr (d Date) engine = Distributed('mycluster','',sharded,toUInt64(d))"
+curl localhost:8124 -d "create table dstr (d Date) engine = Distributed('mycluster','',sharded,toUInt64(d))"
+curl localhost:8125 -d "create table dstr (d Date) engine = Distributed('mycluster','',sharded,toUInt64(d))"
+```
+
+first, let's make sure that `distributed_product_mode` is not specified:
+
+```
+curl localhost:8123 -d "select d from (select d from dstr all inner join (select d from dstr) using d)"
+
+# OK: fails with "Double-distributed IN/JOIN subqueries is denied (distributed_product_mode = 'deny')"
+```
+
+next, let's try using local table:
+
+```
+curl localhost:8123 -d "select d from (select d from dstr all inner join (select d from sharded) using d)"
+```
+
+**ISSUE:**
+
+```
+Code: 60, e.displayText() = DB::Exception: Table default.sharded doesn't exist., e.what() = DB::Exception
+```
+
+Now let's try `IN`:
+
+```
+curl localhost:8123 -d "select d from (select d from dstr where d in (select d from sharded))"
+# OK, is executed properly
+```
+
+Logs: https://gist.github.com/tkroman/31159609b17e749c67d17de3088558c8
+
+Tested on versions
+1.1.54388
+18.1.0
+18.12.14

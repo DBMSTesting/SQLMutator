@@ -1,0 +1,72 @@
+ID: 59084
+Title: S3 request with non existing URL hanging forever
+Description:
+When running a `INSERT INTO FUNCTION s3` and passing a URL that doesn't exist, for example, using a wrong AWS region like in the following examples:
+
+```sql
+INSERT INTO FUNCTION s3('https://my-bucket.s3.fake-region.amazonaws.com/export_1234.csv.gz', 'a', '', 'CSV') SELECT 1
+```
+
+or
+
+```sql
+BACKUP TABLE test TO S3('https://my-bucket.s3.fake-region.amazonaws.com/export_1234.csv.gz', '', '')
+```
+
+The queries hang forever. See a comparison between 23.3 and 24.1 (master)
+
+23.3.1.2823
+
+```
+$ time ./23.3.1.2823/clickhouse local --query "INSERT INTO FUNCTION s3('https://my-bucket.s3.fake-region.amazonaws.com/export_1234.csv.gz', 'a', '', 'CSV') SELECT 1"
+Code: 499. DB::Exception: Could not list objects in bucket 'my-bucket' with key 'export_1234.csv.gz', S3 exception: ``, message: 'Code: 198. DB::Exception: Not found address of host: my-bucket.s3.fake-region.amazonaws.com. (DNS_ERROR) (version 23.3.1.2823 (official build))'. (S3_ERROR)
+
+real	25.751
+user	0.100
+sys	0.029
+```
+
+24.1.1.1536 (master)
+
+```
+$ time ./master/clickhouse local --query "INSERT INTO FUNCTION s3('https://my-bucket.s3.fake-region.amazonaws.com/export_1234.csv.gz', 'a', '', 'CSV') SELECT 1"
+^C^C
+real	4:11.52
+user	1.172
+sys	0.030
+```
+
+(I have stopped the query after 4 minutes)
+
+You can see the following logs when running the same query on a server. The request keeps returning timeout and gets retried forever due to a DNS error (expected since the URL shouldn't exist)
+
+```
+
+2024.01.22 19:30:02.237088 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: Request failed, now waiting 1600 ms before attempting again.
+2024.01.22 19:30:03.872648 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Warning> DNSResolver: Cannot resolve host (my-bucket.s3.fake-region.amazonaws.com), error 0: Host not found.
+2024.01.22 19:30:03.924270 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: Failed to make request to: https://my-bucket.s3.fake-region.amazonaws.com/export_1234.csv.gz: Code: 198. DB::Exception: Not found address of host: my-bucket.s3.fake-region.amazonaws.com. (DNS_ERROR), Stack trace (when copying this message, always include the lines below):
+
+<Empty trace>
+ (version 24.1.1.1536 (official build))
+2024.01.22 19:30:03.924385 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: AWSXmlClient: HTTP response code: -1
+Resolved remote host IP address: my-bucket.s3.fake-region.amazonaws.com:443
+Request ID:
+Exception name:
+Error message: Code: 198. DB::Exception: Not found address of host: my-bucket.s3.fake-region.amazonaws.com. (DNS_ERROR) (version 24.1.1.1536 (official build))
+0 response headers:
+2024.01.22 19:30:03.924413 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: If the signature check failed. This could be because of a time skew. Attempting to adjust the signer.
+2024.01.22 19:30:03.924425 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: Request failed, now waiting 3200 ms before attempting again.
+2024.01.22 19:30:07.157947 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Warning> DNSResolver: Cannot resolve host (my-bucket.s3.fake-region.amazonaws.com), error 0: Host not found.
+2024.01.22 19:30:07.208666 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: Failed to make request to: https://my-bucket.s3.fake-region.amazonaws.com/export_1234.csv.gz: Code: 198. DB::Exception: Not found address of host: my-bucket.s3.fake-region.amazonaws.com. (DNS_ERROR), Stack trace (when copying this message, always include the lines below):
+
+<Empty trace>
+ (version 24.1.1.1536 (official build))
+2024.01.22 19:30:07.208774 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: AWSXmlClient: HTTP response code: -1
+Resolved remote host IP address: my-bucket.s3.fake-region.amazonaws.com:443
+Request ID:
+Exception name:
+Error message: Code: 198. DB::Exception: Not found address of host: my-bucket.s3.fake-region.amazonaws.com. (DNS_ERROR) (version 24.1.1.1536 (official build))
+0 response headers:
+2024.01.22 19:30:07.208803 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: If the signature check failed. This could be because of a time skew. Attempting to adjust the signer.
+2024.01.22 19:30:07.208827 [ 148244 ] {59d7d287-5379-482d-9437-ccf6ecb2ca65} <Information> AWSClient: Request failed, now waiting 6400 ms before attempting again.
+```

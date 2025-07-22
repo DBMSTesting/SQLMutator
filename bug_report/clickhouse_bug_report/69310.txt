@@ -1,0 +1,78 @@
+ID: 69310
+Title: Logical error: 'offsets[i] > offsets[i - 1]' with Wide MergeTree part + read_in_order_two_level_merge_threshold=1 + max_threads=1
+Description:
+When I was on duty I've found this case with Variant type:
+```
+CREATE OR REPLACE TABLE test(
+    key String,
+    val Map(String, Variant(String, Int32, DateTime64(3, 'UTC')))
+) engine = ReplicatedMergeTree('/clickhouse/tables/{database}/table', '1')
+order by key;
+
+/* Some data should be inserted */
+insert into test VALUES ('a', {'a':'a', 'b':1, 'c': '2020-01-01 10:10:10.11'});
+insert into test VALUES ('', {'':'xx', '':4});
+insert into test VALUES ('', {'x':'xx'});
+insert into test VALUES ('', {});
+insert into test VALUES ('a', {'a':'a', 'b':1, 'c': '2020-01-01 10:10:10'});
+insert into test VALUES ('a', {'a':'b', 'b':1, 'c': '2020-01-01'});
+insert into test VALUES ('z', {'a':'a'});
+
+insert into test VALUES ('a', {'a': Null});
+insert into test VALUES ('a', {'a': Null, 'a': Null});
+insert into test VALUES ('a', {'a': Null, 'c': Null});
+
+SELECT variantElement(arrayJoin(mapValues(val)), 'String') FROM test ORDER BY ALL;
+```
+I tried to reproduce it and have no luck, then i added this case as test and it finally fails in flaky check on 24.9:
+
+https://s3.amazonaws.com/clickhouse-test-reports/68155/77a707e37a38cecdde7327c4ff00d0e67a0db852/stateless_tests_flaky_check__asan_.html
+
+PR with test: https://github.com/ClickHouse/ClickHouse/pull/68155
+
+```
+2024-09-06 01:57:21 Reason: server died 32
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.492387 [ 2337 ] {c5a5439d-3740-4579-a58c-1fb57f0c7fb6} <Fatal> : Logical error: 'offsets[i] > offsets[i - 1]'.
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.582766 [ 2337 ] {c5a5439d-3740-4579-a58c-1fb57f0c7fb6} <Fatal> : Stack trace (when copying this message, always include the lines below):
+2024-09-06 01:57:21 
+2024-09-06 01:57:21 0. ./build_docker/./src/Common/StackTrace.cpp:372: StackTrace::tryCapture() @ 0x000000001aede5d7
+2024-09-06 01:57:21 1. ./build_docker/./src/Common/Exception.cpp:53: DB::abortOnFailedAssertion(String const&) @ 0x000000001ae69b2e
+2024-09-06 01:57:21 2. ./src/Columns/ColumnString.h:48: DB::ColumnString::doCompareAt(unsigned long, unsigned long, DB::IColumn const&, int) const @ 0x000000002afe8c64
+2024-09-06 01:57:21 3. DB::IColumn::compareAt(unsigned long, unsigned long, DB::IColumn const&, int) const @ 0x000000000e8cb448
+2024-09-06 01:57:21 4. ./src/Core/SortCursor.h:723: DB::FinishSortingTransform::consume(DB::Chunk) @ 0x000000002dfdb366
+2024-09-06 01:57:21 5. ./build_docker/./src/Processors/Transforms/SortingTransform.cpp:350: DB::SortingTransform::work() @ 0x000000002daf714f
+2024-09-06 01:57:21 6. ./build_docker/./src/Processors/Executors/ExecutionThreadContext.cpp:47: DB::ExecutionThreadContext::executeTask() @ 0x000000002d3f1d4e
+2024-09-06 01:57:21 7. ./build_docker/./src/Processors/Executors/PipelineExecutor.cpp:283: DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x000000002d3d6ed1
+2024-09-06 01:57:21 8. ./build_docker/./src/Processors/Executors/PipelineExecutor.cpp:249: DB::PipelineExecutor::executeImpl(unsigned long, bool) @ 0x000000002d3d581c
+2024-09-06 01:57:21 9. ./build_docker/./src/Processors/Executors/PipelineExecutor.cpp:120: DB::PipelineExecutor::execute(unsigned long, bool) @ 0x000000002d3d5302
+2024-09-06 01:57:21 10. ./build_docker/./src/Processors/Executors/PullingAsyncPipelineExecutor.cpp:83: void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlobalPoolImpl<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x000000002d3faa57
+2024-09-06 01:57:21 11. ./contrib/llvm-project/libcxx/include/__functional/function.h:848: ? @ 0x000000001b03103b
+2024-09-06 01:57:21 12. ./build_docker/./src/Common/ThreadPool.cpp:252: void* std::__thread_proxy[abi:v15007]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000001b03b6ff
+2024-09-06 01:57:21 13. asan_thread_start(void*) @ 0x000000000aa56059
+2024-09-06 01:57:21 14. ? @ 0x00007faa2b49eac3
+2024-09-06 01:57:21 15. ? @ 0x00007faa2b530850
+2024-09-06 01:57:21 
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.668588 [ 2777 ] <Fatal> BaseDaemon: ########################################
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.671564 [ 2777 ] <Fatal> BaseDaemon: (version 24.9.1.78 (official build), build id: 595A9296B249ECBDE9A2B971B3BB65F308F87206, git hash: 27d81fd35744fd2d212181e21260772164174a33) (from thread 2337) (query_id: c5a5439d-3740-4579-a58c-1fb57f0c7fb6) (query: SELECT key, arrayJoin(mapValues(val)) FROM test ORDER BY ALL;) Received signal Aborted (6)
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.673812 [ 2777 ] <Fatal> BaseDaemon: 
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.676187 [ 2777 ] <Fatal> BaseDaemon: Stack trace: 0x000055af768354ad 0x000055af76e2ce03 0x00007faa2b44c520 0x00007faa2b4a09fd 0x00007faa2b44c476 0x00007faa2b4327f3 0x000055af767c06ab 0x000055af767c0b50 0x000055af8693fc64 0x000055af6a222448 0x000055af89932366 0x000055af8944e14f 0x000055af88d48d4e 0x000055af88d2ded1 0x000055af88d2c81c 0x000055af88d2c302 0x000055af88d51a57 0x000055af7698803b 0x000055af769926ff 0x000055af663ad059 0x00007faa2b49eac3 0x00007faa2b530850
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.795339 [ 2777 ] <Fatal> BaseDaemon: 0.0. inlined from ./build_docker/./src/Common/StackTrace.cpp:372: StackTrace::tryCapture()
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:55.796712 [ 2777 ] <Fatal> BaseDaemon: 0. ./build_docker/./src/Common/StackTrace.cpp:341: StackTrace::StackTrace(ucontext_t const&) @ 0x000000001aede4ad
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.011792 [ 2777 ] <Fatal> BaseDaemon: 1. ./build_docker/./src/Common/SignalHandlers.cpp:85: signalHandler(int, siginfo_t*, void*) @ 0x000000001b4d5e03
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.013703 [ 2777 ] <Fatal> BaseDaemon: 2. ? @ 0x00007faa2b44c520
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.015368 [ 2777 ] <Fatal> BaseDaemon: 3. ? @ 0x00007faa2b4a09fd
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.017074 [ 2777 ] <Fatal> BaseDaemon: 4. ? @ 0x00007faa2b44c476
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.019152 [ 2777 ] <Fatal> BaseDaemon: 5. ? @ 0x00007faa2b4327f3
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.251693 [ 2777 ] <Fatal> BaseDaemon: 6. ./build_docker/./src/Common/Exception.cpp:48: DB::abortOnFailedAssertion(String const&, void* const*, unsigned long, unsigned long) @ 0x000000001ae696ab
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:56.713669 [ 2777 ] <Fatal> BaseDaemon: 7. ./build_docker/./src/Common/Exception.cpp:54: ? @ 0x000000001ae69b50
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:57.254571 [ 2777 ] <Fatal> BaseDaemon: 8.0. inlined from ./src/Columns/ColumnString.h:48: DB::ColumnString::sizeAt(long) const
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:57.255780 [ 2777 ] <Fatal> BaseDaemon: 8. ./src/Columns/ColumnString.h:260: DB::ColumnString::doCompareAt(unsigned long, unsigned long, DB::IColumn const&, int) const @ 0x000000002afe8c64
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:57.641888 [ 2777 ] <Fatal> BaseDaemon: 9. DB::IColumn::compareAt(unsigned long, unsigned long, DB::IColumn const&, int) const @ 0x000000000e8cb448
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:58.004530 [ 2777 ] <Fatal> BaseDaemon: 10.0. inlined from ./src/Core/SortCursor.h:723: bool DB::less<std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>, std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>>>(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>> const&, std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn>>> const&, unsigned long, unsigned long, std::vector<DB::SortColumnDescriptionWithColumnIndex, std::allocator<DB::SortColumnDescriptionWithColumnIndex>> const&)
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:58.005950 [ 2777 ] <Fatal> BaseDaemon: 10. ./build_docker/./src/Processors/Transforms/FinishSortingTransform.cpp:80: DB::FinishSortingTransform::consume(DB::Chunk) @ 0x000000002dfdb366
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:59.082351 [ 2777 ] <Fatal> BaseDaemon: 11. ./build_docker/./src/Processors/Transforms/SortingTransform.cpp:350: DB::SortingTransform::work() @ 0x000000002daf714f
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:59.244317 [ 2777 ] <Fatal> BaseDaemon: 12.0. inlined from ./build_docker/./src/Processors/Executors/ExecutionThreadContext.cpp:47: DB::executeJob(DB::ExecutingGraph::Node*, DB::ReadProgressCallback*)
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:59.247406 [ 2777 ] <Fatal> BaseDaemon: 12. ./build_docker/./src/Processors/Executors/ExecutionThreadContext.cpp:96: DB::ExecutionThreadContext::executeTask() @ 0x000000002d3f1d4e
+2024-09-06 01:57:21 [6082bf7eab67] 2024.09.05 18:56:59.742859 [ 2777 ] <Fatal> BaseDaemon: 13. ./build_docker/./src/Processors/Executors/PipelineExecutor.cp
+
+```

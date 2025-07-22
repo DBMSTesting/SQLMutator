@@ -1,0 +1,31 @@
+ID: 16307
+Title: ZooKeeper coordination may fail permanently after multiple huge ALTERs are executed.
+Description:
+**Describe the bug:**
+
+Create a table with very long column names or type names (type names can be long for legitimate reason, e.g. Enum).
+Make table structure to be less than 1 MB but larger than 100 KB.
+
+Create two replicas, turn one replica off. Execute at least 10 ALTER queries to slightly modify columns in the table.
+Turn second replica on.
+
+It will fail with:
+```
+<Debug> sandbox.taskdiskusage (ReplicatedMergeTreeQueue): Pulling 42 entries to queue: log-0001412404 - log-0001412445
+...
+<Error> void Coordination::ZooKeeper::receiveThread(): Code: 33, e.displayText() = DB::Exception: Cannot read all data. Bytes read: 0...
+```
+(there is no subsequent message `Pulled 42 entries to queue`)
+
+Because it tries to make a transaction to move several `log` entries to `queue` (the code is in `ReplicatedMergeTreeQueue::pullLogsToQueue` function) and this transaction is larger than 1 MB.
+
+After this message all other ZooKeeper queries will fail with `Session expired` error.
+After the session to ZooKeeper is reinitialized, everything will repeat.
+
+**Workaround:**
+
+1 MB is the default limit for packet size in ZooKeeper. You should increase it with the parameter `-Djute.maxbuffer` in ZooKeeper.
+
+**Notes:**
+
+There was no such issue with ALTER columns queries before version 20.3. In version 20.3 ALTER of columns goes through the replication log, the change was added in #8701. It means that the issue may manifestate itself after upgrade to the versions 20.3+. But the root cause of the bug itself is present in every version, you can get similar effect with ALTER UPDATE or DELETE if the expression is very long (e.g. long list of constants).

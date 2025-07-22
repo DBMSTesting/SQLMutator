@@ -1,0 +1,82 @@
+ID: 7955
+Title: Crash from DB::Join::joinBlockImpl on running select on a view table 
+Description:
+Running select on a view table crashes with NULL dereference and segfault.
+
+**How to reproduce**
+ClickHouse 19.17.4.11 with revision 54428 (official build on RedHat)
+
+    CREATE TABLE a(`id1` UInt32, `id2` UInt32, `val` UInt32) ENGINE = TinyLog;
+    INSERT INTO a VALUES (1,1,1)(2,2,2)(3,3,3); 
+    CREATE TABLE id1(`id1` UInt32, `val` UInt8) ENGINE = Join(ANY, LEFT, id1);
+    CREATE TABLE id2(`id2` UInt32, `val` UInt8) ENGINE = Join(ANY, LEFT, id2);
+    INSERT INTO id1 VALUES (1,1)(2,2)(3,3);
+    INSERT INTO id2 VALUES (1,1)(2,2)(3,3);
+    (SELECT * from (SELECT * FROM a ANY LEFT OUTER JOIN id1 USING id1) ANY LEFT OUTER JOIN id2 USING id2) ;
+    create view b as (SELECT * from (SELECT * FROM a ANY LEFT OUTER JOIN id1 USING id1) ANY LEFT OUTER JOIN id2 USING id2) ;
+    select * from b;
+
+**Expected behavior**
+
+The last select should give the same response as the previous one.
+
+**Error message and/or stacktrace**
+Server crashing with null dereference upon running the select on the view.
+
+```
+2019.11.28 05:16:25.552547 [ 91 ] {7537f1f0-4b9e-4bb7-8158-fbdb2399b37a} <Debug> executeQuery: (from 127.0.0.1:50292) SELECT * FROM b
+2019.11.28 05:16:25.555092 [ 91 ] {7537f1f0-4b9e-4bb7-8158-fbdb2399b37a} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.11.28 05:16:25.556059 [ 93 ] {} <Fatal> BaseDaemon: ########################################
+2019.11.28 05:16:25.556183 [ 93 ] {} <Fatal> BaseDaemon: (version 19.17.4.11 (official build)) (from thread 91) Received signal Segmentation fault (11).
+2019.11.28 05:16:25.556223 [ 93 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Address not mapped to object.
+2019.11.28 05:16:25.556270 [ 93 ] {} <Fatal> BaseDaemon: Stack trace: 0x5592e437ed9c 0x5592e43adf27 0x5592e435f4f5 0x5592e4a76580 0x5592e4a77535 0x5592e48f92cd 0x5592e433b5ee 0x5592e431c52c 0x5592e433c93f 0x5592e4332d7e 0x5592e433ac87 0x5592e431c52c 0x5592e433c93f 0x5592e4b425c5 0x5592e4332f17 0x5592e433ac87 0x5592e431c52c 0x5592e433c93f 0x5592e433e745 0x5592e44413fe 0x5592e444284e 0x5592e0fe1894 0x5592e0fe22cb 0x5592e4ede660 0x5592e4eded7d 0x5592e65b4ef1 0x5592e65b2c9c 0x5592e6d28e00 0x7f88ce13ddd5
+2019.11.28 05:16:25.644451 [ 93 ] {} <Fatal> BaseDaemon: 3. 0x5592e437ed9c ? /usr/bin/clickhouse
+2019.11.28 05:16:25.644687 [ 93 ] {} <Fatal> BaseDaemon: 4. 0x5592e43adf27 void DB::Join::joinBlockImpl<(DB::ASTTableJoin::Kind)1, (DB::ASTTableJoin::Strictness)1, DB::Join::MapsTemplate<DB::JoinStuff::WithFlags<DB::RowRef, false> > >(DB::Block&,std::vector<std::__cxx11::basic_string<char,std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char,std::char_traits<char>, std::allocator<char> > > > const&, DB::Block const&,DB::Join::MapsTemplate<DB::JoinStuff::WithFlags<DB::RowRef, false> > const&) const /usr/bin/clickhouse
+2019.11.28 05:16:25.644755 [ 93 ] {} <Fatal> BaseDaemon: 5. 0x5592e435f4f5 DB::Join::joinBlock(DB::Block&) /usr/bin/clickhouse
+2019.11.28 05:16:25.644792 [ 93 ] {} <Fatal> BaseDaemon: 6. 0x5592e4a76580 DB::ExpressionAction::execute(DB::Block&, bool) const /usr/bin/clickhouse
+2019.11.28 05:16:25.644828 [ 93 ] {} <Fatal> BaseDaemon: 7. 0x5592e4a77535 DB::ExpressionActions::execute(DB::Block&, bool) const /usr/bin/clickhouse
+2019.11.28 05:16:25.644865 [ 93 ] {} <Fatal> BaseDaemon: 8. 0x5592e48f92cd DB::ExpressionBlockInputStream::ExpressionBlockInputStream(std::shared_ptr<DB::IBlockInputStream> const&, std::shared_ptr<DB::ExpressionActions> const&) /usr/bin/clickhouse
+2019.11.28 05:16:25.644904 [ 93 ] {} <Fatal> BaseDaemon: 9. 0x5592e433b5ee void DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuery::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645016 [ 93 ] {} <Fatal> BaseDaemon: 10. 0x5592e431c52c DB::InterpreterSelectQuery::executeWithMultipleStreams(DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645069 [ 93 ] {} <Fatal> BaseDaemon: 11. 0x5592e433c93f DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams(DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645112 [ 93 ] {} <Fatal> BaseDaemon: 12. 0x5592e4332d7e void DB::InterpreterSelectQuery::executeFetchColumns<DB::Inte[72/1518]
+lectQuery::Pipeline>(DB::QueryProcessingStage::Enum, DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::SortingInfo> const&, std::shared_p
+tr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cx
+x11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645149 [ 93 ] {} <Fatal> BaseDaemon: 13. 0x5592e433ac87 void DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuer
+y::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645211 [ 93 ] {} <Fatal> BaseDaemon: 14. 0x5592e431c52c DB::InterpreterSelectQuery::executeWithMultipleStreams(DB::QueryPipeli
+ne&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645241 [ 93 ] {} <Fatal> BaseDaemon: 15. 0x5592e433c93f DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams(DB::Qu
+eryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645283 [ 93 ] {} <Fatal> BaseDaemon: 16. 0x5592e4b425c5 DB::StorageView::read(std::vector<std::__cxx11::basic_string<char, std
+::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > co
+nst&, DB::SelectQueryInfo const&, DB::Context const&, DB::QueryProcessingStage::Enum, unsigned long, unsigned int) /usr/bin/clickhouse
+2019.11.28 05:16:25.645326 [ 93 ] {} <Fatal> BaseDaemon: 17. 0x5592e4332f17 void DB::InterpreterSelectQuery::executeFetchColumns<DB::InterpreterSe
+lectQuery::Pipeline>(DB::QueryProcessingStage::Enum, DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::SortingInfo> const&, std::shared_p
+tr<DB::PrewhereInfo> const&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cx
+x11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645361 [ 93 ] {} <Fatal> BaseDaemon: 18. 0x5592e433ac87 void DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuer
+y::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::shared_ptr<DB::IBlockInputStream> const&, DB::QueryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645392 [ 93 ] {} <Fatal> BaseDaemon: 19. 0x5592e431c52c DB::InterpreterSelectQuery::executeWithMultipleStreams(DB::QueryPipeli
+ne&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645419 [ 93 ] {} <Fatal> BaseDaemon: 20. 0x5592e433c93f DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams(DB::Qu
+eryPipeline&) /usr/bin/clickhouse
+2019.11.28 05:16:25.645452 [ 93 ] {} <Fatal> BaseDaemon: 21. 0x5592e433e745 DB::InterpreterSelectWithUnionQuery::execute() /usr/bin/clickhouse
+2019.11.28 05:16:25.645479 [ 93 ] {} <Fatal> BaseDaemon: 22. 0x5592e44413fe ? /usr/bin/clickhouse
+2019.11.28 05:16:25.645511 [ 93 ] {} <Fatal> BaseDaemon: 23. 0x5592e444284e DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<cha
+r>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum, bool, bool) /usr/bin/clickhouse
+2019.11.28 05:16:25.645547 [ 93 ] {} <Fatal> BaseDaemon: 24. 0x5592e0fe1894 DB::TCPHandler::runImpl() /usr/bin/clickhouse
+2019.11.28 05:16:25.645575 [ 93 ] {} <Fatal> BaseDaemon: 25. 0x5592e0fe22cb DB::TCPHandler::run() /usr/bin/clickhouse
+2019.11.28 05:16:25.645607 [ 93 ] {} <Fatal> BaseDaemon: 26. 0x5592e4ede660 Poco::Net::TCPServerConnection::start() /usr/bin/clickhouse
+2019.11.28 05:16:25.645636 [ 93 ] {} <Fatal> BaseDaemon: 27. 0x5592e4eded7d Poco::Net::TCPServerDispatcher::run() /usr/bin/clickhouse
+2019.11.28 05:16:25.645669 [ 93 ] {} <Fatal> BaseDaemon: 28. 0x5592e65b4ef1 Poco::PooledThread::run() /usr/bin/clickhouse
+2019.11.28 05:16:25.645698 [ 93 ] {} <Fatal> BaseDaemon: 29. 0x5592e65b2c9c Poco::ThreadImpl::runnableEntry(void*) /usr/bin/clickhouse
+2019.11.28 05:16:25.645724 [ 93 ] {} <Fatal> BaseDaemon: 30. 0x5592e6d28e00 ? /usr/bin/clickhouse
+2019.11.28 05:16:25.645756 [ 93 ] {} <Fatal> BaseDaemon: 31. 0x7f88ce13ddd5 start_thread /usr/lib64/libpthread-2.17.so
+Segmentation fault (core dumped)
+
+```
+
+**Additional context**
+Add any other context about the problem here.

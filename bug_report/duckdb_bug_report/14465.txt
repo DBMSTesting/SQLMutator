@@ -1,0 +1,41 @@
+ID: 14465
+Title: Temp directory compression
+Description:
+This PR implements compression for the temporary buffers that DuckDB swaps in and out of files in `temp_directory`.
+
+The temporary buffers are compressed with ZSTD (with compression level -3, -1, 1, or 3) ) _or stored uncompressed_, which is chosen adaptively. The adaptivity is really simple, as we store the last total write time (or compress + write time) and choose whatever was the fastest previously (with a slight bias towards compression, as reducing the temp directory size is always beneficial), with a small chance to deviate from this, so that we don't get stuck doing the same thing forever.
+
+Whether we compress or not, and at which compression level really needs to be adaptive; otherwise, we degrade performance in situations where writing is cheap, e.g., when not many concurrent writes (to an SSD) are going on at the same time. I have performed two simple benchmarks on my laptop:
+
+```sql
+.timer on
+set memory_limit='100mb';
+set preserve_insertion_order=false;
+create or replace table test as select random()::varchar i from range(50_000_000); -- Q1
+create or replace table test2 as select * from test; -- Q2
+```
+
+Q1 is a single-threaded write (because `range` is a single-threaded table function), and Q2 is a multi-threaded read/write. Here are the median runtimes over 5 runs:
+
+| Query | DuckDB 1.1.2 | This PR |
+|--:|--:|--:|
+| Q1 | 7.107s | __5.845s__ |
+| Q2 | __0.346s__ | 0.380s |
+
+As we can see, Q1 is significantly faster. Meanwhile, Q2 is only slightly slower. The difference in size is minimal (2.3GB vs 2.4GB).
+
+The next benchmark is a large out-of-core aggregation:
+```sql
+use tpch_sf1000;
+set memory_limit='32gb';
+.timer on
+pragma tpch(18);
+```
+
+| DuckDB 1.1.2 | This PR |
+|--:|--:|
+| 65.524 | __59.074__ |
+
+Note that there is some fluctuation in performance due to my laptop running some stuff in the background, but the compression also seems to improve performance here. This time, the size difference is a bit more pronounced. In DuckDB 1.1.2, the size of the temp directory was 38-39GB. With this PR, the size was 33-36GB. If disk speeds are slower, more blocks will be compressed with a higher compression level, which should reduce the temp directory size more.
+
+Our uncompressed fixed-size blocks are still swapped in and out of a file that stores 256KiB blocks. Our compressed blocks can have different sizes, and we create one or more files per "size class", i.e., a multiple of 32KiB.

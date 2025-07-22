@@ -1,0 +1,222 @@
+ID: 39684
+Title: Cannot mutate part columns with uninitialized mutations stream (LOGICAL_ERROR)
+Description:
+**Describe what's wrong**
+
+Attempting to drop a tuple that has been flattened to several array-typed fields can fail.
+
+**Does it reproduce on recent release?**
+
+Reproduces on Linux x64 22.7.1.2484
+
+**How to reproduce**
+
+```
+ClickHouse client version 22.7.1.2484 (official build).
+Connecting to localhost:9010 as user default.
+Connected to ClickHouse server version 22.7.1 revision 54457.
+
+server :) create table foo(arr Array(Tuple(a Int32, b Int32, c Int32))) Engine=MergeTree() Order By tuple();
+
+CREATE TABLE foo
+(
+    `arr` Array(Tuple(a Int32, b Int32, c Int32))
+)
+ENGINE = MergeTree
+ORDER BY tuple()
+
+Query id: 858c2b6d-0139-4f02-b4c2-8aee331e90e2
+
+Ok.
+
+0 rows in set. Elapsed: 0.006 sec. 
+
+server :) desc table foo;
+
+DESCRIBE TABLE foo
+
+Query id: 944e0f2f-5d84-4092-9bb1-11d00b9eee36
+
+┌─name──┬─type─────────┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┬─ttl_expression─┐
+│ arr.a │ Array(Int32) │              │                    │         │                  │                │
+│ arr.b │ Array(Int32) │              │                    │         │                  │                │
+│ arr.c │ Array(Int32) │              │                    │         │                  │                │
+└───────┴──────────────┴──────────────┴────────────────────┴─────────┴──────────────────┴────────────────┘
+
+3 rows in set. Elapsed: 0.001 sec. 
+
+server :) insert into foo(arr.a, arr.b, arr.c) values ([1],[2],[3]);
+
+INSERT INTO foo (arr.a, arr.b, arr.c) FORMAT Values
+
+Query id: f097d5d0-74bb-4440-b9ee-a7ceda183a2e
+
+Ok.
+
+1 row in set. Elapsed: 0.003 sec. 
+
+server :) alter table foo add column z Int32;
+
+ALTER TABLE foo
+    ADD COLUMN `z` Int32
+
+Query id: 917057cb-df4a-4294-aba1-2abda0ddb6c1
+
+Ok.
+
+0 rows in set. Elapsed: 0.002 sec. 
+
+server :) alter table foo drop column arr;
+
+ALTER TABLE foo
+    DROP COLUMN arr
+
+Query id: efc804a4-654e-4ee4-b441-ad37254c8f8d
+
+
+0 rows in set. Elapsed: 0.005 sec. 
+
+Received exception from server (version 22.7.1):
+Code: 341. DB::Exception: Received from localhost:9010. DB::Exception: Exception happened during execution of mutation 'mutation_2.txt' with part 'all_1_1_0' reason: 'Code: 49. DB::Exception: Cannot mutate part columns with uninitialized mutations stream. It's a bug. (LOGICAL_ERROR) (version 22.7.1.2484 (official build))'. This error maybe retryable or not. In case of unretryable error, mutation can be killed with KILL MUTATION query. (UNFINISHED)
+
+server :) desc table foo;
+
+DESCRIBE TABLE foo
+
+Query id: e215dca6-a054-4807-919b-63f7aec0e7a1
+
+┌─name─┬─type──┬─default_type─┬─default_expression─┬─comment─┬─codec_expression─┬─ttl_expression─┐
+│ z    │ Int32 │              │                    │         │                  │                │
+└──────┴───────┴──────────────┴────────────────────┴─────────┴──────────────────┴────────────────┘
+
+1 row in set. Elapsed: 0.001 sec. 
+```
+
+**Expected behavior**
+
+All of the `arr.*` columns should drop without error, or the DDL should be rejected.
+
+**Error message and/or stacktrace**
+
+server logs:
+```
+2022.07.28 14:30:28.784112 [ 1647 ] {} <Debug> TCP-Session: 1532d805-3f75-41d1-b540-c18442e63cb6 Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.07.28 14:30:28.784309 [ 1647 ] {858c2b6d-0139-4f02-b4c2-8aee331e90e2} <Debug> executeQuery: (from 127.0.0.1:50738) create table foo(arr Array(Tuple(a Int32, b Int32, c Int32))) Engine=MergeTree() Order By tuple(); (stage: Complete)
+2022.07.28 14:30:28.784362 [ 1647 ] {858c2b6d-0139-4f02-b4c2-8aee331e90e2} <Trace> ContextAccess (default): Access granted: CREATE TABLE ON default.foo
+2022.07.28 14:30:28.788273 [ 1647 ] {858c2b6d-0139-4f02-b4c2-8aee331e90e2} <Debug> default.foo (e210e937-a588-43a8-9755-fd7e36084a77): Loading data parts
+2022.07.28 14:30:28.788356 [ 1647 ] {858c2b6d-0139-4f02-b4c2-8aee331e90e2} <Debug> default.foo (e210e937-a588-43a8-9755-fd7e36084a77): There are no data parts
+2022.07.28 14:30:28.789619 [ 1647 ] {858c2b6d-0139-4f02-b4c2-8aee331e90e2} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2022.07.28 14:30:28.789635 [ 1647 ] {858c2b6d-0139-4f02-b4c2-8aee331e90e2} <Debug> TCPHandler: Processed in 0.005582604 sec.
+2022.07.28 14:30:35.011449 [ 1722 ] {} <Debug> DNSResolver: Updating DNS cache
+2022.07.28 14:30:35.011496 [ 1722 ] {} <Debug> DNSResolver: Updated DNS cache
+2022.07.28 14:30:37.262869 [ 1647 ] {} <Debug> TCP-Session: 1532d805-3f75-41d1-b540-c18442e63cb6 Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.07.28 14:30:37.262984 [ 1647 ] {944e0f2f-5d84-4092-9bb1-11d00b9eee36} <Debug> executeQuery: (from 127.0.0.1:50738) desc table foo; (stage: Complete)
+2022.07.28 14:30:37.263036 [ 1647 ] {944e0f2f-5d84-4092-9bb1-11d00b9eee36} <Trace> ContextAccess (default): Access granted: SHOW COLUMNS ON default.foo
+2022.07.28 14:30:37.263529 [ 1647 ] {944e0f2f-5d84-4092-9bb1-11d00b9eee36} <Information> executeQuery: Read 3 rows, 240.00 B in 0.000519409 sec., 5775 rows/sec., 451.23 KiB/sec.
+2022.07.28 14:30:37.263553 [ 1647 ] {944e0f2f-5d84-4092-9bb1-11d00b9eee36} <Debug> MemoryTracker: Peak memory usage (for query): 8.45 KiB.
+2022.07.28 14:30:37.263560 [ 1647 ] {944e0f2f-5d84-4092-9bb1-11d00b9eee36} <Debug> TCPHandler: Processed in 0.000757404 sec.
+2022.07.28 14:30:44.168403 [ 1647 ] {} <Debug> TCP-Session: 1532d805-3f75-41d1-b540-c18442e63cb6 Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.07.28 14:30:44.168547 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Debug> executeQuery: (from 127.0.0.1:50738) insert into foo(arr.a, arr.b, arr.c) values  (stage: Complete)
+2022.07.28 14:30:44.168638 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Trace> ContextAccess (default): Access granted: INSERT(`arr.a`, `arr.b`, `arr.c`) ON default.foo
+2022.07.28 14:30:44.169531 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 2.54 TiB.
+2022.07.28 14:30:44.170037 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Trace> MergedBlockOutputStream: filled checksums all_1_1_0 (state Temporary)
+2022.07.28 14:30:44.170871 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Trace> default.foo (e210e937-a588-43a8-9755-fd7e36084a77): Renaming temporary part tmp_insert_all_1_1_0 to all_1_1_0.
+2022.07.28 14:30:44.171029 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Information> executeQuery: Read 1 rows, 36.00 B in 0.002451125 sec., 407 rows/sec., 14.34 KiB/sec.
+2022.07.28 14:30:44.171055 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Debug> MemoryTracker: Peak memory usage (for query): 4.10 MiB.
+2022.07.28 14:30:44.171062 [ 1647 ] {f097d5d0-74bb-4440-b9ee-a7ceda183a2e} <Debug> TCPHandler: Processed in 0.002718325 sec.
+2022.07.28 14:30:45.000080 [ 1825 ] {} <Trace> AsynchronousMetrics: MemoryTracking: was 440.53 MiB, peak 441.14 MiB, will set to 436.43 MiB (RSS), difference: -4.10 MiB
+2022.07.28 14:30:50.011587 [ 1704 ] {} <Debug> DNSResolver: Updating DNS cache
+2022.07.28 14:30:50.011634 [ 1704 ] {} <Debug> DNSResolver: Updated DNS cache
+2022.07.28 14:30:55.013678 [ 1647 ] {} <Debug> TCP-Session: 1532d805-3f75-41d1-b540-c18442e63cb6 Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.07.28 14:30:55.013813 [ 1647 ] {917057cb-df4a-4294-aba1-2abda0ddb6c1} <Debug> executeQuery: (from 127.0.0.1:50738) alter table foo add column z Int32; (stage: Complete)
+2022.07.28 14:30:55.013866 [ 1647 ] {917057cb-df4a-4294-aba1-2abda0ddb6c1} <Trace> ContextAccess (default): Access granted: ALTER ADD COLUMN(z) ON default.foo
+2022.07.28 14:30:55.015622 [ 1647 ] {917057cb-df4a-4294-aba1-2abda0ddb6c1} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2022.07.28 14:30:55.015639 [ 1647 ] {917057cb-df4a-4294-aba1-2abda0ddb6c1} <Debug> TCPHandler: Processed in 0.002017978 sec.
+2022.07.28 14:31:05.011751 [ 1716 ] {} <Debug> DNSResolver: Updating DNS cache
+2022.07.28 14:31:05.011793 [ 1716 ] {} <Debug> DNSResolver: Updated DNS cache
+2022.07.28 14:31:05.413297 [ 1647 ] {} <Debug> TCP-Session: 1532d805-3f75-41d1-b540-c18442e63cb6 Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2022.07.28 14:31:05.413429 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Debug> executeQuery: (from 127.0.0.1:50738) alter table foo drop column arr; (stage: Complete)
+2022.07.28 14:31:05.413474 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Trace> ContextAccess (default): Access granted: ALTER DROP COLUMN(arr) ON default.foo
+2022.07.28 14:31:05.416337 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Information> default.foo (e210e937-a588-43a8-9755-fd7e36084a77): Added mutation: mutation_2.txt
+2022.07.28 14:31:05.416363 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Information> default.foo (e210e937-a588-43a8-9755-fd7e36084a77): Waiting mutation: mutation_2.txt
+2022.07.28 14:31:05.416480 [ 1759 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 2.54 TiB.
+2022.07.28 14:31:05.416744 [ 1657 ] {e210e937-a588-43a8-9755-fd7e36084a77::all_1_1_0_2} <Trace> MutateTask: Mutating part all_1_1_0 to mutation version 2
+2022.07.28 14:31:05.417717 [ 1657 ] {e210e937-a588-43a8-9755-fd7e36084a77::all_1_1_0_2} <Error> MutatePlainMergeTreeTask: Code: 49. DB::Exception: Cannot mutate part columns with uninitialized mutations stream. It's a bug. (LOGICAL_ERROR) (version 22.7.1.2484 (official build))
+2022.07.28 14:31:05.418056 [ 1657 ] {e210e937-a588-43a8-9755-fd7e36084a77::all_1_1_0_2} <Error> virtual bool DB::MutatePlainMergeTreeTask::executeStep(): Code: 49. DB::Exception: Cannot mutate part columns with uninitialized mutations stream. It's a bug. (LOGICAL_ERROR), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+1. DB::MutateAllPartColumnsTask::prepare() @ 0x17714a75 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+2. DB::MutateAllPartColumnsTask::executeStep() @ 0x1771331d in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+3. DB::MutatePlainMergeTreeTask::executeStep() @ 0x176fba2e in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+4. DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::routine(std::__1::shared_ptr<DB::TaskRuntimeData>) @ 0xba0d7bb in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+5. DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::threadFunction() @ 0xba0d1f0 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+6. ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>) @ 0xbb06e06 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+7. void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*) @ 0xbb08a15 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+8. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0xbb046a8 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+9. ? @ 0xbb07a3d in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+10. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+11. __clone @ 0xfe9fd in /usr/lib64/libc-2.17.so
+ (version 22.7.1.2484 (official build))
+2022.07.28 14:31:05.418150 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Error> executeQuery: Code: 341. DB::Exception: Exception happened during execution of mutation 'mutation_2.txt' with part 'all_1_1_0' reason: 'Code: 49. DB::Exception: Cannot mutate part columns with uninitialized mutations stream. It's a bug. (LOGICAL_ERROR) (version 22.7.1.2484 (official build))'. This error maybe retryable or not. In case of unretryable error, mutation can be killed with KILL MUTATION query. (UNFINISHED) (version 22.7.1.2484 (official build)) (from 127.0.0.1:50738) (in query: alter table foo drop column arr;), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+1. DB::Exception::Exception<char const*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&>(int, fmt::v8::basic_format_string<char, fmt::v8::type_identity<char const*>::type, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >::type, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&>::type, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&>::type>, char const*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&) @ 0x1767d2a0 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+2. DB::checkMutationStatus(std::__1::optional<DB::MergeTreeMutationStatus>&, std::__1::set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::less<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x1767d12a in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+3. DB::StorageMergeTree::waitForMutation(long, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x1731e470 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+4. DB::StorageMergeTree::alter(DB::AlterCommands const&, std::__1::shared_ptr<DB::Context const>, std::__1::unique_lock<std::__1::timed_mutex>&) @ 0x1731b603 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+5. DB::InterpreterAlterQuery::executeToTable(DB::ASTAlterQuery const&) @ 0x16b10851 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+6. DB::InterpreterAlterQuery::execute() @ 0x16b0e732 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+7. ? @ 0x16ecdbd7 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+8. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x16ecb015 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+9. DB::TCPHandler::runImpl() @ 0x17b4041c in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+10. DB::TCPHandler::run() @ 0x17b53499 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+11. Poco::Net::TCPServerConnection::start() @ 0x1a98c273 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+12. Poco::Net::TCPServerDispatcher::run() @ 0x1a98d66d in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+13. Poco::PooledThread::run() @ 0x1ab492fd in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+14. Poco::ThreadImpl::runnableEntry(void*) @ 0x1ab46942 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+16. __clone @ 0xfe9fd in /usr/lib64/libc-2.17.so
+
+2022.07.28 14:31:05.418203 [ 1735 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 2.54 TiB.
+2022.07.28 14:31:05.418293 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Error> TCPHandler: Code: 341. DB::Exception: Exception happened during execution of mutation 'mutation_2.txt' with part 'all_1_1_0' reason: 'Code: 49. DB::Exception: Cannot mutate part columns with uninitialized mutations stream. It's a bug. (LOGICAL_ERROR) (version 22.7.1.2484 (official build))'. This error maybe retryable or not. In case of unretryable error, mutation can be killed with KILL MUTATION query. (UNFINISHED), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int, bool) @ 0xba37dda in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+1. DB::Exception::Exception<char const*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&>(int, fmt::v8::basic_format_string<char, fmt::v8::type_identity<char const*>::type, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >::type, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&>::type, fmt::v8::type_identity<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&>::type>, char const*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&) @ 0x1767d2a0 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+2. DB::checkMutationStatus(std::__1::optional<DB::MergeTreeMutationStatus>&, std::__1::set<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::less<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) @ 0x1767d12a in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+3. DB::StorageMergeTree::waitForMutation(long, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) @ 0x1731e470 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+4. DB::StorageMergeTree::alter(DB::AlterCommands const&, std::__1::shared_ptr<DB::Context const>, std::__1::unique_lock<std::__1::timed_mutex>&) @ 0x1731b603 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+5. DB::InterpreterAlterQuery::executeToTable(DB::ASTAlterQuery const&) @ 0x16b10851 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+6. DB::InterpreterAlterQuery::execute() @ 0x16b0e732 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+7. ? @ 0x16ecdbd7 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+8. DB::executeQuery(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::shared_ptr<DB::Context>, bool, DB::QueryProcessingStage::Enum) @ 0x16ecb015 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+9. DB::TCPHandler::runImpl() @ 0x17b4041c in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+10. DB::TCPHandler::run() @ 0x17b53499 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+11. Poco::Net::TCPServerConnection::start() @ 0x1a98c273 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+12. Poco::Net::TCPServerDispatcher::run() @ 0x1a98d66d in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+13. Poco::PooledThread::run() @ 0x1ab492fd in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+14. Poco::ThreadImpl::runnableEntry(void*) @ 0x1ab46942 in /d/scratch/elan/clickhouse/clickhouse-common-static-22.7.1.2484/usr/bin/clickhouse
+15. start_thread @ 0x7ea5 in /usr/lib64/libpthread-2.17.so
+16. __clone @ 0xfe9fd in /usr/lib64/libc-2.17.so
+
+2022.07.28 14:31:05.418382 [ 1647 ] {efc804a4-654e-4ee4-b441-ad37254c8f8d} <Debug> MemoryTracker: Peak memory usage (for query): 0.00 B.
+2022.07.28 14:31:05.418394 [ 1647 ] {} <Debug> TCPHandler: Processed in 0.005155884 sec.
+
+<repeats indefinitely>
+```
+
+**Additional context**
+
+Potentially related to #39682
+
+The following operations succeed:
+```
+create table foo(arr Array(Tuple(a Int32, b Int32, c Int32)), z Int32) Engine=MergeTree() Order By tuple();
+alter table foo drop column arr;
+```
+
+```
+create table foo(arr Array(Tuple(a Int32, b Int32, c Int32)), z Int32) Engine=MergeTree() Order By tuple();
+insert into foo(arr.a, arr.b, arr.c, z) values ([1],[2],[3], 4);
+alter table foo drop column arr;
+```
+

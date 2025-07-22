@@ -1,0 +1,172 @@
+ID: 14814
+Title: Clickhouse gets stuck talking to Zookeeper at startup
+Description:
+We are seeing an issue where Clickhouse gets stuck at start up, seemingly while talking to Zookeeper. It can start perfectly fine in a single node mode. Trace logs at startup:
+
+```
+Processing configuration file '/etc/clickhouse-server/config.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/config.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+Including configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+Include not found: clickhouse_compression
+Logging trace to console
+2020.09.14 16:16:06.519248 [ 6 ] {} <Information> SentryWriter: Sending crash reports is disabled
+2020.09.14 16:16:06.522189 [ 6 ] {} <Trace> Pipe: Pipe capacity is 1.00 MiB
+2020.09.14 16:16:06.687157 [ 6 ] {} <Information> : Starting ClickHouse 20.9.1.4585 with revision 54439, no build id, PID 6
+2020.09.14 16:16:06.687319 [ 6 ] {} <Information> Application: starting up
+Processing configuration file '/etc/clickhouse-server/config.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/config.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+Including configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+2020.09.14 16:16:06.701294 [ 6 ] {} <Trace> ZooKeeper: Initialized, hosts: clickhouse-jaeger3.zookeeper.foo.bar:2181,clickhouse-jaeger1.zookeeper.foo.bar:2181,clickhouse-jaeger2.zookeeper.foo.bar:2181
+Include not found: clickhouse_compression
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Saved preprocessed configuration to '/var/lib/clickhouse/preprocessed_configs/config.xml'.
+2020.09.14 16:16:06.715072 [ 6 ] {} <Information> Application: It looks like the process has no CAP_IPC_LOCK capability, binary mlock will be disabled. It could happen due to incorrect ClickHouse package installation. You could resolve the problem manually with 'sudo setcap cap_ipc_lock=+ep /usr/bin/clickhouse'. Note that it will not work on 'nosuid' mounted filesystems.
+2020.09.14 16:16:06.715156 [ 6 ] {} <Information> StatusFile: Status file /var/lib/clickhouse/status already exists - unclean restart. Contents:
+PID: 6
+Started at: 2020-09-14 16:14:19
+Revision: 54439
+
+2020.09.14 16:16:06.715273 [ 6 ] {} <Debug> Application: rlimit on number of file descriptors is 1048576
+2020.09.14 16:16:06.715295 [ 6 ] {} <Debug> Application: Initializing DateLUT.
+2020.09.14 16:16:06.715327 [ 6 ] {} <Trace> Application: Initialized DateLUT with time zone 'Etc/UTC'.
+```
+
+At this point everything is stuck. Attaching GDB shows this:
+
+```
+(gdb) thread apply all bt
+
+Thread 6 (LWP 40716):
+#0  0x00007fa2b1b767ef in epoll_wait () from target:/lib/x86_64-linux-gnu/libc.so.6
+#1  0x00000000130afe47 in Poco::Net::SocketImpl::pollImpl(Poco::Timespan&, int) ()
+#2  0x00000000130b00a9 in Poco::Net::SocketImpl::poll(Poco::Timespan const&, int) ()
+#3  0x0000000010ee8003 in DB::ReadBufferFromPocoSocket::poll(unsigned long) ()
+#4  0x0000000010cc0a4a in Coordination::ZooKeeper::receiveThread() ()
+#5  0x0000000010cc0c45 in ?? ()
+#6  0x000000000920ca54 in ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) ()
+#7  0x000000000920b042 in ?? ()
+#8  0x00007fa2b1c54fa3 in start_thread () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#9  0x00007fa2b1b764cf in clone () from target:/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 5 (LWP 40715):
+#0  0x00007fa2b1c5b3f9 in pthread_cond_timedwait@@GLIBC_2.3.2 () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x00000000131f3327 in Poco::SemaphoreImpl::waitImpl(long) ()
+#2  0x0000000010cc2fee in Coordination::ZooKeeper::sendThread() ()
+#3  0x0000000010cc3e75 in ?? ()
+#4  0x000000000920ca54 in ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) ()
+#5  0x000000000920b042 in ?? ()
+#6  0x00007fa2b1c54fa3 in start_thread () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#7  0x00007fa2b1b764cf in clone () from target:/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 4 (LWP 40708):
+#0  0x00007fa2b1c5e544 in read () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x00000000091fd4b2 in DB::ReadBufferFromFileDescriptor::nextImpl() ()
+#2  0x000000000fa5240a in SignalListener::run() ()
+#3  0x0000000013200aba in Poco::ThreadImpl::runnableEntry(void*) ()
+#4  0x00007fa2b1c54fa3 in start_thread () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#5  0x00007fa2b1b764cf in clone () from target:/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 3 (LWP 40707):
+#0  0x00007fa2b1c5b00c in pthread_cond_wait@@GLIBC_2.3.2 () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x000000001317d1eb in Poco::EventImpl::waitImpl() ()
+#2  0x000000001320436f in Poco::PooledThread::run() ()
+#3  0x0000000013200aba in Poco::ThreadImpl::runnableEntry(void*) ()
+#4  0x00007fa2b1c54fa3 in start_thread () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#5  0x00007fa2b1b764cf in clone () from target:/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 2 (LWP 40706):
+#0  0x00007fa2b1c5b00c in pthread_cond_wait@@GLIBC_2.3.2 () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x000000001317d1eb in Poco::EventImpl::waitImpl() ()
+#2  0x000000001320436f in Poco::PooledThread::run() ()
+#3  0x0000000013200aba in Poco::ThreadImpl::runnableEntry(void*) ()
+#4  0x00007fa2b1c54fa3 in start_thread () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#5  0x00007fa2b1b764cf in clone () from target:/lib/x86_64-linux-gnu/libc.so.6
+
+Thread 1 (LWP 40705):
+#0  0x00007fa2b1c56495 in __pthread_timedjoin_ex () from target:/lib/x86_64-linux-gnu/libpthread.so.0
+#1  0x000000001407f1bb in std::__1::thread::join() ()
+#2  0x000000000920b8c1 in ThreadPoolImpl<std::__1::thread>::finalize() ()
+#3  0x000000000920b943 in ThreadPoolImpl<std::__1::thread>::~ThreadPoolImpl() ()
+#4  0x000000000920af2b in GlobalThreadPool::initialize(unsigned long) ()
+#5  0x000000000916c9b8 in DB::Server::main(std::__1::vector<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, std::__1::allocator<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > > const&) ()
+#6  0x00000000130c55f8 in Poco::Util::Application::run() ()
+#7  0x000000000923c12b in DB::Server::run() ()
+#8  0x000000000923343d in mainEntryClickHouseServer(int, char**) ()
+#9  0x000000000916a845 in main ()
+```
+
+If I wait for 1 minute while GDB is attached, on detach Clickhouse is able to continue:
+
+```
+2020.09.14 16:17:49.984072 [ 11 ] {} <Error> void Coordination::ZooKeeper::receiveThread(): Code: 33, e.displayText() = DB::Exception: Cannot read all data. Bytes read: 0. Bytes expected: 4., Stack trace (when copying this message, always include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x131849c5 in /usr/lib/debug/usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x9203b21 in /usr/lib/debug/usr/bin/clickhouse
+2. DB::ReadBuffer::readStrict(char*, unsigned long) @ 0x9220150 in /usr/lib/debug/usr/bin/clickhouse
+3. Coordination::ZooKeeper::receiveEvent() @ 0x10cbf5fe in /usr/lib/debug/usr/bin/clickhouse
+4. Coordination::ZooKeeper::receiveThread() @ 0x10cc0b86 in /usr/lib/debug/usr/bin/clickhouse
+5. ThreadFromGlobalPool::ThreadFromGlobalPool<Coordination::ZooKeeper::ZooKeeper(std::__1::vector<Coordination::ZooKeeper::Node, std::__1::allocator<Coordination::ZooKeeper::Node> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Timespan, Poco::Timespan, Poco::Timespan)::'lambda0'()>(Coordination::ZooKeeper::ZooKeeper(std::__1::vector<Coordination::ZooKeeper::Node, std::__1::allocator<Coordination::ZooKeeper::Node> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Timespan, Poco::Timespan, Poco::Timespan)::'lambda0'()&&)::'lambda'()::operator()() const @ 0x10cc0c45 in /usr/lib/debug/usr/bin/clickhouse
+6. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x920ca54 in /usr/lib/debug/usr/bin/clickhouse
+7. void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()> >(void*) @ 0x920b042 in /usr/lib/debug/usr/bin/clickhouse
+8. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+9. __clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+ (version 20.9.1.4585)
+2020.09.14 16:17:49.984409 [ 11 ] {} <Error> void Coordination::ZooKeeper::finalize(bool, bool): Poco::Exception. Code: 1000, e.code() = 107, e.displayText() = Net Exception: Socket is not connected, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::IOException::IOException(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1318d525 in /usr/lib/debug/usr/bin/clickhouse
+1. Poco::Net::NetException::NetException(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x13098001 in /usr/lib/debug/usr/bin/clickhouse
+2. Poco::Net::SocketImpl::error(int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) (.cold) @ 0x9098d77 in /usr/lib/debug/usr/bin/clickhouse
+3. Poco::Net::SocketImpl::shutdown() @ 0x130ad720 in /usr/lib/debug/usr/bin/clickhouse
+4. Coordination::ZooKeeper::finalize(bool, bool) @ 0x10cc0020 in /usr/lib/debug/usr/bin/clickhouse
+5. Coordination::ZooKeeper::receiveThread() (.cold) @ 0x8f309a3 in /usr/lib/debug/usr/bin/clickhouse
+6. ThreadFromGlobalPool::ThreadFromGlobalPool<Coordination::ZooKeeper::ZooKeeper(std::__1::vector<Coordination::ZooKeeper::Node, std::__1::allocator<Coordination::ZooKeeper::Node> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Timespan, Poco::Timespan, Poco::Timespan)::'lambda0'()>(Coordination::ZooKeeper::ZooKeeper(std::__1::vector<Coordination::ZooKeeper::Node, std::__1::allocator<Coordination::ZooKeeper::Node> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, Poco::Timespan, Poco::Timespan, Poco::Timespan)::'lambda0'()&&)::'lambda'()::operator()() const @ 0x10cc0c45 in /usr/lib/debug/usr/bin/clickhouse
+7. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x920ca54 in /usr/lib/debug/usr/bin/clickhouse
+8. void* std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda1'()> >(void*) @ 0x920b042 in /usr/lib/debug/usr/bin/clickhouse
+9. start_thread @ 0x7fa3 in /lib/x86_64-linux-gnu/libpthread-2.28.so
+10. __clone @ 0xf94cf in /lib/x86_64-linux-gnu/libc-2.28.so
+ (version 20.9.1.4585)
+2020.09.14 16:17:49.984711 [ 6 ] {} <Debug> Application: Setting up /var/lib/clickhouse/tmp/ to store temporary data in it
+2020.09.14 16:17:49.985238 [ 6 ] {} <Error> Access(user directories): The <users>, <profiles> and <quotas> elements should be located in users config file: /etc/clickhouse-server/users.xml not in main config /etc/clickhouse-server/config.xml. Also note that you should place configuration changes to the appropriate *.d directory like 'users.d'.
+2020.09.14 16:17:49.986050 [ 6 ] {} <Debug> ConfigReloader: Loading config '/etc/clickhouse-server/users.xml'
+Processing configuration file '/etc/clickhouse-server/users.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/config.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+Including configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+Processing configuration file '/etc/clickhouse-server/users.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/config.xml'.
+Merging configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+Including configuration file '/etc/clickhouse-server/conf.d/fragments.xml'.
+2020.09.14 16:17:50.006720 [ 6 ] {} <Trace> ZooKeeper: Initialized, hosts: clickhouse-jaeger3.zookeeper.foo.bar:2181,clickhouse-jaeger1.zookeeper.foo.bar:2181,clickhouse-jaeger2.zookeeper.foo.bar:2181
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Include not found: networks
+Saved preprocessed configuration to '/var/lib/clickhouse/preprocessed_configs/users.xml'.
+2020.09.14 16:17:50.015128 [ 6 ] {} <Debug> ConfigReloader: Loaded config '/etc/clickhouse-server/users.xml', performing update on configuration
+2020.09.14 16:17:50.016655 [ 6 ] {} <Debug> ConfigReloader: Loaded config '/etc/clickhouse-server/users.xml', performed update on configuration
+2020.09.14 16:17:50.019022 [ 6 ] {} <Information> Application: Setting max_server_memory_usage was set to 168.81 GiB (187.57 GiB available * 0.90 max_server_memory_usage_to_ram_ratio)
+2020.09.14 16:17:50.019041 [ 6 ] {} <Information> Application: Loading metadata from /var/lib/clickhouse/
+```
+
+The error here is similar to #8871, but circumstances are different,
+
+We are seeing this on both `v20.9.1.4585-prestable` and `v20.7:20.7.1.4189-testing`, v20.3 cluster looks ok.
+
+Our Clickhouse runs in Docker, Zookeeper is v3.4.13.

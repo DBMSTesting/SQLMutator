@@ -1,0 +1,106 @@
+ID: 10694
+Title: Problem when  query contains nested CAST in presense of JOIN
+Description:
+<b>Context </b> 
+We meet this problem when using Tableau V. 2019-4 (www.tableau.com).
+**Error**
+```
+:Code: 43, e.displayText() = DB::Exception: Second argument to CAST must be a constant string describing type (version 20.3.3.6 (official build))
+```
+[stacktrace.txt](https://github.com/ClickHouse/ClickHouse/files/4586028/stacktrace.txt)
+**Environment**
+	CH 		v 20.3.3.6
+	Proc.	Intel Core i7 @ 2500 Mz, 4 procs,  16 go
+	Ubuntu  	v 5.3.0-23
+**Test Case**
+The problem is too strange to be described in a few words. So, we have to resort to a test case.
+
+*Building*
+```sql
+CREATE TABLE APPLICATION (
+  `Name` LowCardinality(String),
+  `Base` LowCardinality(String)
+) ENGINE = Memory();
+
+insert into table APPLICATION values ('ApplicationA', 'BaseA'), ('ApplicationB', 'BaseB') , ('ApplicationC', 'BaseC');
+
+CREATE TABLE DATABASE_IO (
+  `Application` LowCardinality(String),
+  `Base` LowCardinality(String),
+  `Date` DateTime,
+  `Ios` UInt32  ) 
+ENGINE = MergeTree()
+ORDER BY Date;
+  
+insert into table DATABASE_IO  values ('AppA', 'BaseA', '2020-01-01 00:00:00', 1000);
+```
+*query*
+```
+SELECT `APPLICATION`.`Name` AS `App`,
+       CAST(CAST(`DATABASE_IO`.`Date` AS DATE) AS DATE) AS `date` 
+FROM   `DATABASE_IO`
+INNER 
+JOIN   `APPLICATION` ON (`DATABASE_IO`.`Base` = `APPLICATION`.`Base`)
+WHERE (
+       CAST(CAST(`DATABASE_IO`.`Date` AS DATE) AS TIMESTAMP) >= toDateTime('2020-01-01 00:00:00')
+)
+```
+  The execution of this request fails : <tt>Second argument to CAST must be a constant…</tt>
+We should think that CH does not support nested CAST, which is not the case: 
+```
+select CAST(CAST(toDate('2020-01-01') AS DATE) AS TIMESTAMP)> 
+```
+...works fine :
+
+**It is strange to note that the problem disappears if we modify the expression of the request a little, or DATABASE_IO engine.**
+Here is a list of these changes: 
+
+*Mod 1 : remove clause WHERE* 
+```sql
+SELECT `APPLICATION`.`Name` AS `App`,
+       CAST(CAST(`DATABASE_IO`.`Date` AS DATE) AS DATE) AS `date` 
+FROM   `DATABASE_IO`
+INNER 
+JOIN   `APPLICATION` ON (`DATABASE_IO`.`Base` = `APPLICATION`.`Base`)
+```
+*Mod 2 : remove clause JOIN*
+```sql
+SELECT CAST(CAST(`DATABASE_IO`.`Date` AS DATE) AS DATE) AS `date` 
+FROM   `DATABASE_IO`
+WHERE (
+       CAST(CAST(`DATABASE_IO`.`Date` AS DATE) AS TIMESTAMP) >= toDateTime('2020-01-01 00:00:00')
+)
+```
+*Mod 3 : remove a nested CAST*
+```sql
+SELECT `Application`.`Name` AS `App`,
+       CAST(`DATABASE_IO`.`Date` AS DATE) AS `date` --- nested CAST removed
+FROM   `DATABASE_IO`
+INNER 
+JOIN   `Application` ON (`DATABASE_IO`.`Base` = `Application`.`Base`)
+WHERE (
+       CAST(CAST(`DATABASE_IO`.`Date` AS DATE) AS TIMESTAMP) >= toDateTime('2020-01-01 00:00:00')
+)
+```
+
+*Mod 4 : Duplicate table  DATABASE_IO to  DATABASE_IOmem with ENGINE=Memory()*
+```sql
+CREATE TABLE gdr_pg2.DATABASE_IOmem (
+  `Application` LowCardinality(String),
+  `Base` LowCardinality(String),
+  `Date` DateTime,
+  `Ios` UInt32
+) ENGINE = Memory()
+insert into table DATABASE_IOmem
+select * from DATABASE_IO
+```
+```sql
+SELECT `APPLICATION`.`Name` AS `App`,
+       CAST(CAST(`DATABASE_IOmem`.`Date` AS DATE) AS DATE) AS `date` 
+FROM   `DATABASE_IOmem`
+INNER 
+JOIN   `Application` ON (`DATABASE_IOmem`.`Base` = `APPLICATION`.`Base`)
+WHERE (
+       CAST(CAST(`DATABASE_IOmem`.`Date` AS DATE) AS TIMESTAMP) >= toDateTime('2020-01-01 00:00:00')
+)
+```

@@ -1,0 +1,86 @@
+ID: 23059
+Title: TiDB reported out-of-range error while `tidb_analyze_version = 2`
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+1. set up a TiDB server.
+2. assume `TIDB` as its ip address, run shell commands below
+```
+# install deps
+apt update && apt install -y default-mysql-client pandoc
+
+# some config
+TABLE_NAME=test
+MYSQL="mysql --host $TIDB --port 4000 -u root $TABLE_NAME"
+
+# fetch OptimizerTester
+git clone https://github.com/PragmaTwice/OptimizerTester
+cd OptimizerTester
+mkdir -p test report
+
+# generate zipfx data
+go run main.go datagen --dataset zipfx --dir test --args x=1.5,n=100000,ndv=5000
+
+# clean and import data to tidb
+$MYSQL -BNe "SELECT concat('DROP TABLE IF EXISTS \`', table_name, '\`;') FROM information_schema.tables WHERE table_schema = '$TABLE_NAME';" | $MYSQL
+$MYSQL < test/zipfx_schema.sql
+$MYSQL < test/zipfx_load.sql
+
+# generate cetest config file (ref to https://github.com/qw4990/OptimizerTester/blob/main/cetest/cetest_conf_example.toml)
+cat > config.toml <<EOF
+query-types = ["mul-cols-range-query-on-index", "mul-cols-point-query-on-index"]
+report-dir = "$(pwd)/report"
+analyze-tables = ["test.tint"]
+n-samples = 10000
+
+[[datasets]]
+name = "zipfx"
+db = "test"
+label = "zipf-1.5"
+
+[[instances]]
+addr = "$TIDB"
+port = 4000
+user = "root"
+password = ""
+label = "v2"
+init-exec = "set tidb_analyze_version = 2"
+EOF
+cat config.toml
+
+# run cetest for config above
+go run main.go cetest --config config.toml
+```
+
+### 2. What did you expect to see? (Required)
+No error from tidb.
+### 3. What did you see instead (Required)
+TiDB reported a runtime error as below:
+```
+ERROR 1105: runtime error: index out of range [1] with length 0
+```
+details:
+```
+panic: run sql=EXPLAIN SELECT * FROM test.tint WHERE a=16474587 AND b>=1407409168 AND b<=1638102850, err=Error 1105: runtime error: index out of range [1] with length 0
+
+goroutine 37 [running]:
+github.com/qw4990/OptimizerTester/cetest.(*mulColIndexQuerier).Collect.func1(0xc000216ac0, 0x4b4b, 0x40, 0xc000216a20, 0x5, 0xc0000e4180, 0x0, 0x9d4bd8, 0xc0000e81c0, 0xc0000c2200, ...)
+        /go/OptimizerTester/cetest/dataset_mul_col_index_querier.go:139 +0x8b3
+created by github.com/qw4990/OptimizerTester/cetest.(*mulColIndexQuerier).Collect
+        /go/OptimizerTester/cetest/dataset_mul_col_index_querier.go:120 +0x37e
+exit status 2
+```
+### 4. What is your TiDB version? (Required)
+```
+Release Version: v4.0.0-beta.2-2209-gfebac515b
+Edition: Community
+Git Commit Hash: febac515b1369643216e1efc971a262615dc4794
+Git Branch: master
+UTC Build Time: 2021-03-01 03:47:27
+GoVersion: go1.13
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+

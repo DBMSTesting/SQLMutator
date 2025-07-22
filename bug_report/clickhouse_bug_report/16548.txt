@@ -1,0 +1,72 @@
+ID: 16548
+Title: 'index file unexpectedly long' error when SET mutations_sync = 2 
+Description:
+**How to reproduce**
+Using clickhouse version 20.10.2.20 over localhost using official docker container, the following queries cause a panic:
+
+```sql
+SET mutations_sync = 2;
+
+CREATE TABLE foo
+(
+    id UUID,
+    created_at DateTime,
+    group_id Int64
+) ENGINE = ReplacingMergeTree(created_at)
+Order By (group_id, id);
+
+
+CREATE MATERIALIZED VIEW foobar
+ENGINE = AggregatingMergeTree() ORDER BY (
+    group_id,
+    updated_at,
+    id
+)
+POPULATE
+AS SELECT
+id,
+argMaxState(group_id, created_at) group_id,
+minState(created_at) created_at_,
+maxState(created_at) updated_at
+FROM foo
+GROUP BY id;
+
+INSERT INTO foo SELECT '017578b0-90c8-0000-2838-3e8422da2092', '2020-10-30 08:47:18', 38;
+
+INSERT INTO foo SELECT '017578b0-90d4-0000-4dd9-698de89549df', '2020-10-30 08:47:18', 38;
+
+INSERT INTO foo SELECT '017578b0-90d4-0000-4dd9-698de89549df', '2020-10-30 08:47:18', 38;
+
+ALTER TABLE foo DELETE where id = '017578b0-90c8-0000-2838-3e8422da2092';
+
+ALTER TABLE foobar DELETE where id = '017578b0-90c8-0000-2838-3e8422da2092'; -- this blows up
+```
+
+Without the mutations_sync setting, these queries succeed
+
+**Expected behavior**
+Queries complete successfully without error
+
+**Error message and/or stacktrace**
+```
+2020.10.30 09:04:42.881043 [ 61 ] {} <Error> void DB::BackgroundProcessingPool::workLoopFunc(): Code: 4, e.displayText() = DB::Exception: Index file /var/lib/clickhouse/store/d0a/d0a47518-d7ea-4c5c-98f2-277288bf652d/tmp_clone_all_2_2_0_4/primary.idx is unexpectedly long, Stack trace (when copying this message, always include the lines below):
+
+0. DB::IMergeTreeDataPart::loadIndex() @ 0xe2b378f in /usr/bin/clickhouse
+1. DB::IMergeTreeDataPart::loadColumnsChecksumsIndexes(bool, bool) @ 0xe2b12c0 in /usr/bin/clickhouse
+2. DB::MergeTreeData::cloneAndLoadDataPartOnSameDisk(std::__1::shared_ptr<DB::IMergeTreeDataPart const> const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::MergeTreePartInfo const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&) @ 0xe31461a in /usr/bin/clickhouse
+3. DB::MergeTreeDataMergerMutator::mutatePartToTemporaryPart(DB::FutureMergedMutatedPart const&, std::__1::shared_ptr<DB::StorageInMemoryMetadata const> const&, DB::MutationCommands const&, DB::MergeListEntry&, long, DB::Context const&, std::__1::unique_ptr<DB::IReservation, std::__1::default_delete<DB::IReservation> > const&, std::__1::shared_ptr<DB::RWLockImpl::LockHolderImpl>&) @ 0xe3429ef in /usr/bin/clickhouse
+4. DB::StorageMergeTree::tryMutatePart() @ 0xe0daf1c in /usr/bin/clickhouse
+5. DB::StorageMergeTree::mergeMutateTask() @ 0xe0dc803 in /usr/bin/clickhouse
+6. DB::BackgroundProcessingPool::workLoopFunc() @ 0xe296d83 in /usr/bin/clickhouse
+7. ? @ 0xe2978b3 in /usr/bin/clickhouse
+8. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x7b8b75d in /usr/bin/clickhouse
+9. ? @ 0x7b8f273 in /usr/bin/clickhouse
+10. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+11. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 20.10.2.20 (official build))
+```
+
+**Additional context**
+Why set mutations_sync? To make tests deterministic. 
+
+You can see a example build fail at https://github.com/PostHog/posthog/pull/2116/checks?check_run_id=1327879634.

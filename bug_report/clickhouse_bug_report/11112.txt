@@ -1,0 +1,88 @@
+ID: 11112
+Title: max_parser_depth not properly controlling maximum stack size
+Description:
+**Describe the bug**
+
+There's currently no way to control the `maximum stack size`. It looks like an attempt at addressing this was made in #8647 (`New setting introduced: max_parser_depth to control maximum stack size and allow large complex queries.` from the [changelog](https://clickhouse.tech/docs/en/whats-new/changelog/#new-feature_1), but we're still unable to adjust the max size. Looking at [`checkStackSize.cpp`](https://github.com/ClickHouse/ClickHouse/blob/ea6f90b4f2c3cc2f7d8b846c769b7f3e84907e47/src/Common/checkStackSize.cpp) it looks like this is fully controlled by the os so the changelog might just be inaccurate, but if there's a way to expand the max stack size manually, I'd love to know how we can do that.
+
+![image](https://user-images.githubusercontent.com/6392429/82591816-e68d9380-9b6d-11ea-8c38-cf1053b7bd6e.png)
+
+
+**How to reproduce**
+* Which ClickHouse server version to use [20.4.2.9](https://hub.docker.com/layers/yandex/clickhouse-server/20.4.2.9/images/sha256-5d461b37e726f6d8036f90028462d76dc6d1177c9c94b22569027263643b7d5f?context=explore)
+* Which interface to use, if matters: `clickhouse-client`
+* Non-default settings, if any
+```xml
+          <max_memory_usage>200000000000</max_memory_usage>
+          <deduplicate_blocks_in_dependent_materialized_views>1</deduplicate_blocks_in_dependent_materialized_views>
+          <use_uncompressed_cache>0</use_uncompressed_cache>
+          <load_balancing>random</load_balancing>
+          <partial_merge_join>1</partial_merge_join>
+          <max_bytes_before_external_group_by>70000000000</max_bytes_before_external_group_by>
+          <max_bytes_in_join>150000000000</max_bytes_in_join>
+```
+
+I can do this if we need to, but our migration script is a bit of a pain to extract. We've basically got a chain of three materialized views + a join. Since I assume any sufficiently complex chain could cause this issue, I'd prefer not to have to deconstruct our MV's, but I can throw a reproducable example in here if this proves to be more than a misunderstanding on my part of how the config works.
+
+
+**Expected behavior**
+
+```
+
+clickhouse-mega-0.clickhouse-mega.default.svc.cluster.local :) INSERT INTO a.bc SELECT * FROM x.yz
+
+INSERT INTO clusters.base SELECT *
+FROM x.yz
+LIMIT 100
+
+Received exception from server (version 20.4.2):
+Code: 306. DB::Exception: Received from localhost:9000. DB::Exception: Stack size too large. Stack address: 0x7fed763fe000, frame address: 0x7fed767fb2a0, stack size: 4205920, maximum stack size: 8388608.
+
+0 rows in set. Elapsed: 0.092 sec.
+
+clickhouse-mega-0.clickhouse-mega.default.svc.cluster.local :) SET max_query_size=4205920
+
+SET max_query_size = 4205920
+
+Ok.
+
+0 rows in set. Elapsed: 0.001 sec.
+
+clickhouse-mega-0.clickhouse-mega.default.svc.cluster.local :) SET max_parser_depth=4205920
+
+SET max_parser_depth = 4205920
+
+Ok.
+
+0 rows in set. Elapsed: 0.001 sec.
+
+clickhouse-mega-0.clickhouse-mega.default.svc.cluster.local :) SET max_depth=4205920
+
+SET max_depth = 4205920
+
+Received exception from server (version 20.4.2):
+Code: 115. DB::Exception: Received from localhost:9000. DB::Exception: Unknown setting max_depth.
+
+0 rows in set. Elapsed: 0.003 sec.
+
+clickhouse-mega-0.clickhouse-mega.default.svc.cluster.local :) SET max_query_size=4205920
+
+SET max_query_size = 4205920
+
+Ok.
+```
+
+Now that first insert query should work, instead I get 
+
+```
+Received exception from server (version 20.4.2):
+Code: 306. DB::Exception: Received from localhost:9000. DB::Exception: Stack size too large. Stack address: 0x7fed763fe000, frame address: 0x7fed767fb2a0, stack size: 4205920, maximum stack size: 8388608.
+```
+ (no change)
+
+
+**Additional context**
+
+This has come up a few times including in [this stackoverflow question](https://stackoverflow.com/questions/60375250/dataflow-apache-beam-insert-into-replicatedreplacingmergetree), and #6681/#7668/#8438 with specific reference to `00632_get_sample_block_cache.sql`
+
+cc @jalavosus (on my team and familiar with this error)

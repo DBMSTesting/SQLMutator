@@ -1,0 +1,170 @@
+ID: 27006
+Title: Dictionaries PostgreSQL missing schema in background task
+Description:
+Missing schema name for background pereodic task for update dictionaries
+
+**Describe the bug**
+
+In Posgres:
+```
+-- DROP SCHEMA test;
+CREATE SCHEMA test;
+
+-- DROP TABLE test.newtable;
+
+CREATE TABLE test.newtable (
+	id serial NOT NULL,
+	"name" varchar NULL
+);
+
+INSERT INTO test.newtable ("name") VALUES('test1');
+INSERT INTO test.newtable ("name") VALUES('test2');
+```
+
+In Clickhouse:
+
+etc/metrika.xml
+```
+<yandex>
+    <postgresql_source>
+        <host>localhost</host>
+        <port>5432</port>
+        <user>user</user>
+        <password>password</password>
+        <db>postgres</db>
+    </postgresql_source>
+</yandex>
+```
+
+/etc/clickhouse-server/dictionaries/newtable_dictionary.xml
+```
+<yandex>
+    <dictionary>
+        <name>test_newtable</name>
+        <source>
+            <postgresql incl="postgresql_source">
+                <table>test.newtable</table>
+            </postgresql>
+        </source>
+        <lifetime>
+            <min>5</min>
+            <max>20</max>
+        </lifetime>
+        <layout>
+            <flat/>
+        </layout>
+        <structure>
+            <id>
+                <name>id</name>
+            </id>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value></null_value>
+            </attribute>
+        </structure>
+    </dictionary>
+</yandex>
+```
+
+**Does it reproduce on recent release?**
+v21.6.8.62-stable
+
+**Enable crash reporting**
+
+**How to reproduce**
+
+run query:
+```
+SELECT dictGet('test_newtable', 'name', toUInt64(1));
+Query id: c7118684-c2f8-4698-a1d5-ae1870cfaf58
+
+┌─dictGet('test_newtable', 'name', toUInt64(1))─┐
+│ test1                                         │
+└───────────────────────────────────────────────┘
+```
+
+check dictionary:
+
+```
+SELECT * FROM system.dictionaries WHERE name = 'test_newtable' FORMAT Vertical;
+
+Row 1:
+──────
+database:                    
+name:                        test_newtable
+uuid:                        00000000-0000-0000-0000-000000000000
+status:                      LOADED
+origin:                      /etc/clickhouse-server/dictionaries/test/newtable_dictionary.xml
+type:                        Flat
+key.names:                   ['id']
+key.types:                   ['UInt64']
+attribute.names:             ['name']
+attribute.types:             ['String']
+bytes_allocated:             20712
+query_count:                 1
+hit_rate:                    1
+found_rate:                  1
+element_count:               2
+load_factor:                 0.001953125
+source:                      PostgreSQL: mobster.newtable
+lifetime_min:                120
+lifetime_max:                300
+loading_start_time:          2021-07-30 08:46:45
+last_successful_update_time: 2021-07-30 08:46:45
+loading_duration:            0.019
+last_exception:              
+```
+
+last_exception - empty
+
+wait 30 seconds
+
+```
+SELECT * FROM system.dictionaries WHERE name = 'test_newtable' FORMAT Vertical;
+....
+...
+..
+last_exception:              std::exception. Code: 1001, type: pqxx::undefined_table, e.what() = ERROR:  relation "newtable" does not exist
+LINE 1: COPY (SELECT "id", "name" FROM "newtable") TO STDOUT
+
+```
+
+
+**Expected behavior**
+
+no error in logs =)
+
+**Error message and/or stacktrace**
+
+in Logs:
+```
+2021.07.30 08:49:58.529464 [ 140 ] {} <Error> ExternalDictionariesLoader: Could not update external dictionary 'test_newtable', leaving the previous version, next update is scheduled at 2021-07-30 08:50:04: std::exception. Code: 1001, type: pqxx::undefined_table, e.what() = ERROR:  relation "newtable" does not exist
+LINE 1: COPY (SELECT "id", "name" FROM "newtable") TO STDOUT
+                                       ^
+, Stack trace (when copying this message, always include the lines below):
+
+0. pqxx::sql_error::sql_error(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, char const*) @ 0x1443bf19 in /usr/bin/clickhouse
+1. pqxx::undefined_table::undefined_table(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, char const*) @ 0x1443ed69 in /usr/bin/clickhouse
+2. pqxx::result::throw_sql_error(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&) const @ 0x1443e9b0 in /usr/bin/clickhouse
+3. pqxx::connection::make_result(pg_result*, std::__1::shared_ptr<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > > const&) @ 0x14431902 in /usr/bin/clickhouse
+4. pqxx::connection::exec(std::__1::shared_ptr<std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > >) @ 0x14434b92 in /usr/bin/clickhouse
+5. pqxx::connection::exec(std::__1::basic_string_view<char, std::__1::char_traits<char> >) @ 0x14431efd in /usr/bin/clickhouse
+6. pqxx::transaction_base::direct_exec(std::__1::basic_string_view<char, std::__1::char_traits<char> >) @ 0x14447d57 in /usr/bin/clickhouse
+7. pqxx::transaction_base::exec(std::__1::basic_string_view<char, std::__1::char_traits<char> >, std::__1::basic_string_view<char, std::__1::char_traits<char> >) @ 0x1444764f in /usr/bin/clickhouse
+8. pqxx::transaction_base::exec_n(int, pqxx::zview, std::__1::basic_string_view<char, std::__1::char_traits<char> >) @ 0x14447df3 in /usr/bin/clickhouse
+9. pqxx::stream_from::stream_from(pqxx::transaction_base&, pqxx::from_query_t, std::__1::basic_string_view<char, std::__1::char_traits<char> >) @ 0x144419ac in /usr/bin/clickhouse
+10. DB::PostgreSQLBlockInputStream::readPrefix() @ 0xf351fb9 in /usr/bin/clickhouse
+11. DB::FlatDictionary::loadData() @ 0xdbdcd0a in /usr/bin/clickhouse
+12. DB::FlatDictionary::FlatDictionary(DB::StorageID const&, DB::DictionaryStructure const&, std::__1::unique_ptr<DB::IDictionarySource, std::__1::default_delete<DB::IDictionarySource> >, DB::ExternalLoadableLifetime, DB::FlatDictionary::Configuration, std::__1::shared_ptr<DB::Block>) @ 0xdbdca08 in /usr/bin/clickhouse
+13. DB::FlatDictionary::clone() const @ 0xdbe80eb in /usr/bin/clickhouse
+14. DB::ExternalLoader::LoadingDispatcher::loadSingleObject(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ExternalLoader::ObjectConfig const&, std::__1::shared_ptr<DB::IExternalLoadable const>) @ 0xf669df7 in /usr/bin/clickhouse
+15. DB::ExternalLoader::LoadingDispatcher::doLoading(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroupStatus>) @ 0xf666c80 in /usr/bin/clickhouse
+16. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ExternalLoader::LoadingDispatcher::*)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ExternalLoader::LoadingDispatcher*, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool, std::__1::shared_ptr<DB::ThreadGroupStatus> >(void (DB::ExternalLoader::LoadingDispatcher::*&&)(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, unsigned long, bool, unsigned long, bool, std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ExternalLoader::LoadingDispatcher*&&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&, unsigned long&, bool&, unsigned long&, bool&&, std::__1::shared_ptr<DB::ThreadGroupStatus>&&)::'lambda'()::operator()() @ 0xf66e253 in /usr/bin/clickhouse
+17. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x8bb355f in /usr/bin/clickhouse
+18. ? @ 0x8bb6a83 in /usr/bin/clickhouse
+19. start_thread @ 0x9609 in /usr/lib/x86_64-linux-gnu/libpthread-2.31.so
+20. clone @ 0x122293 in /usr/lib/x86_64-linux-gnu/libc-2.31.so
+ (version 21.6.8.62 (official build))
+```
+

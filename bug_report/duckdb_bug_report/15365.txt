@@ -1,0 +1,40 @@
+ID: 15365
+Title: [Compression] Let non-validity compression functions also contain validity data, add this to `Dictionary`
+Description:
+As the title says, if a compression function already encodes the validity, we don't need to compress the validity separately.
+
+Dictionary stores nulls in the dictionary at `string_number = 0`, so all we have to do is set the scanned tuples that reference dictionary id 0 to NULL, this requires only a very small change to the scan code.
+
+To communicate that the validity mask does not need to be separately compressed and scanned however, requires a bigger change:
+
+## Implementation Details
+
+### Existing Logic
+
+In `StandardColumnData::Checkpoint`, the base data is compressed first, producing any number of segments.
+Inside the `ColumnData`, an `optional_ptr<CompressionFunction> compression` exists.
+If all of the produces segments for this column have been made with the same compression function, then `compression` will be set to the compression function used.
+
+The `parent` of the validity data's ColumnData points to that of the base.
+After the base data is compressed, the validity data will be compressed.
+
+### CompressionValidity
+
+We've added a new enum to the CompressionFunction struct: `CompressionValidity`:
+```c++
+enum class CompressionValidity : uint8_t { REQUIRES_VALIDITY, NO_VALIDITY_REQUIRED };
+```
+
+This signals for a given compression function whether it can encode validity information, or the validity data should be compressed separately (the default behavior).
+
+This means that we can check at the start of checkpointing the validity whether the parent was compressed with a compression function that has `CompressionValidity::NO_VALIDITY_REQUIRED`.
+
+If that's the case, we limit the available compression functions to just one, `COMPRESSION_EMPTY`.
+This is a new compression function we have created solely for this purpose, all of its methods are no-ops, except for one: compression.
+In compression we create a single segment, that covers the entire range of the segments to compress. (producing no segments is not allowed by the compression api/framework)
+
+## Future work
+
+Right now this optimization can only kick in when *all* of the produced segments for the base data are compressed by the same compression function.
+It would be nice if we can exclude ranges of tuples from the validity compression if those ranges are covered by a compression function that has `CompressionValidity::NO_VALIDITY_REQUIRED`.
+This will currently perform double work at decompression, as both the base data's compression function as well as the validity data's compression function will set the validity mask.

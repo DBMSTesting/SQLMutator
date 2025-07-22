@@ -1,0 +1,52 @@
+ID: 15544
+Title: This Xmas, I wanted BitpackingMode info in `pragma_storage_info` but …
+Description:
+…Santa did not bring it;
+
+so I tried myself ;-)
+
+This pull request will do:
+
+- Create a BitpackingSegmentState that overrides GetSegmentInfo to return mode info
+- Add BitpackingInitSegment that returns segment-info (used in ColumnData)
+- Add BitpackingInitSegment / init_segment to the compressionfunction
+
+(I also renamed BitpackingCompressState to BitpackingCompressionState for consistency with other compression code.)
+
+The approach implemented seems to work correctly and passes tests locally.
+
+However, the new information is only shown when you first close the database and reopen it. If you only use `CHECKPOINT`, `init_segment` is not called and the modes not reported. I am stuck where to fix this; it seems that this would be a step related to `ConvertToPersistent` that I overlook but I do not understand what I need to do to make it work.
+
+I have tested using the following SQL (but because of this incomplete behaviour not yet added as a test):
+
+```
+pragma force_compression = 'BitPacking';
+CREATE or replace TABLE test (a INTEGER, b INTEGER);
+insert into test values (10,12), (11,12), (12,11), (NULL,NULL);
+insert into test values (10,12), (33,33), (33,33), (10,12);
+select segment_id, row_group_id, block_id, block_offset, compression, segment_info FROM pragma_storage_info('test') order by segment_id, row_group_id  asc;
+checkpoint;
+select segment_id, row_group_id, block_id, block_offset, compression, segment_info FROM pragma_storage_info('test') order by segment_id, row_group_id  asc;
+```
+
+After closing the CLI and restarting it on the same database, and then doing
+```
+select segment_id, row_group_id, block_id, block_offset, compression, segment_info FROM pragma_storage_info('test') order by segment_id, row_group_id  asc;
+```
+
+the `pragma_storage_info` reports `segment_info` that includes the bitpacking mode.
+
+Hoping for some DuckDB compression guru advice, A.
+
+```
+D select segment_id, row_group_id, block_id, block_offset, compression, segment_info FROM pragma_storage_info('test') order by segment_id, row_group_id  asc;
+┌────────────┬──────────────┬──────────┬──────────────┬──────────────┬──────────────┐
+│ segment_id │ row_group_id │ block_id │ block_offset │ compression  │ segment_info │
+│   int64    │    int64     │  int64   │    int64     │   varchar    │   varchar    │
+├────────────┼──────────────┼──────────┼──────────────┼──────────────┼──────────────┤
+│          0 │            0 │        1 │            0 │ BitPacking   │ Mode: for    │
+│          0 │            0 │        1 │           48 │ Uncompressed │              │
+│          0 │            0 │        1 │          304 │ BitPacking   │ Mode: for    │
+│          0 │            0 │        1 │          352 │ Uncompressed │              │
+└────────────┴──────────────┴──────────┴──────────────┴──────────────┴──────────────┘
+```

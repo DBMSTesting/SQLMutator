@@ -1,0 +1,19 @@
+ID: 13712
+Title: Fix checkpoint deadlock - re-use locks on the same table 
+Description:
+This PR fixes an issue where checkpoints together with concurrent queries that referenced the same table multiple times could lead to deadlocks.
+
+The issue was as follows:
+
+When doing a checkpoint of a table, we would grab an exclusive lock for a given table while writing the data for that table.
+Grabbing an exclusive lock meant *waiting for all existing readers to finish, while not allowing new readers to start*. This allows existing readers to finish, while guaranteeing progress for the checkpoint thread (new readers cannot continuously block the checkpoint)
+
+This causes problems when we have a query that refers to the same table multiple times - as we would try to grab the same lock multiple times within the same transaction. The deadlock would happen as follows: 
+
+* Transaction `T1` grabs a read lock on `table`
+* Checkpointer grabs an exclusive lock on `table`, preventing new readers from starting
+* Transaction `T1` tries to grab *another* read lock on `table`
+
+This would then result in a deadlock, as `T1` would wait need to wait until the checkpoint thread finishes - but the checkpoint thread needs to wait until `T1` finishes.
+
+This PR resolves the issue by keeping track of all active locks grabbed by a transaction, and ensuring we never grab the same shared lock multiple times in the same transaction.

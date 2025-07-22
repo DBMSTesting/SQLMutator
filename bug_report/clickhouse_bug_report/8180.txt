@@ -1,0 +1,73 @@
+ID: 8180
+Title: MV from Kafka gives "There is no query: while pushing to view"
+Description:
+Hi,
+
+I have data coming in via Kafka that has an incremental version field for each unique id. I'm using argMaxState in a MV to populate a table I can use to find the last record (see below, I can select argMaxMerge from to_table). Everything works correct up to this point.
+
+I then want to add a MV that can maintain an aggregate based on another field (see sum_table below). Because I can't do sumState(argMaxMerge(value)) I've written the MV using a subquery (see sum_table_mv below) - however, if I do this, then I see the error "There is no query: while pushing to view default.sum_table_mv: while write prefix to view default.to_table_mv" as new data arrives. 
+
+I have verified that the same structure works correctly when from_table is not using the Kafka engine. Also, it only seems to error when the subquery is used in the MV.
+
+Is this a bug? Alternatively, is there a better approach I can try?
+
+```
+CREATE TABLE from_table
+(
+	id UInt32,
+	gid UInt32,
+	version UInt32,
+	value UInt32
+)
+ENGINE = Kafka('localhost:9092', 'from_table', 'groupId', 'JSONEachRow');
+
+CREATE TABLE to_table
+(
+	id UInt32,
+	gid UInt32,
+	value AggregateFunction(argMax, UInt32, UInt32)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY tuple()
+order by id;
+
+CREATE MATERIALIZED VIEW to_table_mv TO to_table
+AS 
+SELECT 	id, 
+		any(gid) as gid, 
+		argMaxState(value,version) as value
+FROM from_table 
+GROUP BY id;
+
+CREATE TABLE sum_table
+(
+	gid UInt32,
+	value AggregateFunction(sum, UInt32)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY tuple()
+ORDER BY gid;
+
+CREATE MATERIALIZED VIEW sum_table_mv TO sum_table 
+AS
+SELECT 	gid, 
+		sumState(value) as value 
+FROM 
+(
+	select 	gid, 
+			argMaxMerge(value) as value 
+	FROM to_table 
+	GROUP BY gid
+)
+GROUP BY gid
+
+echo '{"id":1,"gid":1,"version":0,"value":5}' | ./bin/kafka-console-producer --topic from_table --broker-list localhost:9092
+```
+Error below - I can supply a full stack trace if needed.
+
+`2019.12.12 16:52:00.052859 [ 16 ] {} <Error> void DB::StorageKafka::threadFunc(): Code: 393, e.displayText() = DB::Exception: There is no query: while pushing to view default.sum_table_mv: while write prefix to view default.to_table_mv, Stack trace:
+`
+
+Running server version 19.17.4 revision 54428.
+
+Thanks, S

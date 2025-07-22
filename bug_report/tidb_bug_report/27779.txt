@@ -1,0 +1,75 @@
+ID: 27779
+Title: maybe common mistakes with table driven tests and t.Parallel()
+Description:
+## Bug Report
+
+I am tring to figure out a strang problem in pr #27557, in which 2 tests fail if i add `t.Parallel()` and work well if i removed it. Then when i tried to find more info about `t.Parallel()`, i found that there maybe an common mistake in our test.
+
+###  problem
+
+```go
+func TestWithParallel(t *testing.T) {
+	tests := []struct {
+		name  string
+		value int
+	}{
+		{name: "test 1", value: 4},
+		{name: "test 2", value: 4},
+		{name: "test 3", value: 4},
+		{name: "test 4", value: 4},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+                         // uncomment below line will make 4 tests pass
+			//t.Parallel()
+			fmt.Printf("%+v == %+v \n", i+1, tc.value)
+			require.Equal(t, i+1, tc.value)
+		})
+	}
+}
+```
+for above table driven tests, `test1`, `test2`, `test3` should fail, `test 4` should pass, it works as expect.
+but if we add `t.Parallel()` by uncomment the line, 4 test will pass, and the output is:
+
+```shell
+4 == 4 
+4 == 4 
+4 == 4 
+4 == 4 
+```
+
+### reason
+
+the reason is explained well in [Go common mistakes guide](https://github.com/golang/go/wiki/CommonMistakes#using-goroutines-on-loop-iterator-variables), 2 reason:
+
+1. In Go, the loop iterator variable is a single variable that takes different values in each loop iteration
+2. there is a very good chance that when you run this code you will see the last element printed for every iteration instead of each value in sequence, because the goroutines will probably not begin executing until after the loop
+
+### how to resolve
+
+- adding val as a parameter to the closure
+```go
+for _, val := range values {
+	go func(val interface{}) {
+		fmt.Println(val)
+	}(val)
+}
+```
+
+- Copy  iterator variable into a new variable
+```diff
+ for i := 0; i < 3; i++ {
++	i := i // Copy i into a new variable.
+ 	out = append(out, &i)
+ }
+
+```
+
+also, we may add linter to avoid such pitfall https://github.com/kunwardeep/paralleltest
+
+### todo
+i seached repo, there already some wrong occurance there,  such as  `request_builder_test.go` , `table/column_test.go`,
+i am not sure how many contributors are awared of this, the occurances ge merged means even some experienced reviewer may not aware of it. 
+
+so i submit a issue here, we need fix them and **pay attention** to this scenario, and may also add notice to https://pingcap.github.io/tidb-dev-guide/get-started/write-and-run-unit-tests.html
+

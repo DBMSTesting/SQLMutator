@@ -1,0 +1,100 @@
+ID: 20372
+Title: read_from_storage with new partition impl cannot works
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```
+func (s *testIntegrationSuite) TestReadFromStorage(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec(`create table t (
+					a int, b int, c varchar(20),
+					primary key(a), key(b), key(c)
+				) partition by range columns(a) (
+					partition p0 values less than(6),
+					partition p1 values less than(11),
+					partition p2 values less than(16));`)
+	tk.MustExec(`insert into t values (1,1,"1"), (2,2,"2"), (8,8,"8"), (11,11,"11"), (15,15,"15")`)
+	// Create virtual tiflash replica info.
+	dom := domain.GetDomain(tk.Se)
+	is := dom.InfoSchema()
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	c.Assert(exists, IsTrue)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
+	}
+	tk.MustExec(`set @@tidb_partition_prune_mode='` + string(variable.DynamicOnly) + `'`)
+	tk.MustQuery(`explain select /*+ read_from_storage(tikv[t partition(p0)], tiflash[t partition(p1, p2)]) */ * from t`)
+}
+```
+
+### 2. What did you expect to see? (Required)
+
+explain return success
+
+### 3. What did you see instead (Required)
+
+```
+...     "[planner:1815]Internal : Can't find a proper physical plan for this query\n" +
+...     "github.com/pingcap/errors.AddStack\n" +
+...     "\t/home/robi/Code/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20200917111840-a15ef68f753d/errors.go:174\n" +
+...     "github.com/pingcap/errors.(*Error).GenWithStackByArgs\n" +
+...     "\t/home/robi/Code/go/pkg/mod/github.com/pingcap/errors@v0.11.5-0.20200917111840-a15ef68f753d/terror_error.go:204\n" +
+...     "github.com/pingcap/tidb/planner/core.physicalOptimize\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/optimizer.go:228\n" +
+...     "github.com/pingcap/tidb/planner/core.DoOptimize\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/optimizer.go:139\n" +
+...     "github.com/pingcap/tidb/planner.optimize\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/optimize.go:257\n" +
+...     "github.com/pingcap/tidb/planner.Optimize\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/optimize.go:114\n" +
+...     "github.com/pingcap/tidb/planner/core.(*PlanBuilder).buildExplain\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/planbuilder.go:3248\n" +
+...     "github.com/pingcap/tidb/planner/core.(*PlanBuilder).Build\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/planbuilder.go:574\n" +
+...     "github.com/pingcap/tidb/planner.optimize\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/optimize.go:215\n" +
+...     "github.com/pingcap/tidb/planner.Optimize\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/optimize.go:114\n" +
+...     "github.com/pingcap/tidb/executor.(*Compiler).Compile\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/executor/compiler.go:62\n" +
+...     "github.com/pingcap/tidb/session.(*session).ExecuteStmt\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/session/session.go:1176\n" +
+...     "github.com/pingcap/tidb/util/testkit.(*TestKit).Exec\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:161\n" +
+...     "github.com/pingcap/tidb/util/testkit.(*TestKit).MustQuery\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/util/testkit/testkit.go:260\n" +
+...     "github.com/pingcap/tidb/planner/core_test.(*testIntegrationSuite).TestOptimizeHintOnPartitionTable\n" +
+...     "\t/home/robi/Code/go/src/github.com/pingcap/tidb/planner/core/integration_test.go:1298\n" +
+...     "reflect.Value.call\n" +
+...     "\t/home/robi/Tools/go/src/reflect/value.go:475\n" +
+...     "reflect.Value.Call\n" +
+...     "\t/home/robi/Tools/go/src/reflect/value.go:336\n" +
+...     "github.com/pingcap/check.(*suiteRunner).forkTest.func1\n" +
+...     "\t/home/robi/Code/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:850\n" +
+...     "github.com/pingcap/check.(*suiteRunner).forkCall.func1\n" +
+...     "\t/home/robi/Code/go/pkg/mod/github.com/pingcap/check@v0.0.0-20200212061837-5e12011dc712/check.go:739\n" +
+...     "runtime.goexit\n" +
+...     "\t/home/robi/Tools/go/src/runtime/asm_amd64.s:1374"
+```
+
+### 4. What is your TiDB version? (Required)
+
+it works well in 4.0
+
+master 3828ba2a0956bfa9d5a70cb84a64d725d04b7e8c
+
+<!-- Paste the output of SELECT tidb_version() -->
+

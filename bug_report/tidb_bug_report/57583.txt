@@ -1,0 +1,72 @@
+ID: 57583
+Title: Optimizer convert hash semi join with nulleq condition to cross semi join with other condition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+In TiDB, it will convert intersect/except into a hash join with nulleq join condition:
+```
+mysql> create table t1(id int, v1 int, v2 int, v3 int);
+Query OK, 0 rows affected (1.47 sec)
+
+mysql> create table t2(id int, v1 int, v2 int, v3 int);
+Query OK, 0 rows affected (1.19 sec)
+mysql> explain select id from t1 intersect select id from t1;
++------------------------------+----------+-----------+---------------+-------------------------------------------------------------+
+| id                           | estRows  | task      | access object | operator info                                               |
++------------------------------+----------+-----------+---------------+-------------------------------------------------------------+
+| HashJoin_7                   | 6400.00  | root      |               | semi join, equal:[nulleq(test.t1.id, test.t1.id)]           |
+| ├─TableReader_18(Build)      | 10000.00 | root      |               | data:TableFullScan_17                                       |
+| │ └─TableFullScan_17         | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                              |
+| └─HashAgg_12(Probe)          | 8000.00  | root      |               | group by:test.t1.id, funcs:firstrow(test.t1.id)->test.t1.id |
+|   └─TableReader_13           | 8000.00  | root      |               | data:HashAgg_8                                              |
+|     └─HashAgg_8              | 8000.00  | cop[tikv] |               | group by:test.t1.id,                                        |
+|       └─TableFullScan_11     | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                              |
++------------------------------+----------+-----------+---------------+-------------------------------------------------------------+
+```
+As you can see, `HashJoin_7` is a hash join with nulleq join condition
+However, if the query is a little bit complex, TiDB optimizer will generate a CARTESIAN semi join
+```
+mysql> explain select t1.id from t1 join t2 on t1.v1 = t2.v2 intersect select t1.id from t1 join t2 on t1.v1 = t2.v2;
++----------------------------------+----------+-----------+---------------+----------------------------------------------------------------+
+| id                               | estRows  | task      | access object | operator info                                                  |
++----------------------------------+----------+-----------+---------------+----------------------------------------------------------------+
+| HashJoin_15                      | 6393.60  | root      |               | CARTESIAN semi join, other cond:nulleq(test.t1.id, test.t1.id) |
+| ├─HashJoin_26(Build)             | 12487.50 | root      |               | inner join, equal:[eq(test.t1.v1, test.t2.v2)]                 |
+| │ ├─TableReader_33(Build)        | 9990.00  | root      |               | data:Selection_32                                              |
+| │ │ └─Selection_32               | 9990.00  | cop[tikv] |               | not(isnull(test.t2.v2))                                        |
+| │ │   └─TableFullScan_31         | 10000.00 | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                 |
+| │ └─TableReader_30(Probe)        | 9990.00  | root      |               | data:Selection_29                                              |
+| │   └─Selection_29               | 9990.00  | cop[tikv] |               | not(isnull(test.t1.v1))                                        |
+| │     └─TableFullScan_28         | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                 |
+| └─HashAgg_16(Probe)              | 7992.00  | root      |               | group by:test.t1.id, funcs:firstrow(test.t1.id)->test.t1.id    |
+|   └─HashJoin_17                  | 12487.50 | root      |               | inner join, equal:[eq(test.t1.v1, test.t2.v2)]                 |
+|     ├─TableReader_24(Build)      | 9990.00  | root      |               | data:Selection_23                                              |
+|     │ └─Selection_23             | 9990.00  | cop[tikv] |               | not(isnull(test.t2.v2))                                        |
+|     │   └─TableFullScan_22       | 10000.00 | cop[tikv] | table:t2      | keep order:false, stats:pseudo                                 |
+|     └─TableReader_21(Probe)      | 9990.00  | root      |               | data:Selection_20                                              |
+|       └─Selection_20             | 9990.00  | cop[tikv] |               | not(isnull(test.t1.v1))                                        |
+|         └─TableFullScan_19       | 10000.00 | cop[tikv] | table:t1      | keep order:false, stats:pseudo                                 |
++----------------------------------+----------+-----------+---------------+----------------------------------------------------------------+
+```
+
+The direct cause seems in 
+https://github.com/pingcap/tidb/tree/c091dba89718599dc1b3d3e45f9b0308a8d49ef0/pkg/planner/core/operator/logicalop/logical_join.go#L200
+
+For inner/semi join, it will collect all join's condition together with the predicate, and call `LogicalJoin::extractOnCondition` to re-extract the condition, and in 
+https://github.com/pingcap/tidb/tree/c091dba89718599dc1b3d3e45f9b0308a8d49ef0/pkg/planner/core/operator/logicalop/logical_join.go#L1214
+only eq is treated as equal condition:
+https://github.com/pingcap/tidb/tree/c091dba89718599dc1b3d3e45f9b0308a8d49ef0/pkg/planner/core/operator/logicalop/logical_join.go#L1257-L1261
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+### 3. What did you see instead (Required)
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

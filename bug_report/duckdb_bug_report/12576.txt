@@ -1,0 +1,140 @@
+ID: 12576
+Title: Detecting data races in duckdb::Connection::Query() under ThreadSanitizer
+Description:
+### What happens?
+
+Any use of duckdb::Connection::Query() under ThreadSanitizer emits data race warnings for me.
+
+Example output:
+```
+WARNING: ThreadSanitizer: data race (pid=152584)
+  Write of size 8 at 0x7b2400000f68 by thread T4:
+    #0 memset <null> (duckdb_main+0x5b834) (BuildId: 54bde38959d4193d35c7510fe17170166547516b)
+    #1 duckdb::ColumnDataCollection::InitializeScan(duckdb::ColumnDataScanState&, duckdb::vector<unsigned long, true>, duckdb::ColumnDataScanProperties) const <null> (libduckdb.so+0x133f123) (BuildId: 49e03847946f9c0b9bf4ee275127844b18f343f6)
+
+  Previous write of size 8 at 0x7b2400000f68 by main thread (mutexes: write M0):
+    #0 operator new(unsigned long) <null> (duckdb_main+0xe82f7) (BuildId: 54bde38959d4193d35c7510fe17170166547516b)
+    #1 duckdb::PhysicalColumnDataScan::GetGlobalSourceState(duckdb::ClientContext&) const <null> (libduckdb.so+0x17ab32e) (BuildId: 49e03847946f9c0b9bf4ee275127844b18f343f6)
+    #2 __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16 (libc.so.6+0x29d8f) (BuildId: 490fef8403240c91833978d494d39e537409b92e)
+
+  Location is heap block of size 144 at 0x7b2400000f30 allocated by main thread:
+    #0 operator new(unsigned long) <null> (duckdb_main+0xe82f7) (BuildId: 54bde38959d4193d35c7510fe17170166547516b)
+    #1 duckdb::PhysicalColumnDataScan::GetGlobalSourceState(duckdb::ClientContext&) const <null> (libduckdb.so+0x17ab32e) (BuildId: 49e03847946f9c0b9bf4ee275127844b18f343f6)
+    #2 __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16 (libc.so.6+0x29d8f) (BuildId: 490fef8403240c91833978d494d39e537409b92e)
+
+  Mutex M0 (0x7b5400000440) created at:
+    #0 pthread_mutex_lock <null> (duckdb_main+0x61f0b) (BuildId: 54bde38959d4193d35c7510fe17170166547516b)
+    #1 duckdb::ClientContext::LockContext() <null> (libduckdb.so+0x18a9460) (BuildId: 49e03847946f9c0b9bf4ee275127844b18f343f6)
+    #2 __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16 (libc.so.6+0x29d8f) (BuildId: 490fef8403240c91833978d494d39e537409b92e)
+
+  Thread T4 (tid=152589, running) created by main thread at:
+    #0 pthread_create <null> (duckdb_main+0x6020b) (BuildId: 54bde38959d4193d35c7510fe17170166547516b)
+    #1 std::thread::_M_start_thread(std::unique_ptr<std::thread::_State, std::default_delete<std::thread::_State>>, void (*)()) <null> (libduckdb.so+0x1fd8654) (BuildId: 49e03847946f9c0b9bf4ee275127844b18f343f6)
+    #2 __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16 (libc.so.6+0x29d8f) (BuildId: 490fef8403240c91833978d494d39e537409b92e)
+```
+
+The exact location of the warning varies. With just a single DDL query it usually warns about jemalloc, but building without jemalloc didn't help the other warnings. I tried using .sanitizer-thread-suppressions.txt, also without success.
+
+Additional notes:
+- I'm seeing this both when building 1.0.0 from source and when using the precompiled nightly lib
+- When building from source I'm doing `GEN=ninja BUILD_HTTPFS=1 make reldebug`
+- It looks like ASan is on by default when building DuckDB from source (and presumably with the nightly build), and is meant to be disabled with `DISABLE_SANITIZER=1`, and then I need to additionally do `THREADSAN=1` if I want TSan
+- When combining it all to build from source with `GEN=ninja BUILD_HTTPFS=1 DISABLE_SANITIZER=1 THREADSAN=1 make reldebug` my executable segfaults on startup
+
+I don't see others complaining about data races so I suspect these are false positives and that I'm getting DuckDB with some sanitizer instrumentation that's fighting mine. But it's not obvious to me what the correct build settings are. (Edit: "correct" here meaning that I want to fix the warnings. I'm fine not instrumenting DuckDB with TSan as part of my TSan build)
+
+### To Reproduce
+
+(Using Clang 17.0.6, CMake 3.22.1, C++20)
+
+Relevant CMake:
+```
+cmake_minimum_required(VERSION 3.22.1)
+project(duckdb-min CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_compile_options(
+    -g -O1 -fsanitize=thread -fno-omit-frame-pointer -fPIC)
+add_link_options(
+    -g -O1 -fsanitize=thread -fno-omit-frame-pointer -fPIC)
+
+find_library(
+    DUCKDB_LIBRARY
+    NAMES duckdb
+    PATHS /home/james/Downloads
+    NO_DEFAULT_PATH)
+if(NOT DUCKDB_LIBRARY)
+    message(FATAL_ERROR "DuckDB library not found")
+endif()
+set(DUCKDB_INCLUDE_DIR /home/james/Downloads)
+add_library(duckdb_interface INTERFACE)
+target_link_libraries(duckdb_interface INTERFACE ${DUCKDB_LIBRARY})
+target_include_directories(duckdb_interface INTERFACE ${DUCKDB_INCLUDE_DIR})
+
+add_executable(duckdb_main duckdb_main.cc)
+target_link_libraries(
+    duckdb_main
+    PRIVATE duckdb_interface)
+target_compile_definitions(duckdb_main PRIVATE -D_GLIBCXX_USE_CXX11_ABI=0)
+```
+
+Relevant C++:
+```
+#include <iostream>
+#include <string>
+
+#include "duckdb.hpp"
+
+int main() {
+  duckdb::DuckDB db(/*path=*/nullptr);
+  duckdb::Connection con(db);
+  auto r1 = con.Query("CREATE TABLE numbers_a (id INTEGER)");
+  if (r1->HasError()) {
+    std::cerr << "Uh oh\n";
+  }
+  auto r2 = con.Query("INSERT INTO numbers_a VALUES (0), (1)");
+  if (r2->HasError()) {
+    std::cerr << "Uh oh\n";
+  }
+  return 0;
+}
+```
+
+### OS:
+
+Ubuntu 22.04.4 LTS, x86
+
+### DuckDB Version:
+
+1.0.0 and nightly
+
+### DuckDB Client:
+
+C++
+
+### Full Name:
+
+James Hill
+
+### Affiliation:
+
+Promoted.ai
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a nightly build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

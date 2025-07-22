@@ -1,0 +1,40 @@
+ID: 9019
+Title: Broken indicies and inconsistent queries results
+Description:
+Hi! 
+
+After updating Clickhouse from 19.13.1.11 version to 20.1.3.7 and when we run queries like this:
+
+```
+select courseId, uniqExact(learnerId) from entities_attempts_distributed group by courseId order by courseId
+```
+and 
+```
+select uniqExact(learnerId) from entities_attempts_distributed where courseId = 41
+``` 
+we have different results. For example first query returns 21500 unique values for courseId = 41 and second query returns 3500 unique values for courseId = 41.
+
+If we change second query to 
+```
+select uniqExact(learnerId) from entities_attempts_distributed where identity(courseId) = 41
+``` 
+we have same result with first query. So, it's possible that in some moment table indicies was corrupted.
+
+We have ReplicatedMergeTree table with structure:
+
+```
+CREATE TABLE cursometr.entities_attempts_replicated (`learnerId` UInt64, `courseId` UInt64, `actorId` UInt64, `entityIri` String, `startedAt` DateTime, `attemptNumber` UInt16, `attemptLearningNumber` UInt16, `attemptRepeatingNumber` UInt16, `attemptBeforePassedNumber` UInt16, `attemptAfterPassedNumber` UInt16, `endedAt` DateTime, `passed` UInt8, `success` UInt8, `learning` UInt8, `repeating` UInt8, `beforePassed` UInt8, `afterPassed` UInt8, `result` Float32, `durationTotal` UInt32, `durationLearning` UInt32, `durationRepeating` UInt32, `durationBeforePassed` UInt32, `durationAfterPassed` UInt32, `reject` UInt8, `version` DateTime, `hash` UInt64, `queryId` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/cursometr/{shard}/entities_attempts', '{replica}') PARTITION BY toStartOfDay(version) ORDER BY (courseId, learnerId, hash, entityIri) SETTINGS index_granularity = 8192
+```
+
+Inserts in this table performs via temporary table with same structure. When data successfully inserted in temporary table we move partitions to main table `entities_attempts_replicated` with query 
+```
+alter table entities_attempts_replicated attach partition $partition from $temp_table_name
+```
+When partitions successfully moved to main table we drop temporary table.
+
+Sometimes we run queries to delete old data by column `hash`. To perform consistent mutation we collect list of actual hashes and insert them into memory table. Query looks like 
+```
+alter table entities_attempts_replicated delete where hash not in (select hash from $temporary_hashes_table)
+```
+
+So, we don't know at which moment data corrupts, but we can try to make step-by-step reproducing manual if needed.

@@ -1,0 +1,103 @@
+ID: 64224
+Title: unpacking of tuple values via IN operator triggers toDate() function call on tuple
+Description:
+**Version**
+version 24.1.8.22 (official build)
+
+**Describe what's wrong**
+When trying to perform a filter via IN-operator on a tuple, Clickhouse tries to cast the tuple to a Date type. This raises an illegal type exception.
+
+**Does it reproduce on the most recent release?**
+Haven't checked
+
+**How to reproduce**
+setup table:
+```
+CREATE TABLE IF NOT EXISTS dummy_table_12345
+(
+    id_col Nullable(String),
+    date_col Date
+)
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/db/dummy_table_12345', '{replica}')
+    ORDER BY date_col;
+
+INSERT INTO dummy_table_12345 (id_col, date_col)
+    VALUES ('some_string', '2024-05-21');
+```
+
+this query will run into the type error:
+```
+SELECT 0 as _row_exists
+FROM dummy_table_12345
+WHERE (date_col, id_col) IN (SELECT (date_col, id_col) FROM dummy_table_12345);
+
+Code: 43. DB::Exception: Illegal type Tuple(Date, Nullable(String)) of argument of function toDate. (ILLEGAL_TYPE_OF_ARGUMENT)
+```
+
+changing the positions of id_col and date_col runs fine:
+```
+SELECT 0 as _row_exists
+FROM dummy_table_12345
+WHERE (id_col, date_col) IN (SELECT (id_col, date_col) FROM dummy_table_12345);
+```
+
+omitting the brackets in the subquery also runs fine:
+```
+SELECT 0 as _row_exists
+FROM dummy_table_12345
+WHERE (date_col, id_col) IN (SELECT date_col, id_col FROM dummy_table_12345);
+```
+
+using a cte instead of a table also works fine:
+```
+WITH temp AS (
+    SELECT 'some_string'::Nullable(String) as id_col, '2024-05-21'::Date as date_col
+)
+
+SELECT 0 as _row_exists
+FROM temp
+WHERE (date_col, id_col) IN (SELECT (date_col, id_col) FROM temp);
+```
+
+**Expected behavior**
+I expected consistent behavior of the examples above, and not triggering type casting on a tuple.
+
+**Stack trace**
+In our case, we first ran into the issue via mutations triggered by lightweight deletes:
+```
+2024.05.21 16:12:36.315610 [ 1042286 ] {} <Error> MergeTreeBackgroundExecutor: Exception while executing background task {4756a7a1-bbe4-4a99-a500-511a4f04a686::all_0_0_0_1}: Code: 43. DB::Exception: Illegal type Tuple(Date, Nullable(String)) of argument of function toDate. (ILLEGAL_TYPE_OF_ARGUMENT), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c804c9b in /usr/bin/clickhouse
+1. DB::Exception::Exception<String, String>(int, FormatStringHelperImpl<std::type_identity<String>::type, std::type_identity<String>::type>, String&&, String&&) @ 0x000000000721f71d in /usr/bin/clickhouse
+2. DB::FunctionConvert<DB::DataTypeDate, DB::NameToDate, DB::ToDateMonotonicity>::executeInternal(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x00000000074f7ae1 in /usr/bin/clickhouse
+3. DB::FunctionConvert<DB::DataTypeDate, DB::NameToDate, DB::ToDateMonotonicity>::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x00000000074f679a in /usr/bin/clickhouse
+4. DB::FunctionToExecutableFunctionAdaptor::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000721d36e in /usr/bin/clickhouse
+5. DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fdac7fe in /usr/bin/clickhouse
+6. DB::IExecutableFunction::executeWithoutSparseColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fdad37e in /usr/bin/clickhouse
+7. DB::IExecutableFunction::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fdae91b in /usr/bin/clickhouse
+8. DB::IFunctionBase::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000721c50d in /usr/bin/clickhouse
+9. COW<DB::IColumn>::immutable_ptr<DB::IColumn> std::__function::__policy_invoker<COW<DB::IColumn>::immutable_ptr<DB::IColumn> (std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long)>::__call_impl<std::__function::__default_alloc_func<DB::FunctionCast<DB::CastInternalName>::createFunctionAdaptor(std::shared_ptr<DB::IFunction>, std::shared_ptr<DB::IDataType const> const&)::'lambda'(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long), COW<DB::IColumn>::immutable_ptr<DB::IColumn> (std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long)>>(std::__function::__policy_storage const*, std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long) @ 0x000000000fddb116 in /usr/bin/clickhouse
+10. COW<DB::IColumn>::immutable_ptr<DB::IColumn> std::__function::__policy_invoker<COW<DB::IColumn>::immutable_ptr<DB::IColumn> (std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long)>::__call_impl<std::__function::__default_alloc_func<DB::FunctionCast<DB::CastInternalName>::prepareRemoveNullable(std::shared_ptr<DB::IDataType const> const&, std::shared_ptr<DB::IDataType const> const&, bool) const::'lambda'(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long), COW<DB::IColumn>::immutable_ptr<DB::IColumn> (std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long)>>(std::__function::__policy_storage const*, std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>>&, std::shared_ptr<DB::IDataType const> const&, DB::ColumnNullable const*, unsigned long) @ 0x000000000ff078b4 in /usr/bin/clickhouse
+11. DB::ExecutableFunctionCast::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000fdbdce4 in /usr/bin/clickhouse
+12. DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fdac7fe in /usr/bin/clickhouse
+13. DB::IExecutableFunction::executeWithoutSparseColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fdad2c4 in /usr/bin/clickhouse
+14. DB::IExecutableFunction::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000fdae91b in /usr/bin/clickhouse
+15. DB::IFunctionBase::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000721c50d in /usr/bin/clickhouse
+16. DB::castColumn(DB::CastType, DB::ColumnWithTypeAndName const&, std::shared_ptr<DB::IDataType const> const&, DB::InternalCastFunctionCache*) (.llvm.13102303835264055280) @ 0x00000000118e9506 in /usr/bin/clickhouse
+17. DB::KeyCondition::extractAtomFromTree(DB::RPNBuilderTreeNode const&, DB::KeyCondition::RPNElement&) @ 0x0000000012330e1d in /usr/bin/clickhouse
+18. DB::RPNBuilder<DB::KeyCondition::RPNElement>::traverseTree(DB::RPNBuilderTreeNode const&) @ 0x000000001233fcf8 in /usr/bin/clickhouse
+19. DB::KeyCondition::KeyCondition(std::shared_ptr<DB::ActionsDAG>, std::shared_ptr<DB::Context const>, std::vector<String, std::allocator<String>> const&, std::shared_ptr<DB::ExpressionActions> const&, bool, bool) @ 0x000000001232876c in /usr/bin/clickhouse
+20. DB::buildIndexes(std::optional<DB::ReadFromMergeTree::Indexes>&, std::shared_ptr<DB::ActionsDAG>, DB::MergeTreeData const&, std::vector<std::shared_ptr<DB::IMergeTreeDataPart const>, std::allocator<std::shared_ptr<DB::IMergeTreeDataPart const>>> const&, std::shared_ptr<DB::Context const> const&, DB::SelectQueryInfo const&, std::shared_ptr<DB::StorageInMemoryMetadata const> const&) (.llvm.288725487508600406) @ 0x0000000012dea4b1 in /usr/bin/clickhouse
+21. DB::ReadFromMergeTree::applyFilters() @ 0x0000000012de9734 in /usr/bin/clickhouse
+22. DB::QueryPlanOptimizations::optimizeTreeThirdPass(DB::QueryPlan&, DB::QueryPlan::Node&, std::list<DB::QueryPlan::Node, std::allocator<DB::QueryPlan::Node>>&) @ 0x0000000012e5de3b in /usr/bin/clickhouse
+23. DB::QueryPlan::optimize(DB::QueryPlanOptimizationSettings const&) @ 0x0000000012dcd065 in /usr/bin/clickhouse
+24. DB::QueryPlan::buildQueryPipeline(DB::QueryPlanOptimizationSettings const&, DB::BuildQueryPipelineSettings const&) @ 0x0000000012dcbf0e in /usr/bin/clickhouse
+25. DB::InterpreterSelectQuery::execute() @ 0x0000000011515257 in /usr/bin/clickhouse
+26. DB::isStorageTouchedByMutations(DB::MergeTreeData&, std::shared_ptr<DB::IMergeTreeDataPart const>, std::shared_ptr<DB::StorageInMemoryMetadata const> const&, std::vector<DB::MutationCommand, std::allocator<DB::MutationCommand>> const&, std::shared_ptr<DB::Context const>) @ 0x0000000011602c26 in /usr/bin/clickhouse
+27. DB::MutateTask::prepare() @ 0x00000000125bfe32 in /usr/bin/clickhouse
+28. DB::MutateTask::execute() @ 0x00000000125bef3d in /usr/bin/clickhouse
+29. DB::ReplicatedMergeMutateTaskBase::executeStep() @ 0x0000000012632da7 in /usr/bin/clickhouse
+30. DB::MergeTreeBackgroundExecutor<DB::DynamicRuntimeQueue>::threadFunction() @ 0x0000000012377984 in /usr/bin/clickhouse
+31. ThreadPoolImpl<ThreadFromGlobalPoolImpl<false>>::worker(std::__list_iterator<ThreadFromGlobalPoolImpl<false>, void*>) @ 0x000000000c8eee41 in /usr/bin/clickhouse
+ (version 24.1.8.22 (official build))
+```

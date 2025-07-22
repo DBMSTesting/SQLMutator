@@ -1,0 +1,79 @@
+ID: 52244
+Title: Partition table couldn't generate `IndexReader` with `UnionScan`
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+```
+CREATE TABLE `t` (
+  `a` int(11) NOT NULL,
+  `b` int(11) DEFAULT NULL,
+  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */,
+  KEY `idx1` (`b`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
+PARTITION BY HASH (`a`) PARTITIONS 5;
+begin;
+insert into t values (1, 2);
+explain select b from t use index(idx1) where b > 1;
+```
+
+### 2. What did you expect to see? (Required)
+
+```
+mysql> explain  select b from t use index(idx1) where b > 1;
++----------------------------+---------+-----------+------------------------+------------------------------------------------+
+| id                         | estRows | task      | access object          | operator info                                  |
++----------------------------+---------+-----------+------------------------+------------------------------------------------+
+| Projection_5               | 3333.33 | root      |                        | test.t.b                                       |
+| └─UnionScan_6              | 3333.33 | root      |                        | gt(test.t.b, 1)                                |
+|   └─IndexReader_8          | 3333.33 | root      | partition:all          | index:IndexRangeScan_7                         |
+|     └─IndexRangeScan_7     | 3333.33 | cop[tikv] | table:t, index:idx1(b) | range:(1,+inf], keep order:false, stats:pseudo |
++----------------------------+---------+-----------+------------------------+------------------------------------------------+
+4 rows in set (0.01 sec)
+```
+
+### 3. What did you see instead (Required)
+
+```
+mysql> explain  select b from t use index(idx1) where b > 1;
++-----------------------------------+---------+-----------+------------------------+------------------------------------------------+
+| id                                | estRows | task      | access object          | operator info                                  |
++-----------------------------------+---------+-----------+------------------------+------------------------------------------------+
+| Projection_5                      | 3333.33 | root      |                        | test.t.b                                       |
+| └─UnionScan_6                     | 3333.33 | root      |                        | gt(test.t.b, 1)                                |
+|   └─IndexLookUp_9                 | 3333.33 | root      | partition:all          |                                                |
+|     ├─IndexRangeScan_7(Build)     | 3333.33 | cop[tikv] | table:t, index:idx1(b) | range:(1,+inf], keep order:false, stats:pseudo |
+|     └─TableRowIDScan_8(Probe)     | 3333.33 | cop[tikv] | table:t                | keep order:false, stats:pseudo                 |
++-----------------------------------+---------+-----------+------------------------+------------------------------------------------+
+5 rows in set (25.71 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```
+mysql> select tidb_version();
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v8.0.0-alpha-672-g693ed4e889
+Edition: Community
+Git Commit Hash: 693ed4e889e64bcaf741cd001cb90fb498775e39
+Git Branch: master
+UTC Build Time: 2024-03-29 09:17:29
+GoVersion: go1.21.5
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+
+
+The problem is that we added one more column to the dataSource. It works fine when this line is commented. 
+
+https://github.com/pingcap/tidb/blob/8bba8261b0c345a1ec622a7a531dc511fcef7f0a/pkg/planner/core/logical_plan_builder.go#L5075

@@ -1,0 +1,90 @@
+ID: 3336
+Title: clickhouse crashes  on prewhere in some cases.
+Description:
+I have found a strange bug I guess.
+Here is the clickhouse version.
+
+`
+ClickHouse client version 18.12.17.
+Connecting to 10.133.64.181:9000 as user default.
+Connected to ClickHouse server version 18.12.17 revision 54407.
+`
+
+Here is the steps to reproduce the crash. It crashes on **prewhere** it works with **where**.
+
+Sql to execute .
+```sql
+drop table if exists t1;
+create table t1 (id UInt64, val Array(String),nid UInt64, eDate Date)ENGINE = MergeTree(eDate, (id, eDate), 8192);
+insert into t1 (id,val,nid,eDate) values (1,['background','foreground','heading','image'],1,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (1,['background','foreground','heading','image'],1,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (2,['background','foreground','heading','image'],1,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (2,[],2,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (3,[],4,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (3,[],5,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (3,[],6,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (3,[],7,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (3,[],8,'2018-09-27');
+select arrayJoin(val) as nameGroup6 from t1 prewhere notEmpty(toString(nameGroup6)) group by nameGroup6; 
+select arrayJoin(val) as nameGroup6, countDistinct(nid) as rowids from t1 where notEmpty(toString(nameGroup6)) group by nameGroup6;
+select arrayJoin(val) as nameGroup6, countDistinct(nid) as rowids from t1 prewhere notEmpty(toString(nameGroup6)) group by nameGroup6;
+```
+Here is the result .
+
+```
+clickhouse-client -n --progress < bug.sql 
+image
+heading
+foreground
+background
+image	1
+heading	1
+foreground	1
+background	1
+↓ Progress: 6.00 rows, 300.00 B (59.42 rows/s., 2.97 KB/s.)  0%Error on processing query: select arrayJoin(val) as nameGroup6, countDistinct(nid) as rowids from t1 prewhere notEmpty(toString(nameGroup6)) group by nameGroup6;
+
+Code: 32, e.displayText() = DB::Exception: Attempt to read after eof: while receiving packet from 10.133.64.181:9000, e.what() = DB::Exception, Stack trace:
+
+0. clickhouse-client(StackTrace::StackTrace()+0x16) [0x517a976]
+1. clickhouse-client(DB::Exception::Exception(std::string const&, int)+0x1f) [0x294a16f]
+2. clickhouse-client(DB::throwReadAfterEOF()+0x3c) [0x294a7ec]
+3. clickhouse-client(DB::Connection::receivePacket()+0xcf4) [0x4d89b74]
+4. clickhouse-client(DB::Client::receiveAndProcessPacket()+0x24) [0x2996a34]
+5. clickhouse-client(DB::Client::processSingleQuery(std::string const&, std::shared_ptr<DB::IAST>)+0x322) [0x2998492]
+6. clickhouse-client(DB::Client::process(std::string const&)+0x2ac) [0x2998f2c]
+7. clickhouse-client(DB::Client::nonInteractive()+0xea) [0x299a84a]
+8. clickhouse-client(DB::Client::mainImpl()+0x103b) [0x299b9db]
+9. clickhouse-client(DB::Client::main(std::vector<std::string, std::allocator<std::string> > const&)+0x17) [0x2939217]
+10. clickhouse-client(Poco::Util::Application::run()+0x26) [0x5295e76]
+11. clickhouse-client(mainEntryClickHouseClient(int, char**)+0x3c) [0x296e17c]
+12. clickhouse-client(main+0x18b) [0x2932b1b]
+13. /lib64/libc.so.6(__libc_start_main+0xf5) [0x7fa919076445]
+14. clickhouse-client() [0x2947493]
+```
+Without the rows with empty arrays and different nid it works I mean it produces a error.
+```sql
+drop table if exists t1;
+create table t1 (id UInt64, val Array(String),nid UInt64, eDate Date)ENGINE = MergeTree(eDate, (id, eDate), 8192);
+insert into t1 (id,val,nid,eDate) values (1,['background','foreground','heading','image'],1,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (1,['background','foreground','heading','image'],1,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (2,['background','foreground','heading','image'],1,'2018-09-27');
+insert into t1 (id,val,nid,eDate) values (2,[],2,'2018-09-27');
+
+select arrayJoin(val) as nameGroup6 from t1 prewhere notEmpty(toString(nameGroup6)) group by nameGroup6;
+select arrayJoin(val) as nameGroup6, countDistinct(nid) as rowids from t1 where notEmpty(toString(nameGroup6)) group by nameGroup6;
+select arrayJoin(val) as nameGroup6, countDistinct(nid) as rowids from t1 prewhere notEmpty(toString(nameGroup6)) group by nameGroup6;
+```
+```
+clickhouse-client -n - --progress < bug.sql 
+image
+heading
+foreground
+background
+image	1
+heading	1
+foreground	1
+background	1
+Received exception from server (version 18.12.17):
+Code: 9. DB::Exception: Received from 10.133.64.181:9000. DB::Exception: Sizes of columns doesn't match: nid: 1, arrayJoin(val): 4. 
+```
+With **where** it works without any issues. 

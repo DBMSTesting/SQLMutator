@@ -1,0 +1,57 @@
+ID: 54545
+Title: `SET SESSION_STATES` will not change the resource group connection count 
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+The following test will fail:
+
+```go
+	// The resource group set by `SET SESSION_STATE` will be tracked by the counter
+	// At first, create a new cert/key pair to encode session state
+	tempDir := t.TempDir()
+	certPath := filepath.Join(tempDir, "cert.pem")
+	keyPath := filepath.Join(tempDir, "key.pem")
+	err := util.CreateCertificates(certPath, keyPath, 1024, x509.RSA, x509.UnknownSignatureAlgorithm)
+	require.NoError(t, err)
+
+	sessionstates.SetCertPath(certPath)
+	sessionstates.SetKeyPath(keyPath)
+	sessionstates.ReloadSigningCert()
+	cli.RunTests(t, nil, func(dbt *testkit.DBTestKit) {
+		ctx := context.Background()
+		conn, err := dbt.GetDB().Conn(ctx)
+		require.NoError(t, err)
+		resourceGroupConnCountReached(t, "default", 1.0)
+		// Now set the resource group to `test`
+		_, err = conn.ExecContext(ctx, "set resource group test")
+		require.NoError(t, err)
+		resourceGroupConnCountReached(t, "default", 0.0)
+		resourceGroupConnCountReached(t, "test", 1.0)
+
+		// Encode the session state
+		rows, err := conn.QueryContext(ctx, "show session_states")
+		require.NoError(t, err)
+		var sessionStates, signInfo string
+		rows.Next()
+		err = rows.Scan(&sessionStates, &signInfo)
+		require.NoError(t, err)
+		require.NoError(t, rows.Close())
+
+		// Now reset the resource group to `default`
+		_, err = conn.ExecContext(ctx, "set resource group default")
+		require.NoError(t, err)
+		resourceGroupConnCountReached(t, "default", 1.0)
+		resourceGroupConnCountReached(t, "test", 0.0)
+		// Set the session state
+		sessionStates = strings.ReplaceAll(sessionStates, "\\", "\\\\")
+		sessionStates = strings.ReplaceAll(sessionStates, "'", "\\'")
+		_, err = conn.ExecContext(ctx, fmt.Sprintf("set session_states '%s'", sessionStates))
+		require.NoError(t, err)
+		resourceGroupConnCountReached(t, "default", 0.0)
+		resourceGroupConnCountReached(t, "test", 1.0)
+	})
+```
+
+Instead, the count of `default` resource group is always 1.

@@ -1,0 +1,76 @@
+ID: 36963
+Title: Select from Merge table (over MergeTree and Buffer) with two or more clauses in the Where throws exception
+Description:
+**Describe what's wrong**
+
+Select from Merge table, which works with MergeTree table and Buffer table above MergeTree table, with two or more clauses in the Where, throws exception.
+
+**Does it reproduce on recent release?**
+
+v22.3.2.2-lts
+v22.3.3.44-lts
+v22.3.4.20-lts
+v22.3.5.5-lts
+
+(every 22.3 lts version)
+
+**How to reproduce**
+
+Use ClickHouse server 22.3.5.5 version.
+
+```sql
+-- create tables
+create table mt1 (f1 Int32, f2 Int32) engine = MergeTree() order by f1;
+
+create table mt2 as mt1 engine = MergeTree() order by f1;
+create table b as mt1 engine = Buffer(currentDatabase(), mt2, 16, 1, 1, 10000, 1000000, 10000000, 100000000);
+
+create table m as mt1 engine = Merge(currentDatabase(), '^(mt1|b)$');
+
+-- insert some data
+insert into mt1 values(1, 1), (2, 2);
+insert into b   values(3, 3), (4, 4);
+
+-- do select
+select f1, f2
+from m
+where f1 = 1 and f2 = 1
+```
+
+Select throws exception:
+```
+Code: 44. DB::Exception: Cannot convert column `equals(f1, 1)` because it is non constant in source stream but must be constant in result. (ILLEGAL_COLUMN) (version 22.3.5.5 (official build))
+```
+
+The interesting part that no exceptions are thrown if the Where has only one clause:
+```sql
+select f1, f2
+from m
+where f1 = 1
+
+-- f1|f2|
+-- --+--+
+--  1| 1|
+
+select f1, f2
+from m
+where toUInt8(f1 = 1 and f2 = 1)
+
+-- f1|f2|
+-- --+--+
+--  1| 1|
+```
+
+It's tested that type of column and function in the Where do not matter.
+
+**Expected behavior**
+
+Select completes without exceptions.
+
+**Error message and/or stacktrace**
+
+Code: 44. DB::Exception: Cannot convert column `equals(f1, 1)` because it is non constant in source stream but must be constant in result. (ILLEGAL_COLUMN)
+
+**Additional context**
+
+There is no such problem in v21.8.15.7-lts.

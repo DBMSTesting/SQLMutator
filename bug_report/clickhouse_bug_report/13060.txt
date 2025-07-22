@@ -1,0 +1,87 @@
+ID: 13060
+Title: Clickhouse incorrectly returning zero counts, when data does exist
+Description:
+**Describe the bug**
+Clickhouse is returning zero results when data does exist for the query.
+When we change the dates around slightly, data is returned, including data for the dates that previously said it had no rows for.
+
+**How to reproduce**
+Clickhouse server version 20.5.2.7
+Clickhouse clients tried: dbeaver and clickhouse-go both gave the same results.
+
+The first query successfully returns results:
+```sql
+select eventday, count(*) from mytable
+where toYYYYMM(eventday) = 202007
+  AND user_id = 742522
+  AND eventday >= '2020-07-01'
+  AND eventday <= '2020-07-25'
+group by eventday
+order by eventday;
+```
+Results:
+```
+2020-07-01	8180782
+2020-07-02	8654577
+2020-07-03	8165184
+2020-07-04	7315179
+2020-07-05	8423453
+2020-07-06	6658727
+...etc...
+```
+
+The second query says there are no results / no rows:
+```sql
+select eventday, count(*) from mytable
+where toYYYYMM(eventday) = 202007
+  AND user_id = 742522
+  AND eventday >= '2020-07-03'
+  AND eventday <= '2020-07-25'
+group by eventday
+order by eventday;
+```
+
+The only change was that `eventday >= '2020-07-03'`.
+You can see from the results above, that we do have data on every day.
+This results are the same every time I run the two queries. We have paused all data ingestion while for a bit while we investigate this, so the counts are not changing either.
+
+Things that don't change the zero-row result:
+* Changing the dates to anything from 2020-07-02 to 2020-07-25.
+* Changing to a different user_id.
+* Using `toYYYYMM(eventday) >= 202007 AND toYYYYMM(eventday) <= 202007` instead of `toYYYYMM(eventday) = 202007`
+
+Things that do change the result, and give the correct results:
+* Removing the `user_id = 742522` filter.
+* Removing the `toYYYMM(eventday) = 202007` filter.
+* Remove either or both of the eventday filters (`eventday >= '2020-07-03' AND eventday <= '2020-07-25'`).
+* Change the dates on the eventday filters to be outside of July, or the include the 1st of July (such as `eventday <= '2020-08-25'`), even though the `toYYYYMM(eventday) = 202007` means the results would be the same.
+* Change the order by of the table to have user_id in front: `(user_id, eventday, eventhour, eventminute, sipHash64(toaddress), integrationkey)`
+
+
+Here is my create table statement:
+```sql
+CREATE TABLE IF NOT EXISTS mytable_local (
+    created          DateTime
+    eventday         Date
+    eventhour        DateTime
+    eventminute      DateTime
+    user_id          UInt32
+    toaddress        String
+    integrationkey   String
+    -- bunch of other fields
+)
+    ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/mydb.mytable', '{replica}')
+    PARTITION BY toYYYYMM(eventday)
+    ORDER BY (eventday, eventhour, eventminute, user_id, sipHash64(toaddress), integrationkey)
+    TTL eventday TO VOLUME 'fast', eventday + toIntervalDay(93) TO VOLUME 'slow', eventday + toIntervalDay(732) DELETE
+    SAMPLE BY sipHash64(toaddress);
+
+CREATE TABLE IF NOT EXISTS mytable AS mytable_local ENGINE = Distributed(mycluster, mydb, mytable_local, rand());
+```
+
+**Expected behavior**
+The first query clearly shows that data exists (and it does, as I put in data for every day), so I expect the second query to return those counts.
+
+**Error message and/or stacktrace**
+No error messages were returned by the dbeaver client or the golang driver.
+I have a colleague confirm he was seeing the same thing from his computer, and he was using the clickhouse client docker container.

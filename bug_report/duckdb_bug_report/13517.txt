@@ -1,0 +1,86 @@
+ID: 13517
+Title: Preserve cardinality information
+Description:
+<p>The cardinality of operators is not preserved throughout the optimization and sometimes appears inaccurate in the EXPLAIN outputs. This PR tries to preserve the cardinality information throughout the join order and other subsequent optimizations.</p>
+<p>Changes:</p>
+<p><strong>Join order optimizer</strong></p>
+<ol>
+<li>In <code>ExtractJoinRelations</code>, statistics of operators are extracted. The cardinality information is set only for the <code>input_op</code> and not for <code>op</code>. Now, <code>op</code> gets the cardinality extracted from the stats (before possible data source filters apply).</li>
+<li>In <code>CombineStatsOfNonReorderableOperator</code>, <code>MARK</code> joins now adopt the cardinality of its left child</li>
+<li>In <code>GenerateJoins</code>, if the leaf node is of FILTER + GET, the cardinality of GET used to be overwritten by FILTER's cardinality. GET's cardinality is already estimated during <code>ExtractJoinRelations,</code> so there's no need to overwrite it here.</li>
+</ol>
+<p><strong>Statistics Propagation</strong>
+Statistics propagator attempts to impose stricter filter/join conditions based on the statistics. Therefore, when a new filter is created, it triggers a new round of Filter Pushdonw. In <code>pushdown_inner_join</code>, the join is replaced with a cross-product, later converted back to a join (with a possible filter on top). During the process, cardinality is lost. So, I set the cardinality info in the new cross-product operator, which is later used to set the cardinality of the new join operator.</p>
+<p><strong>Others</strong>
+Optimization rules for unused columns, common subexpression, column lifetime, and compressed materialization create new projection operators with uninitialized cardinality. I set the cardinality so that the projection adopts the cardinality of its child.</p>
+<p><strong>Example query plans</strong> (disabled compressed_materialization for shorter explain)</p>
+<p><em>1. Aggregate</em></p>
+<pre><code>-- subquery from TPCH q18
+SELECT l_orderkey FROM lineitem
+  GROUP BY l_orderkey
+  HAVING sum(l_quantity) &gt; 300;
+
+</code></pre>
+<p>The cardinality of <code>HASH_GROUP_BY</code> is estimated as 229076 during join order optimization, which was not being set. Therefore, the explain output simply shows the cardinality of its child.</p>
+
+<img width="360" alt="Screenshot 2024-08-22 at 16 22 07" src="https://github.com/user-attachments/assets/b5d475d7-d8b4-491b-8e65-134302a2a020">
+
+
+<p><em>2. Base Table</em></p>
+<pre><code>-- Modified query 41 from TPCDS.
+SELECT distinct(i_product_name)
+FROM item i1
+WHERE i_manufact_id BETWEEN 738 AND 738+40
+  AND (SELECT count(*) AS item_cnt
+       FROM item i1
+       WHERE (i_manufact = i1.i_manufact
+		           AND ((i_color = 'powder' OR i_color = 'khaki')
+               AND (i_units = 'Ounce' OR i_units = 'Oz'))))
+ORDER BY i_product_name
+LIMIT 100;
+
+</code></pre>
+<p>The base table cardinality should remain untouched until the filter has been applied.</p>
+<p>Partial plans ...</p>
+<img width="579" alt="Screenshot 2024-08-22 at 16 27 10" src="https://github.com/user-attachments/assets/b5f7e8d6-2a95-49f1-af70-6bebbb245680">
+
+
+<p><em>3. Inner Join</em>
+The <code>HASH_JOIN (keyword_id = id)</code> has a cardinality of 33, which is lost during statistics propagation. The explain output takes the max of its children, 4523930, which is way off DuckDB's estimation.</p>
+<pre><code>-- modified from query 17d of Join Order Benchmark
+select t.id  FROM
+       keyword AS k,
+       movie_companies AS mc,
+       movie_keyword AS mk,
+       title AS t
+  WHERE k.keyword ='character-name-in-title'
+    AND t.id = mk.movie_id
+    AND mk.keyword_id = k.id
+    AND t.id = mc.movie_id
+    AND mc.movie_id = mk.movie_id;
+
+</code></pre>
+<p>Partial plans ...</p>
+<img width="800" alt="Screenshot 2024-08-22 at 16 30 28" src="https://github.com/user-attachments/assets/33b336a5-e427-4a3d-814e-d79561fd3ddf">
+
+<p><strong>Some Stats</strong>
+I ran TPCH and TPCDS and traversed the query plan after the optimizations. Many operators missing cardinalities are projections, which don't have affect. However, some aggregates and joins are also missing cardinality. This PR sets the cardinalities of all operators in TPCH and TPCDS. </p>
+
+Operators  missing cardinality | TPCH (all queries) | TPCDS (all queries)
+-- | -- | --
+PROJECTION | 80 | 398
+TOP_N | 5 | 80
+FILTER | 0 | 27
+AGGREGATE | 1 | 17
+WINDOW | 0 | 11
+COMPARISON_JOIN (INNER) | 2 | 11
+COMPARISON_JOIN (MARK) | 4 | 8
+CTE_SCAN | - | 13
+DISTINCT | - | 1
+Total number of operators | 357 | 3029
+Total Missing | 92 (12 non-projection) | 566  (168 non-projection)
+% incomplete queries | 86.36 % | 95.96 %
+% incomplete queries (excluding projection) | 36.36 % | 89.90 %
+
+
+<!-- notionvc: 3faf0bc8-6e1d-4de4-82df-08e774406615 -->

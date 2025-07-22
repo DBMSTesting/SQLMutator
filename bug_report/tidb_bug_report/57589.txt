@@ -1,0 +1,65 @@
+ID: 57589
+Title: Update statement not blocked by primary or unique lock in partition
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+ref https://github.com/pingcap/tidb/issues/20692
+
+```
+func TestIssue20692(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (id int primary key, v int, vv int, vvv int, unique key u0(id, v, vv)) partition by hash (id) partitions 1;")
+	tk.MustExec("insert into t values(1, 1, 1, 1);")
+	tk1 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(t, store)
+	tk3 := testkit.NewTestKit(t, store)
+	tk1.MustExec("begin pessimistic;")
+	tk1.MustExec("use test")
+	tk2.MustExec("begin pessimistic;")
+	tk2.MustExec("use test")
+	tk3.MustExec("begin pessimistic;")
+	tk3.MustExec("use test")
+	tk1.MustExec("delete from t where id = 1 and v = 1 and vv = 1;")
+	stop1, stop2 := make(chan struct{}), make(chan struct{})
+	go func() {
+		tk2.MustExec("insert into t values(1, 2, 3, 4);")
+		stop1 <- struct{}{}
+		tk3.MustExec("update t set id = 10, v = 20, vv = 30, vvv = 40 where id = 1 and v = 2 and vv = 3;")
+		stop2 <- struct{}{}
+	}()
+	tk1.MustExec("commit;")
+	<-stop1
+
+	// wait 50ms to ensure tk3 is blocked by tk2
+	select {
+	case <-stop2:
+		t.Fail()
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	tk2.MustExec("commit;")
+	<-stop2
+	tk3.MustExec("commit;")
+	tk3.MustQuery("select * from t;").Check(testkit.Rows("10 20 30 40"))
+}
+```
+Change the table t from non-partition to partition
+
+### 2. What did you expect to see? (Required)
+Test passes.
+
+### 3. What did you see instead (Required)
+
+Test fails.
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

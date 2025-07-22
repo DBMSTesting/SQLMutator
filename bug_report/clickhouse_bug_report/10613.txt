@@ -1,0 +1,159 @@
+ID: 10613
+Title: 20.3 enable_optimize_predicate_expression wrong result or exception for distributed queries
+Description:
+In a distributed query with GROUP BY and HAVING I get an empty result if there are two conditions in the HAVING clause:
+`HAVING (max(active) > 0) AND (min(rows) < 1000)`
+I get an exception if the two conditions are of different data types:
+`HAVING (max(value) > '9') AND (min(changed) = 0)`
+
+Examples:
+1. Wrong result
+```
+ClickHouse client version 20.3.7.46 (official build).
+Connecting to localhost:9000 as user default.
+Connected to ClickHouse server version 20.3.7 revision 54433.
+
+SELECT
+    database,
+    count() AS cnt
+FROM cluster(test_cluster_two_shards_localhost, system, parts)
+GROUP BY database
+HAVING (max(active) > 0) AND (min(rows) < 1000)
+SETTINGS enable_optimize_predicate_expression = 0
+
+┌─database─┬──cnt─┐
+│ db       │ 1433 │
+│ system   │ 2494 │
+└──────────┴──────┘
+
+SELECT
+    database,
+    count() AS cnt
+FROM cluster(test_cluster_two_shards_localhost, system, parts)
+GROUP BY database
+HAVING (max(active) > 0) AND (min(rows) < 1000)
+SETTINGS enable_optimize_predicate_expression = 1
+
+Ok.
+```
+
+2. Exception
+```
+SELECT
+    name,
+    count() AS cnt
+FROM cluster(test_cluster_two_shards_localhost, system, settings)
+GROUP BY name
+HAVING (max(value) > '9') AND (min(changed) = 0)
+SETTINGS enable_optimize_predicate_expression = 0
+
+┌─name──────────────────────────┬─cnt─┐
+│ send_logs_level               │   6 │
+│ date_time_input_format        │   6 │
+│ group_by_overflow_mode        │   6 │
+│ read_overflow_mode            │   6 │
+│ join_default_strictness       │   6 │
+│ join_algorithm                │   6 │
+│ result_overflow_mode          │   6 │
+│ set_overflow_mode             │   6 │
+│ distributed_product_mode      │   6 │
+│ format_custom_escaping_rule   │   6 │
+│ max_threads                   │   6 │
+│ sort_overflow_mode            │   6 │
+│ network_compression_method    │   6 │
+│ distinct_overflow_mode        │   6 │
+│ count_distinct_implementation │   6 │
+│ timeout_overflow_mode         │   6 │
+│ max_alter_threads             │   6 │
+│ transfer_overflow_mode        │   6 │
+│ join_overflow_mode            │   6 │
+│ totals_mode                   │   6 │
+└───────────────────────────────┴─────┘
+
+20 rows in set.
+```
+SETTINGS enable_optimize_predicate_expression = 1
+```
+SELECT
+    name,
+    count() AS cnt
+FROM cluster(test_cluster_two_shards_localhost, system, settings)
+GROUP BY name
+HAVING (max(value) > '9') AND (min(changed) = 0)
+SETTINGS enable_optimize_predicate_expression = 1
+
+Received exception from server (version 20.3.7):
+Code: 386. DB::Exception: Received from localhost:9000. DB::Exception: There is no supertype for types String, UInt8 because some of them are String/FixedString and some of them are not.
+```
+SETTINGS enable_optimize_predicate_expression = 1
+one condition in HAVING
+```
+SELECT
+    name,
+    count() AS cnt
+FROM cluster(test_cluster_two_shards_localhost, system, settings)
+GROUP BY name
+HAVING max(value) > '9'
+SETTINGS enable_optimize_predicate_expression = 1
+
+┌─name──────────────────────────┬─cnt─┐
+│ send_logs_level               │   6 │
+│ date_time_input_format        │   6 │
+│ group_by_overflow_mode        │   6 │
+│ read_overflow_mode            │   6 │
+│ join_default_strictness       │   6 │
+│ join_algorithm                │   6 │
+│ result_overflow_mode          │   6 │
+│ set_overflow_mode             │   6 │
+│ distributed_product_mode      │   6 │
+│ format_custom_escaping_rule   │   6 │
+│ max_threads                   │   6 │
+│ sort_overflow_mode            │   6 │
+│ load_balancing                │   6 │
+│ network_compression_method    │   6 │
+│ distinct_overflow_mode        │   6 │
+│ count_distinct_implementation │   6 │
+│ timeout_overflow_mode         │   6 │
+│ max_alter_threads             │   6 │
+│ transfer_overflow_mode        │   6 │
+│ join_overflow_mode            │   6 │
+│ totals_mode                   │   6 │
+└───────────────────────────────┴─────┘
+
+21 rows in set.
+```
+The exception's stack trace
+```
+2020.05.01 12:30:36.409540 [ 13386 ] {} <Error> HTTPHandler: Code: 386, e.displayText() = DB::Exception: There is no supertype for types String, UInt8 because some of them are String/FixedString and some of them are not, Stack trace (when copying this message, a
+lways include the lines below):
+
+0. Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x10541260 in /usr/bin/clickhouse
+1. DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x8f3f72d in /usr/bin/clickhouse
+2. ? @ 0xcf7b68e in /usr/bin/clickhouse
+3. DB::FunctionComparison<DB::EqualsOp, DB::NameEquals>::executeGeneric(DB::Block&, unsigned long, DB::ColumnWithTypeAndName const&, DB::ColumnWithTypeAndName const&) @ 0x9eb39e7 in /usr/bin/clickhouse
+4. DB::FunctionComparison<DB::EqualsOp, DB::NameEquals>::executeImpl(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long) @ 0x9feeb82 in /usr/bin/clickhouse
+5. DB::ExecutableFunctionAdaptor::execute(DB::Block&, std::__1::vector<unsigned long, std::__1::allocator<unsigned long> > const&, unsigned long, unsigned long, bool) @ 0x91a91d1 in /usr/bin/clickhouse
+6. DB::ExpressionAction::execute(DB::Block&, bool, std::__1::shared_ptr<DB::ExtraBlock>&) const @ 0xd0eea94 in /usr/bin/clickhouse
+7. DB::ExpressionActions::execute(DB::Block&, bool) const @ 0xd0f29d0 in /usr/bin/clickhouse
+8. DB::FilterBlockInputStream::FilterBlockInputStream(std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::shared_ptr<DB::ExpressionActions>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >, bool) @ 0xd28d4e0 in /us
+r/bin/clickhouse
+9. ? @ 0xd1610a3 in /usr/bin/clickhouse
+10. void DB::InterpreterSelectQuery::executeImpl<DB::InterpreterSelectQuery::Pipeline>(DB::InterpreterSelectQuery::Pipeline&, std::__1::shared_ptr<DB::IBlockInputStream> const&, std::__1::optional<DB::Pipe>, DB::QueryPipeline&) @ 0xd18e250 in /usr/bin/clickhouse
+11. DB::InterpreterSelectQuery::executeWithMultipleStreams(DB::QueryPipeline&) @ 0xd14e743 in /usr/bin/clickhouse
+12. DB::InterpreterSelectWithUnionQuery::executeWithMultipleStreams(DB::QueryPipeline&) @ 0xd34f3c0 in /usr/bin/clickhouse
+13. DB::InterpreterSelectWithUnionQuery::execute() @ 0xd34f6aa in /usr/bin/clickhouse
+14. ? @ 0xd561f98 in /usr/bin/clickhouse
+15. DB::executeQuery(DB::ReadBuffer&, DB::WriteBuffer&, bool, DB::Context&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1:
+:allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&)>) @ 0xd564f19 in /usr/bin/clickhouse
+16. DB::HTTPHandler::processQuery(Poco::Net::HTTPServerRequest&, HTMLForm&, Poco::Net::HTTPServerResponse&, DB::HTTPHandler::Output&) @ 0x8feb706 in /usr/bin/clickhouse
+17. DB::HTTPHandler::handleRequest(Poco::Net::HTTPServerRequest&, Poco::Net::HTTPServerResponse&) @ 0x8feebc3 in /usr/bin/clickhouse
+18. Poco::Net::HTTPServerConnection::run() @ 0xe3888b4 in /usr/bin/clickhouse
+19. Poco::Net::TCPServerConnection::start() @ 0xe3b885b in /usr/bin/clickhouse
+20. Poco::Net::TCPServerDispatcher::run() @ 0xe3b8cdd in /usr/bin/clickhouse
+21. Poco::PooledThread::run() @ 0x105cf3c7 in /usr/bin/clickhouse
+22. Poco::ThreadImpl::runnableEntry(void*) @ 0x105cb1cc in /usr/bin/clickhouse
+23. ? @ 0x105ccb6d in /usr/bin/clickhouse
+24. start_thread @ 0x74a4 in /lib/x86_64-linux-gnu/libpthread-2.24.so
+25. clone @ 0xe8d0f in /lib/x86_64-linux-gnu/libc-2.24.so
+ (version 20.3.7.46 (official build))
+```

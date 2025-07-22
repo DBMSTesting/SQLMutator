@@ -1,0 +1,70 @@
+ID: 29418
+Title: SQL Mode only_full_group_by incorrectly errors with DISTINCT + ORDER BY
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+```sql
+DROP TABLE IF EXISTS t, tj;
+CREATE TABLE t(a bigint, b bigint, c bigint);
+INSERT INTO t VALUES (1, 2, 1), (1, 2, 2), (1, 3, 1), (1, 3, 2);
+SELECT DISTINCT a, b FROM t ORDER BY c;  # error in both TiDB + MySQL (requires only full group by unset)
+
+CREATE TABLE tj(j JSON, i INT DEFAULT 7);
+INSERT INTO tj(j) VALUES ('1');
+INSERT INTO tj(j) VALUES ('2');
+INSERT INTO tj(j) VALUES ('3');
+INSERT INTO tj(j) VALUES ('4');
+INSERT INTO tj(j) VALUES ('5');
+INSERT INTO tj(j) VALUES (NULL);
+INSERT INTO tj(j) VALUES ('3.14');
+INSERT INTO tj(j) VALUES ('[1,2,3]');
+INSERT INTO tj(j) VALUES (NULL);
+SELECT DISTINCT i,NTILE(3) OVER (ORDER BY i), MAX(i) OVER (), COUNT(*) OVER () FROM tj ORDER BY NTILE(3) OVER (ORDER BY i); # works in MySQL; error in TiDB (requires only full group by unset)
+```
+### 2. What did you expect to see? (Required)
+
+```sql
+..
+
+mysql [localhost:8024] {root} (test) > select distinct a, b from t order by c;
+ERROR 3065 (HY000): Expression #1 of ORDER BY clause is not in SELECT list, references column 'test.t.c' which is not in SELECT list; this is incompatible with DISTINCT
+..
+mysql [localhost:8024] {root} (test) > SELECT DISTINCT i,NTILE(3) OVER (ORDER BY i), MAX(i) OVER (), COUNT(*) OVER () FROM tj ORDER BY NTILE(3) OVER (ORDER BY i);
++------+----------------------------+----------------+------------------+
+| i    | NTILE(3) OVER (ORDER BY i) | MAX(i) OVER () | COUNT(*) OVER () |
++------+----------------------------+----------------+------------------+
+|    7 |                          1 |              7 |               11 |
+|    7 |                          2 |              7 |               11 |
+|    7 |                          3 |              7 |               11 |
++------+----------------------------+----------------+------------------+
+3 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+```sql
+..
+tidb> select distinct a, b from t order by c;
+ERROR 3065 (HY000): Expression #1 of ORDER BY clause is not in SELECT list, references column 'test.t.c' which is not in SELECT list; this is incompatible with DISTINCT
+..
+tidb> SELECT DISTINCT i,NTILE(3) OVER (ORDER BY i), MAX(i) OVER (), COUNT(*) OVER () FROM tj ORDER BY NTILE(3) OVER (ORDER BY i);
+ERROR 3065 (HY000): Expression #1 of ORDER BY clause is not in SELECT list, references column '' which is not in SELECT list; this is incompatible with DISTINCT
+
+```
+### 4. What is your TiDB version? (Required)
+```sql
++-------------------------+--------------------------------------------------------------------------+
+| Variable_name           | Value                                                                    |
++-------------------------+--------------------------------------------------------------------------+
+| innodb_version          | 5.6.25                                                                   |
+| protocol_version        | 10                                                                       |
+| tidb_analyze_version    | 2                                                                        |
+| tidb_row_format_version | 2                                                                        |
+| tls_version             | TLSv1,TLSv1.1,TLSv1.2                                                    |
+| version                 | 5.7.25-TiDB-v5.2.2                                                       |
+| version_comment         | TiDB Server (Apache License 2.0) Community Edition, MySQL 5.7 compatible |
+| version_compile_machine | x86_64                                                                   |
+| version_compile_os      | osx10.8                                                                  |
++-------------------------+--------------------------------------------------------------------------+
+```

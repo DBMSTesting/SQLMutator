@@ -1,0 +1,84 @@
+ID: 40583
+Title: add unique index may cause dangle index 
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+There is no simple way to reproduce.
+We need to modify the code. 
+Here is the test case:
+``` SQL
+func TestAddIndexMergeDeleteUniqueOnWriteOnly(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a enum('a', 'b', 'c', 'd', 'e', 'f'), b int default 0, c int, primary key(b, a) clustered, unique key(c));")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("use test")
+
+	d := dom.DDL()
+	originalCallback := d.GetHook()
+	defer d.SetHook(originalCallback)
+	callback := &ddl.TestDDLCallback{}
+	onJobUpdatedExportedFunc := func(job *model.Job) {
+		if t.Failed() {
+			return
+		}
+		var err error
+		switch job.SchemaState {
+		case model.StateDeleteOnly:
+		case model.StateWriteOnly:
+			_, err = tk1.Exec("insert into t values ('b', 5, 4);")
+			assert.NoError(t, err)
+		}
+	}
+	callback.OnJobRunBeforeExported = onJobUpdatedExportedFunc
+	d.SetHook(callback)
+	tk.MustExec("alter table t add unique index idx(a);")
+	tk.MustExec("admin check table t;")
+}
+```
+besides:
+in doReorgWorkForCreateIndex()
+``` SQL
+		case model.ReorgTypeTxnMerge:
+			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+			if err != nil || !done {
+				return false, ver, errors.Trace(err)
+			}
+
+			sess, _ := w.sessPool.get()
+			defer w.sessPool.put(sess)
+			se := newSession(sess)
+			_, err = se.execute(w.ctx, "update test.t set b=7;", "")
+			if err != nil {
+				return false, 0, err
+			}
+			_, err = se.execute(w.ctx, "delete from test.t;", "")
+			if err != nil {
+				return false, 0, err
+			}
+		}
+		indexInfo.BackfillState = model.BackfillStateReadyToMerge
+```
+
+Modify the code to execute these two queries before the index schema change to BackfillStateReadyToMerge.
+
+### 2. What did you expect to see? (Required)
+test pass
+
+
+### 3. What did you see instead (Required)
+```
+admin check table t;, [], error stack [admin:8223]data inconsistency in table: t, index: idx, handle: {5, 2}, index-values:"handle: {5, 2}, values: [KindMysqlEnum b KindInt64 5 KindMysqlEnum b]" != record-values:""
+```
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+

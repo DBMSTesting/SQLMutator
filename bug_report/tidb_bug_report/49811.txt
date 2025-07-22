@@ -1,0 +1,265 @@
+ID: 49811
+Title: JDBC throws unexpected connection close when commit/rollback after timeout
+Description:
+## Bug Report
+
+### 1. Minimal reproduce step (Required)
+
+
+Running the case below by JAVA.
+
+Schema:
+
+```sql
+create table t1 (a int, b int,primary key(a))
+insert into t1 values (3, 2)
+```
+
+Then run the case by two connections parallel.
+
+| ID   | conn1                                                       | conn2                      |
+| ---- | ----------------------------------------------------------- | -------------------------- |
+| op1  | begin                                                       |                            |
+| op2  |                                                             | begin                      |
+| op3  | delete from t1 where a = 3                                  |                            |
+| op4  |                                                             | delete from t1 where a = 2 |
+| op5  | delete from t1 where a = 2 -- set query timeout for it(op5) |                            |
+| op6  | -- op5 is timeout and triggers rollback/commit              | commit                     |
+
+
+
+
+We also provide our code which triggers this case.
+Note that the static value `TIMEOUT` maybe need to be  changed based on the testing environment to keep conn2 commits at the same time when conn1's delete is timeout.
+```java
+package org.example;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class Main {
+
+    private static final String TIDB_HOST = "49.52.27.20";
+
+    private static final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private static final int TIDB_PORT = 4000;
+    private static final long TIMEOUT = 1010;
+
+    public static void main(String[] args) throws ClassNotFoundException, SQLException {
+        Connection connection1 = null;
+        Connection connection2 = null;
+
+        Class.forName("com.mysql.cj.jdbc.Driver");
+
+        try {
+            // JDBC connection parameters
+            String jdbcUrl = "jdbc:mysql://" + TIDB_HOST + ":" + TIDB_PORT + "/test";
+            String username = "root";
+            String password = "";
+
+            // Establish the connections
+            connection1 = DriverManager.getConnection(jdbcUrl, username, password);
+            connection1.setAutoCommit(false);
+            connection2 = DriverManager.getConnection(jdbcUrl, username, password);
+            connection2.setAutoCommit(false);
+
+            // Init database
+            executeQuery(connection1, "drop table if exists t1");
+            executeQuery(connection1, "create table t1 (a int, b int,primary key(a))");
+            executeQuery(connection1, "insert into t1 values (3, 2),(2, 3)");
+
+
+            executeQuery(connection1, "begin");
+            executeQuery(connection2, "begin");
+
+            // Parameterized delete operations
+            System.out.println("c1 delete: " + executeQuery(connection1, "delete from t1 where a = 3"));
+            System.out.println("c2 delete: " + executeQuery(connection2, "delete from t1 where a = 2"));
+
+            // conn1 delete the record async
+            CompletableFuture<String> res = null;
+            System.out.println("c1 delete: " +  (res=executeParamQueryAsync(connection1, "delete from t1 where a = 2")));
+
+            // keep conn2 commit at the same time when conn1's delete is timeout
+            Thread.sleep(TIMEOUT);
+            System.out.println("c2 commit: " + executeQuery(connection2, "commit"));
+            res.get();
+
+        } catch (SQLException | InterruptedException | ExecutionException e) {
+            e.printStackTrace();
+        } finally {
+            // Close resources in the reverse order of their creation
+            connection1.close();
+            connection2.close();
+
+            executor.shutdown();
+        }
+    }
+
+    private static String executeQuery(Connection connection, String query) throws SQLException {
+        Statement statement = connection.createStatement();
+        statement.execute(query);
+        return  "Success" ;
+    }
+
+    private static CompletableFuture<String> executeParamQueryAsync(Connection connection, String query) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (PreparedStatement preparedStatement = connection.prepareStatement(query)) {
+                preparedStatement.setQueryTimeout(1);
+                return preparedStatement.executeUpdate() == 0 ? "Failure" : "Success";
+            } catch (SQLException e) {
+                e.printStackTrace();
+                try {
+                    connection.commit(); // HERE throws an unexpected exception, rollback causes a similar case
+                } catch (Exception e1) {
+                    e1.printStackTrace();
+                }
+                System.out.println("c1 delete end");
+                return "Failure";
+            }
+        }, executor);
+    }
+}
+
+```
+
+And the jdbc version is:
+```xml
+<dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+            <version>8.0.27</version> <!-- Use the latest version available -->
+</dependency>
+```
+
+### 2. What did you expect to see? (Required)
+
+There is only one exception in the whole execution, i.e., the timeout exception of conn1's delete.
+
+That's what MySQL8.0 does. Staggering the time of conn1's delete and conn2's commit also leads to this result, i.e., setting TIMEOUT to 2000.
+
+Then the output is shown below.
+
+```java
+c1 delete: Success
+c2 delete: Success
+c1 delete: java.util.concurrent.CompletableFuture@55141def[Not completed]
+c2 commit: Success
+com.mysql.cj.jdbc.exceptions.MySQLTimeoutException: Statement cancelled due to timeout or client request
+	at com.mysql.cj.jdbc.exceptions.SQLExceptionsMapping.translateException(SQLExceptionsMapping.java:113)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeInternal(ClientPreparedStatement.java:953)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeUpdateInternal(ClientPreparedStatement.java:1098)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeUpdateInternal(ClientPreparedStatement.java:1046)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeLargeUpdate(ClientPreparedStatement.java:1371)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeUpdate(ClientPreparedStatement.java:1031)
+	at org.example.Main.lambda$executeParamQueryAsync$0(Main.java:82)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1768)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+c1 delete end
+```
+
+
+
+### 3. What did you see instead (Required)
+
+The commit/rollback after conn1's delete also fails and throws other exceptions(Communications link failure), as shown below.
+
+```java
+c1 delete: Success
+c2 delete: Success
+c1 delete: java.util.concurrent.CompletableFuture@1786dec2[Not completed]
+c2 commit: Success
+com.mysql.cj.jdbc.exceptions.MySQLTimeoutException: Statement cancelled due to timeout or client request
+	at com.mysql.cj.jdbc.exceptions.SQLExceptionsMapping.translateException(SQLExceptionsMapping.java:113)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeInternal(ClientPreparedStatement.java:953)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeUpdateInternal(ClientPreparedStatement.java:1098)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeUpdateInternal(ClientPreparedStatement.java:1046)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeLargeUpdate(ClientPreparedStatement.java:1371)
+	at com.mysql.cj.jdbc.ClientPreparedStatement.executeUpdate(ClientPreparedStatement.java:1031)
+	at org.example.Main.lambda$executeParamQueryAsync$0(Main.java:82)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1768)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+com.mysql.cj.jdbc.exceptions.CommunicationsException: Communications link failure
+
+The last packet successfully received from the server was 18 milliseconds ago. The last packet sent successfully to the server was 1,041 milliseconds ago.
+	at com.mysql.cj.jdbc.exceptions.SQLError.createCommunicationsException(SQLError.java:174)
+	at com.mysql.cj.jdbc.exceptions.SQLExceptionsMapping.translateException(SQLExceptionsMapping.java:64)
+	at com.mysql.cj.jdbc.ConnectionImpl.commit(ConnectionImpl.java:806)
+	at org.example.Main.lambda$executeParamQueryAsync$0(Main.java:86)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1768)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: com.mysql.cj.exceptions.CJCommunicationsException: Communications link failure
+
+The last packet successfully received from the server was 18 milliseconds ago. The last packet sent successfully to the server was 1,041 milliseconds ago.
+	at java.base/jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(DirectConstructorHandleAccessor.java:62)
+	at java.base/java.lang.reflect.Constructor.newInstanceWithCaller(Constructor.java:502)
+	at java.base/java.lang.reflect.Constructor.newInstance(Constructor.java:486)
+	at com.mysql.cj.exceptions.ExceptionFactory.createException(ExceptionFactory.java:61)
+	at com.mysql.cj.exceptions.ExceptionFactory.createException(ExceptionFactory.java:105)
+	at com.mysql.cj.exceptions.ExceptionFactory.createException(ExceptionFactory.java:151)
+	at com.mysql.cj.exceptions.ExceptionFactory.createCommunicationsException(ExceptionFactory.java:167)
+	at com.mysql.cj.protocol.a.NativeProtocol.readMessage(NativeProtocol.java:520)
+	at com.mysql.cj.protocol.a.NativeProtocol.checkErrorMessage(NativeProtocol.java:700)
+	at com.mysql.cj.protocol.a.NativeProtocol.sendCommand(NativeProtocol.java:639)
+	at com.mysql.cj.protocol.a.NativeProtocol.sendQueryPacket(NativeProtocol.java:987)
+	at com.mysql.cj.protocol.a.NativeProtocol.sendQueryString(NativeProtocol.java:933)
+	at com.mysql.cj.NativeSession.execSQL(NativeSession.java:664)
+	at com.mysql.cj.jdbc.ConnectionImpl.commit(ConnectionImpl.java:794)
+	... 5 more
+Caused by: java.io.EOFException: Can not read response from server. Expected to read 4 bytes, read 0 bytes before connection was unexpectedly lost.
+	at com.mysql.cj.protocol.FullReadInputStream.readFully(FullReadInputStream.java:67)
+	at com.mysql.cj.protocol.a.SimplePacketReader.readHeaderLocal(SimplePacketReader.java:81)
+	at com.mysql.cj.protocol.a.SimplePacketReader.readHeader(SimplePacketReader.java:63)
+	at com.mysql.cj.protocol.a.SimplePacketReader.readHeader(SimplePacketReader.java:45)
+	at com.mysql.cj.protocol.a.TimeTrackingPacketReader.readHeader(TimeTrackingPacketReader.java:52)
+	at com.mysql.cj.protocol.a.TimeTrackingPacketReader.readHeader(TimeTrackingPacketReader.java:41)
+	at com.mysql.cj.protocol.a.MultiPacketReader.readHeader(MultiPacketReader.java:54)
+	at com.mysql.cj.protocol.a.MultiPacketReader.readHeader(MultiPacketReader.java:44)
+	at com.mysql.cj.protocol.a.NativeProtocol.readMessage(NativeProtocol.java:514)
+	... 11 more
+c1 delete end
+
+```
+
+This phenomenon is confusing because it's hard to check whether the transaction of conn1is finished.(In fact it is finished.)
+
+And I think it is unexpected because:
+
+1. It is incompatible with MySQL;
+2. It only occurs when the timeout of conn1's delete and conn2's commit happen at the same time.
+3. It seems the connection is closed after throwing these exceptions.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+```mysql
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                 |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.4.0
+Edition: Community
+Git Commit Hash: 38cb4f3312be9199a983c0ef282d2ea2e28a7824
+Git Branch: heads/refs/tags/v7.4.0
+UTC Build Time: 2023-10-10 14:18:50
+GoVersion: go1.21.1
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv |
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.01 sec)
+```
+

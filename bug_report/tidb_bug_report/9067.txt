@@ -1,0 +1,85 @@
+ID: 9067
+Title: YCSB workloade is too slow for scan operation
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+I start a cluster with 1 PD + 1 TiKV + 1 TiDB, run go-ycsb with workloade like:
+
+```
+./bin/go-ycsb run tidb -p recordcount=1000000 -p operationcount=1000000 -p threadcount=100 -p fieldcount=5 -p fieldlength=16 -p maxscanlength=10 -p mysql.port=4000 -P workloads/workloade
+```
+The workloade is little changed with 100% scan:
+
+```
+workload=core
+
+readallfields=true
+
+readproportion=0
+updateproportion=0
+scanproportion=1
+insertproportion=0
+
+requestdistribution=zipfian
+
+maxscanlength=100
+
+scanlengthdistribution=uniform
+```
+
+2. What did you expect to see,
+
+Scanning at most 10 items has better performance.
+
+3. What did you see instead?
+
+The performance is very pool.
+
+From TiDB log
+
+```
+2019/01/15 16:10:46.446 coprocessor.go:675: [info] [TIME_COP_PROCESS] resp_time:813.877886ms txn_start_ts:405678285283917833 region_id:2 store_addr:127.0.0.1:20160 kv_process_ms:637 scan_total_write:293207 scan_processed_write:293206 scan_total_data:293206 scan_processed_data:293206 scan_total_lock:1 scan_processed_lock:0
+2019/01/15 16:10:46.447 adapter.go:402: [warning]
+
+[SLOW_QUERY] cost_time:0.814203953s process_time:0.776s wait_time:0.523s request_count:3 total_keys:358762 processed_keys:358759 succ:true con:430 user:root@127.0.0.1 txn_start_ts:405678285283917833 database:test table_ids:[31],sql:SELECT field0,field1,field2,field3,field4 FROM usertable WHERE YCSB_KEY >= ? LIMIT ? [arguments: user6438141073078409495, 9]
+```
+
+And TiKV log:
+
+```
+2019/01/15 16:10:43.482 INFO tracker.rs:175: [region 34] [slow-query] execute takes 1.769s, wait takes 316ms, peer: Some("ipv4:127.0.0.1:38990"), start_ts: Some(405678284182913026), table_id: Some(31), tag: select (desc: Some(false)) [keys: 963286, hit: 963284, ranges: 1 (Some(start: "t\200\000\000\000\000\000\000\037_r\200\000\000\000\000\003\263\226" end: "t\200\000\000\000\000\000\000\037_r\200\000\000\000\000\013\r\000")), perf: PerfStatisticsDelta(PerfStatisticsFields { internal_key_skipped_count: 963283, internal_delete_skipped_count: 0, block_cache_hit_count: 1237, block_read_count: 0, block_read_byte: 0 })]
+```
+
+Seem Scan scans too many data, and the `limit` expression may not be pushed to TiKV.
+
+The schema is 
+
+```
+MySQL [test]> desc usertable;
++----------+-------------+------+------+---------+-------+
+| Field    | Type        | Null | Key  | Default | Extra |
++----------+-------------+------+------+---------+-------+
+| YCSB_KEY | varchar(64) | NO   | PRI  | NULL    |       |
+| FIELD0   | varchar(16) | YES  |      | NULL    |       |
+| FIELD1   | varchar(16) | YES  |      | NULL    |       |
+| FIELD2   | varchar(16) | YES  |      | NULL    |       |
+| FIELD3   | varchar(16) | YES  |      | NULL    |       |
+| FIELD4   | varchar(16) | YES  |      | NULL    |       |
++----------+-------------+------+------+---------+-------+
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+| Release Version: v2.1.0-rc.3-476-g3835bef-dirty
+Git Commit Hash: 3835bef7ae67ac297bc307d87941d525ecc68308
+Git Branch: master
+UTC Build Time: 2019-01-15 07:27:34
+GoVersion: go version go1.11.4 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false |
+```

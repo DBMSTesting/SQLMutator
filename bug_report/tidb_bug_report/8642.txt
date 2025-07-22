@@ -1,0 +1,84 @@
+ID: 8642
+Title: anti-semi join execution does not handle `null` case properly
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+In TiDB:
+```
+mysql> create table t1 (
+    -> ua_id decimal(22,0) not null,
+    -> ua_invited_by_id decimal(22,0) default NULL,
+    -> primary key(ua_id)
+    -> );
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> insert into t1 values (123, NULL), (456, NULL);
+Query OK, 2 rows affected (0.01 sec)
+
+mysql> select * from t1 where ua_invited_by_id not in (select ua_id from t1);
++-------+------------------+
+| ua_id | ua_invited_by_id |
++-------+------------------+
+|   123 |             NULL |
+|   456 |             NULL |
++-------+------------------+
+2 rows in set (0.00 sec)
+
+mysql> explain select * from t1 where ua_invited_by_id not in (select ua_id from t1);
++------------------------+----------+------+-----------------------------------------------------------------------------------------+
+| id                     | count    | task | operator info                                                                           |
++------------------------+----------+------+-----------------------------------------------------------------------------------------+
+| HashLeftJoin_11        | 8000.00  | root | anti semi join, inner:TableReader_15, equal:[eq(tmp.t1.ua_invited_by_id, tmp.t1.ua_id)] |
+| ├─TableReader_13       | 10000.00 | root | data:TableScan_12                                                                       |
+| │ └─TableScan_12       | 10000.00 | cop  | table:t1, range:[-inf,+inf], keep order:false, stats:pseudo                             |
+| └─TableReader_15       | 10000.00 | root | data:TableScan_14                                                                       |
+|   └─TableScan_14       | 10000.00 | cop  | table:t1, range:[-inf,+inf], keep order:false, stats:pseudo                             |
++------------------------+----------+------+-----------------------------------------------------------------------------------------+
+5 rows in set (0.00 sec)
+```
+
+2. What did you expect to see?
+
+`Null not in (123, 456)` should return `null` according to SQL standard, so no row should be returned for the SELECT query.
+
+In MySQL:
+```
+mysql> create table t1 (
+    -> ua_id decimal(22,0) not null,
+    -> ua_invited_by_id decimal(22,0) default NULL,
+    -> primary key(ua_id)
+    -> );
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> insert into t1 values (123, NULL), (456, NULL);
+Query OK, 2 rows affected (0.00 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+mysql> select * from t1 where ua_invited_by_id not in (select ua_id from t1);
+Empty set (0.00 sec)
+```
+
+3. What did you see instead?
+
+Result set is not empty. 
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select tidb_version();
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                                                                                    |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v2.1.0-rc.3-300-gce622ec
+Git Commit Hash: ce622ec6d849e5224299f557e50ad0775d260062
+Git Branch: master
+UTC Build Time: 2018-12-06 08:34:15
+GoVersion: go version go1.11.2 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```

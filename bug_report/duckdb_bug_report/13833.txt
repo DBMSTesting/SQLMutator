@@ -1,0 +1,172 @@
+ID: 13833
+Title: 1.1.0 Performance regression (or my SQL is bad?)
+Description:
+### What happens?
+
+(interesting coincidence)
+
+Earlier today, I created a query that aggregates the join between a hive-partitioned Parquet dataset and a PostgreSQL table - I found it very fast, as was my expectation.
+
+Having heard about the release of 1.1.0, I quickly tried it, only to find that its performance was substantially slower. After adjusting the query, performance was regained and better than 1.0.0.
+
+This is running `duckdb` 1.1.0 vs 1.0.0 CLI on Rocky Linux 9 with 8x CPU, 32 GB RAM.
+
+
+### To Reproduce
+
+PostgreSQL is running on the same host as `duckdb` CLI: holds a reference table with ~100 rows.
+
+The Parquet dataset is hosted on a MiniIO server on the LAN. Partitioned by `year` and `filename`: the partition we're using holds 2.8 GB in 99 Parquet files.
+
+I cannot share the exact query due to privacy issues: I've thusly renamed mostly everything.
+Here it is:
+
+```
+-- PostgreSQL has a reference.products table we need
+-- -------------------------------------------------
+-- - It has under 100 rows.
+
+ATTACH '' AS psql (TYPE postgres, READ_ONLY);
+
+
+-- Sales data is on hive-partitioned Parquet dataset on MinIO
+-- ----------------------------------------------------------
+-- - Partitions are /year={yyyy}/filename={filename}/{data_file}.parquet.
+-- - The partition we're querying holds 2.8 GB in 99 Parquet files.
+
+CREATE OR REPLACE SECRET my_secret (
+	TYPE S3,
+	KEY_ID '...',
+	SECRET '...',
+	SCOPE 's3://bucket-name',
+	ENDPOINT 'my-minio.fully.qualified.name',
+	URL_STYLE 'path'
+);
+
+
+-- Here we go
+-- ----------
+-- Aggregate 2022 daily sales metrics for 'simple'-typed products.
+
+WITH sales AS (
+    SELECT *
+    FROM parquet_scan(
+        's3://bucket-name/key/**/*.parquet',
+        hive_partitioning=true
+    )
+),
+products AS (
+    SELECT id, type
+    FROM psql.reference.products
+),
+c_d_map AS (
+    SELECT *
+    FROM (VALUES
+        ('A', 1),
+        ('B', 1),
+        ('C', -1),
+        ('D', -1),
+    ) AS t(c_d, value)
+)
+SELECT
+    s.client_id,
+    date_trunc('day', s.ts) AS day,
+    SUM(s.qty) AS qty_sum,
+    SUM(s.g_a) AS g_a_sum,
+    SUM(s.i_v) AS i_v_sum,
+    SUM(s.v_v) AS v_v_sum,
+    SUM(s.n_v) AS n_v_sum,
+    SUM(s.s) AS s_sum,
+    SUM(s.rebate) AS rebate_sum,
+    SUM(COALESCE(m.value, 0)) AS cred_deb_vsum,
+    COUNT(DISTINCT s.card) AS count_distinct_card,
+    SUM(s.v_e_r) AS v_e_r_sum,
+    SUM(s.c) AS c_sum,
+    SUM(s.c_r) AS c_r_sum
+FROM
+    sales s
+    LEFT JOIN products p ON (s.product_id = p.id)
+    JOIN c_d_map m ON (s.c_d = m.c_d)
+WHERE
+    s.year = 2022
+    AND
+    p.type = 'simple'
+GROUP BY ALL
+ORDER BY 1, 2
+;
+```
+
+Result:
+
+* 7 301 457 rows.
+* `1.0.0` takes ~17 seconds.
+* `1.1.0` takes ~40 seconds.
+
+Converting the `JOIN c_d_map` into a `LEFT JOIN` changes things for the better. Here's a summary of my observations:
+
+|             | duration (s) | max RAM (GB) | CPU behaviour |
+|--------|----------------------------|-----------------|---------------------|
+| `1.0.0` JOIN | ~17 | ~6.2 | ~300% most of the time, 600-700% near the end |
+| `1.1.0` JOIN | ~40 | ~7.5 | ~100% most of the time, 50% for a while, 600-700% near the end |
+| `1.0.0` LEFT JOIN | ~17 | ~6.2 | ~300% most of the time, 600-700% near the end |
+| `1.1.0` LEFT JOIN | ~14 | ~7.9 | ~300% most of the time, 600-700% near the end |
+
+* duration is real time obtained from `time duckdb < query.sql`.
+* max RAM and CPU behaviour is observed via `top`, so it's an approximation.
+
+More:
+
+* I ran EXPLAIN and from what I can tell the plans are the same.
+* Given that the semantic is the same (the joined column always joins), I went for a JOIN instead of a LEFT JOIN, thus bumping into this.
+
+Wondering:
+
+* Could it be to the new CTE materialization mechanisms in place?
+
+
+Parting words:
+
+* Thanks for sharing such a wonderful and powerful tool.
+* If I can assist it preventing others from experiencing what could be considered a performance regression, I'll be happy to assist.
+
+
+
+### OS:
+
+Rocky Linux 9 x86_64
+
+### DuckDB Version:
+
+1.1.0
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+VM with 32 GB RAM and 8x CPU
+
+### Full Name:
+
+Tiago Montes
+
+### Affiliation:
+
+Freelance Consultant
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+No - I cannot share the data sets because they are confidential
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

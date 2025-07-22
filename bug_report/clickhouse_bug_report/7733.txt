@@ -1,0 +1,58 @@
+ID: 7733
+Title: ALTER-DELETE query seemingly never completes
+Description:
+**Describe the bug or unexpected behaviour**
+In our production cluster we needed to remove certain records. To prevent overloading the cluster with lots of insertions happening, we used the following setup:
+- Deletes were executed from 'master' nodes in the cluster, targeting the local (replicated) table
+- Rows to be deleted were grouped using the `_part` column, and only a single 'part' should have been affected per statement
+- The deletes were executed from a script, only continuing with the next 'part' when the mutation was finished.
+
+We found at some point the mutations got stuck on every node. The mutation would not complete (`is_done = 0`) nor would it result in a failure. Records were removed though, and also the `system.part_log` table showed a new part was written, replacing the old 'part'.
+
+ClickHouse logs would only show this (new mutation started when some was manually killed using `kill mutation where ...`):
+```
+clickhouse-server.log:2019.11.11 10:03:53.942679 [ 78 ] {} <Information> cust.calls_v2 (ReplicatedMergeTreeQueue): Loading 1 mutation entries: 0000000006 - 0000000006
+clickhouse-server.log:2019.11.11 10:03:56.504414 [ 73 ] {} <Information> cust.calls_v2 (ReplicatedMergeTreeQueue): Loading 1 mutation entries: 0000000007 - 0000000007
+clickhouse-server.log:2019.11.11 10:10:26.482707 [ 54 ] {} <Information> cust.calls_v2 (ReplicatedMergeTreeQueue): Loading 1 mutation entries: 0000000008 - 0000000008
+```
+Not sure if a coincidence or not, but it looked like the mutation always got stuck with `parts_remaining = 44` (while on average the DELETE had to process > 700 parts).
+
+
+
+**How to reproduce**
+We could only replicate this in our production cluster, other environments completed without issues but they don't have multi-node (replicated) setups.
+* Which ClickHouse server version to use - ClickHouse server version 19.11.8 revision 54423
+* Which interface to use, if matters - CLI client, using `--query` parameter
+* `CREATE TABLE` statements for all tables involved - see below
+* Queries to run that lead to unexpected result - see below
+
+(redacted) query:
+```
+clickhouse client --database=cust --query="ALTER TABLE calls_v2 DELETE WHERE ${CALL_QUERY_WHERE} AND call_id IN (${CALLS})"
+```
+- where `${CALLS}` is grouping respective calls by a single `_part`
+- The `${CALL_QUERY_WHERE}` contains filters on the primary keys for the table
+
+(redacted) Create table:
+
+```
+CREATE TABLE cust.calls_v2 (
+    app_id String,
+    call_id String,
+    t UInt64,
+    retained_until_timestamp UInt64,
+    cust_level UInt8,
+...
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/cust/calls_v2', '{replica}')
+PARTITION BY toRelativeDayNum(toDate(retained_until_timestamp / 1000))
+ORDER BY (app_id, cust_level, t)
+SETTINGS index_granularity = 8192
+```
+
+**Expected behavior**
+Mutations for the `ALTER .. DELETE` statements would finish.
+
+**Error message and/or stacktrace**
+None
+

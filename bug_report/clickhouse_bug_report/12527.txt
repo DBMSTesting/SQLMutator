@@ -1,0 +1,50 @@
+ID: 12527
+Title: Tables with dot in table name can not be used in row-level security
+Description:
+Create a user like:
+
+```
+cat /etc/clickhouse-server/users.d/test_user.xml 
+<yandex>
+  <users>
+      <test_user>
+          <password></password>
+          <profile>default</profile>
+          <quota>default</quota>
+          <networks>
+                <ip>::/1</ip>
+          </networks>
+          <databases>
+            <default>
+                <test.abc><filter>user='test'</filter></test.abc>
+            </default>
+          </databases>
+      </test_user>
+  </users>
+</yandex>
+```
+
+Try reload configuration (or inspect a log file):
+
+```
+clickhouse-client --query="system reload config" --send_logs_level=trace
+[chi-t203-t203-0-0-0] 2020.07.15 13:29:52.313375 [ 96 ] {7583b4b1-14ce-4a76-a5c5-c625bb8fa4d9} <Debug> executeQuery: (from 127.0.0.1:33574) SYSTEM RELOAD CONFIG
+[chi-t203-t203-0-0-0] 2020.07.15 13:29:52.313607 [ 96 ] {7583b4b1-14ce-4a76-a5c5-c625bb8fa4d9} <Trace> AccessRightsContext (default): Access granted: RELOAD CONFIG ON *.*
+[chi-t203-t203-0-0-0] 2020.07.15 13:29:52.316905 [ 96 ] {7583b4b1-14ce-4a76-a5c5-c625bb8fa4d9} <Debug> ConfigReloader: Loading config '/etc/clickhouse-server/config.xml'
+[chi-t203-t203-0-0-0] 2020.07.15 13:29:52.324163 [ 96 ] {7583b4b1-14ce-4a76-a5c5-c625bb8fa4d9} <Information> StoragePolicySelector: Storage policy `default` loaded
+[chi-t203-t203-0-0-0] 2020.07.15 13:29:52.325159 [ 96 ] {7583b4b1-14ce-4a76-a5c5-c625bb8fa4d9} <Debug> ConfigReloader: Loading config '/etc/clickhouse-server/users.xml'
+[chi-t203-t203-0-0-0] 2020.07.15 13:29:52.335657 [ 96 ] {7583b4b1-14ce-4a76-a5c5-c625bb8fa4d9} <Error> Access(users.xml): Could not parse row policies: Poco::Exception. Code: 1000, e.code() = 0, e.displayText() = Not found: users.test_user.databases.default.test.abc.filter, Stack trace (when copying this message, always include the lines below):
+
+0. Poco::NotFoundException::NotFoundException(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x1051d510 in /usr/bin/clickhouse
+1. ? @ 0x10438394 in /usr/bin/clickhouse
+2. DB::UsersConfigAccessStorage::setConfiguration(Poco::Util::AbstractConfiguration const&) @ 0xcd5fc14 in /usr/bin/clickhouse
+3. DB::Context::setUsersConfig(Poco::AutoPtr<Poco::Util::AbstractConfiguration> const&) @ 0xcfc2965 in /usr/bin/clickhouse
+```
+
+row_policies are missing as well:
+```
+clickhouse-client --query="select * from system.row_policies"
+```
+Since ClickHouse tables may have dots in names, some way of escaping is required.
+
+The bigger problem and a security issue is that once ClickHouse fails to parse row policy for one user, other users get row_policy disabled as well.

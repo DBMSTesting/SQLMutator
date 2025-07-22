@@ -1,0 +1,65 @@
+ID: 9304
+Title: online DDL affect Binlog
+Description:
+## About the issue
+this pr https://github.com/pingcap/tidb/pull/9207 fix the issue [TOOL-881 (internel only)](https://internal.pingcap.net/jira/browse/TOOL-881)
+the issue is like we may get the following sequence Binlog after sorting by commit TS
+```
+...
+create database test1; (SchemaVersion = 591
+insert into test1.test1.... (SchemaVersion = 592  
+create table test1.test1 (SchemaVersion = 592
+....
+
+```
+the insert into test1.test will fail to execute at downstream, because we having not execute the create table DDL at downstream yet.
+
+## New issue introduced
+[https://github.com/pingcap/tidb/pull/9207](https://github.com/pingcap/tidb/pull/9207)
+fix this issue, but introduce another problem. That is we may receive the old SchemaVersion DML after we have execute the DDL at downstream(with multi TiDB instances).
+like:
+```
+DDL on table a  (SchemaVersion = 500
+DML1  (later DML on table a SchemaVersion may be 500 or 499)
+DML2  
+...
+```
+
+this means we must handle the case with one older SchemaVersion DML
+for different DDL.
+
+## How to handle for different DDL
+- drop table/db
+public -> write-only -> delete-only - None
+ok - will not get old SchemaVersion DML (the table/db is not visible at delete-only schema state
+
+- create table/db
+None -> Public
+ok  - will not get old SchemaVersion DML (having not this table/db yet)
+
+- add index/column   （index take no effect， just consider column）
+None -> delete-only -> write-only -> public
+TiDB should make sure the old schema version DML will write the added column value at write-only(or should be write-reorganization) schema state, so we can get this column value while syncing to downstream.
+
+- drop index/column  （index take no effect， just consider column）
+public -> write-only -> delete-only -> None
+ok - the old SchemaVersion at delete-only can or can not write the drop column to Binlog, if it writes to Binlog, we can just ignore this column.
+
+- modify column
+currently no intermediate schema state, just change meta info.
+the older schema version DML can always write to the table with new schema version
+**(may be change if we support change column type later)**
+
+- truncate table
+no intermediate schema state,TiDB will use a new table id and GC the old table id data after DDL job is synced。
+After truncate table at downstream we may receive the old schema version DML(with old table id), we must discard this DML.
+
+- rename table
+no intermediate schema state
+For example: RENAME TABLE a TO b, we must change name from a to b before sync to downstream.
+…
+
+### conclusion
+- TiDB should make sure the old schema version DML will write the added column value at write-only(or should be write-reorganization) schema state.
+- If we support modify column type later, we must consider the effect on Binlog.
+

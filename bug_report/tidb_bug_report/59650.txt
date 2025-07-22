@@ -1,0 +1,63 @@
+ID: 59650
+Title: IMPORT INTO + global sort didn't handle UK conflict correctly
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+
+```diff
+diff --git a/tests/realtikvtest/importintotest4/global_sort_test.go b/tests/realtikvtest/importintotest4/global_sort_test.go
+index 6734ff65ee..3563ad5c89 100644
+--- a/tests/realtikvtest/importintotest4/global_sort_test.go
++++ b/tests/realtikvtest/importintotest4/global_sort_test.go
+@@ -156,3 +156,28 @@ func (s *mockGCSSuite) TestGlobalSortMultiFiles() {
+ 	s.tk.MustQuery(importSQL)
+ 	s.tk.MustQuery("select * from t").Sort().Check(testkit.Rows(allData...))
+ }
++
++func (s *mockGCSSuite) TestGlobalSortUniqueKeyConflict() {
++	var allData []string
++	for i := 0; i < 10; i++ {
++		var content []byte
++		keyCnt := 1000
++		for j := 0; j < keyCnt; j++ {
++			idx := i*keyCnt + j
++			content = append(content, []byte(fmt.Sprintf("%d,test-%d\n", idx, j))...)
++		}
++		s.server.CreateObject(fakestorage.Object{
++			ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "gs-multi-files-uk", Name: fmt.Sprintf("t.%d.csv", i)},
++			Content:     content,
++		})
++	}
++	slices.Sort(allData)
++	s.prepareAndUseDB("gs_multi_files")
++	s.server.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: "sorted"})
++	s.tk.MustExec("create table t (a bigint primary key , b varchar(100) unique key);")
++	// 1 subtask, encoding 10 files using 4 threads.
++	sortStorageURI := fmt.Sprintf("gs://sorted/gs_multi_files?endpoint=%s", gcsEndpoint)
++	importSQL := fmt.Sprintf(`import into t FROM 'gs://gs-multi-files-uk/t.*.csv?endpoint=%s'
++		with cloud_storage_uri='%s', __max_engine_size='1', thread=8`, gcsEndpoint, sortStorageURI)
++	s.tk.MustQuery(importSQL)
++}
+```
+
+### 2. What did you expect to see? (Required)
+
+has reasonable output
+
+### 3. What did you see instead (Required)
+
+in the log we can find
+
+```
+[2025/02/19 20:55:53.969 +08:00] [WARN] [local.go:1255] ["meet retryable error when writing to TiKV"] [category=ddl-ingest] [error="peer 31, store 1, region 30, epoch conf_ver:1 version:11 , when send data: rpc error: code = Unknown desc = EngineTraits(Engine(Status { code: IoError, sub_code: None, sev: NoError, state: \"Invalid argument: Keys must be added in strict ascending order.\" }))"] ["job stage"=needRescan]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+

@@ -1,0 +1,125 @@
+ID: 27179
+Title: ROW POLICY: Inconsistent number of columns 
+Description:
+```sql
+CREATE TABLE default.test_table
+(
+    `a`      UInt16 DEFAULT 0,
+    `c`      LowCardinality(String) DEFAULT '',
+    `t_date` LowCardinality(String) DEFAULT '',
+    `ex`     LowCardinality(String) DEFAULT '',
+    `team`   LowCardinality(String) DEFAULT '',
+    `g`      LowCardinality(String) DEFAULT '',
+    `mt`     FixedString(1) DEFAULT ' ',
+    `rw_ts`  Int64 DEFAULT 0,
+    `exr_t`  Int64 DEFAULT 0,
+    `en`     UInt16 DEFAULT 0,
+    `f_t`    Int64 DEFAULT 0,
+    `j`      UInt64 DEFAULT 0,
+    `oj`     UInt64 DEFAULT 0
+)
+ENGINE = MergeTree
+PARTITION BY (c, t_date)
+ORDER BY (ex, team, g, mt, rw_ts, exr_t, en, f_t, j, oj)
+SETTINGS index_granularity = 8192;
+
+
+INSERT INTO default.test_table(t_date, c,team, a) SELECT 
+arrayJoin([toDate('2021-07-15'),toDate('2021-07-16')]) as t_date,
+arrayJoin(['aur','rua']) as c,
+arrayJoin(['AWD','ZZZ']) as team,
+arrayJoin([3183,3106,0,3130,3108,3126,3109,3107,3182,3180,3129,3128,3125,3266]) as a
+FROM numbers(60000);
+
+SELECT
+    team,
+    a,
+    t_date,
+    count() AS count
+FROM default.test_table
+WHERE (t_date = '2021-07-15') AND (c = 'aur') AND (a = 3130) AND (team = 'AWD')
+GROUP BY
+    team,
+    a,
+    t_date;
+
+-- ┌─team─┬────a─┬─t_date─────┬─count─┐
+-- │ AWD  │ 3130 │ 2021-07-15 │ 60000 │
+-- └──────┴──────┴────────────┴───────┘
+
+
+--- cat << EOF > /etc/clickhouse-server/users.d/access_management.xml
+--- <yandex>
+---     <users><default><access_management>1</access_management></default></users>
+--- </yandex>
+--- EOF
+
+DROP ROLE IF exists AWD;
+create role AWD;
+REVOKE ALL ON *.* FROM AWD;
+
+DROP USER IF EXISTS AWD_user;
+CREATE USER AWD_user
+    IDENTIFIED WITH SHA256_PASSWORD BY 'AWD_pwd'
+    DEFAULT ROLE AWD;
+
+GRANT SELECT ON default.test_table TO AWD;
+
+DROP ROW POLICY IF EXISTS ttt_bu_test_table_AWD ON default.test_table;
+CREATE ROW POLICY ttt_bu_test_table_AWD ON default.test_table FOR SELECT USING team = 'AWD' TO AWD;
+
+--- exit;
+--- clickhouse-client --user=AWD_user --password=AWD_pwd
+
+SELECT count() AS count
+ FROM default.test_table
+WHERE
+ t_date = '2021-07-15' AND c = 'aur' AND a=3130;
+
+
+-- ┌──count─┐
+-- │ 835784 │ ????? 
+-- └────────┘
+
+
+SELECT
+    team,
+    a,
+    t_date,
+    count() AS count
+FROM default.test_table
+WHERE (t_date = '2021-07-15') AND (c = 'aur') AND (a = 3130)
+GROUP BY
+    team,
+    a,
+    t_date;
+
+
+-- ┌─team─┬────a─┬─t_date─────┬─count─┐
+-- │ AWD  │ 3128 │ 2021-07-15 │ 59675 │
+-- │ AWD  │ 3183 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3107 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3182 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3106 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3126 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3129 │ 2021-07-15 │ 59675 │
+-- │ AWD  │    0 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3266 │ 2021-07-15 │ 59675 │
+-- │ AWD  │ 3108 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3130 │ 2021-07-15 │ 60000 │
+-- │ AWD  │ 3125 │ 2021-07-15 │ 59675 │
+-- │ AWD  │ 3109 │ 2021-07-15 │ 59676 │
+-- │ AWD  │ 3180 │ 2021-07-15 │ 59676 │
+-- └──────┴──────┴────────────┴───────┘
+ 
+
+SELECT count() AS count
+FROM default.test_table
+WHERE (t_date = '2021-07-15') AND (c = 'aur') AND (a = 313)
+
+
+-- Received exception from server (version 21.9.1):
+-- Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: Inconsistent number of columns got from MergeTreeRangeReader. Have 1 in sample block and 0 columns in list: While executing MergeTreeThread. (LOGICAL_ERROR)
+```
+
+/cc @KochetovNicolai

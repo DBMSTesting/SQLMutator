@@ -1,0 +1,146 @@
+ID: 26580
+Title: Window Functions don't respect partitions (sometimes)
+Description:
+**Describe the bug**
+
+From time to time, window functions stop respecting their partitions.
+
+I haven't been able to figure out the exact conditions that lead to this, but there's a reproducible(ish) example below.
+
+A clear and concise description of what works not as it is supposed to.
+
+**Does it reproduce on recent release?**
+
+Yes
+
+**How to reproduce**
+
+* Which ClickHouse server version to use: 21.7.4.18
+* Non-default settings, if any: `SETTINGS allow_experimental_window_functions = 1`
+* `CREATE TABLE` +data statements for all tables involved
+```
+CREATE DATABASE IF NOT EXISTS playground;
+CREATE TABLE playground.events_prod
+(
+    uuid UUID,
+    event VARCHAR,
+    timestamp DateTime64(6, 'UTC'),
+    distinct_id VARCHAR,
+    team_id Int64,
+    _timestamp DateTime
+
+) ENGINE = ReplacingMergeTree(_timestamp)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (team_id, toDate(timestamp), distinct_id, uuid)
+SAMPLE BY uuid;
+
+INSERT INTO playground.events_prod VALUES
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-08 18:00:00'), 'user a', 1, now()),
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-08 19:00:00'), 'user a', 1, now())
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-08 21:00:00'), 'user a', 1, now())
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-09 13:00:00'), 'user b', 1, now())
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-09 13:37:00'), 'user b', 1, now())
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-11 07:00:00'), 'user c', 1, now())
+    ( generateUUIDv4(), 'step one', toDateTime('2021-06-12 06:00:00'), 'user c', 1, now());
+
+CREATE TABLE playground.person
+(
+    id UUID,
+    created_at DateTime64,
+    team_id Int64,
+    _timestamp DateTime
+) ENGINE = ReplacingMergeTree(_timestamp)
+Order By (team_id, id);
+
+INSERT INTO playground.person values
+    ('017ac40e-08de-0000-10cd-1b37fea376c4', now(), 1, now()),
+    ('017ac40e-08ec-0000-3fc6-fe5226831996', now(), 1, now()),
+    ('017ac40e-08ce-0000-bb19-ac0dedd370ea', now(), 1, now());
+
+CREATE TABLE playground.person_distinct_id
+(
+    id Int64,
+    distinct_id VARCHAR,
+    person_id UUID,
+    team_id Int64,
+    _timestamp DateTime
+) ENGINE = ReplacingMergeTree(_timestamp)
+Order By (team_id, distinct_id, person_id, id)
+
+INSERT INTO playground.person_distinct_id VALUES
+    (1, 'user a', '017ac40e-08de-0000-10cd-1b37fea376c4', 1, now())
+    (2, 'user c', '017ac40e-08ec-0000-3fc6-fe5226831996', 1, now())
+    (3, 'user b', '017ac40e-08ce-0000-bb19-ac0dedd370ea', 1, now());
+``` 
+* Queries to run that lead to unexpected result
+
+Here's the smallest reproducible example I could create (sorry it's still huge, but without the inner joins, it works as expected, which is mistifying)
+
+Basically, this query groups all the expected values in the frame together. In every frame, I'd only expect to see values corresponding to a `person_id`.
+
+```
+SELECT person_id,
+       timestamp,
+       step_0,
+       latest_0,
+       step_1,
+       groupArray(latest_1) over (PARTITION by person_id ORDER BY timestamp DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) latest_1,
+       step_2,
+       groupArray(latest_2) over (PARTITION by person_id ORDER BY timestamp DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) latest_2
+  FROM (
+        SELECT person_id,
+               timestamp,
+               if(event = 'step one', 1, 0) as step_0,
+               if(step_0 = 1, timestamp, null) as latest_0,
+               if(event = 'step one', 1, 0) as step_1,
+               if(step_1 = 1, timestamp, null) as latest_1,
+               if(event = 'step one', 1, 0) as step_2,
+               if(step_2 = 1, timestamp, null) as latest_2
+          FROM (
+                SELECT e.event as event,
+                       e.team_id as team_id,
+                       e.distinct_id as distinct_id,
+                       e.timestamp as timestamp,
+                       pdi.person_id as person_id
+                  FROM playground.events_prod e
+                 INNER JOIN (
+                        SELECT person_id,
+                               distinct_id
+                          FROM playground.person_distinct_id
+                       ) AS pdi
+                    ON e.distinct_id = pdi.distinct_id
+                 WHERE team_id = 1
+                   AND event IN ['step one', 'step one', 'step one', 'step one', 'step one', 'step one']
+                   AND timestamp >= '2021-06-07 00:00:00'
+                   AND timestamp <= '2021-06-13 23:59:59'
+               ) events
+         WHERE (step_0 = 1 OR step_1 = 1 OR step_2 = 1)
+       ) SETTINGS allow_experimental_window_functions = 1
+```
+
+**Expected behavior**
+
+The groupArray only returns values where person_id is correct.
+Further, this is non-deterministic, it happens some times, but not all times.
+
+Error output (sometimes):
+
+```
+017ac40e-08ec-0000-3fc6-fe5226831996,2021-06-11 07:00:00.000000,1,2021-06-11 07:00:00.000000,1,"['2021-06-09 13:37:00.000000','2021-06-09 13:00:00.000000','2021-06-12 06:00:00.000000']",1,"['2021-06-09 13:37:00.000000','2021-06-09 13:00:00.000000','2021-06-12 06:00:00.000000']"
+
+```
+
+Notice the array: `['2021-06-09 13:37:00.000000','2021-06-09 13:00:00.000000','2021-06-12 06:00:00.000000']` - it has values from `user b`s frame (13:00, 13:37), while it should only have values from `user c`s frame: `06:00`.
+
+**Additional context**
+
+This doesn't happen always, but often enough to be worrysome. I did a few tests to try and figure out how often it occurs, running the same query in batches of 100s, and:
+
+first two batches: all values correct.
+third batch: 
+```
+[bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, good, bad, bad, bad, bad, bad, bad, bad, bad, bad, good, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, good, good, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, good, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, bad, good, bad, bad, bad, good, bad, bad, good, good, bad, bad, bad, bad, bad, bad, bad, good, good, bad, bad, bad, good, bad, bad, bad, good, bad, good, bad, bad, good, good]
+```
+(most of them in the third batch were bad)
+fourth batch: all values correct.
+

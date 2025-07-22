@@ -1,0 +1,151 @@
+ID: 44496
+Title: Right argument of `IN` is evaluated in a column default expression in 22.10+ 
+Description:
+**Describe the issue**
+
+When you add a new replica to a table using certain operations (joinGet in the definition in this example), but values of the table might be leaked into the ZK definition leading to issues when creating a table.
+
+
+**How to reproduce**
+
+#### Setup
+2 replicas
+1 cluster (in this case called tinybird)
+
+In the first replica we execute:
+
+```
+SELECT version() from clusterAllReplicas('tinybird', system.one);
+DROP DATABASE IF EXISTS upgrade_problem ON CLUSTER tinybird SYNC;
+CREATE DATABASE upgrade_problem ON CLUSTER tinybird;
+CREATE TABLE upgrade_problem.id_join ON CLUSTER tinybird
+(
+    `country` String,
+    `location` Array(Int32)
+)
+ENGINE = Join(ANY, LEFT, country);
+```
+
+The above has created a database `upgrade_problem` on cluster and a join table, also on cluster.
+
+Now in the first replica we add data:
+
+```
+INSERT INTO upgrade_problem.id_join values ('CLICK', [1234]);  -- Only adds data to server1 by design
+```
+
+And we also create a new table that uses this info (not created on cluster, only in the server1):
+```
+CREATE TABLE upgrade_problem.dep
+    (
+    `id` Int32,
+    `country` LowCardinality(String),
+    `purchase_location` UInt16 MATERIALIZED if(id IN joinGet('upgrade_problem.id_join', 'location', 'CLICK'), 123, 456)
+    )
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/upgrade_problem.dep', '{replica}')
+ORDER BY tuple();
+```
+
+Now we go into server2 and add the replica manually (not via on cluster):
+```
+CREATE TABLE upgrade_problem.dep
+    (
+    `id` Int32,
+    `country` LowCardinality(String),
+    `purchase_location` UInt16 MATERIALIZED if(id IN joinGet('upgrade_problem.id_join', 'location', 'CLICK'), 123, 456)
+    )
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/upgrade_problem.dep', '{replica}')
+ORDER BY tuple();
+```
+
+Results:
+* 22.8.5.29: No problem
+* 22.9.3.18: No problem
+* 22.10.2.11: Fails
+* 22.11.2.30: Fails
+* 22.12.1.1752: Fails
+
+Example error:
+```
+production-02 :) CREATE TABLE upgrade_problem.dep
+                     (
+                     `id` Int32,
+                     `country` LowCardinality(String),
+                     `purchase_location` UInt16 MATERIALIZED if(id IN joinGet('upgrade_problem.id_join', 'location', 'CLICK'), 123, 456)
+                     )
+                 ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/upgrade_problem.dep', '{replica}')
+                 ORDER BY tuple();
+
+CREATE TABLE upgrade_problem.dep
+(
+    `id` Int32,
+    `country` LowCardinality(String),
+    `purchase_location` UInt16 MATERIALIZED if(id IN joinGet('upgrade_problem.id_join', 'location', 'CLICK'), 123, 456)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{layer}-{shard}/upgrade_problem.dep', '{replica}')
+ORDER BY tuple()
+
+Query id: 57930d18-0b8c-4f31-9fed-3e91c4d8e918
+
+
+Received exception from server (version 22.10.2):
+Code: 122. DB::Exception: Received from clickhouse-02:59000. DB::Exception: Table columns structure in ZooKeeper is different from local table structure. Local columns:
+columns format version: 1
+3 columns:
+`id` Int32
+`country` LowCardinality(String)
+`purchase_location` UInt16      MATERIALIZED    if(id IN [], 123, 456)
+
+Zookeeper columns:
+columns format version: 1
+3 columns:
+`id` Int32
+`country` LowCardinality(String)
+`purchase_location` UInt16      MATERIALIZED    if(id IN [1234], 123, 456)
+. (INCOMPATIBLE_COLUMNS)
+```
+
+For some reason the definition comparison between the 2 servers has replaced `joinGet('upgrade_problem.id_join', 'location', 'CLICK')` by its result. Since the result is different (`[1234]` vs `[]`), the comparison fails.
+
+This breaks adding new replicas. Note that this also happens, and it's made 10x worse, even when the data matches but the **new replica is newer**.
+
+For example, if you create the first replica with 22.9 and then add a new one with 22.12 you will get this error:
+```
+Received exception from server (version 22.12.1):
+Code: 122. DB::Exception: Received from clickhouse-02:59000. DB::Exception: Table columns structure in ZooKeeper is different from local table structure. Local columns:
+columns format version: 1
+3 columns:
+`id` Int32
+`country` LowCardinality(String)
+`purchase_location` UInt16      MATERIALIZED    if(id IN [], 123, 456)
+
+Zookeeper columns:
+columns format version: 1
+3 columns:
+`id` Int32
+`country` LowCardinality(String)
+`purchase_location` UInt16      MATERIALIZED    if(id IN joinGet(\'upgrade_problem.id_join\', \'location\', \'CLICK\'), 123, 456)
+. (INCOMPATIBLE_COLUMNS)
+```
+
+Even if you match the data the definition still changes:
+```
+Code: 122. DB::Exception: Received from clickhouse-02:59000. DB::Exception: Table columns structure in ZooKeeper is different from local table structure. Local columns:
+columns format version: 1
+3 columns:
+`id` Int32
+`country` LowCardinality(String)
+`purchase_location` UInt16      MATERIALIZED    if(id IN [1234], 123, 456)
+
+Zookeeper columns:
+columns format version: 1
+3 columns:
+`id` Int32
+`country` LowCardinality(String)
+`purchase_location` UInt16      MATERIALIZED    if(id IN joinGet(\'upgrade_problem.id_join\', \'location\', \'CLICK\'), 123, 456)
+. (INCOMPATIBLE_COLUMNS)
+```
+
+Note the diff where it was [] above and [1234] after adding the data.
+
+This to me is a major breaking compatibility issue as you are unable to add new replicas to existing clusters anymore.

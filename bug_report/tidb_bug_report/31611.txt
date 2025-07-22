@@ -1,0 +1,86 @@
+ID: 31611
+Title: TiDB doesn't write binlog when replicating tables with sequence
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+1. use tiup playground to start follower cluster:
+```bash
+tiup playground v5.5.0-nightly-20220112 --monitor=false --tiflash 0
+```
+2. use tiup playground to start the leader cluster:
+```bash
+tiup playground v5.5.0-nightly-20220112 --monitor=false --tiflash 0  --pump 1 --drainer 1 --drainer.config="drainer.toml"
+```
+drainer.toml:
+```toml
+log-level = "debug"
+
+[syncer]
+
+sync-ddl = true
+
+# downstream storage, equal to --dest-db-type
+# valid values are "mysql", "file", "tidb", "kafka"
+#db-type = "file"
+db-type = "mysql"
+
+# ignore syncing the txn with specified commit ts to downstream
+ignore-txn-commit-ts = []
+
+# disable sync these schema
+ignore-schemas = "INFORMATION_SCHEMA,PERFORMANCE_SCHEMA,mysql"
+
+##replicate-do-db priority over replicate-do-table if have same db name
+##and we support regex expression , start with '~' declare use regex expression.
+#
+replicate-do-db = ["~^test.*"]
+
+# the downstream mysql protocol database
+[syncer.to]
+host = "127.0.0.1"
+user = "root"
+password = ""
+port = 4000
+dir = "/Users/chauncy/code/goPath/src/github.com/pingcap/tidb-binlog/bin/config"
+#
+#[syncer.relay]
+#log-dir = "/tmp/binlog/relay2"
+```
+3. Execute the following SQLs on the leader cluster:
+```sql
+run_sql 'CREATE DATABASE test;'
+run_sql 'CREATE SEQUENCE test.sequence_name;'
+run_sql 'CREATE TABLE test.table_name (id INT DEFAULT NEXT VALUE FOR test.sequence_name, val int);'
+run_sql 'INSERT INTO test.table_name(val) values(10);'
+```
+
+
+### 2. What did you expect to see? (Required)
+Follower TiDB can receive correct data.
+
+### 3. What did you see instead (Required)
+1. Follower TiDB didn't have new dml data in `test.table_name`.
+2. Drainer get blocked at receiving ddl jobs.
+```log
+[2022/01/12 16:32:51.203 +08:00] [INFO] [collector.go:283] ["start query job"] [id=68] [binlog="tp:Commit start_ts:430434253815414785 commit_ts:430434253815414786 prewrite_key:\"mNextGlob\\377alID\\000\\000\\000\\000\\373\\000\\000\\000\\000\\000\\000\\000s\" ddl_query:\"SELECT SETVAL(`test`.`sequence_name`, 1000);\" ddl_job_id:68 ddl_schema_state:5 "]
+```
+
+### 4. What is your TiDB version? (Required)
+```
+Release Version: v5.5.0-alpha
+Edition: Community
+Git Commit Hash: 706abd66aea261ed783f0771411e71d99ae1b32d
+Git Branch: heads/refs/tags/v5.5.0-alpha
+UTC Build Time: 2022-01-11 14:52:11
+GoVersion: go1.16.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false
+```
+
+<!-- Paste the output of SELECT tidb_version() -->
+

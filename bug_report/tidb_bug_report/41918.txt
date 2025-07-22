@@ -1,0 +1,109 @@
+ID: 41918
+Title: prepared statement failed to fetch rows
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+tidb 6.2.0 is ok, for tidb6.6.0, change param type to int will ok too.
+
+data
+```sql
+create table t(updated_at timestamp, phase varchar(100));
+insert into t values('2023-01-03 09:37:10', 'failed');
+```
+
+test code, mysql driver v1.7.0
+```golang
+func TestQueryMySQL(t *testing.T) {
+	db, err := sql.Open("mysql", "root:123456@tcp(127.0.0.1:4000)/dataflow") //?parseTime=true&loc=Asia%2FShanghai
+	if err != nil {
+		panic(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close()
+	queryAndPrint(t, conn, "select version()")
+	executePsAndPrint(t, conn, "select * from t WHERE TIMESTAMPDIFF(SECOND, updated_at, UTC_TIMESTAMP()) > ?", 300.000000)
+	queryAndPrint(t, conn, "select * from t WHERE TIMESTAMPDIFF(SECOND, updated_at, UTC_TIMESTAMP()) > 300.000000")
+}
+
+func queryAndPrint(t *testing.T, conn *sql.Conn, sql string) {
+	fmt.Println("execute using stmt:")
+	rows, err := conn.QueryContext(context.Background(), sql)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+	printRows(t, rows)
+}
+
+func printRows(t *testing.T, rows *sql.Rows) {
+	columns, err := rows.Columns()
+	require.NoError(t, err)
+	dst := make([]interface{}, len(columns))
+	for i := range columns {
+		dst[i] = &[]byte{}
+	}
+	for rows.Next() {
+		err := rows.Scan(dst...)
+		require.NoError(t, err)
+		var s string
+		for _, v := range dst {
+			s += fmt.Sprintf("%v, ", string(*v.(*[]byte)))
+		}
+		fmt.Println("Row:", s)
+	}
+}
+
+func executePsAndPrint(t *testing.T, conn *sql.Conn, sql string, args ...any) {
+	fmt.Println("execute using prepared stmt:")
+	ctx := context.Background()
+	ps, err2 := conn.PrepareContext(ctx, sql)
+	require.NoError(t, err2)
+	rows, err2 := ps.QueryContext(ctx, args...)
+	require.NoError(t, err2)
+	defer rows.Close()
+	printRows(t, rows)
+}
+```
+
+result
+```test
+=== RUN   TestQueryMySQL
+execute using stmt:
+Row: 5.7.25-TiDB-v6.2.0, 
+execute using prepared stmt:
+Row: 2023-01-03 09:37:10, failed, 
+execute using stmt:
+Row: 2023-01-03 09:37:10, failed, 
+--- PASS: TestQueryMySQL (0.01s)
+PASS
+
+=== RUN   TestQueryMySQL
+execute using stmt:
+Row: 5.7.25-TiDB-v6.6.0, 
+execute using prepared stmt:
+execute using stmt:
+Row: 2023-01-03 09:37:10, failed, 
+--- PASS: TestQueryMySQL (0.01s)
+PASS
+```
+
+### 2. What did you expect to see? (Required)
+prepared statement can get same result at normal stmt
+
+### 3. What did you see instead (Required)
+empty result
+
+### 4. What is your TiDB version? (Required)
+6.6.0
+<!-- Paste the output of SELECT tidb_version() -->
+

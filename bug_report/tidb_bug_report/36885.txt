@@ -1,0 +1,224 @@
+ID: 36885
+Title: Table cache may lead to inconsistency read
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+Run jepsen bank-multitable workload.
+
+### 2. What did you expect to see? (Required)
+No anomaly reported.
+
+### 3. What did you see instead (Required)
+Test failed
+```
+2022-08-04 03:33:37,709{GMT}	INFO	[jepsen test runner] jepsen.core: {:perf
+ {:latency-graph {:valid? true},
+  :rate-graph {:valid? true},
+  :valid? true},
+ :workload
+ {:SI
+  {:valid? false,
+   :read-count 72497,
+   :error-count 10,
+   :first-error
+   {:type :wrong-total,
+    :total 101,
+    :op
+    {:type :ok,
+     :f :read,
+     :process 14,
+     :time 6432395307,
+     :value {0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6},
+     :txn-info {:start_ts 435049826671394872},
+     :index 739}},
+   :errors
+   {:wrong-total
+    {:count 10,
+     :first
+     {:type :wrong-total,
+      :total 101,
+      :op
+      {:type :ok,
+       :f :read,
+       :process 14,
+       :time 6432395307,
+       :value {0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6},
+       :txn-info {:start_ts 435049826671394872},
+       :index 739}},
+     :worst
+     {:type :wrong-total,
+      :total 101,
+      :op
+      {:type :ok,
+       :f :read,
+       :process 14,
+       :time 6432395307,
+       :value {0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6},
+       :txn-info {:start_ts 435049826671394872},
+       :index 739}},
+     :last
+     {:type :wrong-total,
+      :total 101,
+      :op
+      {:type :ok,
+       :f :read,
+       :process 14,
+       :time 6500274594,
+       :value {0 57, 1 0, 2 15, 3 4, 4 5, 5 11, 6 3, 7 6},
+       :txn-info {:start_ts 435049826697347135},
+       :index 767}},
+     :lowest
+     {:type :wrong-total,
+      :total 101,
+      :op
+      {:type :ok,
+       :f :read,
+       :process 14,
+       :time 6432395307,
+       :value {0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6},
+       :txn-info {:start_ts 435049826671394872},
+       :index 739}},
+     :highest
+     {:type :wrong-total,
+      :total 101,
+      :op
+      {:type :ok,
+       :f :read,
+       :process 14,
+       :time 6432395307,
+       :value {0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6},
+       :txn-info {:start_ts 435049826671394872},
+       :index 739}}}}},
+  :plot {:valid? true},
+  :valid? false},
+ :valid? false}
+
+
+Analysis invalid! (ﾉಥ益ಥ）ﾉ ┻━┻
+```
+
+This issus was originally found by https://github.com/pingcap/jepsen/pull/93#issuecomment-1202235737 . I've added some [debug logs](https://github.com/pingcap/tidb/compare/master...zyguan:tidb:debug-table-cache) and reproduced the issue, the full logs can be accessed [here](http://minio.pingcap.net:9000/test-infra/2022-08-04/plan-exec-1111474/plan-exec-1111474-2211620408/archive.tgz).
+
+The mappings of table name and id are listed below.
+
+| table name | table id |
+| ---------- | -------: |
+| account0   |       70 |
+| account1   |       73 |
+| account2   |       76 |
+| account3   |       79 |
+| account4   |       82 |
+| account5   |       85 |
+| account6   |       88 |
+| account7   |       91 |
+
+<details>
+<summary>And we see the following history.</summary>
+
+```
+6*	:invoke	:transfer	{:from 2, :to 0, :amount 1}
+11	:ok	:transfer	{:from ["accounts1" 10 6], :to ["accounts6" 5 9], :amount 4}	{:txn_scope global, :start_ts 435049825832272078, :commit_ts 435049825845379092, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+11	:invoke	:transfer	{:from 6, :to 2, :amount 4}
+10	:ok	:transfer	{:from ["accounts5" 8 7], :to ["accounts2" 13 14], :amount 1}	{:txn_scope global, :start_ts 435049825832272086, :commit_ts 435049825845379094, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+10	:invoke	:read	nil
+1	:ok	:read	{0 51, 1 7, 2 16, 3 5, 4 5, 5 8, 6 5, 7 3}	{:start_ts 435049825832272065}
+1	:invoke	:read	nil
+12	:ok	:read	{0 48, 1 10, 2 13, 3 5, 4 5, 5 8, 6 5, 7 6}	{:start_ts 435049825832272101}
+12	:invoke	:read	nil
+2	:ok	:read	{0 48, 1 10, 2 13, 3 5, 4 5, 5 8, 6 5, 7 6}	{:start_ts 435049825845379086}
+2	:invoke	:transfer	{:from 7, :to 1, :amount 5}
+11	:ok	:transfer	{:from ["accounts6" 9 5], :to ["accounts2" 14 18], :amount 4}	{:txn_scope global, :start_ts 435049825845379112, :commit_ts 435049825845379160, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+11	:invoke	:transfer	{:from 0, :to 5, :amount 1}
+10	:ok	:read	{0 48, 1 6, 2 14, 3 5, 4 5, 5 7, 6 9, 7 6}	{:start_ts 435049825845379123}
+7	:ok	:transfer	{:from ["accounts1" 6 3], :to ["accounts0" 48 51], :amount 3}	{:txn_scope global, :start_ts 435049825845379134, :commit_ts 435049825845379182, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+10	:invoke	:transfer	{:from 6, :to 5, :amount 3}
+7	:invoke	:read	nil
+1	:ok	:read	{0 48, 1 6, 2 14, 3 5, 4 5, 5 7, 6 9, 7 6}	{:start_ts 435049825845379131}
+1	:invoke	:read	nil
+12	:ok	:read	{0 48, 1 6, 2 14, 3 5, 4 5, 5 7, 6 9, 7 6}	{:start_ts 435049825845379151}
+12	:invoke	:transfer	{:from 1, :to 0, :amount 3}
+0	:ok	:transfer	{:from ["accounts2" 18 15], :to ["accounts6" 5 8], :amount 3}	{:txn_scope global, :start_ts 435049825845379187, :commit_ts 435049825845379228, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+0	:invoke	:transfer	{:from 2, :to 7, :amount 3}
+11	:ok	:transfer	{:from ["accounts0" 51 50], :to ["accounts5" 7 8], :amount 1}	{:txn_scope global, :start_ts 435049825845379185, :commit_ts 435049825845379239, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+11	:invoke	:read	nil
+7	:ok	:read	{0 51, 1 3, 2 18, 3 5, 4 5, 5 7, 6 5, 7 6}	{:start_ts 435049825845379213}
+7	:invoke	:transfer	{:from 2, :to 7, :amount 5}
+1	:ok	:read	{0 51, 1 3, 2 18, 3 5, 4 5, 5 7, 6 5, 7 6}	{:start_ts 435049825845379225}
+1	:invoke	:transfer	{:from 5, :to 2, :amount 4}
+10	:ok	:transfer	{:from ["accounts6" 8 5], :to ["accounts5" 8 11], :amount 3}	{:txn_scope global, :start_ts 435049825845379275, :commit_ts 435049825845379308, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+10	:invoke	:read	nil
+12	:ok	:transfer	{:from ["accounts1" 3 0], :to ["accounts0" 50 53], :amount 3}	{:txn_scope global, :start_ts 435049825845379288, :commit_ts 435049825845379312, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+12	:invoke	:transfer	{:from 3, :to 6, :amount 1}
+12	:ok	:transfer	{:from ["accounts3" 5 4], :to ["accounts6" 5 6], :amount 1}	{:txn_scope global, :start_ts 435049825845379325, :commit_ts 435049825858748423, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+12	:invoke	:transfer	{:from 6, :to 0, :amount 3}
+3	:fail	:transfer	{:from 4, :to 7, :amount 2}	{:start_ts 435049825609449526}	[:negative accounts4 -2]
+3	:invoke	:read	nil
+13	:ok	:read	{0 95, 1 0, 2 0, 3 0, 4 0, 5 0, 6 5, 7 0}	{:start_ts 435049825609449502}
+8	:ok	:read	{0 95, 1 0, 2 0, 3 0, 4 0, 5 0, 6 5, 7 0}	{:start_ts 435049825609449501}
+13	:invoke	:read	nil
+8	:invoke	:read	nil
+4	:ok	:read	{0 90, 1 0, 2 0, 3 5, 4 0, 5 0, 6 5, 7 0}	{:start_ts 435049825609449548}
+4	:invoke	:read	nil
+9	:ok	:read	{0 95, 1 0, 2 0, 3 0, 4 0, 5 0, 6 5, 7 0}	{:start_ts 435049825609449500}
+9	:invoke	:transfer	{:from 3, :to 4, :amount 2}
+14	:ok	:read	{0 95, 1 0, 2 0, 3 0, 4 0, 5 0, 6 5, 7 0}	{:start_ts 435049825609449504}
+14	:invoke	:read	nil
+6*	:ok	:transfer	{:from ["accounts2" 15 14], :to ["accounts0" 53 54], :amount 1}	{:txn_scope global, :start_ts 435049825845379336, :commit_ts 435049826658287618, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+6	:invoke	:transfer	{:from 2, :to 5, :amount 5}
+4	:ok	:read	{0 53, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6}	{:start_ts 435049826540322850}
+14	:ok	:read	{0 53, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6}	{:start_ts 435049826540322859}
+3	:ok	:read	{0 53, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6}	{:start_ts 435049826540322817}
+8	:ok	:read	{0 53, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6}	{:start_ts 435049826540322832}
+13	:ok	:read	{0 53, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6}	{:start_ts 435049826540322833}
+4	:invoke	:transfer	{:from 3, :to 5, :amount 5}
+14*	:invoke	:read	nil
+3	:invoke	:read	nil
+13	:invoke	:transfer	{:from 0, :to 4, :amount 5}
+8	:invoke	:transfer	{:from 5, :to 2, :amount 2}
+4	:fail	:transfer	{:from 3, :to 5, :amount 5}	{:start_ts 435049826671394873}	[:negative accounts3 -1]
+4	:invoke	:read	nil
+14*	:ok	:read	{0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6}	{:start_ts 435049826671394872}
+```
+
+</details>
+
+
+let
+- T1 :transfer {:from ["accounts2" 15 14], :to ["accounts0" 53 54], :amount 1} {:txn_scope global, :start_ts 435049825845379336, :commit_ts 435049826658287618, :txn_commit_mode 2pc, :async_commit_fallback false, :one_pc_fallback false}
+- T2 :read {0 54, 1 0, 2 15, 3 4, 4 5, 5 11, 6 6, 7 6} {:start_ts 435049826671394872}
+
+tidb logs shows
+- T1@node-1
+  ```
+  [2022/08/04 03:23:01.119 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=7712245037081297305] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049825845379336] [forUpdateTS=435049825845379336] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select @@tidb_current_ts ts"]
+  [2022/08/04 03:23:01.119 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=7712245037081297305] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049825845379336] [forUpdateTS=435049825845379336] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql=COMMIT]
+  [2022/08/04 03:23:01.119 +00:00] [INFO] [session.go:681] [">> write lock and keep alive"] [tids="[76,70]"] [ts=435049825845379336]
+  [2022/08/04 03:23:01.119 +00:00] [INFO] [cache.go:347] [">> acquire write lock"] [tid=76] [lease=435049826540060672]
+  [2022/08/04 03:23:01.119 +00:00] [INFO] [cache.go:347] [">> acquire write lock"] [tid=70] [lease=435049827038396416]
+  ...
+  ```
+- T2@node-4
+  ```
+  [2022/08/04 03:23:03.708 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=6546133790987649435] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049826540322859] [forUpdateTS=435049826540322859] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select balance from accounts1"]
+  [2022/08/04 03:23:03.708 +00:00] [INFO] [cache.go:214] [">> update cache data (lock for read, loading)"] [tid=76] [ts=435049826540322850] [start=435049826540322850] [lease=435049827326754816]
+  [2022/08/04 03:23:03.708 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=6546133790987649431] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049826540322850] [forUpdateTS=435049826540322850] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select balance from accounts3"]
+  [2022/08/04 03:23:03.709 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=6546133790987649435] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049826540322859] [forUpdateTS=435049826540322859] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select balance from accounts2"]
+  [2022/08/04 03:23:03.710 +00:00] [INFO] [cache.go:116] [">> read from cache"] [tid=76] [ts=435049826540322859] [loading=true]
+  [2022/08/04 03:23:03.710 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=6546133790987649431] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049826540322850] [forUpdateTS=435049826540322850] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select balance from accounts4"]
+  [2022/08/04 03:23:03.711 +00:00] [INFO] [cache.go:238] [">> update cache data (lock for read, loaded)"] [tid=76] [ts=435049826540322850] [start=435049826540322872] [lease=435049827326754816]
+  ...
+  [2022/08/04 03:23:04.248 +00:00] [INFO] [session.go:3149] [GENERAL_LOG] [conn=6546133790987649435] [user=root@10.233.71.204] [schemaVersion=58] [txnStartTS=435049826671394872] [forUpdateTS=435049826671394872] [isReadConsistency=false] [currentDB=test] [isPessimistic=false] [sessionTxnMode=OPTIMISTIC] [sql="select balance from accounts2"]
+  [2022/08/04 03:23:04.248 +00:00] [INFO] [cache.go:116] [">> read from cache"] [tid=76] [ts=435049826671394872] [loading=false]
+  ```
+
+T1 committed with start_ts=435049825845379336 and commit_ts=435049826658287618, it took about 3s because its prewrites encountered a lock. Cached data of account2 was updated with start=435049826540322872 and lease=435049827326754816 on node-4, then T2 read account0 from tikv and account2 from the cached data. Since account2.cached_data.start < T1.commit_ts < T2.start_ts < account2.cached_data.lease, T2 saw partial result of T1.
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+master

@@ -1,0 +1,214 @@
+ID: 23503
+Title: In case of extremely large number of mutations, Segmentation fault (stack overflow) in DB::MergeTreeDataMergerMutator::mutateAllPartColumns
+Description:
+**Describe the bug**
+
+The service is crashing when applying a mutation. The server currently has 20k+ mutations and I'm not sure which one is the culprit.
+
+```
+SELECT count(*) FROM system.mutations
+
+SELECT count(*)
+FROM system.mutations
+
+┌─count()─┐
+│   20726 │
+└─────────┘
+
+1 rows in set. Elapsed: 11.701 sec. Processed 20.73 thousand rows, 107.94 MB (1.77 thousand rows/s., 9.22 MB/s.)
+``` 
+
+**Does it reproduce on recent release?**
+
+It was happening in 20.7 but we didn't check the backtrace at that moment. Since it's a test machine we cleanup up everything, updated to 20.8.16.20 and it stopped happening, but it started happening again after a recent restart of the service; it wasn't crashing before that but the service seemed stuck and it was restarted manually (systemctl restart clickhouse-server).
+
+**How to reproduce**
+
+It is a background process so I don't know how the steps to reproduce it, but it always crashes 5-10 minutes
+after restart.
+
+**Expected behavior**
+
+The service shouldn't crash, either the mutation is applied or rejected with an exception.
+
+**Error message and/or stacktrace**
+
+It seems that the stack is running out of memory as it's crashing in frame **#69408** after a huge call stack going from `DB::IBlockInputStream::read` to `DB::MaterializingBlockInputStream::readImpl` and again to ``DB::IBlockInputStream::read`.
+
+Partial callstack (removing many intermediate steps, which are repeated:
+
+```
+(gdb) bt 10
+#0  0x000000001556418b in clock_gettime_ns (clock_type=6) at ../src/Common/Stopwatch.h:44
+#1  Stopwatch::nanoseconds (this=0x7fe944f050f8) at ../src/Common/Stopwatch.h:44
+#2  Stopwatch::start (this=0x7fe944f050f8) at ../src/Common/Stopwatch.h:28
+#3  DB::IBlockInputStream::read (this=0x7fe944f05020) at ../src/DataStreams/IBlockInputStream.cpp:44
+#4  0x0000000015bf09af in DB::ExpressionBlockInputStream::readImpl (this=0x7fe944f05320) at ../contrib/libcxx/include/memory:3826
+#5  0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe944f05320) at ../src/DataStreams/IBlockInputStream.cpp:57
+#6  0x0000000015bf09af in DB::ExpressionBlockInputStream::readImpl (this=0x7fe944f05620) at ../contrib/libcxx/include/memory:3826
+#7  0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe944f05620) at ../src/DataStreams/IBlockInputStream.cpp:57
+#8  0x0000000015bf09af in DB::ExpressionBlockInputStream::readImpl (this=0x7fe944f05920) at ../contrib/libcxx/include/memory:3826
+#9  0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe944f05920) at ../src/DataStreams/IBlockInputStream.cpp:57
+(More stack frames follow...)
+```
+
+
+```
+(gdb) bt -30
+#69379 0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe96a3b4b20) at ../src/DataStreams/IBlockInputStream.cpp:57
+#69380 0x0000000015980b3f in DB::MaterializingBlockInputStream::readImpl (this=<optimized out>) at ../contrib/libcxx/include/memory:3826
+#69381 0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe96a3b4e20) at ../src/DataStreams/IBlockInputStream.cpp:57
+#69382 0x0000000015bf4fef in DB::CheckSortedBlockInputStream::readImpl (this=0x7fe96a3b6e20) at ../contrib/libcxx/include/memory:3826
+#69383 0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe96a3b6e20) at ../src/DataStreams/IBlockInputStream.cpp:57
+#69384 0x0000000015bf09af in DB::ExpressionBlockInputStream::readImpl (this=0x7fe96a3b5420) at ../contrib/libcxx/include/memory:3826
+#69385 0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe96a3b5420) at ../src/DataStreams/IBlockInputStream.cpp:57
+#69386 0x0000000015980b3f in DB::MaterializingBlockInputStream::readImpl (this=<optimized out>) at ../contrib/libcxx/include/memory:3826
+#69387 0x00000000155642dd in DB::IBlockInputStream::read (this=0x7fe96a3b5720) at ../src/DataStreams/IBlockInputStream.cpp:57
+#69388 0x0000000016133cb3 in DB::MergeTreeDataMergerMutator::mutateAllPartColumns (this=this@entry=0x7febf4438bd8, new_data_part=..., metadata_snapshot=..., skip_indices=..., mutating_stream=..., time_of_mutation=time_of_mutation@entry=1619083974, 
+    compression_codec=..., merge_entry=..., need_remove_expired_values=false) at ../contrib/libcxx/include/memory:3826
+#69389 0x0000000016135724 in DB::MergeTreeDataMergerMutator::mutatePartToTemporaryPart (this=this@entry=0x7febf4438bd8, future_part=..., metadata_snapshot=..., commands=..., merge_entry=..., time_of_mutation=1619083974, context=..., 
+    space_reservation=...) at ../contrib/libcxx/include/memory:3474
+#69390 0x0000000015f0eaee in DB::StorageMergeTree::tryMutatePart (this=this@entry=0x7febf4438700) at ../contrib/libcxx/include/memory:2582
+#69391 0x0000000015f0f9ca in DB::StorageMergeTree::mergeMutateTask (this=0x7febf4438700) at ../src/Storages/StorageMergeTree.cpp:921
+#69392 0x000000001609cc33 in std::__1::__function::__value_func<DB::BackgroundProcessingPoolTaskResult ()>::operator()() const (this=<optimized out>) at ../contrib/libcxx/include/functional:2471
+#69393 std::__1::function<DB::BackgroundProcessingPoolTaskResult ()>::operator()() const (this=<optimized out>) at ../contrib/libcxx/include/functional:2473
+#69394 DB::BackgroundProcessingPool::workLoopFunc (this=0x7fecf545aa18) at ../src/Storages/MergeTree/BackgroundProcessingPool.cpp:202
+#69395 0x000000001609d572 in DB::BackgroundProcessingPool::<lambda()>::operator() (__closure=0x7febf3744098) at ../src/Storages/MergeTree/BackgroundProcessingPool.cpp:53
+#69396 std::__1::__invoke_constexpr<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int, const DB::BackgroundProcessingPool::PoolSettings&, char const*, char const*)::<lambda()>&> (__f=...) at ../contrib/libcxx/include/type_traits:3525
+#69397 std::__1::__apply_tuple_impl<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int, const DB::BackgroundProcessingPool::PoolSettings&, char const*, char const*)::<lambda()>&, const std::__1::tuple<>&> (__t=..., __f=...)
+    at ../contrib/libcxx/include/tuple:1415
+#69398 std::__1::apply<const DB::BackgroundProcessingPool::BackgroundProcessingPool(int, const DB::BackgroundProcessingPool::PoolSettings&, char const*, char const*)::<lambda()>&, const std::__1::tuple<>&> (__t=..., __f=...)
+    at ../contrib/libcxx/include/tuple:1424
+#69399 ThreadFromGlobalPool::<lambda()>::operator()(void) const (this=0x7febf3744088) at ../src/Common/ThreadPool.h:172
+#69400 0x000000000e662ba7 in std::__1::__function::__value_func<void ()>::operator()() const (this=0x7febf0df4e20) at ../contrib/libcxx/include/functional:2471
+#69401 std::__1::function<void ()>::operator()() const (this=0x7febf0df4e20) at ../contrib/libcxx/include/functional:2473
+#69402 ThreadPoolImpl<std::__1::thread>::worker (this=0x7fecf5454300, thread_it=...) at ../src/Common/ThreadPool.cpp:243
+#69403 0x000000000e661093 in void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}::operator()() const (this=<optimized out>, this=<optimized out>)
+    at ../src/Common/ThreadPool.cpp:124
+#69404 std::__1::__invoke<void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}&&, (void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}&&)...) (__f=...)
+    at ../contrib/libcxx/include/type_traits:3519
+#69405 std::__1::__thread_execute<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>&, std::__1::__tuple_indices<>) (__t=...) at ../contrib/libcxx/include/thread:273
+#69406 std::__1::__thread_proxy<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}> >(std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct> >, void ThreadPoolImpl<std::__1::thread>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::{lambda()#3}>) (__vp=0x7fec08a0e700) at ../contrib/libcxx/include/thread:284
+#69407 0x00007fecf6d446db in start_thread (arg=0x7febf0dfb700) at pthread_create.c:463
+#69408 0x00007fecf666171f in clone () at ../sysdeps/unix/sysv/linux/x86_64/clone.S:95
+```
+
+I don't see anything interesting in the last log messages before crashing:
+
+Logs:
+```
+2021.04.22 10:41:12.636191 [ 7445 ] {} <Debug> MemoryTracker: Peak memory usage (for query): 48.37 MiB.
+2021.04.22 10:41:13.521550 [ 7444 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: GET, Address: 10.156.0.2:41368, User-Agent: none, Content Type: , Transfer Encoding: identity
+2021.04.22 10:41:15.034408 [ 7369 ] {} <Debug> MemoryTracker: Current memory usage (total): 21.00 GiB.
+2021.04.22 10:41:15.284308 [ 7376 ] {} <Trace> SystemLog (system.part_log): Flushing system log, 6 entries to flush
+2021.04.22 10:41:15.284696 [ 7376 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 34.20 GiB.
+2021.04.22 10:41:15.285337 [ 7376 ] {} <Trace> system.part_log: Renaming temporary part tmp_insert_202104_36_36_0 to 202104_158201_158201_0.
+2021.04.22 10:41:15.285451 [ 7376 ] {} <Trace> SystemLog (system.part_log): Flushed system log
+2021.04.22 10:41:15.307001 [ 7430 ] {} <Trace> SystemLog (system.query_thread_log): Flushing system log, 18 entries to flush
+2021.04.22 10:41:15.307709 [ 7430 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 34.20 GiB.
+2021.04.22 10:41:15.308587 [ 7430 ] {} <Trace> system.query_thread_log: Renaming temporary part tmp_insert_202104_36_36_0 to 202104_158187_158187_0.
+2021.04.22 10:41:15.308715 [ 7430 ] {} <Trace> SystemLog (system.query_thread_log): Flushed system log
+2021.04.22 10:41:15.316645 [ 7421 ] {} <Trace> SystemLog (system.query_log): Flushing system log, 12 entries to flush
+2021.04.22 10:41:15.317511 [ 7421 ] {} <Debug> DiskLocal: Reserving 1.00 MiB on disk `default`, having unreserved 34.20 GiB.
+2021.04.22 10:41:15.318236 [ 7421 ] {} <Trace> system.query_log: Renaming temporary part tmp_insert_202104_36_36_0 to 202104_158178_158178_0.
+2021.04.22 10:41:15.318509 [ 7421 ] {} <Trace> SystemLog (system.query_log): Flushed system log
+2021.04.22 10:41:17.187182 [ 7360 ] {} <Debug> MemoryTracker: Current memory usage: 2.00 GiB.
+2021.04.22 10:41:17.409919 [ 7445 ] {} <Trace> HTTPHandler-factory: HTTP Request for HTTPHandler-factory. Method: GET, Address: 10.156.0.2:41440, User-Agent: python-requests/2.25.1, Content Type: , Transfer Encoding: identity
+2021.04.22 10:41:49.012835 [ 7757 ] {} <Information> SentryWriter: Sending crash reports is disabled
+2021.04.22 10:41:49.015361 [ 7757 ] {} <Trace> Pipe: Pipe capacity is 1.00 MiB
+2021.04.22 10:41:49.166031 [ 7757 ] {} <Information> : Starting ClickHouse 20.8.16.20 with revision 54438, build id: 466AA0409C2F4D82, PID 7757
+2021.04.22 10:41:49.166131 [ 7757 ] {} <Information> Application: starting up
+2021.04.22 10:41:49.171628 [ 7757 ] {} <Information> StatusFile: Status file /mnt/disks/tb/clickhouse/status already exists - unclean restart. Contents:
+PID: 7328
+Started at: 2021-04-22 10:36:45
+Revision: 54438
+
+2021.04.22 10:41:49.171717 [ 7757 ] {} <Debug> Application: rlimit on number of file descriptors is 500000
+```
+
+Error logs around that time (edited to remove column names)
+```
+2021.04.22 10:41:02.031781 [ 7434 ] {f588880d-1010-4d70-91dd-ab697c132384} <Error> executeQuery: Code: 252, e.displayText() = DB::Exception: Too many parts (300). Merges are processing significantly slower than inserts. (version 20.8.16.20 (official bui
+ld)) (from 127.0.0.1:56194) (in query: INSERT INTO `d_073c5e`.`t_3b2dc2a7eadf4220826aa88a53b561b4` (`XXXXXXXXXXXXXXXXXXXXXXXX) VALUES), Stack trace (when copying this message, always include the lines below):
+
+0. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/src/Exception.cpp:27: Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x18cdacf0 in /usr/lib/debug/usr/bin/clickhou
+se
+1. /build/obj-x86_64-linux-gnu/../src/Common/Exception.cpp:37: DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xe63533d in /usr/lib/debug/usr/bin/clickhouse
+2. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/string:2134: DB::MergeTreeData::delayInsertOrThrowIfNeeded(Poco::Event*) const (.cold) @ 0x16111d2a in /usr/lib/debug/usr/bin/clickhouse
+3. /build/obj-x86_64-linux-gnu/../src/Storages/MergeTree/MergeTreeBlockOutputStream.cpp:20: DB::MergeTreeBlockOutputStream::write(DB::Block const&) @ 0x160dc745 in /usr/lib/debug/usr/bin/clickhouse
+4. /build/obj-x86_64-linux-gnu/../src/DataStreams/PushingToViewsBlockOutputStream.cpp:156: DB::PushingToViewsBlockOutputStream::write(DB::Block const&) @ 0x1597c046 in /usr/lib/debug/usr/bin/clickhouse
+5. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/__hash_table:1541: DB::AddingDefaultBlockOutputStream::write(DB::Block const&) @ 0x159bf8cf in /usr/lib/debug/usr/bin/clickhouse
+6. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/__hash_table:1541: DB::SquashingBlockOutputStream::finalize() @ 0x15981697 in /usr/lib/debug/usr/bin/clickhouse
+7. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/memory:3826: DB::SquashingBlockOutputStream::writeSuffix() @ 0x1598177d in /usr/lib/debug/usr/bin/clickhouse
+8. /build/obj-x86_64-linux-gnu/../src/Server/TCPHandler.cpp:502: DB::TCPHandler::processInsertQuery(DB::Settings const&) @ 0x163a6bca in /usr/lib/debug/usr/bin/clickhouse
+9. /build/obj-x86_64-linux-gnu/../src/Server/TCPHandler.cpp:263: DB::TCPHandler::runImpl() @ 0x163a7dcb in /usr/lib/debug/usr/bin/clickhouse
+10. /build/obj-x86_64-linux-gnu/../src/Server/TCPHandler.cpp:1219: DB::TCPHandler::run() @ 0x163a8470 in /usr/lib/debug/usr/bin/clickhouse
+11. /build/obj-x86_64-linux-gnu/../contrib/poco/Net/src/TCPServerConnection.cpp:57: Poco::Net::TCPServerConnection::start() @ 0x18bf89bb in /usr/lib/debug/usr/bin/clickhouse
+12. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/atomic:856: Poco::Net::TCPServerDispatcher::run() @ 0x18bf8f48 in /usr/lib/debug/usr/bin/clickhouse
+13. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/Mutex_POSIX.h:59: Poco::PooledThread::run() @ 0x18d77a36 in /usr/lib/debug/usr/bin/clickhouse
+14. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:223: Poco::ThreadImpl::runnableEntry(void*) @ 0x18d72e30 in /usr/lib/debug/usr/bin/clickhouse
+15. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+16. /build/glibc-S9d2JN/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97: clone @ 0x12171f in /usr/lib/debug/lib/x86_64-linux-gnu/libc-2.27.so
+
+2021.04.22 10:41:03.527826 [ 7434 ] {287e3a6b-7823-48a5-84e9-908fa8386edd} <Error> executeQuery: Code: 252, e.displayText() = DB::Exception: Too many parts (300). Merges are processing significantly slower than inserts. (version 20.8.16.20 (official bui
+ld)) (from 127.0.0.1:56198) (in query: INSERT INTO `d_073c5e`.`t_3b2dc2a7eadf4220826aa88a53b561b4` (XXXXXXXXXXXXXXXXXXXXXXXXX) VALUES), Stack trace (when copying this message, always include the lines below):
+
+0. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/src/Exception.cpp:27: Poco::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0x18cdacf0 in /usr/lib/debug/usr/bin/clickhou
+se
+1. /build/obj-x86_64-linux-gnu/../src/Common/Exception.cpp:37: DB::Exception::Exception(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, int) @ 0xe63533d in /usr/lib/debug/usr/bin/clickhouse
+2. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/string:2134: DB::MergeTreeData::delayInsertOrThrowIfNeeded(Poco::Event*) const (.cold) @ 0x16111d2a in /usr/lib/debug/usr/bin/clickhouse
+3. /build/obj-x86_64-linux-gnu/../src/Storages/MergeTree/MergeTreeBlockOutputStream.cpp:20: DB::MergeTreeBlockOutputStream::write(DB::Block const&) @ 0x160dc745 in /usr/lib/debug/usr/bin/clickhouse
+4. /build/obj-x86_64-linux-gnu/../src/DataStreams/PushingToViewsBlockOutputStream.cpp:156: DB::PushingToViewsBlockOutputStream::write(DB::Block const&) @ 0x1597c046 in /usr/lib/debug/usr/bin/clickhouse
+5. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/__hash_table:1541: DB::AddingDefaultBlockOutputStream::write(DB::Block const&) @ 0x159bf8cf in /usr/lib/debug/usr/bin/clickhouse
+6. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/__hash_table:1541: DB::SquashingBlockOutputStream::finalize() @ 0x15981697 in /usr/lib/debug/usr/bin/clickhouse
+7. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/memory:3826: DB::SquashingBlockOutputStream::writeSuffix() @ 0x1598177d in /usr/lib/debug/usr/bin/clickhouse
+8. /build/obj-x86_64-linux-gnu/../src/Server/TCPHandler.cpp:502: DB::TCPHandler::processInsertQuery(DB::Settings const&) @ 0x163a6bca in /usr/lib/debug/usr/bin/clickhouse
+9. /build/obj-x86_64-linux-gnu/../src/Server/TCPHandler.cpp:263: DB::TCPHandler::runImpl() @ 0x163a7dcb in /usr/lib/debug/usr/bin/clickhouse
+10. /build/obj-x86_64-linux-gnu/../src/Server/TCPHandler.cpp:1219: DB::TCPHandler::run() @ 0x163a8470 in /usr/lib/debug/usr/bin/clickhouse
+11. /build/obj-x86_64-linux-gnu/../contrib/poco/Net/src/TCPServerConnection.cpp:57: Poco::Net::TCPServerConnection::start() @ 0x18bf89bb in /usr/lib/debug/usr/bin/clickhouse
+12. /build/obj-x86_64-linux-gnu/../contrib/libcxx/include/atomic:856: Poco::Net::TCPServerDispatcher::run() @ 0x18bf8f48 in /usr/lib/debug/usr/bin/clickhouse
+13. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/Mutex_POSIX.h:59: Poco::PooledThread::run() @ 0x18d77a36 in /usr/lib/debug/usr/bin/clickhouse
+14. /build/obj-x86_64-linux-gnu/../contrib/poco/Foundation/include/Poco/AutoPtr.h:223: Poco::ThreadImpl::runnableEntry(void*) @ 0x18d72e30 in /usr/lib/debug/usr/bin/clickhouse
+15. start_thread @ 0x76db in /lib/x86_64-linux-gnu/libpthread-2.27.so
+16. /build/glibc-S9d2JN/glibc-2.27/misc/../sysdeps/unix/sysv/linux/x86_64/clone.S:97: clone @ 0x12171f in /usr/lib/debug/lib/x86_64-linux-gnu/libc-2.27.so
+
+2021.04.22 10:41:54.661816 [ 7833 ] {} <Warning> d_073c5e.t_3b2dc2a7eadf4220826aa88a53b561b4: Removing temporary directory /mnt/disks/tb/clickhouse/data/d_073c5e/t_3b2dc2a7eadf4220826aa88a53b561b4/tmp_mut_all_70357_70357_0_87295/
+2021.04.22 10:41:54.680371 [ 7833 ] {} <Warning> d_073c5e.t_3b2dc2a7eadf4220826aa88a53b561b4: Removing temporary directory /mnt/disks/tb/clickhouse/data/d_073c5e/t_3b2dc2a7eadf4220826aa88a53b561b4/tmp_mut_all_2599_4160_9_87295/
+```
+
+
+I'm not sure if this is an issue of infinite recursion, the recursion being too big for the stack size or some other issue coming from the fact that there are either many mutations or they are too big. Any hints to identify and address the issue would be greatly appreciated.
+
+
+**Additional context**
+
+Server memory:
+```
+$ free -m
+              total        used        free      shared  buff/cache   available
+Mem:          64322        4878       25450          19       33993       58625
+Swap:             0           0           0
+```
+
+Service limits at runtime:
+
+```
+cat /proc/6925/limits 
+Limit                     Soft Limit           Hard Limit           Units     
+Max cpu time              unlimited            unlimited            seconds   
+Max file size             unlimited            unlimited            bytes     
+Max data size             unlimited            unlimited            bytes     
+Max stack size            8388608              unlimited            bytes     
+Max core file size        10737418240          unlimited            bytes     
+Max resident set          unlimited            unlimited            bytes     
+Max processes             257114               257114               processes 
+Max open files            500000               500000               files     
+Max locked memory         67108864             67108864             bytes     
+Max address space         unlimited            unlimited            bytes     
+Max file locks            unlimited            unlimited            locks     
+Max pending signals       257114               257114               signals   
+Max msgqueue size         819200               819200               bytes     
+Max nice priority         0                    0                    
+Max realtime priority     0                    0                    
+Max realtime timeout      unlimited            unlimited            us
+```

@@ -1,0 +1,111 @@
+ID: 9044
+Title: rows missing for LeftOuterSemiJoin when using merge join
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+In TiDB:
+```
+mysql> create table t(a int, b int);
+Query OK, 0 rows affected (0.01 sec)
+
+mysql> insert into t values(1,1),(1,2);
+Query OK, 2 rows affected (0.00 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+mysql> create table s(a int, b int);
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into s values(1,1);
+Query OK, 1 row affected (0.01 sec)
+
+mysql> select a in (select a from s where s.b >= t.b) from t;
++-----------------------------------------+
+| a in (select a from s where s.b >= t.b) |
++-----------------------------------------+
+|                                       1 |
+|                                       0 |
++-----------------------------------------+
+2 rows in set (0.00 sec)
+
+mysql> select /*+ TIDB_SMJ(t,s) */ a in (select a from s where s.b >= t.b) from t;
++-----------------------------------------+
+| a in (select a from s where s.b >= t.b) |
++-----------------------------------------+
+|                                       1 |
++-----------------------------------------+
+1 row in set (0.01 sec)
+
+mysql> explain select /*+ TIDB_SMJ(t,s) */ a in (select a from s where s.b >= t.b) from t;
++----------------------------+----------+------+--------------------------------------------------------------------------------------------+
+| id                         | count    | task | operator info                                                                              |
++----------------------------+----------+------+--------------------------------------------------------------------------------------------+
+| Projection_7               | 10000.00 | root | 6_aux_0                                                                                    |
+| └─MergeJoin_8              | 10000.00 | root | left outer semi join, left key:tmp.t.a, right key:tmp.s.a, other cond:ge(tmp.s.b, tmp.t.b) |
+|   ├─Sort_12                | 10000.00 | root | tmp.t.a:asc                                                                                |
+|   │ └─TableReader_11       | 10000.00 | root | data:TableScan_10                                                                          |
+|   │   └─TableScan_10       | 10000.00 | cop  | table:t, range:[-inf,+inf], keep order:false, stats:pseudo                                 |
+|   └─Sort_16                | 10000.00 | root | tmp.s.a:asc                                                                                |
+|     └─TableReader_15       | 10000.00 | root | data:TableScan_14                                                                          |
+|       └─TableScan_14       | 10000.00 | cop  | table:s, range:[-inf,+inf], keep order:false, stats:pseudo                                 |
++----------------------------+----------+------+--------------------------------------------------------------------------------------------+
+8 rows in set (0.00 sec)
+
+mysql> explain select a in (select a from s where s.b >= t.b) from t;
++-------------------------+-------+------+-----------------------------------------------------------------------------------------------------------+
+| id                      | count | task | operator info                                                                                             |
++-------------------------+-------+------+-----------------------------------------------------------------------------------------------------------+
+| Projection_7            | 2.00  | root | 6_aux_0                                                                                                   |
+| └─HashLeftJoin_8        | 2.00  | root | left outer semi join, inner:TableReader_12, equal:[eq(tmp.t.a, tmp.s.a)], other cond:ge(tmp.s.b, tmp.t.b) |
+|   ├─TableReader_10      | 2.00  | root | data:TableScan_9                                                                                          |
+|   │ └─TableScan_9       | 2.00  | cop  | table:t, range:[-inf,+inf], keep order:false, stats:pseudo                                                |
+|   └─TableReader_12      | 1.00  | root | data:TableScan_11                                                                                         |
+|     └─TableScan_11      | 1.00  | cop  | table:s, range:[-inf,+inf], keep order:false, stats:pseudo                                                |
++-------------------------+-------+------+-----------------------------------------------------------------------------------------------------------+
+6 rows in set (0.00 sec)
+```
+
+2. What did you expect to see?
+
+In MySQL:
+```
+mysql> create table t(a int, b int);
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> insert into t values(1,1),(1,2);
+Query OK, 2 rows affected (0.01 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+mysql> create table s(a int, b int);
+Query OK, 0 rows affected (0.02 sec)
+
+mysql> insert into s values(1,1);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> select a in (select a from s where s.b >= t.b) from t;
++-----------------------------------------+
+| a in (select a from s where s.b >= t.b) |
++-----------------------------------------+
+|                                       1 |
+|                                       0 |
++-----------------------------------------+
+2 rows in set (0.00 sec)
+```
+
+3. What did you see instead?
+
+One row missing when using merge join.
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select version();
++--------------------------------------+
+| version()                            |
++--------------------------------------+
+| 5.7.10-TiDB-v2.1.0-rc.3-457-ge1381b4 |
++--------------------------------------+
+```

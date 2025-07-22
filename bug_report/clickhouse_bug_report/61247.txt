@@ -1,0 +1,124 @@
+ID: 61247
+Title: StorageJoin is not utilized when there are multiple joins
+Description:
+**Describe the situation**
+When there are multiple joins, storage join is not utilised even if it's in the right hand side of the join and joining key match.
+
+**How to reproduce**
+Fact table:
+```sql
+CREATE TABLE default.tab
+(
+    `k1` Nullable(UInt64),
+    `k2` Nullable(UInt64),
+    `v` String
+)
+ENGINE = Memory;
+```
+
+Join table:
+```sql
+CREATE TABLE default.mem
+(
+    `k` UInt64,
+    `v` String
+)
+ENGINE = Join(ANY, LEFT, k)
+```
+
+1. Non-analyzer:
+
+```sql
+EXPLAIN PIPELINE
+SELECT *
+FROM tab
+ANY LEFT JOIN mem ON k1 = mem.k
+ANY LEFT JOIN mem AS t ON k2 = t.k
+
+Query id: 30ff1f46-8e45-4a05-9815-32c991617afc
+
+┌─explain───────────────────────────┐
+│ (Expression)                      │
+│ ExpressionTransform               │
+│   (Join)                          │
+│   JoiningTransform 2 → 1          │
+│     (Expression)                  │
+│     ExpressionTransform           │
+│       (FilledJoin)                │
+│       JoiningTransform            │
+│         (Expression)              │
+│         ExpressionTransform       │
+│           (ReadFromMemoryStorage) │
+│     (Expression)                  │
+│     FillingRightJoinSide          │
+│       Resize 128 → 1              │
+│         ExpressionTransform × 128 │
+│           (ReadFromStorage)       │
+│           Resize 1 → 128          │
+│             Join 0 → 1            │
+└───────────────────────────────────┘
+```
+
+Note that in the second join, we need to alias `mem` because old analyzer cannot resolve column names. In the second join, it's building hash join again from join table, which is not optimal.
+
+2. Analyzer
+
+New analyzer is good, it can resolve column names and we, but it doesn't allow converting join key from non-nullable -> nullable.
+
+```sql
+EXPLAIN PIPELINE
+SELECT *
+FROM tab
+ANY LEFT JOIN mem ON k1 = mem.k
+ANY LEFT JOIN mem ON k2 = mem.k
+SETTINGS allow_experimental_analyzer =1
+
+Query id: 7addb722-0063-4e5f-b04a-d1b8efb79fc9
+
+
+Elapsed: 0.002 sec.
+
+Received exception from server (version 24.2.1):
+Code: 264. DB::Exception: Received from localhost:9100. DB::Exception: JOIN with 'Join' table engine should be performed by storage keys [k], but column '_CAST(__table2.k, 'Nullable(UInt64)'_String)' was found. (INCOMPATIBLE_TYPE_OF_JOIN)
+```
+
+**Expected performance**
+
+Storage join can be utilised in both old and new analyzer.
+
+**Additional context**
+
+When removing nullable from fact table, new analyzer works perfectly 👍 
+
+```sql
+CREATE TABLE default.tab
+(
+    `k1` Nullable(UInt64),
+    `k2` Nullable(UInt64),
+    `v` String
+)
+ENGINE = Memory;
+
+EXPLAIN PIPELINE
+SELECT *
+FROM tab
+ANY LEFT JOIN mem ON k1 = mem.k
+ANY LEFT JOIN mem AS t ON k2 = t.k
+SETTINGS allow_experimental_analyzer =1
+
+Query id: c037244f-2550-4b3d-96c4-6dff151aa8e9
+
+┌─explain───────────────────────────┐
+│ (Expression)                      │
+│ ExpressionTransform               │
+│   (FilledJoin)                    │
+│   JoiningTransform                │
+│     (Expression)                  │
+│     ExpressionTransform           │
+│       (FilledJoin)                │
+│       JoiningTransform            │
+│         (Expression)              │
+│         ExpressionTransform       │
+│           (ReadFromMemoryStorage) │
+└───────────────────────────────────┘
+```

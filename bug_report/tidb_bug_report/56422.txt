@@ -1,0 +1,46 @@
+ID: 56422
+Title: TTL Task will not be canceled if facing write conflict
+Description:
+## Bug Report
+
+See the following function:
+
+```
+// finish turns current job into last job, and update the error message and statistics summary
+func (job *ttlJob) finish(se session.Session, now time.Time, summary *TTLSummary) {
+	// at this time, the job.ctx may have been canceled (to cancel this job)
+	// even when it's canceled, we'll need to update the states, so use another context
+	err := se.RunInTxn(context.TODO(), func() error {
+		sql, args := finishJobSQL(job.tbl.ID, now, summary.SummaryText, job.id)
+...
+		sql, args = removeTaskForJob(job.id)
+...
+		sql, args = finishJobHistorySQL(job.id, now, summary)
+,,,
+		return nil
+	}, session.TxnModeOptimistic)
+
+	if err != nil {
+		logutil.BgLogger().Error("fail to finish a ttl job", zap.Error(err), zap.Int64("tableID", job.tbl.ID), zap.String("jobID", job.id))
+	}
+}
+```
+
+It'll update records in three tables: `tidb_ttl_table_status`, `tidb_ttl_task` and `tidb_ttl_job_history`. It's usually fine to write to `tidb_ttl_table_status` and `tidb_ttl_job_history`, because the `job_manager ` always holds the owner and runs as a single goroutine, but it may have conflict to write to `tidb_ttl_task`.
+
+When it faces a write conflict error, the job will be forgot by the job manager, and nobody will update the status, clean the tasks and update the history again.
+
+The `DoGC` didn't work because it cleans the tasks using the following SQL:
+
+```sql
+DELETE task FROM
+		mysql.tidb_ttl_task task
+	left join
+		mysql.tidb_ttl_table_status job
+	ON task.job_id = job.current_job_id
+	WHERE job.table_id IS NULL
+```
+
+If the `tidb_ttl_table_status` is not updated, the `tidb_ttl_task` will also not be cleaned.
+
+Therefore, I propose to execute this transaction in pessimistic mode. (Actually, it's not necessary to execute them in a single transaction. They are safe to be executed one-by-one.)

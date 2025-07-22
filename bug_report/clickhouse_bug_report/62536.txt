@@ -1,0 +1,105 @@
+ID: 62536
+Title: Memory leak in groupArraySorted function
+Description:
+**Describe what's wrong**
+
+I've done a few things, and I'm not 100% what's causing the memory leak / OOMings. Before this change the clickhouse server were on 24.1 version, and using about ~ 30GiB of RAM. 
+
+I've upgraded to 24.3 and added following materialised view:
+
+( `groupArraySorted` wasn't present in 24.1, but it's in 24.3 )  
+
+```sql
+CREATE TABLE otel.test9 ON CLUSTER replicated
+(
+    Timestamp5mBucket DateTime64(0) CODEC(ZSTD(1)),
+    ServiceName LowCardinality(String) CODEC(ZSTD(1)),
+    SpanName LowCardinality(String) CODEC(ZSTD(1)),
+    Namespace LowCardinality(String) CODEC(ZSTD(1)),
+
+    -- aggregates
+    SlowSpans AggregateFunction(groupArraySorted(100),
+        Tuple(NegativeDurationNs Int64, Timestamp DateTime64(9), TraceId String, SpanId String)
+    ) CODEC(ZSTD(1)),
+    QuantilesDurationNs AggregateFunction(quantiles(0.25, 0.50, 0.90, 0.99, 0.999), Int64) CODEC(ZSTD(1)),
+    AvgDurationNs AggregateFunction(avg, Int64) CODEC(ZSTD(1)),
+    Count SimpleAggregateFunction(sum, UInt64) CODEC(ZSTD(1))
+)
+ENGINE = AggregatingMergeTree()
+PARTITION BY toDate(Timestamp5mBucket)
+ORDER BY (ServiceName, Timestamp5mBucket, SpanName, Namespace)
+TTL toDateTime(Timestamp5mBucket) + toIntervalDay(3)
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+CREATE TABLE otel.dist_test9 ON CLUSTER replicated ENGINE = Distributed(replicated, otel, test9);
+
+CREATE MATERIALIZED VIEW otel.test9_mv ON CLUSTER replicated TO otel.test9
+AS SELECT
+   toStartOfFiveMinute(Timestamp) as Timestamp5mBucket,
+   ServiceName,
+   SpanName,
+   ResourceAttributes['k8s.namespace.name'] as Namespace,
+   groupArraySortedState(100)(
+                         CAST(
+                             tuple(-Duration, Timestamp, TraceId, SpanId),
+                             'Tuple(NegativeDurationNs Int64, Timestamp DateTime64(9), TraceId String, SpanId String)'
+                         )) as SlowSpans,
+   quantilesState(0.25, 0.50, 0.90, 0.99, 0.999)(Duration) as QuantilesDurationNs,
+   avgState(Duration) as AvgDurationNs,
+   count() as Count
+FROM otel.local_otel_traces
+GROUP BY
+    Timestamp5mBucket,
+    ServiceName,
+    SpanName,
+    Namespace ;
+```
+
+I see memory leaking at ~60GiB/h, and process is OOMing once reaching the 600GiB limit. 
+
+`otel.test9` table is about ~12GiB uncompressed per day (per partition), thus no way is it consuming 600GiB of RAM. 
+
+Furthermore I've run https://kb.altinity.com/altinity-kb-setup-and-maintenance/altinity-kb-who-ate-my-memory/ and there's no obvious large memory consumption...this is a memory leak somewhere in Clickhouse itself. 
+
+
+**Does it reproduce on the most recent release?**
+
+Yes, 24.3
+
+**Enable crash reporting**
+
+> Change "enabled" to true in "send_crash_reports" section in `config.xml`:
+```
+<send_crash_reports>
+        <!-- Changing <enabled> to true allows sending crash reports to -->
+        <!-- the ClickHouse core developers team via Sentry https://sentry.io -->
+        <enabled>false</enabled>
+```
+
+**How to reproduce**
+
+a bit tricky....but I'd guess inserting large volume of data to local_otel_traces and having materialised view on it would cause this issue to appear over time. Per node, I'd say 500k rows/s ingestion should be sufficient to replicate this issue over few hours. 
+
+* Which ClickHouse server version to use
+* Which interface to use, if it matters
+* Non-default settings, if any
+* `CREATE TABLE` statements for all tables involved
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+* Queries to run that lead to an unexpected result
+
+**Expected behavior**
+
+No memory leaks
+
+**Error message and/or stacktrace**
+
+None
+
+**Additional context**
+
+I have 2nd CH cluster running same workload without materialised view, and after 24.3 upgrade no memory leak. Thus something in materialised view is causing this. 
+
+
+I've run the cluster without `SlowSpans` column and aggregation; and the memory leak isn't present anymore. Thus the memory leak is either in:
+* CAST function (unlikely tbh)
+* groupArraySorted/groupArraySortedMerge/groupArraySortedState functions, especially given the function weren't present in 24.1 (and are in 24.3), and they've undergone quite a bit of change in last few months.

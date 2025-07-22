@@ -1,0 +1,142 @@
+ID: 15137
+Title: Memory saturation when executing prepared statements
+Description:
+### What happens?
+
+When executing a duckdb prepared statement multiple times, class `duckdb::PendingQueryResult::ExecuteInternal(class duckdb::ClientContextLock &)` grows until no more RAM is available
+
+
+### To Reproduce
+
+The following code can be used for reproducing this problem. Visual Studio 2022 needs to be used for building it
+
+```
+#include <stdexcept>
+#include <iostream>
+extern "C" {
+    #include <duckdb.h>
+}
+
+void memory_saturator(int iteration) {
+    // Connect to database
+    std::cout << "[MEMORY_SATURATOR] Opening database" << std::endl;
+    duckdb_database db;
+    duckdb_connection con;
+    duckdb_state state;
+
+    if (duckdb_open("./test.duckdb", &db) == DuckDBError) {
+        throw std::invalid_argument("unable to open database");
+    }
+    if (duckdb_connect(db, &con) == DuckDBError) {
+        throw std::invalid_argument("unable to connect to database");
+    }
+
+    // Create table if it doesn't exist
+    std::cout << "[MEMORY_SATURATOR] Creating table" << std::endl;
+    state = duckdb_query(con, "CREATE TABLE IF NOT EXISTS TestTable (Name TEXT NOT NULL, Second_Name TEXT NOT NULL, Surname TEXT NOT NULL, Registered BOOL NOT NULL, Data_1 REAL, Data_2 REAL, Data_3 REAL, Data_4 REAL, Data_5 REAL, Data_6 REAL, Data_7 REAL, Data_8 REAL, Data_9 REAL);", NULL);
+    if (state == DuckDBError) {
+        throw std::runtime_error("unable to create table");
+    }
+    // Save results
+    std::cout << "[MEMORY_SATURATOR] Preparing statement" << std::endl;
+    duckdb_prepared_statement stmt;
+    duckdb_result result;
+
+    if (duckdb_prepare(con, "INSERT INTO TestTable VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);", &stmt) == DuckDBError) {
+        throw std::runtime_error("unable to prepare insert query");
+    }
+    std::cout << "[MEMORY_SATURATOR] Saving data" << std::endl;
+    for(int i = 0; i < 40; i++ ) {
+        duckdb_bind_varchar(stmt, 1, "John");
+        duckdb_bind_varchar(stmt, 2, "-");
+        duckdb_bind_varchar(stmt, 3, "Doe");
+        duckdb_bind_boolean(stmt, 4, true);
+        duckdb_bind_double(stmt, 5, (double) i*iteration);
+        duckdb_bind_double(stmt, 6, (double) i*iteration);
+        duckdb_bind_double(stmt, 7, (double) i*iteration);
+        duckdb_bind_double(stmt, 8, (double) i*iteration);
+        duckdb_bind_double(stmt, 9, (double) i*iteration);
+        duckdb_bind_double(stmt, 10, (double) i*iteration);
+        duckdb_bind_double(stmt, 11, (double) i*iteration);
+        duckdb_bind_double(stmt, 12, (double) i*iteration);
+        duckdb_bind_double(stmt, 13, (double) i*iteration);
+        duckdb_execute_prepared(stmt, &result);
+    }
+    
+    // Cleanup
+    std::cout << "[MEMORY_SATURATOR] Cleaning up" << std::endl;
+    duckdb_destroy_result(&result);
+    duckdb_destroy_prepare(&stmt);
+    duckdb_disconnect(&con);
+    duckdb_close(&db);
+}
+
+int main(int argc, char *argv[]) {
+    std::cout << "[MAIN] Starting example" << std::endl; 
+    for(volatile int i = 0; i < 9000; i++) {
+        std::cout << "[MAIN] Calling memory_saturator" << std::endl; 
+        memory_saturator(i);
+    }
+    return 0;
+}
+```
+
+xmake.lua:
+```
+add_rules("mode.debug", "mode.release")
+add_requires("conan::duckdb/1.1.2", {alias = "duckdb"})
+if is_plat("linux", "macosx") then
+    add_requires("onetbb")
+end
+
+target("minimal_reproducible_example")
+    set_kind("binary")
+    set_languages("cxx20")
+    set_optimize("faster")
+    add_headerfiles("src/*.hpp")
+    add_files("src/*.cpp")
+    add_packages("duckdb")
+    if is_plat("linux", "macosx") then
+        add_links("pthread", "m", "dl", "tbb")
+    end
+```
+
+### OS:
+
+Windows 11 x86_64 (Visual Studio 17.9.7, MSVC cl 19.39.33523 for x86)
+
+### DuckDB Version:
+
+1.1.2
+
+### DuckDB Client:
+
+C api (called from native C++ program)
+
+### Hardware:
+
+8 Gb of RAM
+
+### Full Name:
+
+David de la Hoz Menéndez
+
+### Affiliation:
+
+CEDEX
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a source build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Not applicable - the reproduction does not require a data set
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

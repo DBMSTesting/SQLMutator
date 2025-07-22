@@ -1,0 +1,123 @@
+ID: 14349
+Title: `Order By` not being respected when writing to partition. 
+Description:
+### What happens?
+
+When writing to partitioned csv or parquet the order by statement at `COPY` statement is not being respected specially for this input for some reason when exporting using multithreading. 
+
+I tried to minimize the repro without much success however so have attached my script as is.
+
+### To Reproduce
+
+1. Unzip the csv file from the attachment. 
+2. Write the following sql code to a file, `partitioned-write.sql`
+```sql
+-- Workaround for the bug in the COPY, where the order by is not respected with multi-threading
+-- SET threads TO 1;
+
+drop table if exists binance_public_trade;
+
+CREATE TABLE
+  binance_public_trade (
+    trade_id BIGINT,
+    price DOUBLE,
+    qty DOUBLE,
+    base_qty DOUBLE,
+    time BIGINT,
+    is_buyer_maker BOOLEAN,
+    is_best_price_match BOOLEAN,
+  );
+
+COPY binance_public_trade
+FROM
+  './FTTUSDT-trades-2022-04.csv';
+
+CREATE TEMP TABLE import_data AS
+WITH
+  t AS (
+    SELECT
+      'FTTUSDT' AS symbol,
+      'binance' AS exchange,
+      make_timestamp (time * 1000) AS timestamp,
+      *
+    FROM
+      binance_public_trade
+  )
+SELECT
+  symbol,
+  exchange,
+  CAST(
+    STRFTIME (CAST(timestamp AS DATE), '%Y%m%d') AS INTEGER
+  ) AS date,
+  CAST(trade_id AS BIGINT) AS trade_id,
+  epoch_us (timestamp) as timestamp,
+  price,
+  qty,
+  is_buyer_maker,
+  is_best_price_match
+FROM
+  t
+ORDER BY
+  timestamp,
+  trade_id;
+
+copy (
+  select
+    *
+  from
+    import_data
+  order by
+    timestamp,
+    trade_id
+) to 'bleh' (
+  overwrite true,
+  partition_by (symbol, exchange, date)
+);
+```
+3. Run it using something like `duckdb -init partitioned-write.sql`. 
+4. To make it easier to diff, commit the output to a git repository. 
+5. Run step 3 again to observe the changes. 
+6. To fix the issue, uncomment `-- SET threads TO 1;`
+
+[FTTUSDT-trades-2022-04.csv.zip](https://github.com/user-attachments/files/17352907/FTTUSDT-trades-2022-04.csv.zip)
+
+
+### OS:
+
+aarch64
+
+### DuckDB Version:
+
+v1.1.1 af39bd0dcf
+
+### DuckDB Client:
+
+DuckDB CLI
+
+### Hardware:
+
+_No response_
+
+### Full Name:
+
+Swoorup Joshi
+
+### Affiliation:
+
+Side Project
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have not tested with any build
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

@@ -1,0 +1,287 @@
+ID: 15542
+Title: Exporting to parquet with many threads leads to a possible busy-loop contention for the output file (?)
+Description:
+### What happens?
+
+Problem: exporting a table to parquet (via COPY TO) with (too?) many threads leads often to a possible busy-loop contention for the output file and results in a big slowdown with high CPU use.
+
+The query to reproduce the issue is:
+ ```sql
+  COPY stations TO './missedMeasurements.parquet' (FORMAT PARQUET);
+  ```
+
+Tried to track down the bug a bit and think some contention happens when multiple (or too many) threads are used to write to the output file. Might be that this locks up the threads in a busy loop or something similar. My reasons for thinking this are the following.
+
+Executing the query with the default number of threads (11 threads because my machine has 11 cores) gives the following graph in macOS System Monitor (very scientific, I know... but something is better than nothing). One can notice how most of the CPU time is used by the system (red) instead of the user (blue).
+        
+<img width="194" alt="image" src="https://github.com/user-attachments/assets/32679b50-00c9-4220-84bd-b675aab67905" />
+        
+Executing the same query with only 4 threads, gives us this graph. The runtime is noticeably shorter (query ends where blue line sharply drops) and almost no time is used by the system.
+        
+
+<img width="194" alt="image" src="https://github.com/user-attachments/assets/ce86c4fa-5ea9-4081-86aa-f36893cfd0b6" />
+
+For the above query the DuckDB Query Profiling Information (found at the end) doesn't tell us much as to where the time is spent. But executing another 2nd query which outputs the same data, albeit in more convoluted way, and has a System Monitor graph similar to the original query, gives us possibly more clues. 
+
+For that 2nd query (which is similar to the 1st), we see that it took 692 CPU seconds (!) to write the result to the file, compared to ~50 CPU sec when using only 4 threads. That’s why I think that multiple threads were in a busy loop contending possibly for a mutex or something to write to the file.
+
+
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information  of the 2nd (convoluted) query  ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+// NOTE: the helper file ./missedPeriods.json has content [{"start":"1970-01-01T00:00:00Z","end":"2025-01-01T00:00:00Z"}])
+COPY (     WITH missed_periods AS (         SELECT "start", "end"         FROM read_json('./missedPeriods.json',                        format = 'array',                        columns = {                            "start": 'TIMESTAMP_MS',                        "end": 'TIMESTAMP_MS',             }         )     ),         -- using this intermediate "found_periods" CTE lowers mem. usage drastically         found_periods AS (             SELECT DISTINCT fetched_at             FROM                 stations                 CROSS JOIN missed_periods             WHERE                 missed_periods.start <= stations.fetched_at                 AND stations.fetched_at <= missed_periods.end         )     SELECT stations.*     FROM         stations         JOIN found_periods              USING(fetched_at) ) TO './missedMeasurements1.parquet' (FORMAT PARQUET);
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 64.66s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│        COPY_TO_FILE       │
+│    ────────────────────   │
+│           1 Rows          │
+│         (692.53s)         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             id            │
+│         fetched_at        │
+│           state           │
+│            name           │
+│          capacity         │
+│          address          │
+│            zip            │
+│            city           │
+│          latitude         │
+│         longitude         │
+│     is_virtual_station    │
+│          vehicles         │
+│                           │
+│       41571435 Rows       │
+│          (0.02s)          │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: INNER     │
+│                           │
+│        Conditions:        ├──────────────┐
+│  fetched_at = fetched_at  │              │
+│                           │              │
+│       41571435 Rows       │              │
+│          (1.83s)          │              │
+└─────────────┬─────────────┘              │
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││       HASH_GROUP_BY       │
+│    ────────────────────   ││    ────────────────────   │
+│          stations         ││         Groups: #0        │
+│                           ││                           │
+│        Projections:       ││                           │
+│         fetched_at        ││                           │
+│             id            ││                           │
+│           state           ││                           │
+│            name           ││                           │
+│          capacity         ││                           │
+│          address          ││                           │
+│            zip            ││                           │
+│            city           ││                           │
+│          latitude         ││                           │
+│         longitude         ││                           │
+│     is_virtual_station    ││                           │
+│          vehicles         ││                           │
+│                           ││                           │
+│       41571435 Rows       ││        117149 Rows        │
+│          (11.30s)         ││          (0.37s)          │
+└───────────────────────────┘└─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │         PROJECTION        │
+                             │    ────────────────────   │
+                             │         fetched_at        │
+                             │                           │
+                             │       41571435 Rows       │
+                             │          (0.00s)          │
+                             └─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │         PROJECTION        │
+                             │    ────────────────────   │
+                             │         fetched_at        │
+                             │                           │
+                             │       41571435 Rows       │
+                             │          (0.00s)          │
+                             └─────────────┬─────────────┘
+                             ┌─────────────┴─────────────┐
+                             │    PIECEWISE_MERGE_JOIN   │
+                             │    ────────────────────   │
+                             │      Join Type: INNER     │
+                             │                           │
+                             │        Conditions:        │
+                             │    fetched_at >= start    ├──────────────┐
+                             │     fetched_at <= end     │              │
+                             │                           │              │
+                             │       41571435 Rows       │              │
+                             │          (2.52s)          │              │
+                             └─────────────┬─────────────┘              │
+                             ┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+                             │         TABLE_SCAN        ││         TABLE_SCAN        │
+                             │    ────────────────────   ││    ────────────────────   │
+                             │          stations         ││    Function: READ_JSON    │
+                             │                           ││                           │
+                             │        Projections:       ││        Projections:       │
+                             │         fetched_at        ││           start           │
+                             │                           ││            end            │
+                             │                           ││                           │
+                             │       41618340 Rows       ││           1 Rows          │
+                             │          (0.11s)          ││          (0.00s)          │
+                             └───────────────────────────┘└───────────────────────────┘
+
+```
+
+```
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information  of the 1st (short) query   ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+COPY stations TO './missedMeasurements1.parquet' (FORMAT PARQUET);
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││              Total Time: 67.06s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│     BATCH_COPY_TO_FILE    │
+│    ────────────────────   │
+│           1 Rows          │
+│          (11.03s)         │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         TABLE_SCAN        │
+│    ────────────────────   │
+│          stations         │
+│                           │
+│        Projections:       │
+│             id            │
+│         fetched_at        │
+│           state           │
+│            name           │
+│          capacity         │
+│          address          │
+│            zip            │
+│            city           │
+│          latitude         │
+│         longitude         │
+│     is_virtual_station    │
+│          vehicles         │
+│                           │
+│       41618340 Rows       │
+│          (11.73s)         │
+└───────────────────────────┘
+```
+
+MacOS System Monitor graph of the 2nd (convoluted) query:
+<img width="194" alt="image" src="https://github.com/user-attachments/assets/e4255348-3e57-4656-a287-9e4393fa0a34" />
+
+### Other info
+- The issue only occurs when exporting as parquet and not when exporting as CSV or JSON.
+- Disk and memory usage stay quite low during query execution and don't seem correlated with system/user CPU spikes.
+
+# To Reproduce
+
+The slowdown varies between runs and one might need a couple of executions to get the (biggest) slowdowns described above.
+
+1st query:
+```sql
+  COPY stations TO './missedMeasurements.parquet' (FORMAT PARQUET);
+  ```
+
+2nd query:
+```sql
+COPY (
+    WITH missed_periods AS (
+        SELECT "start", "end"
+        FROM read_json('./missedPeriods.json',
+            format = 'array',
+            columns = {
+                "start": 'TIMESTAMP_MS',
+                "end": 'TIMESTAMP_MS',
+            }
+        )
+    ),
+    found_periods AS (
+        SELECT DISTINCT fetched_at
+        FROM
+            stations
+            CROSS JOIN missed_periods
+        WHERE
+            missed_periods.start <= stations.fetched_at
+            AND stations.fetched_at <= missed_periods.end
+    )
+    SELECT stations.*
+    FROM
+        stations
+        JOIN found_periods
+        USING(fetched_at)
+)
+TO './missedMeasurements1.parquet' (FORMAT PARQUET);
+```
+
+The used helper file `./missedPeriods.json` can be created via:
+``` console
+echo '[{"start":"1970-01-01T00:00:00Z","end":"2025-01-01T00:00:00Z"}]' > ./missedPeriods.json
+```
+```console
+$ cat ./missedPeriods.json
+[{"start":"1970-01-01T00:00:00Z","end":"2025-01-01T00:00:00Z"}]
+```
+
+The DB file can be found here: https://drive.google.com/file/d/1ygX9lh53eGPPpLHPx5R1eD3WKg5aPKJN/view?usp=sharing
+
+### OS:
+
+macOS Sonoma 14.4.1, Darwin 23.4.0, arm64
+
+### DuckDB Version:
+
+v1.1.3 19864453f7
+
+### DuckDB Client:
+
+CLI
+
+### Hardware:
+
+Apple M3 Pro, 36GB mem
+
+### Full Name:
+
+Filip Jaksic
+
+### Affiliation:
+
+CS MSc student at ETHZ
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [x] Yes, I have

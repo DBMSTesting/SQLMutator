@@ -1,0 +1,76 @@
+ID: 25368
+Title: Incorrect results (ignoring WHERE) when using JOIN combined with NOT IN 
+Description:
+I get incorrect results as if particular WHERE condition is ignored when there is JOIN and NOT IN condition (empty set) in a query. I've created as minimal example as I could.
+
+```
+
+# Test dataset
+CREATE TABLE test
+(
+    `t` UInt8,
+    `flag` UInt8,
+    `id` UInt8
+)
+ENGINE = MergeTree
+PARTITION BY t
+ORDER BY (t, id)
+SETTINGS index_granularity = 8192;
+
+INSERT INTO test VALUES (1,0,1),(1,0,2),(1,0,3),(1,0,4),(1,0,5),(1,0,6),(1,1,7),(0,0,7);
+
+# Explore dataset
+
+SELECT * FROM test
+
+┌─t─┬─flag─┬─id─┐
+│ 0 │    0 │  7 │
+└───┴──────┴────┘
+┌─t─┬─flag─┬─id─┐
+│ 1 │    0 │  1 │
+│ 1 │    0 │  2 │
+│ 1 │    0 │  3 │
+│ 1 │    0 │  4 │
+│ 1 │    0 │  5 │
+│ 1 │    0 │  6 │
+│ 1 │    1 │  7 │
+└───┴──────┴────┘
+
+# Problematic query
+
+SELECT id, flag FROM test t1
+INNER JOIN  (SELECT DISTINCT id FROM test) AS t2 ON t1.id = t2.id
+WHERE flag = 0 and t = 1 AND id NOT IN (SELECT 1 WHERE 0)
+
+┌─id─┬─flag─┐
+│  1 │    0 │
+│  2 │    0 │
+│  3 │    0 │
+│  4 │    0 │
+│  5 │    0 │
+│  6 │    0 │
+│  7 │    1 │ <---- this row should NOT be in result set because of flag = 0 condition in WHERE
+└────┴──────┘
+
+# If I remove NOT IN part (which should not affect anything because it is an empty set) I got correct results
+
+SELECT id, flag FROM test t1
+INNER JOIN  (SELECT DISTINCT id FROM test) AS t2 ON t1.id = t2.id
+WHERE flag = 0 and t = 1
+┌─id─┬─flag─┐
+│  1 │    0 │
+│  2 │    0 │
+│  3 │    0 │
+│  4 │    0 │
+│  5 │    0 │
+│  6 │    0 │
+└────┴──────┘
+```
+
+Original query was a way more complex, didn't use self join and NOT IN wasn't empty set, I've boiled it down to above simple example while trying to figure out why it's happening. It seems that all things matters here: table and query structure and dataset.
+
+Yes, it is reproducing in current release with default settings.
+21.6.4.26 - reproduced (current release)
+21.5.6.6 - reproduced
+
+Does NOT reproduce in 20.10.3.30

@@ -1,0 +1,62 @@
+ID: 11424
+Title: Segmentation fault when using nullable
+Description:
+**Bug description**
+I observed a segmentation fault and a crash of clickhouse with a simple query. My understanding is that it is due to the joint use of countIf(condition on numerical_field), a WHERE clause with the same condition on numerical_field and when the numerical_field is Nullable. 
+
+**How to reproduce**
+Consider the following schema:
+```sql
+CREATE TABLE mydb.data (ts DateTime, field String, num_field Nullable(Float64)) 
+ENGINE = MergeTree() PARTITION BY ts ORDER BY ts;
+```
+and insert the following single row :
+```
+2020-05-14 02:08:00,some_field_value,7.
+```
+Then the following query produces the error : 
+```sql
+SELECT field, countIf(num_field > 6.0) FROM mydb.data WHERE (num_field>6.0) GROUP BY field
+```
+I know this query looks a bit buggy and could be simplified. In fact it is a cornercase of a more complicated query we use, but I think the database shouldn't crash on it. 
+
+As mentionned, no fault is observed if num_field is not Nullable, and the following queries run without issues :
+```sql
+SELECT field, countIf(num_field > 6.0) FROM mydb.data WHERE (num_field>6.0000001) GROUP BY field;
+SELECT field, countIf(num_field > 6.0) FROM mydb.data WHERE (num_field>6.0) AND isNotNull(num_field) GROUP BY field;
+SELECT field, countIf(num_field > 6.0) FROM mydb.data WHERE (num_field>=6.0) GROUP BY field;
+```
+
+**Which ClickHouse server version to use**
+The issue was observed on clickhouse-server 19.17.4.11, running in the docker container ([this one](https://hub.docker.com/r/yandex/clickhouse-server)) as well as on the 'latest' tag of the same image (7d08af4177b7).
+
+**Expected behavior**
+The server should not crash and compute the result.
+
+**Error message and/or stacktrace**
+Here is the content of clickhouse-server.err.log after executing the query :
+2020.06.04 06:32:55.883400 [ 54 ] {} <Fatal> BaseDaemon: ########################################
+2020.06.04 06:32:55.883435 [ 54 ] {} <Fatal> BaseDaemon: (version 19.17.4.11 (official build)) (from thread 52) Received signal Segmentation fault (11).
+2020.06.04 06:32:55.883446 [ 54 ] {} <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+2020.06.04 06:32:55.883453 [ 54 ] {} <Fatal> BaseDaemon: Stack trace: 0x55f16d3c000b 0x55f16e207b59 0x55f16e2082fc 0x55f16e183ddc 0x55f16e184b68 0x55f16e184ebc 0x55f16e0ae7cc 0x55f16d99e01a 0x55f16e0e7abb 0x55f16d99e01a 0x55f16e0e7abb 0x55f16d99e01a 0x55f16d9970eb 0x55f16d9974b0 0x55f16a794a4e 0x55f16a79505e 0x55f16a79251c 0x55f170517e00 0x7f7528d1d6db 0x7f752863a88f
+2020.06.04 06:32:55.908322 [ 54 ] {} <Fatal> BaseDaemon: 3. 0x55f16d3c000b DB::IAggregateFunctionHelper<DB::AggregateFunctionNullUnary<true> >::addBatch(unsigned long, char**, unsigned long, DB::IColumn const**, DB::Arena*) const /usr/bin/clickhouse
+2020.06.04 06:32:55.908368 [ 54 ] {} <Fatal> BaseDaemon: 4. 0x55f16e207b59 void DB::Aggregator::executeImplBatch<DB::AggregationMethodStringNoCache<StringHashMap<char*, Allocator<true, true> > > >(DB::AggregationMethodStringNoCache<StringHashMap<char*, Allocator<true, true> > >&, DB::AggregationMethodStringNoCache<StringHashMap<char*, Allocator<true, true> > >::State&, DB::Arena*, unsigned long, DB::Aggregator::AggregateFunctionInstruction*) const /usr/bin/clickhouse
+2020.06.04 06:32:55.908382 [ 54 ] {} <Fatal> BaseDaemon: 5. 0x55f16e2082fc void DB::Aggregator::executeImpl<DB::AggregationMethodStringNoCache<StringHashMap<char*, Allocator<true, true> > > >(DB::AggregationMethodStringNoCache<StringHashMap<char*, Allocator<true, true> > >&, DB::Arena*, unsigned long, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, DB::Aggregator::AggregateFunctionInstruction*, bool, char*) const /usr/bin/clickhouse
+2020.06.04 06:32:55.908399 [ 54 ] {} <Fatal> BaseDaemon: 6. 0x55f16e183ddc DB::Aggregator::executeOnBlock(std::vector<COW<DB::IColumn>::immutable_ptr<DB::IColumn>, std::allocator<COW<DB::IColumn>::immutable_ptr<DB::IColumn> > >, unsigned long, DB::AggregatedDataVariants&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, std::vector<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >, std::allocator<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > > >&, bool&) /usr/bin/clickhouse
+2020.06.04 06:32:55.908414 [ 54 ] {} <Fatal> BaseDaemon: 7. 0x55f16e184b68 DB::Aggregator::executeOnBlock(DB::Block const&, DB::AggregatedDataVariants&, std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >&, std::vector<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> >, std::allocator<std::vector<DB::IColumn const*, std::allocator<DB::IColumn const*> > > >&, bool&) /usr/bin/clickhouse
+2020.06.04 06:32:55.908430 [ 54 ] {} <Fatal> BaseDaemon: 8. 0x55f16e184ebc DB::Aggregator::execute(std::shared_ptr<DB::IBlockInputStream> const&, DB::AggregatedDataVariants&) /usr/bin/clickhouse
+2020.06.04 06:32:55.908438 [ 54 ] {} <Fatal> BaseDaemon: 9. 0x55f16e0ae7cc DB::AggregatingBlockInputStream::readImpl() /usr/bin/clickhouse
+2020.06.04 06:32:55.908446 [ 54 ] {} <Fatal> BaseDaemon: 10. 0x55f16d99e01a DB::IBlockInputStream::read() /usr/bin/clickhouse
+2020.06.04 06:32:55.908461 [ 54 ] {} <Fatal> BaseDaemon: 11. 0x55f16e0e7abb DB::ExpressionBlockInputStream::readImpl() /usr/bin/clickhouse
+2020.06.04 06:32:55.908469 [ 54 ] {} <Fatal> BaseDaemon: 12. 0x55f16d99e01a DB::IBlockInputStream::read() /usr/bin/clickhouse
+2020.06.04 06:32:55.908475 [ 54 ] {} <Fatal> BaseDaemon: 13. 0x55f16e0e7abb DB::ExpressionBlockInputStream::readImpl() /usr/bin/clickhouse
+2020.06.04 06:32:55.908482 [ 54 ] {} <Fatal> BaseDaemon: 14. 0x55f16d99e01a DB::IBlockInputStream::read() /usr/bin/clickhouse
+2020.06.04 06:32:55.908492 [ 54 ] {} <Fatal> BaseDaemon: 15. 0x55f16d9970eb DB::AsynchronousBlockInputStream::calculate() /usr/bin/clickhouse
+2020.06.04 06:32:55.908499 [ 54 ] {} <Fatal> BaseDaemon: 16. 0x55f16d9974b0 ? /usr/bin/clickhouse
+2020.06.04 06:32:55.908507 [ 54 ] {} <Fatal> BaseDaemon: 17. 0x55f16a794a4e ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::_List_iterator<ThreadFromGlobalPool>) /usr/bin/clickhouse
+2020.06.04 06:32:55.908526 [ 54 ] {} <Fatal> BaseDaemon: 18. 0x55f16a79505e ThreadFromGlobalPool::ThreadFromGlobalPool<ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}>(ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::function<void ()>, int, std::optional<unsigned long>)::{lambda()#3}&&)::{lambda()#1}::operator()() const /usr/bin/clickhouse
+2020.06.04 06:32:55.908535 [ 54 ] {} <Fatal> BaseDaemon: 19. 0x55f16a79251c ThreadPoolImpl<std::thread>::worker(std::_List_iterator<std::thread>) /usr/bin/clickhouse
+2020.06.04 06:32:55.908541 [ 54 ] {} <Fatal> BaseDaemon: 20. 0x55f170517e00 ? /usr/bin/clickhouse
+2020.06.04 06:32:55.908551 [ 54 ] {} <Fatal> BaseDaemon: 21. 0x7f7528d1d6db start_thread /lib/x86_64-linux-gnu/libpthread-2.27.so
+2020.06.04 06:32:55.908561 [ 54 ] {} <Fatal> BaseDaemon: 22. 0x7f752863a88f __clone /lib/x86_64-linux-gnu/libc-2.27.so
+

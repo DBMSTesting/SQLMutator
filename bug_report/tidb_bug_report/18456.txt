@@ -1,0 +1,86 @@
+ID: 18456
+Title: create index concurrently lead to block
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+```
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+var (
+	cases = []string{
+		"drop database if exists %s",
+		"create database if not exists %s",
+		"create table %s.t (id int)",
+		"alter table %s.t add column col int", // no need, but will increase the probability of reproduction
+		"alter table %s.t add index idx(id)",
+	}
+	wg sync.WaitGroup
+)
+
+func runSQL(dbName string, db *sql.DB) {
+	defer wg.Done()
+
+	for _, sqlFormat := range cases {
+		sql := fmt.Sprintf(sqlFormat, dbName)
+		fmt.Printf("run sql: %s\n", sql)
+		_, err := db.Exec(sql)
+		if err != nil {
+			fmt.Printf("%v\n", err)
+			os.Exit(2)
+		}
+	}
+}
+
+func main() {
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/",
+		"root", "", "127.0.0.1", 4000)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		fmt.Printf("fail to open db")
+		os.Exit(2)
+	}
+	if err := db.Ping(); err != nil {
+		fmt.Printf("fail to ping db")
+		os.Exit(2)
+	}
+
+	for i := 1; i <= 10; i++ {
+		fmt.Printf("round %d\n", i)
+		wg.Add(2)
+		go runSQL("test_a", db)
+		go runSQL("test_b", db)
+		wg.Wait()
+		time.Sleep(1 * time.Second)
+	}
+}
+
+```
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+success to execute `alter table %s.t add index idx(id)`
+### 3. What did you see instead (Required)
+the create index statement block
+### 4. Affected version (Required)
+ v4.0.0-beta.2-737-g5f983b860
+<!-- v3.0.0, v4.0.0, etc -->
+
+### 5. Root Cause Analysis
+tidb log
+[debug-log.txt](https://github.com/pingcap/tidb/files/4894031/debug-log.txt)
+
+<!-- should be filled by the investigator before it's closed -->

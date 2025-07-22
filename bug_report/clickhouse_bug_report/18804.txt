@@ -1,0 +1,77 @@
+ID: 18804
+Title: attach part does not reset mutation version on a part. 
+Description:
+Attach part does not reset mutation version on attached parts. 
+So mutations (update/delete) do not work against parts restored from a backup, because their version is bigger than the version stored in the ZK.
+
+```sql
+20.8.11.17
+
+drop table test;
+drop table restore;
+
+CREATE TABLE test (i Int64, s String)
+ENGINE = ReplicatedMergeTree ('/clickhouse/tables/test','{replica}') ORDER BY i;
+
+insert into test select 1, '';
+optimize table test final;
+optimize table test final;
+
+select _part, *  from test;
+
+┌─_part─────┬─i─┬─s─┐
+│ all_0_0_2 │ 1 │   │
+└───────────┴───┴───┘
+
+alter table test update s='xxx' where 1;
+alter table test update s='xxx' where 1;
+alter table test update s='xxx' where 1;
+alter table test update s='xxx' where 1;
+select _part, *  from test;
+
+┌─_part───────┬─i─┬─s───┐
+│ all_0_0_2_4 │ 1 │ xxx │
+└─────────────┴───┴─────┘
+
+CREATE TABLE restore (i Int64, s String)
+ENGINE = ReplicatedMergeTree ('/clickhouse/tables/restore','{replica}') ORDER BY i;
+
+alter table restore fetch partition tuple() from '/clickhouse/tables/test/';
+
+--alter table test freeze;
+--mv /var/lib/clickhouse/shadow/5/data/default/test/all_0_0_2_4/ /var/lib/clickhouse/data/default/restore/detached/
+
+alter table restore attach part 'all_0_0_2_4';
+insert into restore select 2, '';
+
+select _part, *  from restore;
+
+┌─_part───────┬─i─┬─s───┐
+│ all_0_0_0_4 │ 1 │ xxx │   <--- expected   all_0_0_0
+└─────────────┴───┴─────┘
+┌─_part─────┬─i─┬─s─┐
+│ all_1_1_0 │ 2 │   │
+└───────────┴───┴───┘
+
+alter table restore update s='yyy' where 1;
+
+select _part, *  from restore;
+
+┌─_part───────┬─i─┬─s───┐
+│ all_0_0_0_4 │ 1 │ xxx │ <---- expected yyy
+└─────────────┴───┴─────┘
+┌─_part───────┬─i─┬─s───┐
+│ all_1_1_0_2 │ 2 │ yyy │
+└─────────────┴───┴─────┘
+
+
+alter table restore delete where 1;
+
+select _part, *  from restore;
+┌─_part───────┬─i─┬─s───┐
+│ all_0_0_0_4 │ 1 │ xxx │   <---- expected 0 (no) rows
+└─────────────┴───┴─────┘
+```
+
+the same issue with `alter table restore attach partition tuple()`
+but `alter table restore attach partition tuple() from test;` removes the mutation version from attached part.

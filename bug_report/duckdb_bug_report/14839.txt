@@ -1,0 +1,54 @@
+ID: 14839
+Title: Support struct projection pushdown in Parquet files
+Description:
+Follow-up from https://github.com/duckdb/duckdb/pull/14750 - this PR extends the Parquet reader and the MultiFileReader to work with `ColumnIndex` - allowing pushdown into struct fields. Internally the way this works in the reader is that the `StructColumnReader` can now leave certain child readers on `NULL`. Child readers that are left on `NULL` are not scanned - they instead emit a constant `NULL` value.
+
+
+### Benchmarks
+
+Below is a benchmark running TPC-H Q01 over SF10. For the struct case, we store the entire rows in a struct field, and then extract it using a view, e.g.:
+
+```sql
+CALL dbgen(sf=10, suffix='_normalized');
+COPY (SELECT lineitem_normalized AS row_val FROM lineitem_normalized) TO 'lineitem_struct.parquet';
+CREATE VIEW lineitem AS SELECT UNNEST(row_val) FROM 'lineitem_struct.parquet';
+```
+
+We can see even more significant speed-ups than when using our native storage - primarily because reading the (unnecessary) string columns in Parquet format is significantly slower than when using our native format.
+
+| Query | Struct (v1.1) | Struct (new) | Regular |
+|-------|---------------|--------------|---------|
+| Q01   | 1.23s         | 0.38s        | 0.35s   |
+
+
+### Explain
+
+This PR also adds support to the `EXPLAIN` for showing which sub-columns are selected in the projection list of a scan, for example:
+
+```sql
+explain select struct_val.l_orderkey, struct_val.l_partkey from lineitem_struct.parquet;
+
+┌───────────────────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│ struct_extract(struct_val,│
+│        'l_orderkey')      │
+│ struct_extract(struct_val,│
+│        'l_partkey')       │
+│                           │
+│        ~60175 Rows        │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       PARQUET_SCAN        │
+│    ────────────────────   │
+│         Function:         │
+│        PARQUET_SCAN       │
+│                           │
+│        Projections:       │
+│   struct_val.l_orderkey   │
+│    struct_val.l_partkey   │
+│                           │
+│        ~60175 Rows        │
+└───────────────────────────┘
+
+```

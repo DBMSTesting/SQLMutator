@@ -1,0 +1,90 @@
+ID: 11674
+Title: col type float(64) represent by `mysql.TypeFloat` but not `mysql.TypeDouble` in TiDB
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+```sql
+drop table if exists tb5;
+create table tb5
+(
+    a bigint(64) unsigned,
+    b float(64)
+);
+
+insert into tb5 (a, b)
+values (13835058000000000000, 13835058000000000000);
+
+insert into tb5 (select * from tb5 where a = b);
+```
+
+**the `insert into tb5 (select * from tb5 where a = b);` insert nothing.**
+
+according to [mysql doc](https://dev.mysql.com/doc/refman/5.7/en/floating-point-types.html)
+
+> For FLOAT, the SQL standard permits an optional specification of the precision (but not the range of the exponent) in bits following the keyword FLOAT in parentheses; ; that is, FLOAT(p). MySQL also supports this optional precision specification, but the precision value in FLOAT(p) is used only to determine storage size. A precision from 0 to 23 results in a 4-byte single-precision FLOAT column. A precision from 24 to 53 results in an 8-byte double-precision DOUBLE column.
+
+
+the `13835058000000000000` can be representable by `double` exactly,
+```c
+int main () {
+    double a = 13835058000000000000.0;
+    unsigned long long b = 13835058000000000000ULL;
+    printf("%d\n", (unsigned long long)a == b); // output 1
+    printf("%d\n", (double)a == (double)b); // output 1
+}
+```
+
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+Release Version: v4.0.0-alpha-17-gd262020cc-dirty
+Git Commit Hash: d262020cce78cb7ee0cd3f78db34fd686f3778d0
+Git Branch: fix-bug-of-builtin_cast
+UTC Build Time: 2019-08-07 11:05:36
+GoVersion: go version go1.12.6 linux/amd64
+Race Enabled: false
+TiKV Min Version: 2.1.0-alpha.1-ff3dd160846b7d1aed9079c389fc188f7f5ea13e
+Check Table Before Drop: false
+```
+
+5. Reason
+
+when run  `insert into tb5 (select * from tb5 where a = b);`
+it call 
+```go 
+// CompareReal compares two float-point values.
+func CompareReal(sctx sessionctx.Context, lhsArg, rhsArg Expression, lhsRow, rhsRow chunk.Row) (int64, bool, error) {
+ arg0, isNull0, err := lhsArg.EvalReal(sctx, lhsRow)
+ if err != nil {
+  return 0, true, err
+ }
+ arg1, isNull1, err := rhsArg.EvalReal(sctx, rhsRow)
+ if err != nil {
+  return 0, true, err
+ }
+
+ if isNull0 || isNull1 {
+  return compareNull(isNull0, isNull1), true, nil
+ }
+ return int64(types.CompareFloat64(arg0, arg1)), false, nil
+}
+```
+here
+`arg1, isNull1, err := rhsArg.EvalReal(sctx, rhsRow)` call 
+```go
+// EvalReal returns real representation of Column.
+func (col *Column) EvalReal(ctx sessionctx.Context, row chunk.Row) (float64, bool, error) {
+ if row.IsNull(col.Index) {
+  return 0, true, nil
+ }
+ if col.GetType().Tp == mysql.TypeFloat {
+  return float64(row.GetFloat32(col.Index)), false, nil
+ }
+ return row.GetFloat64(col.Index), false, nil
+}
+```
+the  `col.GetType().Tp` return `msql.Float`

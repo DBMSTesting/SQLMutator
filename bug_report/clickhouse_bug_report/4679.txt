@@ -1,0 +1,170 @@
+ID: 4679
+Title: Attempt to read after eof: while receiving packet
+Description:
+Error occurs when we select from table with a large amount of rows (~60M). We tried to use MergeTree and ReplacingMergeTree and error appears in both cases.
+We found on this resource that it depends on SSE. https://github.com/yandex/ClickHouse/issues/1617
+We have SSE 2 whereas clickhouse use SSE 4.2. Could this be the main problem? And how can we fix error?
+
+Have 16GB RAM.
+Have this error in both ClickHouse 18.16.1 and ClickHouse 19.1.6.
+
+P.S. This error is not logged in /var/log/clickhouse-server/clickhouse-server.err.log.
+
+```SQL
+CREATE TABLE Tab (
+    t_id    Int32,
+    c2      Int32,
+    c3      Int32,
+    c4      String,
+    c5      Decimal(20, 15),
+    c6      Int32,
+    c7      Int32,
+    c8      Int32,
+    c9      String,
+    c10     Int32,
+    c11     Decimal(15, 2),
+    c12     Int32,
+    c13     Int32,
+    c14     String,
+    c15     DateTime,
+    c16     DateTime,
+    c17     Decimal(15, 2),
+    c18     UInt8,
+    c19     Int32,
+    c20     UInt8,
+    c21     DateTime,
+    c22     UInt8,
+    c23     String,
+    c24     Int32,
+    c25     String,
+    c26     Int32,
+    c27     Int64,
+    c28     Decimal(15, 2),
+    c29     UInt8,
+    rv      UInt64
+) ENGINE = ReplacingMergeTree(rv)
+  PARTITION BY intDiv(t_id, 1000000)
+  ORDER BY (t_id)
+  SETTINGS  index_granularity = 8192;
+
+SELECT  tupleElement(h.t, 1),
+        tupleElement(h.t, 2),
+        tupleElement(h.t, 3),
+        tupleElement(h.t, 4),
+        tupleElement(h.t, 5),
+        tupleElement(h.t, 6),
+        tupleElement(h.t, 7),
+        tupleElement(h.t, 8),
+        tupleElement(h.t, 9),
+        tupleElement(h.t, 10),
+        tupleElement(h.t, 11),
+        tupleElement(h.t, 12),
+        tupleElement(h.t, 13),
+        tupleElement(h.t, 14),
+        tupleElement(h.t, 15),
+        tupleElement(h.t, 16),
+        tupleElement(h.t, 17),
+        tupleElement(h.t, 18),
+        tupleElement(h.t, 19),
+        tupleElement(h.t, 20),
+        tupleElement(h.t, 21),
+        tupleElement(h.t, 22),
+        tupleElement(h.t, 23),
+        tupleElement(h.t, 24),
+        tupleElement(h.t, 25),
+        tupleElement(h.t, 26),
+        tupleElement(h.t, 27),
+        tupleElement(h.t, 28),
+        tupleElement(h.t, 29)
+FROM    (
+            SELECT  argMax((t_id,
+                            c2,
+                            c3,
+                            c4,
+                            c5,
+                            c6,
+                            c7,
+                            c8,
+                            c9,
+                            c10,
+                            c11,
+                            c12,
+                            c13,
+                            c14,
+                            c15,
+                            c16,
+                            c17,
+                            c18,
+                            c19,
+                            c20,
+                            c21,
+                            c22,
+                            c23,
+                            c24,
+                            c25,
+                            c26,
+                            c27,
+                            c28,
+                            c29),
+                            rv) t
+            FROM    Tab
+            GROUP BY
+                t_id
+            ORDER BY
+                t_id
+            LIMIT 100
+        ) h
+```
+
+Stack trace:
+> 0. /usr/lib/x86_64-linux-gnu/libclickhouse.so.18.16(StackTrace::StackTrace()+0x16) [0x7f4e23729406]
+> 1. /usr/lib/x86_64-linux-gnu/libclickhouse.so.18.16(+0x36f3572) [0x7f4e25671572]
+> 2. /usr/lib/x86_64-linux-gnu/libclickhouse.so.18.16(+0x375063c) [0x7f4e256ce63c]
+> 3. /usr/lib/x86_64-linux-gnu/libclickhouse.so.18.16(+0x37531ed) [0x7f4e256d11ed]
+> 4. /usr/lib/x86_64-linux-gnu/libclickhouse.so.18.16(DB::Connection::receivePacket()+0x2e0) [0x7f4e25329e00]
+> 5. clickhouse-client(+0x39b73) [0x561d20cb3b73]
+> 6. clickhouse-client(+0x3bca3) [0x561d20cb5ca3]
+> 7. clickhouse-client(+0x3e4af) [0x561d20cb84af]
+> 8. clickhouse-client(+0x3ec2c) [0x561d20cb8c2c]
+> 9. clickhouse-client(+0x40ead) [0x561d20cbaead]
+> 10. clickhouse-client(+0x194f5) [0x561d20c934f5]
+> 11. /usr/lib/libPocoUtil.so.60(Poco::Util::Application::run()+0x31) [0x7f4e2115afe1]
+> 12. clickhouse-client(+0x3431e) [0x561d20cae31e]
+> 13. /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xeb) [0x7f4e202b809b]
+> 14. clickhouse-client(+0x1982a) [0x561d20c9382a]
+
+Trace from clickhouse-client with --send_logs_level 'trace':
+> 2019.03.13 20:08:20.625277 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Debug> default.Tab (SelectExecutor): Key condition: unknown
+> 2019.03.13 20:08:20.625375 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Debug> default.Tab (SelectExecutor): MinMax index condition: unknown
+> 2019.03.13 20:08:20.625546 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Debug> default.Tab (SelectExecutor): Selected 169 parts by date, 169 parts by key, 7585 marks to read from 169 ranges
+> 2019.03.13 20:08:20.705544 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Trace> default.Tab (SelectExecutor): Reading approx. 62136320 rows with 4 streams
+> 2019.03.13 20:08:20.705964 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+> 2019.03.13 20:08:20.706267 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+> 2019.03.13 20:08:20.706626 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 26 ] <Debug> executeQuery: Query pipeline:
+> Expression
+>  Expression
+>   Limit
+>    Expression
+>     MergeSorting
+>      PartialSorting
+>       Expression
+>        ParallelAggregating
+>         Expression × 4
+>          MergeTreeThread
+> 
+> → Progress: 8.19 thousand rows, 3.00 MB (40.75 thousand rows/s., 14.93 MB/s.)  0%2019.03.13 20:08:20.708003 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 44 ] <Trace> ParallelAggregatingBlockInputStream: Aggregating
+> 2019.03.13 20:08:20.785490 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 45 ] <Trace> Aggregator: Aggregation method: key32
+> ↘ Progress: 24.58 thousand rows, 8.84 MB (81.39 thousand rows/s., 29.27 MB/s.)  0%2019.03.13 20:08:20.848176 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 45 ] <Trace> Aggregator: Converting aggregation data to two-level.
+> 2019.03.13 20:08:20.903406 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 47 ] <Trace> Aggregator: Aggregation method: key32
+> ↓ Progress: 57.34 thousand rows, 20.66 MB (142.35 thousand rows/s., 51.27 MB/s.)  0%2019.03.13 20:08:20.952600 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 48 ] <Trace> Aggregator: Aggregation method: key32
+> 2019.03.13 20:08:20.953446 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 46 ] <Trace> Aggregator: Aggregation method: key32
+> 2019.03.13 20:08:20.973467 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 47 ] <Trace> Aggregator: Converting aggregation data to two-level.
+> ↙ Progress: 90.11 thousand rows, 31.68 MB (178.89 thousand rows/s., 62.89 MB/s.) ▏                                                                                                                                                        0%2019.03.13 20:08:21.048646 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 48 ] <Trace> Aggregator: Converting aggregation data to two-level.
+> 2019.03.13 20:08:21.057515 {641ce4e9-585e-4743-928e-e67f3d9e77f3} [ 46 ] <Trace> Aggregator: Converting aggregation data to two-level.
+> ↗ Progress: 3.68 million rows, 1.32 GB (290.86 thousand rows/s., 104.32 MB/s.) █████████                                                                                                                                                  5%
+> Exception on client:
+> Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000, ::1
+> 
+> Connecting to localhost:9000.
+> Code: 210. DB::NetException: Connection refused (localhost:9000, ::1)
+

@@ -1,0 +1,132 @@
+ID: 46327
+Title: TiDB server crashes with `UPDATE` statement
+Description:
+## Bug Report
+
+
+### 1. Minimal reproduce step (Required)
+
+1. Compile the TiDB using the source repository: [link](https://github.com/pingcap/tidb)
+2. Check out with the latest master version: 1ea64991324, also tested with released version: release-7.3 (5bb9131a493). 
+3. Compile the TiDB server using go1.21.0. Use `make` in the repo root directory. 
+4. Launch TiDB server using command: 
+
+```bash
+./tidb-server -P 8000 -socket /tmp/mysql_0.sql -path $(pwd)/db_data
+```
+
+5. Connect to the server using mysql client: 
+
+```bash
+mysql -h 127.0.0.1 -P 8000 -u root --socket /tmp/mysql_0.sql
+```
+
+6. Input the PoC Query to trigger the crash of the server. 
+
+```sql
+WITH RECURSIVE ta2(a0) AS ((SELECT TRUE) LIMIT 1) UPDATE ta3 AS OF TIMESTAMP ( (WITH RECURSIVE ta3 AS (SELECT TRUE) TABLE ta3) >> ?) IS NULL SET v0 = DEFAULT;
+```
+
+### 2. What did you expect to see? (Required)
+
+The TiDB Server should continue running and report that the table does not exist. 
+
+### 3. What did you see instead (Required)
+
+The TiDB-server crashes and then returns error:
+
+```
+mysql> WITH RECURSIVE ta2(a0) AS ((SELECT TRUE) LIMIT 1) UPDATE ta3 AS OF TIMESTAMP ( (WITH RECURSIVE ta3 AS (SELECT TRUE) TABLE ta3) >> ?) IS NULL SET v0 = DEFAULT;
+ERROR 1105 (HY000): runtime error: invalid memory address or nil pointer dereference
+```
+
+Here is a more detailed stack trace from the released version: release-7.3 (5bb9131a493):
+
+```
+github.com/pingcap/tidb/server.(*clientConn).Run.func1
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:965
+runtime.gopanic
+\t/usr/local/go/src/runtime/panic.go:914
+github.com/pingcap/tidb/executor.(*Compiler).Compile.func1
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/executor/compiler.go:54
+runtime.gopanic
+\t/usr/local/go/src/runtime/panic.go:914
+runtime.panicmem
+\t/usr/local/go/src/runtime/panic.go:261
+runtime.sigpanic
+\t/usr/local/go/src/runtime/signal_unix.go:861
+github.com/pingcap/tidb/util/chunk.Row.IsNull
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/util/chunk/row.go:218
+github.com/pingcap/tidb/expression.(*Column).EvalInt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/expression/column.go:430
+github.com/pingcap/tidb/expression.(*builtinRightShiftSig).evalInt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/expression/builtin_op.go:422
+github.com/pingcap/tidb/expression.(*ScalarFunction).EvalInt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/expression/scalar_function.go:413
+github.com/pingcap/tidb/expression.(*builtinIntIsNullSig).evalInt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/expression/builtin_op.go:1104
+github.com/pingcap/tidb/expression.(*ScalarFunction).EvalInt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/expression/scalar_function.go:413
+github.com/pingcap/tidb/expression.(*ScalarFunction).Eval
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/expression/scalar_function.go:369
+github.com/pingcap/tidb/planner/core.evalAstExpr
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/expression_rewriter.go:62
+github.com/pingcap/tidb/sessiontxn/staleread.CalculateAsOfTsExpr
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/sessiontxn/staleread/util.go:43
+github.com/pingcap/tidb/sessiontxn/staleread.parseAndValidateAsOf
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/sessiontxn/staleread/processor.go:283
+github.com/pingcap/tidb/sessiontxn/staleread.(*staleReadProcessor).OnSelectTable.func1
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/sessiontxn/staleread/processor.go:171
+github.com/pingcap/tidb/sessiontxn/staleread.(*staleReadProcessor).OnSelectTable
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/sessiontxn/staleread/processor.go:173
+github.com/pingcap/tidb/planner/core.(*preprocessor).handleTableName
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/preprocess.go:1556
+github.com/pingcap/tidb/planner/core.(*preprocessor).Leave
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/preprocess.go:584
+github.com/pingcap/tidb/parser/ast.(*TableName).Accept
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/parser/ast/dml.go:452
+github.com/pingcap/tidb/parser/ast.(*TableSource).Accept
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/parser/ast/dml.go:604
+github.com/pingcap/tidb/parser/ast.(*Join).Accept
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/parser/ast/dml.go:244
+github.com/pingcap/tidb/parser/ast.(*TableRefsClause).Accept
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/parser/ast/dml.go:805
+github.com/pingcap/tidb/parser/ast.(*UpdateStmt).Accept
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/parser/ast/dml.go:2814
+github.com/pingcap/tidb/planner/core.Preprocess
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/planner/core/preprocess.go:136
+github.com/pingcap/tidb/executor.(*Compiler).Compile
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/executor/compiler.go:63
+github.com/pingcap/tidb/session.(*session).ExecuteStmt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/session/session.go:2225
+github.com/pingcap/tidb/server.(*TiDBContext).ExecuteStmt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/driver_tidb.go:291
+github.com/pingcap/tidb/server.(*clientConn).handleStmt
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1993
+github.com/pingcap/tidb/server.(*clientConn).handleQuery
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1784
+github.com/pingcap/tidb/server.(*clientConn).dispatch
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1271
+github.com/pingcap/tidb/server.(*clientConn).Run
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/conn.go:1050
+github.com/pingcap/tidb/server.(*Server).onConn
+\t/home/tidb/go_projects/src/github.com/tidb/tidb/server/server.go:662
+```
+
+### 4. What is your TiDB version? (Required)
+
+```
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                                                        |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: v7.3.0-2-g5bb9131a49
+Edition: Community
+Git Commit Hash: 5bb9131a49373eaecbe23a572b711a24a42c5297
+Git Branch: release-7.3
+UTC Build Time: 2023-08-23 01:27:53
+GoVersion: go1.21.0
+Race Enabled: false
+Check Table Before Drop: false
+Store: unistore |
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+```

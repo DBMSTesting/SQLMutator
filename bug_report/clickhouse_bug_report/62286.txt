@@ -1,0 +1,46 @@
+ID: 62286
+Title: new analyzer: global in TABLE does not work in distributed queries
+Description:
+I cannot reproduce it with fiddle https://fiddle.clickhouse.com/5de17519-8a1b-4cfc-8e5d-2e76cd7b94cf
+
+It's reproducible only with 2 real shards:
+
+```sql
+drop table if exists u;
+drop table if exists ff1 on cluster cluster2shards;
+drop table if exists d on cluster cluster2shards;
+
+CREATE TABLE ff1 on cluster cluster2shards (uid Int16) ENGINE = MergeTree order by tuple() as select 1;
+
+create table d on cluster cluster2shards as ff1 Engine=Distributed(cluster2shards, 'default', 'ff1');
+
+CREATE TABLE u(uid Int16) ENGINE=Memory as select 1;
+
+select * from d where uid GLOBAL IN (select * from u);
+   ┌─uid─┐
+1. │   1 │
+   └─────┘
+   ┌─uid─┐
+2. │   1 │
+   └─────┘
+
+select * from d where uid GLOBAL IN u settings allow_experimental_analyzer=0;
+   ┌─uid─┐
+1. │   1 │
+   └─────┘
+   ┌─uid─┐
+2. │   1 │
+   └─────┘
+
+select * from d where uid GLOBAL IN u settings allow_experimental_analyzer=1;
+   ┌─uid─┐
+1. │   1 │
+   └─────┘
+↙ Progress: 0.00 rows, 0.00 B (0.00 rows/s., 0.00 B/s.)
+1 row in set. Elapsed: 0.005 sec.
+
+Received exception from server (version 24.3.2):
+Code: 47. DB::Exception: Received from localhost:9000. DB::Exception: Received from host2:9000. DB::Exception: 
+Unknown expression or table expression identifier 'default.u' in scope SELECT __table1.uid AS uid 
+FROM default.ff1 AS __table1 WHERE __table1.uid GLOBAL IN (default.u AS __table2). (UNKNOWN_IDENTIFIER)
+```

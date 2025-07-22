@@ -1,0 +1,88 @@
+ID: 56822
+Title: REORGANIZE PARTITION does not cleanup replaced indexes.
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+<!-- a step by step guide for reproducing the bug. -->
+```sql
+create table t (a int primary key, b varchar(255), unique index idx_b_global (b) global) partition by range (a) (partition p1 values less than (200), partition pMax values less than (maxvalue));
+insert into t values (1,1),(2,2),(101,101),(102,102),(998,998),(999,999);
+select * from information_schema.tidb_indexes where table_name = 't';
+select * from mysql.gc_delete_range;
+select * from mysql.gc_delete_range_done;
+alter table t reorganize partition p1 into (partition p0 values less than (100), partition p1 values less than (200));
+select * from mysql.gc_delete_range;
+select * from mysql.gc_delete_range_done;
+select * from information_schema.tidb_indexes where table_name = 't';
+```
+
+### 2. What did you expect to see? (Required)
+An entry it the gc_delete_range* tables for the index with id = 1
+
+### 3. What did you see instead (Required)
+No such entry to delete the global index:
+```sql
+tidb> create table t (a int primary key, b varchar(255), unique index idx_b_global (b) global) partition by range (a) (partition p1 values less than (200), partition pMax values less than (maxvalue));
+Query OK, 0 rows affected (0.04 sec)
+
+tidb> insert into t values (1,1),(2,2),(101,101),(102,102),(998,998),(999,999);
+Query OK, 6 rows affected (0.00 sec)
+Records: 6  Duplicates: 0  Warnings: 0
+
+tidb> select * from information_schema.tidb_indexes where table_name = 't';
++--------------+------------+------------+--------------+--------------+-------------+----------+---------------+------------+----------+------------+-----------+-----------+
+| TABLE_SCHEMA | TABLE_NAME | NON_UNIQUE | KEY_NAME     | SEQ_IN_INDEX | COLUMN_NAME | SUB_PART | INDEX_COMMENT | Expression | INDEX_ID | IS_VISIBLE | CLUSTERED | IS_GLOBAL |
++--------------+------------+------------+--------------+--------------+-------------+----------+---------------+------------+----------+------------+-----------+-----------+
+| test         | t          |          0 | PRIMARY      |            1 | a           |     NULL |               | NULL       |        0 | YES        | YES       |         0 |
+| test         | t          |          0 | idx_b_global |            1 | b           |     NULL |               | NULL       |        1 | YES        | NO        |         1 |
++--------------+------------+------------+--------------+--------------+-------------+----------+---------------+------------+----------+------------+-----------+-----------+
+2 rows in set (0.00 sec)
+
+tidb> select * from mysql.gc_delete_range;
+Empty set (0.00 sec)
+
+tidb> select * from mysql.gc_delete_range_done;
+Empty set (0.00 sec)
+
+tidb> alter table t reorganize partition p1 into (partition p0 values less than (100), partition p1 values less than (200));
+Query OK, 0 rows affected, 1 warning (0.73 sec)
+
+tidb> select * from mysql.gc_delete_range;
++--------+------------+--------------------+--------------------+--------------------+
+| job_id | element_id | start_key          | end_key            | ts                 |
++--------+------------+--------------------+--------------------+--------------------+
+|    116 |          1 | 74800000000000006f | 748000000000000070 | 453456927279808521 |
++--------+------------+--------------------+--------------------+--------------------+
+1 row in set (0.00 sec)
+
+tidb> select * from mysql.gc_delete_range_done;
+Empty set (0.00 sec)
+
+tidb> select * from information_schema.tidb_indexes where table_name = 't';
++--------------+------------+------------+--------------+--------------+-------------+----------+---------------+------------+----------+------------+-----------+-----------+
+| TABLE_SCHEMA | TABLE_NAME | NON_UNIQUE | KEY_NAME     | SEQ_IN_INDEX | COLUMN_NAME | SUB_PART | INDEX_COMMENT | Expression | INDEX_ID | IS_VISIBLE | CLUSTERED | IS_GLOBAL |
++--------------+------------+------------+--------------+--------------+-------------+----------+---------------+------------+----------+------------+-----------+-----------+
+| test         | t          |          0 | PRIMARY      |            1 | a           |     NULL |               | NULL       |        0 | YES        | YES       |         0 |
+| test         | t          |          0 | idx_b_global |            1 | b           |     NULL |               | NULL       |        2 | YES        | NO        |         1 |
++--------------+------------+------------+--------------+--------------+-------------+----------+---------------+------------+----------+------------+-----------+-----------+
+2 rows in set (0.00 sec)
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+```
+tidb_version(): Release Version: v8.4.0-alpha-457-g64ecfa1156
+Edition: Community
+Git Commit Hash: 64ecfa1156200c5b45f1b686ecd29c00ebcc425a
+Git Branch: HEAD
+UTC Build Time: 2024-10-23 03:06:30
+GoVersion: go1.23.2
+Race Enabled: false
+Check Table Before Drop: false
+Store: tikv
+```

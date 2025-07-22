@@ -1,0 +1,102 @@
+ID: 4463
+Title: Increase Memory limit when inserting from CSV to Memory engine table
+Description:
+I am hitting memory limit error when attempting to insert 100 million rows from CSV to in-memory table. CSV size is 5 GB. Machine memory is 125 GB.
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+
+19.3.4 revision 54415
+
+* Which interface to use, if matters
+
+`clickhouse-client`
+
+* `CREATE TABLE` statements for all tables involved
+
+First generate data, for that you need to have R and R data.table package. Below command will produce two csv files: ~0.5 GB (1e7 rows), ~5 GB (1e8 rows).
+```sh
+wget https://raw.githubusercontent.com/h2oai/db-benchmark/master/groupby-datagen.R
+Rscript groupby-datagen.R 1e7 1e2 0 0
+Rscript groupby-datagen.R 1e8 1e2 0 0
+```
+
+Inserting 0.5 GB (1e7 rows) table works as expected.
+```sh
+clickhouse-client --query="CREATE TABLE IF NOT EXISTS G1_1e7_1e2_0_0 (id1 String, id2 String, id3 String, id4 Int32, id5 Int32, id6 Int32, v1 Int32, v2 Int32, v3 Float64) ENGINE = Memory()"
+clickhouse-client --query="TRUNCATE TABLE G1_1e7_1e2_0_0"
+clickhouse-client --query="INSERT INTO G1_1e7_1e2_0_0 FORMAT CSVWithNames" < data/G1_1e7_1e2_0_0.csv
+clickhouse-client --query="SELECT count(*) FROM G1_1e7_1e2_0_0"
+#10000000
+wc -l data/G1_1e7_1e2_0_0.csv
+#10000001 data/G1_1e7_1e2_0_0.csv
+```
+
+* Queries to run that lead to unexpected result
+
+Inserting 5 GB (1e8 rows) table silently insert only a subset of rows.
+```sh
+clickhouse-client --query="CREATE TABLE IF NOT EXISTS G1_1e8_1e2_0_0 (id1 String, id2 String, id3 String, id4 Int32, id5 Int32, id6 Int32, v1 Int32, v2 Int32, v3 Float64) ENGINE = Memory()"
+clickhouse-client --query="TRUNCATE TABLE G1_1e8_1e2_0_0"
+clickhouse-client --query="INSERT INTO G1_1e8_1e2_0_0 FORMAT CSVWithNames" < data/G1_1e8_1e2_0_0.csv
+clickhouse-client --query="SELECT count(*) FROM G1_1e8_1e2_0_0"
+#72351744
+wc -l data/G1_1e8_1e2_0_0.csv
+#100000001 data/G1_1e8_1e2_0_0.csv
+```
+
+**Expected behavior**
+
+all rows should be inserted
+
+**Error message and/or stacktrace**
+
+log file content `/var/log/clickhouse-server/clickhouse-server.err.log`
+```
+2019.02.20 08:00:37.303248 [ 26 ] {1334b6a9-4dad-4c29-8f95-b10e0d5d988f} <Error> executeQuery: Code: 241, e.displayText() = DB::Exception: Memory limit (for query) exce
+eded: would use 9.32 GiB (attempt to allocate chunk of 16777216 bytes), maximum: 9.31 GiB (from 127.0.0.1:40520) (in query: INSERT INTO G1_1e8_1e2_0_0 FORMAT CSVWithNam
+es), Stack trace:                                                          
+                                                                          
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x6f13346]                             
+1. /usr/bin/clickhouse-server(MemoryTracker::alloc(long)+0xa0e) [0x6f0aa4e]                               
+2. /usr/bin/clickhouse-server(MemoryTracker::alloc(long)+0xb1) [0x6f0a0f1] 
+3. /usr/bin/clickhouse-server(Allocator<false>::alloc(unsigned long, unsigned long)+0x31) [0x6eec6b1]   
+4. /usr/bin/clickhouse-server(COWPtrHelper<DB::IColumn, DB::ColumnString>::clone() const+0xba) [0x3936eaa] 
+5. /usr/bin/clickhouse-server(DB::Block::mutateColumns()+0x1a9) [0x616fcd9]                           
+6. /usr/bin/clickhouse-server(DB::SquashingBlockOutputStream::write(DB::Block const&)+0x27e) [0x68014ce]
+7. /usr/bin/clickhouse-server(DB::AddingDefaultBlockOutputStream::write(DB::Block const&)+0x89) [0x6779a79]
+8. /usr/bin/clickhouse-server(DB::CountingBlockOutputStream::write(DB::Block const&)+0x2c) [0x679c34c]
+9. /usr/bin/clickhouse-server(DB::TCPHandler::receiveData()+0xa7) [0x33a6df7]                            
+10. /usr/bin/clickhouse-server(DB::TCPHandler::receivePacket()+0xcd) [0x33a83cd]
+11. /usr/bin/clickhouse-server(DB::TCPHandler::readData(DB::Settings const&)+0x1cb) [0x33a889b]
+12. /usr/bin/clickhouse-server(DB::TCPHandler::processInsertQuery(DB::Settings const&)+0x23b) [0x33a8dcb]
+13. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x755) [0x33a9745]            
+14. /usr/bin/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x33aa63b]    
+15. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x7049cbf]
+16. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x16a) [0x704a09a]
+17. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x77) [0x71265a7]
+18. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0x7122468]
+19. /usr/bin/clickhouse-server() [0xacbfecf]
+20. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7fedd135a6db]                                                                                      
+21. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7fedd08d988f]
+
+2019.02.20 08:00:37.458127 [ 26 ] {} <Error> ServerErrorHandler: Code: 99, e.displayText() = DB::Exception: Unknown packet 2701 from client, Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x6f13346]               
+1. /usr/bin/clickhouse-server(DB::Exception::Exception(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, int)+0x22) [0x3399d82]
+2. /usr/bin/clickhouse-server(DB::TCPHandler::receivePacket()+0x32c) [0x33a862c]       
+3. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x362) [0x33a9352]
+4. /usr/bin/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x33aa63b]                                                                                    
+5. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x7049cbf]
+6. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x16a) [0x704a09a]
+7. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x77) [0x71265a7]                                                                                
+8. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0x7122468]
+9. /usr/bin/clickhouse-server() [0xacbfecf]                             
+10. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7fedd135a6db]                                                                                                  
+11. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7fedd08d988f]                
+```
+
+**Additional context**
+
+Are there any settings I should use to tune memory limit?

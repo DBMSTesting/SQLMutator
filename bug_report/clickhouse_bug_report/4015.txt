@@ -1,0 +1,33 @@
+ID: 4015
+Title: Insert is not working for distributed tables with materialized columns
+Description:
+Problem reproduces on inserts into distributed table with such schema: 
+`CREATE DATABASE shard_1
+
+CREATE TABLE shard_1.test (field_1 UInt8, event_date Date MATERIALIZED today()) ENGINE = MergeTree(event_date, (event_date, field_1), 8192)
+
+CREATE TABLE IF NOT EXISTS test_dist AS shard_1.test ENGINE = Distributed('test_cluster', '','test', cityHash64(event_date))
+
+INSERT INTO `default`.test_dist (field_1) VALUES(0);`
+
+After that exception of server is falling 
+`2019.01.09 16:52:58.097140 [ 28 ] {} <Error> test_dist.Distributed.DirectoryMonitor: Code: 44, e.displayText() = DB::Exception: Received from localhost:9000, 127.0.0.1. DB::Exception: Cannot insert column event_date, because it is MATERIALIZED column.. Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x9c778f6]
+1. /usr/bin/clickhouse-server(DB::InterpreterInsertQuery::getSampleBlock(DB::ASTInsertQuery const&, std::shared_ptr<DB::IStorage> const&)+0xbe0) [0x6ebbc60]
+2. /usr/bin/clickhouse-server(DB::InterpreterInsertQuery::execute()+0x36a) [0x6ebc2ea]
+3. /usr/bin/clickhouse-server() [0x6fbe247]
+4. /usr/bin/clickhouse-server(DB::executeQuery(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, DB::Context&, bool, DB::QueryProcessingStage::Enum)+0x8a) [0x6fc01da]
+5. /usr/bin/clickhouse-server(DB::TCPHandler::runImpl()+0x4d5) [0x32c4455]
+6. /usr/bin/clickhouse-server(DB::TCPHandler::run()+0x2b) [0x32c563b]
+7. /usr/bin/clickhouse-server(Poco::Net::TCPServerConnection::start()+0xf) [0x9dfb50f]
+8. /usr/bin/clickhouse-server(Poco::Net::TCPServerDispatcher::run()+0x16a) [0x9dfb8ea]
+9. /usr/bin/clickhouse-server(Poco::PooledThread::run()+0x77) [0xa0ce957]
+10. /usr/bin/clickhouse-server(Poco::ThreadImpl::runnableEntry(void*)+0x38) [0xa0ca818]
+11. /usr/bin/clickhouse-server() [0xa94e40f]
+12. /lib/x86_64-linux-gnu/libpthread.so.0(+0x76db) [0x7fd7a889d6db]
+13. /lib/x86_64-linux-gnu/libc.so.6(clone+0x3f) [0x7fd7a7e1c88f]`
+
+I assume problem is somewhere in generated temporary files for distributed tables *.bin, because in the new version of CH they starts from insert script with all columns(including materialized). 
+In previous version of CH they weren't including materialized columns. This issue fully blocks all insert into the target of the distributed table.
+Problem reproduces in version 18.16.1 (in 18.14.13 everything is ok)

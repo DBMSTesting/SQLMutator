@@ -1,0 +1,55 @@
+ID: 9202
+Title: with max_parallel_replicas CH does not merge query results from shards.
+Description:
+18.14.19, 19.4.5.35, 19.13.6.51, 20.2
+```
+        <replicated>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica><host>host1</host><port>9000</port></replica>
+                <replica><host>host2</host><port>9000</port></replica>
+            </shard>
+        </replicated>
+
+CREATE TABLE t_rep (k UInt32, s String) 
+ENGINE = MergeTree ORDER BY (s, cityHash64(k)) 
+SAMPLE BY cityHash64(k);
+
+CREATE TABLE t_all as t_rep 
+ENGINE = Distributed(replicated, currentDatabase(), t_rep, rand());
+
+insert into t_all select number, toString(number) from numbers(1000);
+
+host1: select count() from t_rep
+┌─count()─┐
+│    1000 │
+└─────────┘
+
+host2: select count() from t_rep
+┌─count()─┐
+│    1000 │
+└─────────┘
+
+
+set max_parallel_replicas=2, prefer_localhost_replica=0;
+
+SELECT count() FROM t_all;
+
+┌─count()─┐
+│     492 │
+└─────────┘
+┌─count()─┐
+│     508 │
+└─────────┘
+
+SELECT k%2 x, sum(k) FROM t_all group by x;
+┌─x─┬─sum(k)─┐
+│ 0 │ 127158 │
+│ 1 │ 118419 │
+└───┴────────┘
+┌─x─┬─sum(k)─┐
+│ 0 │ 122342 │
+│ 1 │ 131581 │
+└───┴────────┘
+
+```

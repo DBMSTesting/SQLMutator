@@ -1,0 +1,53 @@
+ID: 12680
+Title: Accelerating Parquet encryption with dlopen
+Description:
+Opened a new PR and closed #11720 for more clarity.
+
+---
+
+This PR enables to accelerate Parquet en/decryption with OpenSSL using dlopen/dlsym to avoid maintaining the state in the DBconfig (as previously in #11720).
+
+**TL;DR** Parquet en/decryption uses the mbedtls library by default. However, with the httpfs extension we can leverage OpenSSL to speedup the en/decryption process. The OpenSSL factory method will be detected by using dlopen/dlsym, and then the en/decryption of Parquet files will be accelerated by default. This means that it does not require any additional steps to enable the acceleration once httpfs is build.
+
+### How it works
+---
+When a Parquet reader/writer is initialized, _and_ the `encryption_config` is present, the pointer `encryption_util` will be set. Depending on whether `dlopen()` can find the `CreateSSLFactory` function, this pointer will point to an OpenSSL factory method or a mbedtls factory method.
+
+I have tried to maintain the same logic as used for the mbedtls-based en/decryption functions. However, some minor refactoring was required since the en/decryption logic for mbedtls and openssl slightly differs.
+
+### Benchmarks
+---
+The benchmarks are performed on a Mac M2 Pro, using TPC-H with scale factor 1. The execution times are the average of 5 subsequent runs. I've added the exact benchmarks I used (the mbedtls benchmarks are separate, because `dlopen()` always detects the `CreateSSLFactory` function if httpfs is build).
+
+| | Unencrypted | OpenSSL | mbedtls | 
+| -------- | ------- |  ------- |  ------- |  
+| **Load  (TPCH)** | 0.253  | 0.278  | 0.488  | 
+| **Q1 (TPCH)** | 0.067  |  0.071  |  0.150  |
+
+The overhead is reduced from _93%_ to _10%_ and from _124%_ to _6%_ for loading + encrypting data and performing Q1 on encrypted Parquet respectively. This is roughly the same for the old implementation (#11720).
+
+
+### Tests
+---
+I've added 2 new test files that repeat most of the existing tests for Parquet encryption:
+
+- `parquet_encryption_httpfs.test` which is similar to `parquet_encryption.test` but then with `require httpfs`
+- `parquet_encryption_mbedtls_openssl.test` which tests the decryption of files, that are encrypted with mbedtls, with OpenSSL and vice versa.
+
+### Debugging with mbedtls when httpfs is build
+---
+If the httpfs extension is build, by default the application switches to OpenSSL encryption at runtime. However, if you want to debug with mbedtls enabled you can set  parquet option: `debug_use_openssl = false`. The final logic looks like this:
+
+For copy:
+```
+# write files with mbedtls (explicitly disable OpenSSL if httpfs is loaded)
+COPY (SELECT 42 i) to 'test_file.parquet' (ENCRYPTION_CONFIG {footer_key: 'key${key_len}'}, 
+DEBUG_USE_OPENSSL false)
+```
+
+For read:
+```
+# read encrypted files by using mbedtls (explicitly disable OpenSSL if httpfs is loaded)
+SELECT * FROM read_parquet('test_file.parquet', encryption_config={footer_key: 'key${key_len}'}, 
+debug_use_openssl=false)
+```

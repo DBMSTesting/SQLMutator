@@ -1,0 +1,109 @@
+ID: 26846
+Title: Query using index has a duplicated result.
+Description:
+## Bug Report
+
+We have 2 TiDB clusters, one master and one slave. Data replicated from master to slave by TiDB-binlog.
+When query by index on the slave, the result has a duplicated row, but the result is corrected when executing the same query on master.
+
+Currently, the bug only affected one record, no other duplicate record found so far.
+
+### 1. Minimal reproduce step (Required)
+
+Table schema:
+```sql
+CREATE TABLE `log` (
+  `field_1` bigint(20) NOT NULL,
+  `field_2` smallint(6) NOT NULL,
+  `field_3` bigint(20) NOT NULL,
+  `field_4` int(11) NOT NULL,
+  `field_5` varchar(64) NOT NULL,
+  `field_6` smallint(6) NOT NULL,
+  `field_7` varchar(64) NOT NULL,
+  `field_8` varchar(64) NOT NULL,
+  `field_9` varchar(16) NOT NULL DEFAULT '-1',
+  `field_10` smallint(1) NOT NULL,
+  `field_11` int(11) NOT NULL,
+  `field_12` int(11) NOT NULL,
+  `field_13` bigint(20) NOT NULL,
+  `field_14` bigint(20) NOT NULL,
+  `field_15` json NOT NULL,
+  `field_16` bigint(20) NOT NULL,
+  `field_17` bigint(20) NOT NULL,
+  `field_18` bigint(20) NOT NULL,
+  `field_19` bigint(20) NOT NULL,
+  `field_20` bigint(20) NOT NULL,
+  `field_21` varchar(1024) NOT NULL,
+  `field_22` varchar(1024) NOT NULL,
+  PRIMARY KEY (`field_1`,`field_2`,`field_3`),
+  KEY `key_1` (`field_7`,`field_11`),
+  KEY `key_2` (`field_20`),
+  KEY `key_3` (`field_14`),
+  KEY `key_4` (`field_8`),
+  KEY `key_5` (`field_3`,`field_19`),
+  KEY `key_6` (`field_5`,`field_4`,`field_12`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin;
+```
+
+1.   Query by index (key_1, key_2, key_3, key_4) has the incorrect result (which has a duplicate row). Other index (which has less unique value) is not verify due to large of data.
+```sql
+select field_1, field_2, field_3 from log where field_7='PU210610000124334';
+select field_1, field_2, field_3 from log where field_20=1623269827689;
+select field_1, field_2, field_3 from log where field_14=1623269827689;
+select field_1, field_2, field_3 from log where field_8='210610000124334';
+```
+- The result is the same for 4 queries above:
+<img width="342" alt="dup-result" src="https://user-images.githubusercontent.com/13825568/127984359-9000e2bc-6087-460e-a1bb-0dd918d320ad.png">
+
+- The explain analyze:
+```sql
+explain analyze select field_1, field_2, field_3 from log where field_7='PU210610000124334';
+--- result:
+id,count,task,"operator info","execution info",memory
+Projection_4,0.00,root,"zas.log.field_1, zas.log.field_2, zas.log.field_3","time:5.042769ms, loops:2, rows:5",N/A
+└─IndexLookUp_10,0.00,root,,"time:5.031902ms, loops:2, rows:5","9.68359375 KB"
+"  ├─IndexScan_8",0.00,cop,"table:log, index:field_7, field_11, range:["PU210610000124334","PU210610000124334"], keep order:false","time:0s, loops:1, rows:5",N/A
+"  └─TableScan_9",0.00,cop,"table:log, keep order:false","time:0s, loops:1, rows:5",N/A
+
+explain analyze select field_1, field_2, field_3 from log where field_14=1623269827689; -- field_20 has the same result.
+--- result:
+id,count,task,"operator info","execution info",memory
+IndexLookUp_10,1270371.65,root,"zas.log.field_1, zas.log.field_2, zas.log.field_3","time:4.038591ms, loops:2, rows:5","17.83984375 KB"
+├─IndexScan_8,1270371.65,cop,"table:log, index:field_14, range:[1623269827689,1623269827689], keep order:false","time:0s, loops:1, rows:5",N/A
+└─TableScan_9,1270371.65,cop,"table:log, keep order:false","time:0s, loops:1, rows:5",N/A
+
+explain analyze select field_1, field_2, field_3 from log where field_8='210610000124334';
+--- result:
+id,count,task,"operator info","execution info",memory
+Projection_4,0.00,root,"zas.log.field_1, zas.log.field_2, zas.log.field_3","time:10.568519ms, loops:2, rows:5",N/A
+└─IndexLookUp_10,0.00,root,,"time:10.555061ms, loops:2, rows:5","9.68359375 KB"
+"  ├─IndexScan_8",0.00,cop,"table:log, index:field_8, range:["210610000124334","210610000124334"], keep order:false","time:1ms, loops:1, rows:5",N/A
+"  └─TableScan_9",0.00,cop,"table:log, keep order:false","time:1ms, loops:1, rows:5",N/A
+```
+
+2. Query by the first field on the compose primary key. The result is corrected
+```sql
+select field_1, field_2, field_3 from log where field_1=100122019622518784;
+```
+- The result:
+<img width="337" alt="correct-result" src="https://user-images.githubusercontent.com/13825568/127983764-ab9b4e50-5d95-4b1f-a7f8-23bc6d0ee22e.png">
+
+- The explain analyze:
+```sql
+explain analyze select field_1, field_2, field_3 from log where field_1=100122019622518784;
+--- result:
+id,count,task,"operator info","execution info",memory
+IndexReader_6,0.00,root,index:IndexScan_5,"time:2.215023ms, loops:2, rows:4","274 Bytes"
+└─IndexScan_5,0.00,cop,"table:log, index:field_1, field_2, field_3, range:[100122019622518784,100122019622518784], keep order:false","time:0s, loops:1, rows:4",N/A
+```
+
+### 2. What did you expect to see? (Required)
+Non-duplicate result by any query criteria.
+
+### 3. What did you see instead (Required)
+Duplicate result if query using index.
+
+### 4. What is your TiDB version? (Required)
+
+'5.7.25-TiDB-v3.0.12'
+

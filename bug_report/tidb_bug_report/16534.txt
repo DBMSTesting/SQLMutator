@@ -1,0 +1,79 @@
+ID: 16534
+Title: TiDB cost estimate is unstable
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. What did you do?
+
+<!-- If possible, provide a recipe for reproducing the error. -->
+1. load lineorder table in ssb benchmark(scale 100), analyze lineorder
+2.
+```
+MySQL [ssb]> explain select count(*)  from lineorder where lo_discount > 1;
++------------------------------+--------------+--------------+-----------------+-----------------------------------+
+| id                           | estRows      | task         | access object   | operator info                     |
++------------------------------+--------------+--------------+-----------------+-----------------------------------+
+| StreamAgg_27                 | 1.00         | root         |                 | funcs:count(Column#21)->Column#19 |
+| └─TableReader_28             | 1.00         | root         |                 | data:StreamAgg_9                  |
+|   └─StreamAgg_9              | 1.00         | cop[tiflash] |                 | funcs:count(1)->Column#21         |
+|     └─Selection_26           | 542194468.00 | cop[tiflash] |                 | gt(ssb.lineorder.lo_discount, 1)  |
+|       └─TableFullScan_25     | 600038145.00 | cop[tiflash] | table:lineorder | keep order:false                  |
++------------------------------+--------------+--------------+-----------------+-----------------------------------+
+5 rows in set (0.00 sec)
+
+MySQL [ssb]> explain select count(*)  from lineorder where lo_discount < 3;
++------------------------------+--------------+--------------+-----------------+-----------------------------------+
+| id                           | estRows      | task         | access object   | operator info                     |
++------------------------------+--------------+--------------+-----------------+-----------------------------------+
+| StreamAgg_27                 | 1.00         | root         |                 | funcs:count(Column#21)->Column#19 |
+| └─TableReader_28             | 1.00         | root         |                 | data:StreamAgg_9                  |
+|   └─StreamAgg_9              | 1.00         | cop[tiflash] |                 | funcs:count(1)->Column#21         |
+|     └─Selection_26           | 166930611.00 | cop[tiflash] |                 | lt(ssb.lineorder.lo_discount, 3)  |
+|       └─TableFullScan_25     | 600038145.00 | cop[tiflash] | table:lineorder | keep order:false                  |
++------------------------------+--------------+--------------+-----------------+-----------------------------------+
+5 rows in set (0.00 sec)
+
+MySQL [ssb]> explain select count(*)  from lineorder where lo_discount > 1 and lo_discount < 3;
++----------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+| id                         | estRows      | task         | access object   | operator info                                                      |
++----------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+| StreamAgg_10               | 1.00         | root         |                 | funcs:count(1)->Column#19                                          |
+| └─TableReader_22           | 0.00         | root         |                 | data:Selection_21                                                  |
+|   └─Selection_21           | 0.00         | cop[tiflash] |                 | gt(ssb.lineorder.lo_discount, 1), lt(ssb.lineorder.lo_discount, 3) |
+|     └─TableFullScan_20     | 600038145.00 | cop[tiflash] | table:lineorder | keep order:false                                                   |
++----------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+```
+3. After restart TiDB, and re-run the explain sql, the first time give a reasonable result, but starting from the second time, the estRows is always 0
+```
+MySQL [ssb]> explain select count(*)  from lineorder where lo_discount < 3 and lo_discount > 1;
++------------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+| id                           | estRows      | task         | access object   | operator info                                                      |
++------------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+| StreamAgg_27                 | 1.00         | root         |                 | funcs:count(Column#21)->Column#19                                  |
+| └─TableReader_28             | 1.00         | root         |                 | data:StreamAgg_9                                                   |
+|   └─StreamAgg_9              | 1.00         | cop[tiflash] |                 | funcs:count(1)->Column#21                                          |
+|     └─Selection_26           | 15000953.62  | cop[tiflash] |                 | gt(ssb.lineorder.lo_discount, 1), lt(ssb.lineorder.lo_discount, 3) |
+|       └─TableFullScan_25     | 600038145.00 | cop[tiflash] | table:lineorder | keep order:false                                                   |
++------------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+5 rows in set (0.00 sec)
+
+MySQL [ssb]> explain select count(*)  from lineorder where lo_discount < 3 and lo_discount > 1;
++----------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+| id                         | estRows      | task         | access object   | operator info                                                      |
++----------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+| StreamAgg_10               | 1.00         | root         |                 | funcs:count(1)->Column#19                                          |
+| └─TableReader_22           | 0.00         | root         |                 | data:Selection_21                                                  |
+|   └─Selection_21           | 0.00         | cop[tiflash] |                 | gt(ssb.lineorder.lo_discount, 1), lt(ssb.lineorder.lo_discount, 3) |
+|     └─TableFullScan_20     | 600038145.00 | cop[tiflash] | table:lineorder | keep order:false                                                   |
++----------------------------+--------------+--------------+-----------------+--------------------------------------------------------------------+
+4 rows in set (0.00 sec)
+```
+
+### 2. What did you expect to see?
+The estRows should be stable and reasonable
+### 3. What did you see instead?
+The estRows is always 0
+### 4. What version of TiDB are you using? (`tidb-server -V` or run `select tidb_version();` on TiDB)
+TiDB master

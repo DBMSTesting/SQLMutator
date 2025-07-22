@@ -1,0 +1,92 @@
+ID: 5683
+Title: Unexpectedly high disk usage of UInt32 column
+Description:
+CH 19.7.5.27
+Single host, no replication no nothing.
+
+I've got a table with Graphite stuff, which is:
+```
+CREATE TABLE graphite (
+ `Path` String,
+ `Value` Float64,
+ `Time` UInt32,
+ `Date` Date,
+ `Timestamp` UInt32
+) ENGINE = GraphiteMergeTree('graphite_rollup')
+PARTITION BY toYYYYMMDD(Date)
+ORDER BY (Path, Time)
+
+SELECT sum(bytes_on_disk)
+FROM system.parts
+WHERE (table = 'graphite') AND active
+
+┌─sum(bytes_on_disk)─┐
+│       121650448572 │
+└────────────────────┘
+
+SELECT count(*)
+FROM graphite
+
+┌─────count()─┐
+│ 77441749187 │
+└─────────────┘
+
+1 rows in set. Elapsed: 47.003 sec. Processed 77.44 billion rows, 154.88 GB (1.65 billion rows/s., 3.30 GB/s.)
+```
+
+So it has about 77 billion rows and takes 121GB of space. It's partitioned daily and gets a lot of metrics, so has quite some parts.
+
+Then I create another table using usual MergeTree with same structure, but partitioned by month and decide to take half a month of data into it:
+```
+CREATE TABLE graphite2 AS graphite
+ENGINE MergeTree()
+PARTITION BY toYYYYMM(Date)
+ORDER BY (Path, Time)
+
+INSERT INTO graphite2 SELECT * FROM graphite WHERE Date >= '2019-05-01' AND Date <= '2019-05-15'
+
+OPTIMIZE TABLE graphite2 PARTITION 201905 FINAL
+```
+
+And there I have:
+```
+SELECT count(*)
+FROM graphite2
+
+┌─────count()─┐
+│ 16700495140 │
+└─────────────┘
+
+1 rows in set. Elapsed: 268.192 sec. Processed 16.70 billion rows, 33.40 GB (62.27 million rows/s., 124.54 MB/s.)
+
+SELECTbytes_on_disk
+FROM system.parts
+WHERE (table = 'graphite2') AND active
+
+┌─bytes_on_disk─┐
+│   87682940088 │
+└───────────────┘
+```
+
+Only 16 billion rows (21% of the full table) which are in one part and taking **87G** of space (72% of the full table).
+
+I'm looking at the part:
+```
+# ls -1 -sh *.bin
+total 82G
+187M Date.bin
+4.3G Path.bin
+ 63G Time.bin
+284M Timestamp.bin
+ 15G Value.bin
+```
+
+`Path` column with long strings takes only 4.3G, but simple UInt32 `Time` takes horrible 63G... Even 64-bit `Value` column is 4 times smaller.
+
+This looks crazy to me, especially if the original table is partitioned by days and should be stored less effectively.
+
+P.S.
+Also take note on the scanning speed of this table when doing `SELECT COUNT(*)...` - the original `graphite` is going 3.3GB/s, but smaller `graphite2` is only 124MB/s. And it eats all 8 CPU cores while doing that.
+
+* The tables are both LZ4 as I didn't specify any codecs
+* I recreated the table several times - it's persistent

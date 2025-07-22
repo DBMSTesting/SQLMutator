@@ -1,0 +1,113 @@
+ID: 63863
+Title: Locally querying a Map(LowCardinality(String), String)) inside a Tuple leads to segfault in clickhouse server
+Description:
+**Describe what's wrong**
+
+Locally querying a Map(LowCardinality(String, String)) containing more than 254 keys leads to segmentation fault in the server when the table contains around 4000 rows or more.
+
+**Does it reproduce on the most recent release?**
+
+- `head (24.5.1.1106)`: https://fiddle.clickhouse.com/6d680e44-3828-42d3-8ad2-fff8209dce4c
+- `24.4.1.2088`: https://fiddle.clickhouse.com/65d0fb52-ce1c-4e41-8c5f-2fabfcf70337
+- `26.8.14.6`: https://fiddle.clickhouse.com/c6f7c8ab-660e-4c4f-b95e-39d8407dc950
+
+
+**How to reproduce**
+
+`clickhouse client --stacktrace --queries-file poc.sql`
+```sql
+CREATE OR REPLACE TABLE crash_poc
+(
+    id UInt64,
+    crash Tuple
+    (
+        data Map(LowCardinality(String), String)
+    ) 
+)
+ENGINE = MergeTree
+ORDER BY id;
+INSERT INTO crash_poc
+SELECT * FROM url('https://gist.githubusercontent.com/3ster/e499d1cfd53966ab5498fb6881f44e84/raw/52521c733d0bcf649cc44419b23f4b93ae3a5f73/crash_data.parquet');
+SELECT * FROM crash_poc WHERE mapContains(crash.data, 'not_existent_123') LIMIT 1;
+```
+
+Both changing event_data to Map(String, String) and moving event_data out of the winlog Tuple prevent the error from happening. The ingested URL contains 4K rows of random data and is publicly accessible.
+
+**Expected behavior**
+
+Server should not segfault.
+
+**Error message and/or stacktrace**
+
+```
+[406cc05e9261] 2024.05.15 16:00:38.126305 [ 52492 ] <Fatal> BaseDaemon: ########################################
+[406cc05e9261] 2024.05.15 16:00:38.126367 [ 52492 ] <Fatal> BaseDaemon: (version 24.4.1.2088 (official build), build id: 8474BE9DB7BA90A8E303C2F4B836BA6EC5A57A63, git hash: 6d4b31322d168356c8b10c43b4cef157c82337ff) (from thread 52415) (query_id: abc7242c-2252-496b-a8d1-65628f4ca147) (query: SELECT * FROM crash_poc WHERE mapContains(crash.data, 'not_existent_123') LIMIT 1;) Received signal Segmentation fault (11)
+[406cc05e9261] 2024.05.15 16:00:38.126395 [ 52492 ] <Fatal> BaseDaemon: Address: NULL pointer. Access: read. Unknown si_code.
+[406cc05e9261] 2024.05.15 16:00:38.126424 [ 52492 ] <Fatal> BaseDaemon: Stack trace: 0x000000000c017905 0x000000000bfe90e8 0x000000000bfe1f13 0x000000000bfdf626 0x000000000bfdecca 0x0000000007913eee 0x000000000f69433e 0x000000000f694ebe 0x000000000f69645b 0x0000000010411d99 0x00000000125a1283 0x00000000125a1034 0x000000000e3c1ef0 0x0000000012307792 0x00000000123257a8 0x0000000012319a90 0x0000000012318f01 0x00000000123290c2 0x000000000ca5e62d 0x00007f0ed3235609 0x00007f0ed3150353
+[406cc05e9261] 2024.05.15 16:00:38.126523 [ 52492 ] <Fatal> BaseDaemon: 2. void DB::Impl::String<DB::HasAction>::processImpl<true, false, false>(DB::PODArray<char8_t, 4096ul, Allocator<false, false>, 63ul, 64ul> const&, DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 63ul, 64ul> const&, DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 63ul, 64ul> const&, DB::PODArray<char8_t, 4096ul, Allocator<false, false>, 63ul, 64ul> const&, std::conditional<true, unsigned long, DB::PODArray<unsigned long, 4096ul, Allocator<false, false>, 63ul, 64ul> const&>::type, DB::PODArray<char8_t, 4096ul, Allocator<false, false>, 63ul, 64ul>&, DB::PODArray<char8_t, 4096ul, Allocator<false, false>, 63ul, 64ul> const*, DB::PODArray<char8_t, 4096ul, Allocator<false, false>, 63ul, 64ul> const*) @ 0x000000000c017905
+[406cc05e9261] 2024.05.15 16:00:38.126589 [ 52492 ] <Fatal> BaseDaemon: 3. DB::FunctionArrayIndex<DB::HasAction, DB::NameMapContains>::executeStringImpl(DB::FunctionArrayIndex<DB::HasAction, DB::NameMapContains>::ExecutionData&) @ 0x000000000bfe90e8
+[406cc05e9261] 2024.05.15 16:00:38.126623 [ 52492 ] <Fatal> BaseDaemon: 4. DB::FunctionArrayIndex<DB::HasAction, DB::NameMapContains>::executeOnNonNullable(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&) const @ 0x000000000bfe1f13
+[406cc05e9261] 2024.05.15 16:00:38.126655 [ 52492 ] <Fatal> BaseDaemon: 5. DB::FunctionArrayIndex<DB::HasAction, DB::NameMapContains>::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000bfdf626
+[406cc05e9261] 2024.05.15 16:00:38.126688 [ 52492 ] <Fatal> BaseDaemon: 6. DB::FunctionMapToArrayAdapter<DB::FunctionArrayIndex<DB::HasAction, DB::NameMapContains>, DB::MapToSubcolumnAdapter<DB::NameMapKeys, 0ul>, DB::NameMapContains>::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x000000000bfdecca
+[406cc05e9261] 2024.05.15 16:00:38.126723 [ 52492 ] <Fatal> BaseDaemon: 7. DB::FunctionToExecutableFunctionAdaptor::executeImpl(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long) const @ 0x0000000007913eee
+[406cc05e9261] 2024.05.15 16:00:38.126790 [ 52492 ] <Fatal> BaseDaemon: 8. DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000f69433e
+[406cc05e9261] 2024.05.15 16:00:38.126817 [ 52492 ] <Fatal> BaseDaemon: 9. DB::IExecutableFunction::executeWithoutSparseColumns(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000f694ebe
+[406cc05e9261] 2024.05.15 16:00:38.126853 [ 52492 ] <Fatal> BaseDaemon: 10. DB::IExecutableFunction::execute(std::vector<DB::ColumnWithTypeAndName, std::allocator<DB::ColumnWithTypeAndName>> const&, std::shared_ptr<DB::IDataType const> const&, unsigned long, bool) const @ 0x000000000f69645b
+[406cc05e9261] 2024.05.15 16:00:38.126887 [ 52492 ] <Fatal> BaseDaemon: 11. DB::ExpressionActions::execute(DB::Block&, unsigned long&, bool, bool) const @ 0x0000000010411d99
+[406cc05e9261] 2024.05.15 16:00:38.126944 [ 52492 ] <Fatal> BaseDaemon: 12. DB::FilterTransform::doTransform(DB::Chunk&) @ 0x00000000125a1283
+[406cc05e9261] 2024.05.15 16:00:38.126975 [ 52492 ] <Fatal> BaseDaemon: 13. DB::FilterTransform::transform(DB::Chunk&) @ 0x00000000125a1034
+[406cc05e9261] 2024.05.15 16:00:38.127006 [ 52492 ] <Fatal> BaseDaemon: 14. DB::ISimpleTransform::transform(DB::Chunk&, DB::Chunk&) @ 0x000000000e3c1ef0
+[406cc05e9261] 2024.05.15 16:00:38.127037 [ 52492 ] <Fatal> BaseDaemon: 15. DB::ISimpleTransform::work() @ 0x0000000012307792
+[406cc05e9261] 2024.05.15 16:00:38.127067 [ 52492 ] <Fatal> BaseDaemon: 16. DB::ExecutionThreadContext::executeTask() @ 0x00000000123257a8
+[406cc05e9261] 2024.05.15 16:00:38.127110 [ 52492 ] <Fatal> BaseDaemon: 17. DB::PipelineExecutor::executeStepImpl(unsigned long, std::atomic<bool>*) @ 0x0000000012319a90
+[406cc05e9261] 2024.05.15 16:00:38.127138 [ 52492 ] <Fatal> BaseDaemon: 18. DB::PipelineExecutor::execute(unsigned long, bool) @ 0x0000000012318f01
+[406cc05e9261] 2024.05.15 16:00:38.127188 [ 52492 ] <Fatal> BaseDaemon: 19. void std::__function::__policy_invoker<void ()>::__call_impl<std::__function::__default_alloc_func<ThreadFromGlobalPoolImpl<true, true>::ThreadFromGlobalPoolImpl<DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0>(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&, unsigned long)::$_0&&)::'lambda'(), void ()>>(std::__function::__policy_storage const*) @ 0x00000000123290c2
+[406cc05e9261] 2024.05.15 16:00:38.127259 [ 52492 ] <Fatal> BaseDaemon: 20. void* std::__thread_proxy[abi:v15000]<std::tuple<std::unique_ptr<std::__thread_struct, std::default_delete<std::__thread_struct>>, void ThreadPoolImpl<std::thread>::scheduleImpl<void>(std::function<void ()>, Priority, std::optional<unsigned long>, bool)::'lambda0'()>>(void*) @ 0x000000000ca5e62d
+[406cc05e9261] 2024.05.15 16:00:38.127286 [ 52492 ] <Fatal> BaseDaemon: 21. ? @ 0x00007f0ed3235609
+[406cc05e9261] 2024.05.15 16:00:38.127304 [ 52492 ] <Fatal> BaseDaemon: 22. ? @ 0x00007f0ed3150353
+[406cc05e9261] 2024.05.15 16:00:38.296964 [ 52492 ] <Fatal> BaseDaemon: Integrity check of the executable successfully passed (checksum: 1B4AB729A4BACA7860A3C947777632AD)
+[406cc05e9261] 2024.05.15 16:00:38.297618 [ 52492 ] <Fatal> BaseDaemon: Report this error to https://github.com/ClickHouse/ClickHouse/issues
+[406cc05e9261] 2024.05.15 16:00:38.297752 [ 52492 ] <Fatal> BaseDaemon: Changed settings: log_comment = '/workspaces/clickhouse-ingest-feat-materialized/crash.sql'
+Error on processing query: Code: 32. DB::Exception: Attempt to read after eof: while receiving packet from localhost:9000. (ATTEMPT_TO_READ_AFTER_EOF), Stack trace (when copying this message, always include the lines below):
+
+0. DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c9a449b
+1. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x000000000780b9ac
+2. DB::Exception::Exception<>(int, FormatStringHelperImpl<>) @ 0x0000000007819d8b
+3. DB::throwReadAfterEOF() @ 0x000000000ca28198
+4. DB::Connection::receivePacket() @ 0x00000000121a2828
+5. DB::ClientBase::receiveAndProcessPacket(std::shared_ptr<DB::IAST>, bool) @ 0x0000000012172d65
+6. DB::ClientBase::processParsedSingleQuery(String const&, String const&, std::shared_ptr<DB::IAST>, std::optional<bool>, bool) @ 0x0000000012170ea1
+7. DB::ClientBase::executeMultiQuery(String const&) @ 0x000000001217b4ce
+8. DB::ClientBase::processMultiQueryFromFile(String const&) @ 0x000000001217ca5c
+9. DB::ClientBase::runNonInteractive() @ 0x0000000012180e5c
+10. DB::Client::main(std::vector<String, std::allocator<String>> const&) @ 0x000000000cbbc715
+11. Poco::Util::Application::run() @ 0x0000000014c1d166
+12. mainEntryClickHouseClient(int, char**) @ 0x000000000cbcecc1
+13. main @ 0x0000000007807fb8
+14. ? @ 0x00007f2b84c70083
+15. _start @ 0x0000000005ea702e
+ (version 24.4.1.2088 (official build))
+(query: SELECT * FROM crash_poc WHERE mapContains(crash.data, 'not_existent_123') LIMIT 1;)
+```
+
+
+**Additional context**
+
+Data was generated with the following script:
+```python
+import json
+
+data = {"id": 1337, "crash": {"data": {}}}
+numkeys = 255
+for key in [f"param_{i}" for i in range(0, numkeys)]:
+    data["crash"]["data"][key] = "crashcrash"
+
+num_rows = 4000
+with open("crash_data.jsonl", "w") as f:
+    out = []
+    for i in range(num_rows):
+        out.append(json.dumps(data))
+    f.write("\n".join(out))
+```
+
+Possibly related to #63859 as it shares the same table schema.

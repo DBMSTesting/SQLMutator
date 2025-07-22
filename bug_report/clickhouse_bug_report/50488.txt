@@ -1,0 +1,89 @@
+ID: 50488
+Title: Inconsistent results caused by bitShiftLeft after recent fix
+Description:
+**Describe what's wrong**
+
+The two semantically-equivalent SELECT statements should output the same results, but they did not.
+
+**Does it reproduce on recent release?**
+
+It cannot be reproduced in the latest version, but it can be reproduced in head version (23.5.1.2568). So the bug might be involved by recent commits.
+
+**How to reproduce**
+
+Version: 23.5.1 (commit eb5985e5fc0e83c94aa1af134f2718e9fe87979c)
+
+Easy reproduce in ClickHouse fiddle: https://fiddle.clickhouse.com/02a43684-a6aa-421c-91ff-35b1aaa7bd37
+
+_Set up database_
+
+```sql
+create table t1 (vkey UInt32, c3 DateTime) engine = Log;
+create table t3 (vkey UInt32, c11 DateTime) engine = StripeLog;
+insert into t3 values (5, makeDateTime(2034, 10, 28, 3, 38, 18));
+insert into t3 values (10, makeDateTime(2067, 4, 27, 15, 32, 50));
+insert into t3 values (45, makeDateTime(2092, 8, 5, 10, 1, 59));
+insert into t3 values (46, makeDateTime(2075, 8, 8, 23, 41, 29));
+```
+
+_SELECT statement 1_
+
+```sql
+select count(*)
+from 
+  t1 as ref_0
+    right outer join t3 as ref_1
+    on (ref_0.c3 = ref_1.c11)
+where true and (( 
+     (not ((nullif(bitShiftLeft(toDayOfWeek(ref_0.c3),
+        ref_1.vkey), ref_0.vkey)) = 1))) 
+    or (((nullif(bitShiftLeft(toDayOfWeek(ref_0.c3),
+        ref_1.vkey), ref_0.vkey)) = 1) is null));
+```
+Because `true and anything` is `anything`. I simplify the WHERE clause by removing `true and` and get the semantically-equivalent SELECT statement:
+
+_SELECT statement 2_
+
+```sql
+select count(*)
+from 
+  t1 as ref_0
+    right outer join t3 as ref_1
+    on (ref_0.c3 = ref_1.c11)
+where (( 
+     (not ((nullif(bitShiftLeft(toDayOfWeek(ref_0.c3),
+        ref_1.vkey), ref_0.vkey)) = 1))) 
+    or (((nullif(bitShiftLeft(toDayOfWeek(ref_0.c3),
+        ref_1.vkey), ref_0.vkey)) = 1) is null));
+```
+
+**Expected behavior**
+
+The two SELECT statements output the same results.
+
+**Actual behavior**
+
+They are different.
+
+SELECT statement 1 outputs:
+```
++---------+
+| count() |
++---------+
+|       2 |
++---------+
+```
+
+SELECT statement 2 outputs:
+```
++---------+
+| count() |
++---------+
+|       4 |
++---------+
+```
+
+**Additional context**
+
+In latest version of fiddle (https://fiddle.clickhouse.com/b154dcdd-9d3d-4ba4-a7d3-f06a1528a42c), both SELECT statements output 4.
+

@@ -1,0 +1,135 @@
+ID: 48411
+Title: select for update statement can't got stmt-count-limit error
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+For minimum reproduce, the TiDB's configuration as follow:
+
+```sql
+[performance]
+stmt-count-limit=3
+```
+
+Reproduce SQL:
+
+```sql
+create table t (id int key);
+set @@tidb_disable_txn_auto_retry=0;
+set autocommit=0;
+begin optimistic;
+insert into t values (1);
+insert into t values (2);
+select * from t for update;
+insert into t values (3);
+insert into t values (4);
+commit;
+select * from t;
+```
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+
+When execute `select * from t for update;`, should got error:
+
+```sql
+mysql> set @@tidb_disable_txn_auto_retry=0;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> set autocommit=0;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> begin optimistic;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into t values (1);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> insert into t values (2);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> select * from t for update;
+ERROR 1105 (HY000): statement count 4 exceeds the transaction limitation, transaction has been rollback, autocommit = false
+mysql> insert into t values (3);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> insert into t values (4);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> commit;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> select * from t;
++----+
+| id |
++----+
+|  3 |
+|  4 |
++----+
+2 rows in set (0.00 sec)
+```
+
+### 3. What did you see instead (Required)
+
+All SQL are executed successfully, but the finally select result are following, **the user may think that the transaction has been partially committed.**
+
+```
+mysql> set @@tidb_disable_txn_auto_retry=0;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> set autocommit=0;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> begin optimistic;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> insert into t values (1);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> insert into t values (2);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> select * from t for update;
++----+
+| id |
++----+
+|  1 |
+|  2 |
++----+
+2 rows in set (0.00 sec)
+
+mysql> insert into t values (3);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> insert into t values (4);
+Query OK, 1 row affected (0.00 sec)
+
+mysql> commit;
+Query OK, 0 rows affected (0.00 sec)
+
+mysql> select * from t;
++----+
+| id |
++----+
+|  3 |
+|  4 |
++----+
+2 rows in set (0.00 sec)
+```
+
+But you can find an error log in TiDB log file:
+
+```
+[2023/11/08 16:13:29.486 +08:00] [ERROR] [terror.go:317] ["function call errored"] [error="statement count 4 exceeds the transaction limitation, autocommit = false"] [stack="github.com/pingcap/tidb/pkg/parser/terror.Call\n\t/Users/cs/code/goread/src/github.com/pingcap/tidb/pkg/parser/terror/terror.go:317\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).handleStmt\n\t/Users/cs/code/goread/src/github.com/pingcap/tidb/pkg/server/conn.go:2042\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).handleQuery\n\t/Users/cs/code/goread/src/github.com/pingcap/tidb/pkg/server/conn.go:1800\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).dispatch\n\t/Users/cs/code/goread/src/github.com/pingcap/tidb/pkg/server/conn.go:1287\ngithub.com/pingcap/tidb/pkg/server.(*clientConn).Run\n\t/Users/cs/code/goread/src/github.com/pingcap/tidb/pkg/server/conn.go:1066\ngithub.com/pingcap/tidb/pkg/server.(*Server).onConn\n\t/Users/cs/code/goread/src/github.com/pingcap/tidb/pkg/server/server.go:701"]
+```
+
+### 4. What is your TiDB version? (Required)
+
+<!-- Paste the output of SELECT tidb_version() -->
+
+master: 89ec3d38b2c26b45b32208ef73b57461ea59908e

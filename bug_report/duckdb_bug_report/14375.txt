@@ -1,0 +1,60 @@
+ID: 14375
+Title: Eviction Queue Partitioning
+Description:
+This PR improves out-of-core processing by creating more `EvictionQueue`s in `BufferPool` and placing buffers in different pools based on their hash partition. For now, I've created 6 queues for `FileBufferType::MANAGED_BUFFER` but this can be easily tweaked (also for other `FileBufferType`s).
+
+Our hash aggregation/join operators use `Partitioned{Tuple, Column}Data` to store data. This is partitioned by a few bits of the hash. We lazily spill buffers to disk (letting the buffer manager spill when necessary). After collecting all input data, we typically start processing partitions 0, 1, 2, etc. Prioritizing the spilling of higher partitions, e.g., 15, 14, 13, etc., should allow the lower partitions to stay in RAM until they are processed, which means that we do less I/O overall.
+
+The buffers for the partitions are added to the queues using the log of their partition index. With our 6 queues, this is how we add partition buffers to queues:
+
+| Partition | Queue |
+|--:|--:|
+| 0 | 0 |
+| 1 | 1 |
+| 2-3 | 2 |
+| 4-7 | 3 | 
+| 8-15 | 4 |
+| 16+ | 5 |
+
+Buffers that have no partition index are also added to queue 5.
+
+I've performed a brief evaluation using out-of-core joins. I've used TPC-H SF 100 and the following query:
+```sql
+SELECT
+  l.l_orderkey,
+  l.l_partkey,
+  l.l_suppkey,
+  o1.o_orderstatus,
+  o1.o_totalprice,
+  o1.o_orderdate,
+  o1.o_orderpriority,
+  o2.o_clerk,
+  o2.o_shippriority,
+  ps1.ps_availqty,
+  ps2.ps_supplycost
+FROM
+  lineitem AS l,
+  orders AS o1,
+  orders AS o2,
+  partsupp AS ps1,
+  partsupp AS ps2
+WHERE
+  l.l_orderkey = o1.o_orderkey
+AND o1.o_orderkey = o2.o_orderkey
+AND l.l_partkey = ps1.ps_partkey
+AND l.l_suppkey = ps1.ps_suppkey
+AND ps1.ps_partkey = ps2.ps_partkey
+AND ps1.ps_suppkey = ps2.ps_suppkey
+OFFSET
+  600037901;
+```
+
+I've set the memory limit to `'16GB'` and measured the mean of 5 hot runs on my M1 Max MacBook Pro with 64 GB of RAM. Note that this laptop has a lot of RAM, so the OS might keep pages cached in memory. Nonetheless, here are the results:
+
+| DuckDB 1.1.2 | This PR |
+|--:|--:|
+| 16.1s | __15.2__|
+
+The query is now around 6% faster. The gains would likely be even higher with less RAM and a slower storage device.
+
+In this PR, I've also partially fixed #14132. I've made the out-of-core behavior of `RadixPartitionedHashTable` also rely on the allocated variable-size aggregate states, allowing us to complete some queries we previously couldn't if the memory limit was tight.

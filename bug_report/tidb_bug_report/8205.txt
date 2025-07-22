@@ -1,0 +1,133 @@
+ID: 8205
+Title: incompatible behavior with MySQL in JOIN regarding invalid `date` field
+Description:
+## Description
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+1. What did you do?
+
+First, prepare data using following SQL script:
+```sql
+DROP TABLE IF EXISTS `table100_int_autoinc`;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+CREATE TABLE `table100_int_autoinc` (
+  `col_date` date DEFAULT NULL,
+  `col_int_not_null_key` int(11) NOT NULL,
+  `pk` int(11) NOT NULL AUTO_INCREMENT,
+  `col_int_unsigned_not_null` int(10) unsigned NOT NULL,
+  PRIMARY KEY (`pk`),
+  KEY `col_int_not_null_key` (`col_int_not_null_key`)
+) ENGINE=InnoDB AUTO_INCREMENT=101 DEFAULT CHARSET=latin1;
+INSERT INTO `table100_int_autoinc` VALUES ('2009-08-03',6,1,6);
+INSERT INTO `table100_int_autoinc` VALUES (NULL,7,2,8);
+INSERT INTO `table100_int_autoinc` VALUES ('2009-02-08',8,3,4);
+INSERT INTO `table100_int_autoinc` VALUES ('2010-00-20',4,4,3);
+INSERT INTO `table100_int_autoinc` VALUES ('2001-12-04',9,51,9);
+INSERT INTO `table100_int_autoinc` VALUES ('2004-01-03',7,52,2);
+```
+the `SQL_MODE` must be set to insert the invalid forth row into table.
+
+Then, we can see result is different with MySQL for query:
+```sql
+SELECT * FROM `table100_int_autoinc` `t1` JOIN `table100_int_autoinc` `t2` ON `t1`.`col_int_unsigned_not_null` = `t2`.`col_int_not_null_key` ORDER BY `t1`.`pk`, `t2`.`pk` ;
+```
+
+2. What did you expect to see?
+
+In MySQL, result is:
+```
+mysql> SELECT * FROM `table100_int_autoinc` `t1` JOIN `table100_int_autoinc` `t2` ON `t1`.`col_int_unsigned_not_null` = `t2`.`col_int_not_null_key` ORDER BY `t1`.`pk`, `t2`.`pk` ;
++------------+----------------------+----+---------------------------+------------+----------------------+----+---------------------------+
+| col_date   | col_int_not_null_key | pk | col_int_unsigned_not_null | col_date   | col_int_not_null_key | pk | col_int_unsigned_not_null |
++------------+----------------------+----+---------------------------+------------+----------------------+----+---------------------------+
+| 2009-08-03 |                    6 |  1 |                         6 | 2009-08-03 |                    6 |  1 |                         6 |
+| NULL       |                    7 |  2 |                         8 | 2009-02-08 |                    8 |  3 |                         4 |
+| 2009-02-08 |                    8 |  3 |                         4 | 0000-00-00 |                    4 |  4 |                         3 |
+| 2001-12-04 |                    9 | 51 |                         9 | 2001-12-04 |                    9 | 51 |                         9 |
++------------+----------------------+----+---------------------------+------------+----------------------+----+---------------------------+
+4 rows in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+-------------------------------------------------------------------+
+| Level   | Code | Message                                                           |
++---------+------+-------------------------------------------------------------------+
+| Warning | 1292 | Incorrect date value: '2010-00-20' for column 'col_date' at row 7 |
++---------+------+-------------------------------------------------------------------+
+1 row in set (0.00 sec)
+
+mysql> select version();
++-----------+
+| version() |
++-----------+
+| 5.7.10    |
++-----------+
+1 row in set (0.00 sec)
+```
+
+
+3. What did you see instead?
+
+In TiDB, result is:
+```
+mysql> SELECT * FROM `table100_int_autoinc` `t1` JOIN `table100_int_autoinc` `t2` ON `t1`.`col_int_unsigned_not_null` = `t2`.`col_int_not_null_key` ORDER BY `t1`.`pk`, `t2`.`pk` ;
++------------+----------------------+----+---------------------------+------------+----------------------+----+---------------------------+
+| col_date   | col_int_not_null_key | pk | col_int_unsigned_not_null | col_date   | col_int_not_null_key | pk | col_int_unsigned_not_null |
++------------+----------------------+----+---------------------------+------------+----------------------+----+---------------------------+
+| 2009-08-03 |                    6 |  1 |                         6 | 2009-08-03 |                    6 |  1 |                         6 |
+| NULL       |                    7 |  2 |                         8 | 2009-02-08 |                    8 |  3 |                         4 |
+| 2009-02-08 |                    8 |  3 |                         4 | 2010-00-20 |                    4 |  4 |                         3 |
+| 2001-12-04 |                    9 | 51 |                         9 | 2001-12-04 |                    9 | 51 |                         9 |
++------------+----------------------+----+---------------------------+------------+----------------------+----+---------------------------+
+4 rows in set (0.00 sec)
+
+mysql> select version();
++--------------------------------------+
+| version()                            |
++--------------------------------------+
+| 5.7.10-TiDB-v2.1.0-rc.3-147-g379ee5b |
++--------------------------------------+
+1 row in set (0.00 sec)
+```
+Note that second `col_date` field of the third result row is different, because MySQL notices the value is invalid for `date` type, and convert it to zero, while TiDB does not.
+
+One thing worth mention is that, MySQL does not always notice the invalidation, for example:
+```
+mysql> SELECT * FROM `table100_int_autoinc`;
++------------+----------------------+----+---------------------------+
+| col_date   | col_int_not_null_key | pk | col_int_unsigned_not_null |
++------------+----------------------+----+---------------------------+
+| 2009-08-03 |                    6 |  1 |                         6 |
+| NULL       |                    7 |  2 |                         8 |
+| 2009-02-08 |                    8 |  3 |                         4 |
+| 2010-00-20 |                    4 |  4 |                         3 |
+| 2001-12-04 |                    9 | 51 |                         9 |
+| 2004-01-03 |                    7 | 52 |                         2 |
++------------+----------------------+----+---------------------------+
+6 rows in set (0.00 sec)
+```
+
+4. What version of TiDB are you using (`tidb-server -V` or run `select tidb_version();` on TiDB)?
+
+```
+mysql> select version();
++--------------------------------------+
+| version()                            |
++--------------------------------------+
+| 5.7.10-TiDB-v2.1.0-rc.3-147-g379ee5b |
++--------------------------------------+
+1 row in set (0.00 sec)
+```
+
+## SIG slack channel
+
+ [#sig-exec](https://slack.tidb.io/invite?team=tidb-community&channel=sig-exec&ref=high-performance)
+
+## Score
+
+300
+
+## Mentor
+
+- @lzmhhh123

@@ -1,0 +1,119 @@
+ID: 14701
+Title: DuckDB SEGV when loading 2 million entries to a table with STRUCT in schema
+Description:
+### What happens?
+
+Loading 2 million entries to a table reliably crashes, if the table contains STRUCT in the schema. The STRUCT in the schema ifself is triggering the crash, the data does not have to be loaded in the column.
+This is reproducible in the latest DuckDB 1.1.3 as well as earlier versions, except the stable 1.0.0 release.
+
+bzipped crash_data.parquet file required for the code to run:
+https://drive.google.com/file/d/1C4s5mTDTzoGewUaGMvFm6NE4h0X6xQvY/view?usp=share_link
+(please ignore "large file" virus warnings from Google)
+
+Python SEGFAULT report:
+```
+Fatal Python error: Segmentation fault
+
+Thread 0x00000001e8e04f40 (most recent call first):
+  File "/Users/dmitrykalinin/src/duckdb_crash/crash.py", line 19 in <module>
+zsh: segmentation fault  python crash.py
+```
+Example C++ stack trace:
+```
+Thread 35 Crashed:
+0   libsystem_platform.dylib      	       0x180fde1d4 _platform_memmove + 52
+1   duckdb.cpython-312-darwin.so  	       0x1144cb538 duckdb::StringVector::AddStringOrBlob(duckdb::Vector&, duckdb::string_t) + 160
+2   duckdb.cpython-312-darwin.so  	       0x113df914c duckdb::VectorOperations::Copy(duckdb::Vector const&, duckdb::Vector&, duckdb::SelectionVector const&, unsigned long long, unsigned long long, unsigned long long, unsigned long long) + 2492
+3   duckdb.cpython-312-darwin.so  	       0x113df8fd8 duckdb::VectorOperations::Copy(duckdb::Vector const&, duckdb::Vector&, duckdb::SelectionVector const&, unsigned long long, unsigned long long, unsigned long long, unsigned long long) + 2120
+4   duckdb.cpython-312-darwin.so  	       0x1144988c4 duckdb::Vector::Flatten(unsigned long long) + 480
+5   duckdb.cpython-312-darwin.so  	       0x115436b58 duckdb::StructColumnData::Append(duckdb::BaseStatistics&, duckdb::ColumnAppendState&, duckdb::Vector&, unsigned long long) + 64
+6   duckdb.cpython-312-darwin.so  	       0x11542c480 duckdb::RowGroupCollection::Append(duckdb::DataChunk&, duckdb::TableAppendState&) + 324
+7   duckdb.cpython-312-darwin.so  	       0x114c7ab8c duckdb::PhysicalInsert::Sink(duckdb::ExecutionContext&, duckdb::DataChunk&, duckdb::OperatorSinkInput&) const + 432
+8   duckdb.cpython-312-darwin.so  	       0x11518b8f0 duckdb::PipelineExecutor::ExecutePushInternal(duckdb::DataChunk&, unsigned long long) + 268
+9   duckdb.cpython-312-darwin.so  	       0x1151886b4 duckdb::PipelineExecutor::Execute(unsigned long long) + 328
+10  duckdb.cpython-312-darwin.so  	       0x1151883bc duckdb::PipelineTask::ExecuteTask(duckdb::TaskExecutionMode) + 328
+11  duckdb.cpython-312-darwin.so  	       0x11518073c duckdb::ExecutorTask::Execute(duckdb::TaskExecutionMode) + 140
+12  duckdb.cpython-312-darwin.so  	       0x11518ebf4 duckdb::TaskScheduler::ExecuteForever(std::__1::atomic<bool>*) + 612
+13  duckdb.cpython-312-darwin.so  	       0x11519605c void* std::__1::__thread_proxy[abi:ue170006]<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct>>, void (*)(duckdb::TaskScheduler*, std::__1::atomic<bool>*), duckdb::TaskScheduler*, std::__1::atomic<bool>*>>(void*) + 56
+14  libsystem_pthread.dylib       	       0x180fadf94 _pthread_start + 136
+15  libsystem_pthread.dylib       	       0x180fa8d34 thread_start + 8
+```
+
+### To Reproduce
+
+```
+import duckdb
+import faulthandler
+
+faulthandler.enable()
+conn = duckdb.connect()
+cursor = conn.cursor()
+
+conn.execute("""
+    CREATE TABLE test_table (
+        "id" VARCHAR,
+
+        "str" STRUCT(
+            a VARCHAR
+        ),
+        PRIMARY KEY (id)
+    )
+""")
+
+conn.execute("""
+INSERT INTO test_table(
+    "id"   
+)
+(
+    SELECT
+        "id", 
+    FROM
+        read_parquet(['crash_data.parquet'])
+    QUALIFY
+        ROW_NUMBER() OVER (
+            PARTITION BY id
+        ) = 1
+)
+""")
+
+```
+
+### OS:
+
+MacOS
+
+### DuckDB Version:
+
+1.1.3
+
+### DuckDB Client:
+
+Python 3.11.10
+
+### Hardware:
+
+Macbook M3 with 36GB RAM
+
+### Full Name:
+
+Dimi Kalyn
+
+### Affiliation:
+
+Exaforce, Inc
+
+### What is the latest build you tested with? If possible, we recommend testing with the latest nightly build.
+
+I have tested with a stable release
+
+### Did you include all relevant data sets for reproducing the issue?
+
+Yes
+
+### Did you include all code required to reproduce the issue?
+
+- [X] Yes, I have
+
+### Did you include all relevant configuration (e.g., CPU architecture, Python version, Linux distribution) to reproduce the issue?
+
+- [X] Yes, I have

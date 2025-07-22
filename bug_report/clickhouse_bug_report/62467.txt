@@ -1,0 +1,82 @@
+ID: 62467
+Title: Clickhouse Crashes When Trying To Read google/protobuf/struct.proto
+Description:
+Hi
+
+I am using Clickhouse with Kafka & Protobuf, but it seems that the `google/protobuf/struct.proto` causes Clickhouse to crash. This is happening on Docker in MacOS on ARM and also in Kubernetes in GKE, also on ARM. I have tried this on both the `24.3.2.23` and `latest` clickhouse versions. I am also aware that these were relatively recently added to Clickhouse through this https://github.com/ClickHouse/ClickHouse/pull/56741, which includes support for `struct.proto`. But it seems that Clickhouse doesn't like it. I can outline the steps and reproducible steps.
+
+**Create Dockerfile**
+```
+version: '3.7'
+
+volumes:
+  clickhouse: null
+
+services:
+  clickhouse:
+    container_name: clickhouse
+    image: clickhouse/clickhouse-server:24.3.2.23
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "18123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse:/var/lib/clickhouse/
+      - ./a.proto:/var/lib/clickhouse/format_schemas/a.proto
+      - ./b.proto:/var/lib/clickhouse/format_schemas/b.proto
+```
+
+Add these schemas and mount them
+**a.proto**
+```
+syntax = "proto3";
+
+package events;
+option go_package = "/generated";
+
+import "google/protobuf/struct.proto";
+
+message Request {
+  string id = 1;
+  optional google.protobuf.Struct ext = 2;
+}
+```
+
+**b.proto**
+```
+syntax = "proto3";
+
+import "a.proto";
+
+package analytics;
+option go_package = "/analytics";
+
+message AnotherEvent {
+  message Metadata {
+    string id = 1;
+  }
+  events.Request embeded = 2;
+}
+```
+
+Try and describe the schema:
+```
+DESC file('nonexist', 'Protobuf') SETTINGS format_schema='b.proto:AnotherEvent';
+```
+
+**The system will crash**
+
+```
+2024.04.10 00:53:23.312580 [ 47 ] {} <Trace> TCP-Session: 9039c114-34cf-4a2b-8ede-8b9124996864 Creating query context from session context, user_id: 94309d50-4f52-5250-31bd-74fecac179db, parent context user: default
+2024.04.10 00:53:23.312845 [ 47 ] {0ef9e17a-0f1b-4f43-8422-d0853b60ad70} <Debug> executeQuery: (from [::1]:47784) DESC file('nonexist', 'Protobuf') SETTINGS format_schema='b.proto:AnotherEvent'; (stage: Complete)
+2024.04.10 00:53:37.936198 [ 1 ] {} <Information> SentryWriter: Sending crash reports is disabled
+2024.04.10 00:53:37.936245 [ 1 ] {} <Trace> Pipe: Pipe capacity is 1.00 MiB
+2024.04.10 00:53:37.989110 [ 1 ] {} <Information> Application: Starting ClickHouse 24.3.2.23 (revision: 54484, git hash: 8b7d910960cc2c6a0db07991fe2576a67fe98146, build id: 5B5C43F049E2D5125E894547577CDA8EEC25B3C7), PID 1
+2024.04.10 00:53:37.989232 [ 1 ] {} <Information> Application: starting up
+```
+
+**Expected behavior**
+That Clickhouse parses the schema correctly and at least doesn't crash.

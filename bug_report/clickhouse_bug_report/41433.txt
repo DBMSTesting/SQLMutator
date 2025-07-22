@@ -1,0 +1,102 @@
+ID: 41433
+Title: toStartOfMinute without WHERE omitted non-aligned times
+Description:
+I have struggled to recreate this issue on an isolated from-the-scratch example so will describe the in-situ scenario instead
+
+A (Summing)MergeTree table is sorted by a timestamp (plus a bunch of other columns) and is full of data that I have a select query on with a `toStartOfMinute` to add-up totals of some count column over minute intervals. A bit like this (for illustration only):
+
+```
+CREATE TABLE x (t DateTime, n UInt32) ENGINE = MergeTree ORDER BY t
+INSERT INTO x VALUES ('2022-09-17 07:00:00', 1) ('2022-09-17 07:00:30', 2)
+SELECT toStartOfMinute(t) AS s, sum(n) FROM x WHERE s = '2022-09-17 07:00:00' GROUP BY s
+```
+
+Expected result is 3. My real table returns the equivalent of 1, ie the 07:00:30 row is missing
+
+The necessary conditions for this to happen include:
+
+- use `toStartOfMinute` instead of `toStartOfInterval(toIntervalMinute(1))`, and
+- don't try to filter down to specific rows using WHERE (instead I let query print full output and manually filter that)
+
+Below are some differences of notice. Apart from size, the real table differs from the illustration one by a few other things like partitioning and replication. Of those only the size feels substantial; my illustration query does not break down into concurrent blocks like the real one.
+
+### Good
+
+ie `toStartOfInterval`
+
+```
+<Debug> (SelectExecutor): Key condition: unknown
+<Debug> (SelectExecutor): MinMax index condition: unknown
+<Debug> (SelectExecutor): Selected 1771/1771 parts by partition key, 1771 parts by primary key, 1233002/1233002 marks by primary key, 1233002 marks to read from 1771 ranges
+<Debug> (SelectExecutor): Reading approx. 10093333761 rows with 32 streams
+<Trace> AggregatingTransform: Aggregating
+<Trace> Aggregator: Aggregation method: serialized
+<Trace> Aggregator: Converting aggregation data to two-level.
+<Debug> AggregatingTransform: Aggregated. 0 to 0 rows (from 0.00 B) in 3.133200993 sec. (0.000 rows/sec., 0.00 B/sec.)
+                          ...
+<Debug> AggregatingTransform: Aggregated. 0 to 0 rows (from 0.00 B) in 3.134824955 sec. (0.000 rows/sec., 0.00 B/sec.)
+<Trace> Aggregator: Merging aggregated data
+```
+
+```
+┌─explain────────────────────────────────┐
+│ (Expression)                           │
+│ ExpressionTransform                    │
+│   (Aggregating)                        │
+│   Resize 32 → 1                        │
+│     AggregatingTransform × 32          │
+│       StrictResize 32 → 32             │
+│         (Expression)                   │
+│         ExpressionTransform × 32       │
+│           (SettingQuotaAndLimits)      │
+│             (ReadFromMergeTree)        │
+│             MergeTreeThread × 32 0 → 1 │
+└────────────────────────────────────────┘
+```
+
+### Bad
+
+ie `toStartOfMinute`
+
+```
+<Debug> (SelectExecutor): Key condition: (toStartOfMinute(column 0) in [1662724800, 1662724800])
+<Debug> (SelectExecutor): MinMax index condition: (toStartOfMinute(column 0) in [1662724800, 1662724800])
+<Trace> (SelectExecutor): Used generic exclusion search over index for part 1662724800_0_0_0_5 with 157 steps
+<Debug> (SelectExecutor): Selected 1/1778 parts by partition key, 1 parts by primary key, 88/5422 marks by primary key, 88 marks to read from 1 ranges
+<Trace> MergeTreeInOrderSelectProcessor: Reading 5 ranges in order from part 1662724800_0_0_0_5, approx. 196608 rows starting from 0
+<Trace> MergeTreeInOrderSelectProcessor: Reading 5 ranges in order from part 1662724800_0_0_0_5, approx. 196608 rows starting from 196608
+<Trace> MergeTreeInOrderSelectProcessor: Reading 6 ranges in order from part 1662724800_0_0_0_5, approx. 327680 rows starting from 393216
+<Trace> AggregatingInOrderTransform: Aggregating in order
+<Trace> AggregatingInOrderTransform: Aggregating in order
+<Trace> AggregatingInOrderTransform: Aggregating in order
+<Trace> Aggregator: Merging partially aggregated blocks (bucket = -1).
+<Debug> AggregatingInOrderTransform: Aggregated. 196608 to 196608 rows (from 18.78 MiB)
+<Trace> Aggregator: Merging partially aggregated blocks (bucket = -1).
+<Debug> Aggregator: Merged partially aggregated blocks. 230062 rows, 18.64 MiB. in 0.225520311 sec. (1020138.714 rows/sec., 82.66 MiB/sec.)
+<Debug> AggregatingInOrderTransform: Aggregated. 196608 to 188416 rows (from 17.81 MiB)
+<Debug> AggregatingInOrderTransform: Aggregated. 326734 to 326734 rows (from 30.80 MiB)
+<Trace> Aggregator: Merging partially aggregated blocks (bucket = -1).
+<Debug> Aggregator: Merged partially aggregated blocks. 117168 rows, 9.52 MiB. in 0.089612692 sec. (1307493.363 rows/sec., 106.18 MiB/sec.)
+<Debug> Aggregator: Merged partially aggregated blocks. 238778 rows, 19.38 MiB. in 0.219948034 sec. (1085610.977 rows/sec., 88.11 MiB/sec.)
+```
+
+```
+┌─explain───────────────────────────────────────┐
+│ (Expression)                                  │
+│ ExpressionTransform × 32                      │
+│   (Aggregating)                               │
+│   MergingAggregatedBucketTransform × 32       │
+│     Resize 1 → 32                             │
+│       FinishAggregatingInOrderTransform 3 → 1 │
+│         AggregatingInOrderTransform × 3       │
+│           (Expression)                        │
+│           ExpressionTransform × 3             │
+│             (SettingQuotaAndLimits)           │
+│               (ReadFromMergeTree)             │
+│               MergeTreeInOrder × 3 0 → 1      │
+└───────────────────────────────────────────────┘
+```
+
+I didn't find any relevant GitHub issues and so would appreciate your thoughts or suggestions
+
+ClickHouse server version 22.3.5.5

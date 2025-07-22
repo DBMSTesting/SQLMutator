@@ -1,0 +1,87 @@
+ID: 42161
+Title: alter update "corrupts" collumns.txt
+Description:
+```sql
+drop table if exists src;
+
+create table src( A Int64, B String, C String) Engine=MergeTree order by A
+SETTINGS min_bytes_for_wide_part=0;
+insert into src values(1, 'one', 'test');
+
+alter table src detach partition tuple();
+
+alter table src modify column B Nullable(String);
+
+alter table src attach partition tuple();
+select * from src;
+┌─A─┬─B───┬─C────┐
+│ 1 │ one │ test │
+└───┴─────┴──────┘
+
+alter table src update C = 'test1' where 1 settings mutations_sync=2;
+
+select * from src;
+┌─A─┬─B────┬─C─────┐
+│ 1 │ ᴺᵁᴸᴸ │ test1 │   -- expected B='one'
+└───┴──────┴───────┘
+```
+
+```sql
+drop table if exists src;
+create table src( A String, B String, C String) Engine=MergeTree order by A
+SETTINGS min_bytes_for_wide_part=0;
+insert into src values('one', 'one', 'test');
+
+alter table src detach partition tuple();
+
+alter table src modify column A LowCardinality(String);
+
+alter table src attach partition tuple();
+
+select * from src;
+┌─A───┬─B───┬─C────┐
+│ one │ one │ test │
+└─────┴─────┴──────┘
+
+alter table src update C = 'test1' where 1 settings mutations_sync=2;
+
+select * from src;
+
+Received exception from server (version 22.9.1):
+Code: 49. DB::Exception: Received from localhost:9000. DB::Exception: 
+Got empty stream for SerializationLowCardinality keys.: (while reading column A): 
+(while reading from part /var/lib/clickhouse/store/11b/11b74812-48b9-4c1f-9bdc-3e7a28137a9e/all_3_3_0_4/ from mark 0 with max_rows_to_read = 1): 
+While executing MergeTreeInOrder. (LOGICAL_ERROR)
+
+```
+
+```sql
+drop table if exists src;
+create table src( A String, B String, C String) Engine=MergeTree order by A
+SETTINGS min_bytes_for_wide_part=0;
+insert into src values('one', 'one', 'test');
+
+alter table src detach partition tuple();
+
+alter table src modify column A LowCardinality(String);
+
+alter table src attach partition tuple();
+
+select * from src;
+┌─A───┬─B───┬─C────┐
+│ one │ one │ test │
+└─────┴─────┴──────┘
+
+alter table src modify column C LowCardinality(String);
+
+select * from src;
+
+Received exception from server (version 22.9.3):
+Code: 49. DB::Exception: Received from localhost:9000. 
+DB::Exception: Got empty stream for SerializationLowCardinality keys.: 
+```
+
+related https://github.com/ClickHouse/ClickHouse/issues/42083 , https://github.com/ClickHouse/ClickHouse/issues/42074
+(basically it's the same one issue, but I opened this one, because I think the root issue is in `alter update`.
+
+it seems `alter update` updates columns.txt for all columns even if they are not participated in the `alter update`.

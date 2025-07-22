@@ -1,0 +1,204 @@
+ID: 5072
+Title: Huge memory usage for multiple COMMA JOINS with in operator
+Description:
+Without **in** operator query works fast
+
+server version() = 19.5.3.8 
+
+**How to reproduce**
+```
+CREATE TABLE test1
+(
+  id bigint,
+  code text
+)
+engine = MergeTree
+ORDER BY id;
+
+CREATE TABLE test2
+(
+  id bigint,
+  code text,
+  test1_id bigint,
+  test3_id bigint
+)
+engine = MergeTree
+ORDER BY id;
+
+CREATE TABLE test3
+(
+  id bigint,
+  code text
+)
+engine = MergeTree
+ORDER BY id;
+
+insert into test1 (id, code)
+select top 100000 number, toString(number) FROM system.numbers;
+
+insert into test2 (id, code, test1_id, test3_id)
+select top 100000 number, toString(number), number, number FROM system.numbers;
+
+insert into test3 (id, code)
+select top 100000 number, toString(number) FROM system.numbers;
+```
+```
+-- queries
+-- huge memory usage
+select
+    count(test2.id)
+from
+    test1,
+    test2,
+    test3  
+where
+    test1.code in ('1', '2', '3')
+    and test2.test1_id = test1.id
+    and test2.test3_id = test3.id;
+
+-- ok with JOINs
+select
+    count(test2.id)
+from
+    test1
+    join test2 on test2.test1_id = test1.id
+    join test3 on test2.test3_id = test3.id
+where
+    test1.code in ('1', '2', '3');
+```
+
+server log for multiple COMMA JOINS with in operator (huge memory usage)
+```
+2019.04.22 10:21:56.701414 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> executeQuery: (from [::ffff:127.0.0.1]:34130) select     count(test2.id) from     test1,     test2,     test3   where     test1.code in ('1', '2', '3')     and test2.test1_id = test1.id     and test2.test3_id = test3.id;
+2019.04.22 10:21:56.702668 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> Join: setSampleBlock: test2.id Int64 Int64(size = 0), test2.code String String(size = 0), test1_id Int64 Int64(size = 0), test3_id Int64 Int64(size = 0)
+2019.04.22 10:21:56.703555 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> Join: setSampleBlock: test2.id Int64 Int64(size = 0), test2.code String String(size = 0), test1_id Int64 Int64(size = 0), test3_id Int64 Int64(size = 0)
+2019.04.22 10:21:56.704304 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> Join: setSampleBlock: id Int64 Int64(size = 0), code String String(size = 0)
+2019.04.22 10:21:56.706036 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> Join: setSampleBlock: test2.id Int64 Int64(size = 0), test2.code String String(size = 0), test1_id Int64 Int64(size = 0), test3_id Int64 Int64(size = 0)
+2019.04.22 10:21:56.706449 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> test_db.test1 (SelectExecutor): Key condition: unknown
+2019.04.22 10:21:56.706498 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> test_db.test1 (SelectExecutor): Selected 1 parts by date, 1 parts by key, 13 marks to read from 1 ranges
+2019.04.22 10:21:56.706635 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Trace> test_db.test1 (SelectExecutor): Reading approx. 106496 rows with 1 streams
+2019.04.22 10:21:56.706680 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:21:56.706710 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:21:56.707154 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> executeQuery: Query pipeline:
+Expression
+ Expression
+  CreatingSets
+   Lazy
+   Aggregating
+    Concat
+     Expression
+      Filter
+       Expression
+        Expression
+         CreatingSets
+          Lazy
+          Expression
+           Expression
+            MergeTreeThread
+
+2019.04.22 10:21:56.707430 [ 29 ] {} <Trace> CreatingSetsBlockInputStream: Creating join. 
+2019.04.22 10:21:56.707646 [ 29 ] {} <Debug> test_db.test3 (SelectExecutor): Key condition: unknown
+2019.04.22 10:21:56.707677 [ 29 ] {} <Debug> test_db.test3 (SelectExecutor): Selected 1 parts by date, 1 parts by key, 13 marks to read from 1 ranges
+2019.04.22 10:21:56.707738 [ 29 ] {} <Trace> test_db.test3 (SelectExecutor): Reading approx. 106496 rows with 1 streams
+2019.04.22 10:21:56.707783 [ 29 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:21:56.714317 [ 29 ] {} <Debug> CreatingSetsBlockInputStream: Created. Join with 100000 entries from 100000 rows. In 0.007 sec.
+2019.04.22 10:21:56.714367 [ 29 ] {} <Trace> CreatingSetsBlockInputStream: Creating join. 
+2019.04.22 10:21:56.714545 [ 29 ] {} <Debug> test_db.test2 (SelectExecutor): Key condition: unknown
+2019.04.22 10:21:56.714574 [ 29 ] {} <Debug> test_db.test2 (SelectExecutor): Selected 1 parts by date, 1 parts by key, 13 marks to read from 1 ranges
+2019.04.22 10:21:56.714668 [ 29 ] {} <Trace> test_db.test2 (SelectExecutor): Reading approx. 106496 rows with 1 streams
+2019.04.22 10:21:56.714706 [ 29 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:21:56.727353 [ 29 ] {} <Debug> CreatingSetsBlockInputStream: Created. Join with 100000 entries from 100000 rows. In 0.013 sec.
+2019.04.22 10:21:56.727433 [ 29 ] {} <Trace> Aggregator: Aggregating
+2019.04.22 10:21:58.556438 [ 29 ] {} <Debug> MemoryTracker: Current memory usage: 1.08 GiB.
+2019.04.22 10:21:59.671559 [ 29 ] {} <Debug> MemoryTracker: Current memory usage: 2.14 GiB.
+2019.04.22 10:21:59.899413 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Error> executeQuery: Code: 241, e.displayText() = DB::Exception: Memory limit (for query) exceeded: would use 2.89 GiB (attempt to allocate chunk of 268435456 bytes), maximum: 2.79 GiB (version 19.5.3.8 (official build)) (from [::ffff:127.0.0.1]:34130) (in query: select     count(test2.id) from     test1,     test2,     test3   where     test1.code in ('1', '2', '3')     and test2.test1_id = test1.id     and test2.test3_id = test3.id;), Stack trace:
+
+0. /usr/bin/clickhouse-server(StackTrace::StackTrace()+0x16) [0x73fd046]
+1. /usr/bin/clickhouse-server(MemoryTracker::alloc(long)+0x8b2) [0x73f6492]
+2. /usr/bin/clickhouse-server(MemoryTracker::alloc(long)+0xc5) [0x73f5ca5]
+3. /usr/bin/clickhouse-server(Allocator<false>::realloc(void*, unsigned long, unsigned long, unsigned long)+0x1c3) [0x73e11a3]
+4. /usr/bin/clickhouse-server(DB::ColumnString::insertFrom(DB::IColumn const&, unsigned long)+0x24e) [0x6a198ee]
+5. /usr/bin/clickhouse-server(DB::Join::joinBlockImplCross(DB::Block&) const+0x441) [0x68e0031]
+6. /usr/bin/clickhouse-server(DB::Join::joinBlock(DB::Block&, std::vector<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >, std::allocator<std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > > const&, DB::NamesAndTypesList const&) const+0x324) [0x68e88a4]
+7. /usr/bin/clickhouse-server(DB::ExpressionAction::execute(DB::Block&, bool) const+0xb81) [0x6e5d8a1]
+8. /usr/bin/clickhouse-server(DB::ExpressionActions::execute(DB::Block&, bool) const+0x45) [0x6e5ed45]
+9. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x48) [0x6d1f798]
+10. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+11. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6d1f77d]
+12. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+13. /usr/bin/clickhouse-server(DB::CreatingSetsBlockInputStream::readImpl()+0x210) [0x6d0af80]
+14. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+15. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6d1f77d]
+16. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+17. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6d1f77d]
+18. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+19. /usr/bin/clickhouse-server(DB::FilterBlockInputStream::readImpl()+0xd9) [0x6d20409]
+20. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+21. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6d1f77d]
+22. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+23. /usr/bin/clickhouse-server(DB::ConcatBlockInputStream::readImpl()+0xd3) [0x68b8563]
+24. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+25. /usr/bin/clickhouse-server(DB::Aggregator::execute(std::shared_ptr<DB::IBlockInputStream> const&, DB::AggregatedDataVariants&)+0x3a7) [0x6d9b3b7]
+26. /usr/bin/clickhouse-server(DB::AggregatingBlockInputStream::readImpl()+0x43f) [0x6cee75f]
+27. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+28. /usr/bin/clickhouse-server(DB::CreatingSetsBlockInputStream::readImpl()+0x210) [0x6d0af80]
+29. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+30. /usr/bin/clickhouse-server(DB::ExpressionBlockInputStream::readImpl()+0x2d) [0x6d1f77d]
+31. /usr/bin/clickhouse-server(DB::IBlockInputStream::read()+0x178) [0x677baf8]
+
+2019.04.22 10:21:59.899607 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> MemoryTracker: Peak memory usage (for query): 2.64 GiB.
+2019.04.22 10:21:59.899819 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Debug> MemoryTracker: Peak memory usage (total): 2.64 GiB.
+2019.04.22 10:21:59.899847 [ 24 ] {01e2bc84-6eca-44e8-ad66-c7f0923047b1} <Information> TCPHandler: Processed in 3.199 sec.
+```
+server log for regular JOINS with in operator (OK)
+```
+2019.04.22 10:20:20.078611 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> executeQuery: (from [::ffff:127.0.0.1]:34130) select     count(test2.id) from     test1     join test2 on test2.test1_id = test1.id     join test3 on test2.test3_id = test3.id where     test1.code in ('1', '2', '3');
+2019.04.22 10:20:20.080252 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> Join: setSampleBlock: test2.id Int64 Int64(size = 0), test2.code String String(size = 0), test1_id Int64 Int64(size = 0), test3_id Int64 Int64(size = 0), --test2.test1_id Int64 Int64(size = 0)
+2019.04.22 10:20:20.081363 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> Join: setSampleBlock: test2.id Int64 Int64(size = 0), test2.code String String(size = 0), test1_id Int64 Int64(size = 0), test3_id Int64 Int64(size = 0), --test2.test1_id Int64 Int64(size = 0)
+2019.04.22 10:20:20.082263 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> Join: setSampleBlock: id Int64 Int64(size = 0), code String String(size = 0)
+2019.04.22 10:20:20.083831 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> Join: setSampleBlock: test2.id Int64 Int64(size = 0), test2.code String String(size = 0), test1_id Int64 Int64(size = 0), test3_id Int64 Int64(size = 0), --test2.test1_id Int64 Int64(size = 0)
+2019.04.22 10:20:20.084436 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> test_db.test1 (SelectExecutor): Key condition: unknown
+2019.04.22 10:20:20.084469 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> test_db.test1 (SelectExecutor): Selected 1 parts by date, 1 parts by key, 13 marks to read from 1 ranges
+2019.04.22 10:20:20.084573 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Trace> test_db.test1 (SelectExecutor): Reading approx. 106496 rows with 1 streams
+2019.04.22 10:20:20.084611 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:20:20.084627 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:20:20.084855 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> executeQuery: Query pipeline:
+Expression
+ Expression
+  CreatingSets
+   Lazy
+   Aggregating
+    Concat
+     Expression
+      Filter
+       Expression
+        Expression
+         CreatingSets
+          Lazy
+          Expression
+           Expression
+            MergeTreeThread
+
+2019.04.22 10:20:20.085238 [ 28 ] {} <Trace> CreatingSetsBlockInputStream: Creating join. 
+2019.04.22 10:20:20.085572 [ 28 ] {} <Debug> test_db.test3 (SelectExecutor): Key condition: unknown
+2019.04.22 10:20:20.085630 [ 28 ] {} <Debug> test_db.test3 (SelectExecutor): Selected 1 parts by date, 1 parts by key, 13 marks to read from 1 ranges
+2019.04.22 10:20:20.085759 [ 28 ] {} <Trace> test_db.test3 (SelectExecutor): Reading approx. 106496 rows with 1 streams
+2019.04.22 10:20:20.085834 [ 28 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:20:20.113577 [ 28 ] {} <Debug> CreatingSetsBlockInputStream: Created. Join with 100000 entries from 100000 rows. In 0.028 sec.
+2019.04.22 10:20:20.113667 [ 28 ] {} <Trace> CreatingSetsBlockInputStream: Creating join. 
+2019.04.22 10:20:20.113897 [ 28 ] {} <Debug> test_db.test2 (SelectExecutor): Key condition: unknown
+2019.04.22 10:20:20.113938 [ 28 ] {} <Debug> test_db.test2 (SelectExecutor): Selected 1 parts by date, 1 parts by key, 13 marks to read from 1 ranges
+2019.04.22 10:20:20.114087 [ 28 ] {} <Trace> test_db.test2 (SelectExecutor): Reading approx. 106496 rows with 1 streams
+2019.04.22 10:20:20.114307 [ 28 ] {} <Trace> InterpreterSelectQuery: FetchColumns -> Complete
+2019.04.22 10:20:20.138956 [ 28 ] {} <Debug> CreatingSetsBlockInputStream: Created. Join with 100000 entries from 100000 rows. In 0.025 sec.
+2019.04.22 10:20:20.139072 [ 28 ] {} <Trace> Aggregator: Aggregating
+2019.04.22 10:20:20.178865 [ 28 ] {} <Trace> Aggregator: Aggregation method: without_key
+2019.04.22 10:20:20.195402 [ 28 ] {} <Trace> Aggregator: Aggregated. 3 to 1 rows (from 0.000 MiB) in 0.056 sec. (53.312 rows/sec., 0.000 MiB/sec.)
+2019.04.22 10:20:20.195530 [ 28 ] {} <Trace> Aggregator: Merging aggregated data
+2019.04.22 10:20:20.196019 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Information> executeQuery: Read 300000 rows, 7.79 MiB in 0.117 sec., 2558215 rows/sec., 66.41 MiB/sec.
+2019.04.22 10:20:20.196059 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> MemoryTracker: Peak memory usage (for query): 37.08 MiB.
+2019.04.22 10:20:20.196186 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Trace> virtual DB::MergingAndConvertingBlockInputStream::~MergingAndConvertingBlockInputStream(): Waiting for threads to finish
+2019.04.22 10:20:20.196369 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Debug> MemoryTracker: Peak memory usage (total): 37.08 MiB.
+2019.04.22 10:20:20.196436 [ 24 ] {5dfa3673-c46c-403c-8562-25b104c3f571} <Information> TCPHandler: Processed in 0.119 sec.
+```
+

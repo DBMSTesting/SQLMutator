@@ -1,0 +1,130 @@
+ID: 26013
+Title: DB::ParsingException when parsing zstd-compressed JSON from HDFS 
+Description:
+You have to provide the following information whenever possible.
+
+**Describe the bug**
+
+We have stored some data into HDFS using `INSERT INTO FUNCTION hdfs('.../file.zstd', 'JSONEachRow', '...') SELECT ...`. When trying to read the same data back using `SELECT ... FROM hdfs('.../file.zstd', 'JSONEachRow', '...')`, CH throws a exception.
+It appears the bug occurs when:
+1) the file is in HDFS;
+2) the file is ZSTD-compressed;
+3) there is a double-quote `"` quoted as `\"` inside the data;
+4) there is enough entropy in the file (apparently because for the bug to appear, ZSTD must not produce more than one block at a time when decompressing data);
+5) probably some other yet undiscovered condition because I was not able to reproduce the issue on simple data yet.
+
+**Does it reproduce on recent release?**
+
+Reproduces on 21.3.11.1.
+
+**How to reproduce**
+
+* Which ClickHouse server version to use
+
+21.3.11.1.
+
+* Which interface to use, if matters
+
+Reproducible either with `clickhouse-client` or `clickhouse-local`.
+
+* Non-default settings, if any
+* `CREATE TABLE` statements for all tables involved
+* Sample data for all these tables, use [clickhouse-obfuscator](https://github.com/ClickHouse/ClickHouse/blob/master/programs/obfuscator/Obfuscator.cpp#L42-L80) if necessary
+
+
+
+* Queries to run that lead to unexpected result
+
+Get the compressed data from https://drive.google.com/file/d/1vI4x4oCBget292yQ34jjrg4sJoSOdD0Y/view?usp=sharing (500MB download).
+
+Put the data into HDFS, either via hdfs cli, or using `clickhouse-local`:
+```
+clickhouse-local --query '
+  INSERT INTO FUNCTION
+    hdfs('\''hdfs://host/choke.zstd'\'', '\''JSONEachRow'\'', '\''`foo` String'\'')
+  SELECT `foo` FROM
+    file('\''choke4.zstd'\'', '\''JSONEachRow'\'', '\''`foo` String'\'')
+'
+```
+
+Try to read the data back:
+```
+clickhouse-local --input_format_parallel_parsing 0 --query '
+  SELECT `foo` FROM
+    hdfs('\''hdfs://host/choke.zstd'\'', '\''JSONEachRow'\'', '\''`foo` String'\'')
+  FORMAT TabSeparated
+' | wc -l
+```
+
+**Expected behavior**
+
+
+
+**Error message and/or stacktrace**
+
+When using `clickhouse-local`, it's possible to see the offending row number:
+```
+Code: 27, e.displayText() = DB::ParsingException: Cannot parse input: expected ',' before: '2\\"F05\\"C\\"27A\\"6\\"4C5\\"A\\"E2\\"FCF43A4B4668EDEB2EF707132AA6482FAF9CDF5AD\\"\\"5AF6298EAA63B274839376570676BF6C640D6BB84C204253E82D5587C887CDB7F42435FD6613B60859A8': While executing HDFS: (at row 21)
+ (version 21.3.11.1)
+```
+
+When using `clickhouse-client`, the following errors appear in the log:
+```
+2021-07-06 00:26:21.591907, p72804, th139416962029312, ERROR cannot setup block reader for Block: [block pool ID: BP-913649041-127.0.1.1-1603257704115 block ID 1412601886_338982758] file /choke4.zstd on Datanode: host(1.2.3.4).
+ReadShortCircuitInfo.cpp: 228: HdfsIOException: ReadShortCircuitInfoBuilder: "dfs.domain.socket.path" is not set
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+#011@#011Unknown
+retry the same node but disable read shortcircuit feature
+2021.07.06 00:26:21.624529 [ 93314 ] {a9018c41-ad89-48bb-9679-6d353e9d5eb1} <Error> executeQuery: Code: 27, e.displayText() = DB::ParsingException: Cannot parse input: expected ',' before: '2\\"F05\\"C\\"27A\\"6\\"4C5\\"A\\"E2\\"FCF43A4B4668EDEB2EF707132AA6482FAF9CDF5AD\\"\\"5AF6298EAA63B274839376570676BF6C640D6BB84C204253E82D5587C887CDB7F42435FD6613B60859A8': While executing HDFS: (at row 21)#012 (version 21.3.11.1) (from 1.2.3.4:29610) (in query:  SELECT `foo` FROM hdfs('hdfs://host/choke4.zstd', 'JSONEachRow', '`foo` String') FORMAT TabSeparated ), Stack trace (when copying this message, always include the lines below):#012#0120. DB::throwAtAssertionFailed(char const*, DB::ReadBuffer&) @ 0x88870b5 in /usr/bin/clickhouse#0121. DB::JSONEachRowRowInputFormat::advanceToNextKey(unsigned long) @ 0xfb37924 in /usr/bin/clickhouse#0122. DB::JSONEachRowRowInputFormat::readJSONObject(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&) @ 0xfb374e8 in /usr/bin/clickhouse#0123. DB::JSONEachRowRowInputFormat::readRow(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, DB::RowReadExtension&) @ 0xfb38246 in /usr/bin/clickhouse#0124. DB::IRowInputFormat::generate() @ 0xfafac68 in /usr/bin/clickhouse#0125. DB::ISource::tryGenerate() @ 0xfa891a5 in /usr/bin/clickhouse#0126. DB::ISource::work() @ 0xfa88d9a in /usr/bin/clickhouse#0127. DB::InputStreamFromInputFormat::readImpl() @ 0xd0dda4f in /usr/bin/clickhouse#0128. DB::IBlockInputStream::read() @ 0xea2b0f5 in /usr/bin/clickhouse#0129. DB::OwningBlockInputStream<DB::ReadBuffer>::readImpl() @ 0xd09a380 in /usr/bin/clickhouse#01210. DB::IBlockInputStream::read() @ 0xea2b0f5 in /usr/bin/clickhouse#01211. ? @ 0xe73ce44 in /usr/bin/clickhouse#01212. DB::ISource::tryGenerate() @ 0xfa891a5 in /usr/bin/clickhouse#01213. DB::ISource::work() @ 0xfa88d9a in /usr/bin/clickhouse#01214. DB::SourceWithProgress::work() @ 0xfc3c50a in /usr/bin/clickhouse#01215. ? @ 0xfac318d in /usr/bin/clickhouse#01216. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xfabfdb1 in /usr/bin/clickhouse#01217. DB::PipelineExecutor::executeImpl(unsigned long) @ 0xfabdd06 in /usr/bin/clickhouse#01218. ? @ 0xfacb502 in /usr/bin/clickhouse#01219. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x887090f in /usr/bin/clickhouse#01220. ? @ 0x88742e3 in /usr/bin/clickhouse#01221. start_thread @ 0x7fa3 in /usr/lib/x86_64-linux-gnu/libpthread-2.28.so#01222. clone @ 0xf94cf in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+2021.07.06 00:26:21.624595 [ 93314 ] {a9018c41-ad89-48bb-9679-6d353e9d5eb1} <Error> TCPHandler: Code: 27, e.displayText() = DB::Exception: Cannot parse input: expected ',' before: '2\\"F05\\"C\\"27A\\"6\\"4C5\\"A\\"E2\\"FCF43A4B4668EDEB2EF707132AA6482FAF9CDF5AD\\"\\"5AF6298EAA63B274839376570676BF6C640D6BB84C204253E82D5587C887CDB7F42435FD6613B60859A8': While executing HDFS, Stack trace:#012#0120. DB::throwAtAssertionFailed(char const*, DB::ReadBuffer&) @ 0x88870b5 in /usr/bin/clickhouse#0121. DB::JSONEachRowRowInputFormat::advanceToNextKey(unsigned long) @ 0xfb37924 in /usr/bin/clickhouse#0122. DB::JSONEachRowRowInputFormat::readJSONObject(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&) @ 0xfb374e8 in /usr/bin/clickhouse#0123. DB::JSONEachRowRowInputFormat::readRow(std::__1::vector<COW<DB::IColumn>::mutable_ptr<DB::IColumn>, std::__1::allocator<COW<DB::IColumn>::mutable_ptr<DB::IColumn> > >&, DB::RowReadExtension&) @ 0xfb38246 in /usr/bin/clickhouse#0124. DB::IRowInputFormat::generate() @ 0xfafac68 in /usr/bin/clickhouse#0125. DB::ISource::tryGenerate() @ 0xfa891a5 in /usr/bin/clickhouse#0126. DB::ISource::work() @ 0xfa88d9a in /usr/bin/clickhouse#0127. DB::InputStreamFromInputFormat::readImpl() @ 0xd0dda4f in /usr/bin/clickhouse#0128. DB::IBlockInputStream::read() @ 0xea2b0f5 in /usr/bin/clickhouse#0129. DB::OwningBlockInputStream<DB::ReadBuffer>::readImpl() @ 0xd09a380 in /usr/bin/clickhouse#01210. DB::IBlockInputStream::read() @ 0xea2b0f5 in /usr/bin/clickhouse#01211. ? @ 0xe73ce44 in /usr/bin/clickhouse#01212. DB::ISource::tryGenerate() @ 0xfa891a5 in /usr/bin/clickhouse#01213. DB::ISource::work() @ 0xfa88d9a in /usr/bin/clickhouse#01214. DB::SourceWithProgress::work() @ 0xfc3c50a in /usr/bin/clickhouse#01215. ? @ 0xfac318d in /usr/bin/clickhouse#01216. DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic<bool>*) @ 0xfabfdb1 in /usr/bin/clickhouse#01217. DB::PipelineExecutor::executeImpl(unsigned long) @ 0xfabdd06 in /usr/bin/clickhouse#01218. ? @ 0xfacb502 in /usr/bin/clickhouse#01219. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x887090f in /usr/bin/clickhouse#01220. ? @ 0x88742e3 in /usr/bin/clickhouse#01221. start_thread @ 0x7fa3 in /usr/lib/x86_64-linux-gnu/libpthread-2.28.so#01222. clone @ 0xf94cf in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+```
+
+**Additional context**
+
+I tried to use `--allow_simdjson 1` and `--input_format_parallel_parsing 0`, but it made no difference. However, I got a segmentation fault once when I removed the `input_format_parallel_parsing 0` option:
+```
+[] 2021.07.06 00:11:14.317545 [ 69828 ] <Fatal> BaseDaemon: ########################################
+[] 2021.07.06 00:11:14.317642 [ 69828 ] <Fatal> BaseDaemon: (version 21.3.11.1, build id: 3510936533BC42FE58A08719ED1E84CDAB28458D) (from thread 136940) (query_id: ecae989e-9f6e-4766-91df-3f3bada181c9) Received signal Segmentation fault (11)
+[] 2021.07.06 00:11:14.317675 [ 69828 ] <Fatal> BaseDaemon: Address: 0x7edd1ae1b000 Access: write. Address not mapped to object.
+[] 2021.07.06 00:11:14.317695 [ 69828 ] <Fatal> BaseDaemon: Stack trace: 0x882df75 0x888dbb5 0xfb2d362 0xfb5033c 0xfa78bb8 0x887090f 0x88742e3 0x7f5a9a8e4fa3 0x7f5a9a8154cf
+[] 2021.07.06 00:11:14.317754 [ 69828 ] <Fatal> BaseDaemon: 1. memcpy @ 0x882df75 in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317800 [ 69828 ] <Fatal> BaseDaemon: 2. DB::loadAtPosition(DB::ReadBuffer&, DB::Memory<Allocator<false, false> >&, char*&) @ 0x888dbb5 in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317826 [ 69828 ] <Fatal> BaseDaemon: 3. DB::fileSegmentationEngineJSONEachRowImpl(DB::ReadBuffer&, DB::Memory<Allocator<false, false> >&, unsigned long) @ 0xfb2d362 in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317846 [ 69828 ] <Fatal> BaseDaemon: 4. DB::ParallelParsingInputFormat::segmentatorThreadFunction(std::__1::shared_ptr<DB::ThreadGroupStatus>) @ 0xfb5033c in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317884 [ 69828 ] <Fatal> BaseDaemon: 5. ThreadFromGlobalPool::ThreadFromGlobalPool<void (DB::ParallelParsingInputFormat::*)(std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ParallelParsingInputFormat*, std::__1::shared_ptr<DB::ThreadGroupStatus> >(void (DB::ParallelParsingInputFormat::*&&)(std::__1::shared_ptr<DB::ThreadGroupStatus>), DB::ParallelParsingInputFormat*&&, std::__1::shared_ptr<DB::ThreadGroupStatus>&&)::'lambda'()::operator()() @ 0xfa78bb8 in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317903 [ 69828 ] <Fatal> BaseDaemon: 6. ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>) @ 0x887090f in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317921 [ 69828 ] <Fatal> BaseDaemon: 7. ? @ 0x88742e3 in /usr/bin/clickhouse
+[] 2021.07.06 00:11:14.317948 [ 69828 ] <Fatal> BaseDaemon: 8. start_thread @ 0x7fa3 in /usr/lib/x86_64-linux-gnu/libpthread-2.28.so
+[] 2021.07.06 00:11:14.317972 [ 69828 ] <Fatal> BaseDaemon: 9. clone @ 0xf94cf in /usr/lib/x86_64-linux-gnu/libc-2.28.so
+```
+
+The test file was obtained from the real data, by generating random text and placing `{"foo":"`, `"}\n`, and `\"` at the same places as in the original data. Interestingly enough, this changed the line in which the problem occurs. And when removing the randomness, the problem does not occur.

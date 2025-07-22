@@ -1,0 +1,141 @@
+ID: 74411
+Title: Views SQL SECURITY doesn't work with Parallel replicas
+Description:
+We have a test, `02884_create_view_with_sql_security_option.sh`, which covers almost all cases of SQL security for views.
+
+In the CI configuration (with `parallel_replicas_for_non_replicated_merge_tree=1` and a single-node-3-replica cluster):
+- With `parallel_replicas_local_plan=1`, it works correctly.
+- With `parallel_replicas_local_plan=0`, it always reads data from the view, even if the SQL security is invalid.
+`UNEXPECTED` in this context means that the test reads data from the view when it should not.
+
+```
+ ===== StorageView =====
+ OK
+ OK
+-OK
++UNEXPECTED
+ 2
+ 2
+-OK
+-OK
++UNEXPECTED
++UNEXPECTED
+ 2
+ 2
+-OK
++UNEXPECTED
+ 2
+ 2
+ 1
+-OK
++UNEXPECTED
+ 1
+
+```
+
+
+- **However**, on a real cloud cluster, it behaves completely differently: you cannot read from a view at all in **any** case.
+Let’s consider a specific example from the test. Create two users, set `user1` as the definer of the view, and grant him permission to read from the view without granting access to the underlying table. After this, `user2` is able to read from the view.
+```
+DROP DATABASE IF EXISTS db;
+CREATE DATABASE db;
+USE db;
+
+CREATE TABLE db.test_table (s String) ENGINE = MergeTree ORDER BY s;
+INSERT INTO db.test_table VALUES ('foo'), ('bar');
+
+DROP USER IF EXISTS user1, user2;
+CREATE USER user1, user2;
+GRANT SELECT ON db.* TO user1;
+
+CREATE VIEW db.test_view (s String)
+DEFINER = user1 SQL SECURITY DEFINER
+AS SELECT * FROM db.test_table;
+
+GRANT SELECT ON db.test_view TO user2;
+```
+
+Reading from the view as `user2` is successful when parallel replicas are disabled
+```
+clickhouse-client --host= --port=9440 --send_logs_level=error --allow_experimental_analyzer=1 --enable_parallel_replicas=0  --secure --user user2 --query "select count() from db.test_view"
+2
+```
+
+Error occurs when parallel replicas are enabled. (`parallel_replicas_local_plan=1` by default)
+```
+clickhouse-client --host= --port=9440 --send_logs_level=error --allow_experimental_analyzer=1 --enable_parallel_replicas=1  --secure --user user2 --query "select count() from db.test_view"
+
+[c--server-8z4qyrg-0] 2025.01.09 21:06:05.121512 [ 955 ] {ba05e62a-beb6-4b31-8efa-0405bc506e92} <Error> executeQuery: Code: 497. DB::Exception: user2: Not enough privileges. To execute this query, it's necessary to have the grant SELECT(s) ON db.test_table. (ACCESS_DENIED) (version 25.1.1.22156 (official build)) (from 77.166.55.71:54912) (in query: SELECT `__table1`.`s` AS `s` FROM (SELECT `__table2`.`s` AS `s` FROM `db`.`test_table` AS `__table2`) AS `__table1`), Stack trace (when copying this message, always include the lines below):
+
+0. ./contrib/llvm-project/libcxx/include/vector:727: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c412904
+1. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x0000000007fd5a3c
+2. DB::Exception::Exception<String, String>(int, FormatStringHelperImpl<std::type_identity<String>::type, std::type_identity<String>::type>, String&&, String&&) @ 0x0000000007fd76fc
+3. ./build_docker/./src/Access/ContextAccess.cpp:613: auto bool DB::ContextAccess::checkAccessImplHelper<true, false, false, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::vector<String, std::allocator<String>>>(std::shared_ptr<DB::Context const> const&, DB::AccessFlags, std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&) const::'lambda'<typename ...$T>(int, FormatStringHelperImpl<String, std::type_identity<$T>::type...>, $T&&...)::operator()<String>(int, FormatStringHelperImpl<String, std::type_identity<$T>::type...>, $T&&...) const @ 0x000000000fa594a0
+4. ./build_docker/./src/Access/ContextAccess.cpp:673: auto bool DB::ContextAccess::checkAccessImplHelper<true, false, false, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::vector<String, std::allocator<String>>>(std::shared_ptr<DB::Context const> const&, DB::AccessFlags, std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&) const::'lambda'<typename ...$T>(DB::AccessFlags, $T&&...)::operator()<std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&>(DB::AccessFlags, $T&&...) const @ 0x000000000fa58660
+5. ./build_docker/./src/Access/ContextAccess.cpp:711: bool DB::ContextAccess::checkAccessImplHelper<true, false, false, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::vector<String, std::allocator<String>>>(std::shared_ptr<DB::Context const> const&, DB::AccessFlags, std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&) const @ 0x000000000fa57b84
+6. ./src/Access/ContextAccess.cpp:781: void DB::Context::checkAccessImpl<DB::AccessFlags, String, String, std::vector<String, std::allocator<String>>>(DB::AccessFlags const&, String const&, String const&, std::vector<String, std::allocator<String>> const&) const @ 0x00000000104bdcb8
+7. ./build_docker/./src/Interpreters/Context.cpp:1769: DB::Context::checkAccess(DB::AccessFlags const&, DB::StorageID const&, std::vector<String, std::allocator<String>> const&) const @ 0x00000000104bdb38
+8. ./build_docker/./src/Planner/PlannerJoinTree.cpp:169: DB::buildJoinTreeQueryPlan(std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions&, std::unordered_set<String, std::hash<String>, std::equal_to<String>, std::allocator<String>> const&, std::shared_ptr<DB::PlannerContext>&) @ 0x0000000010adf9d4
+9. ./build_docker/./src/Planner/Planner.cpp:1546: DB::Planner::buildPlanForQueryNode() @ 0x0000000010acfda4
+10. ./build_docker/./src/Planner/Planner.cpp:1300: DB::Planner::buildQueryPlanIfNeeded() @ 0x0000000010acbcf4
+11. ./build_docker/./src/Planner/PlannerJoinTree.cpp:1187: DB::(anonymous namespace)::buildQueryPlanForTableExpression(std::shared_ptr<DB::IQueryTreeNode>, std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions const&, std::shared_ptr<DB::PlannerContext>&, bool, bool) @ 0x0000000010ae7d98
+12. ./build_docker/./src/Planner/PlannerJoinTree.cpp:2150: DB::buildJoinTreeQueryPlan(std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions&, std::unordered_set<String, std::hash<String>, std::equal_to<String>, std::allocator<String>> const&, std::shared_ptr<DB::PlannerContext>&) @ 0x0000000010ae0988
+13. ./build_docker/./src/Planner/Planner.cpp:1546: DB::Planner::buildPlanForQueryNode() @ 0x0000000010acfda4
+14. ./build_docker/./src/Planner/Planner.cpp:1300: DB::Planner::buildQueryPlanIfNeeded() @ 0x0000000010acbcf4
+15. ./src/Interpreters/InterpreterSelectQueryAnalyzer.cpp:241: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000010e6ad90
+16. ./build_docker/./src/Interpreters/executeQuery.cpp:1614: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x0000000010e6776c
+17. ./build_docker/./src/Server/TCPHandler.cpp:658: DB::TCPHandler::runImpl() @ 0x0000000012197308
+18. ./build_docker/./src/Server/TCPHandler.cpp:2635: DB::TCPHandler::run() @ 0x00000000121b1fc8
+19. ./src/Server/TCPProtocolStackHandler.h:38: DB::TCPProtocolStackHandler::run() @ 0x000000000c6e76b4
+20. ./build_docker/./base/poco/Net/src/TCPServerConnection.cpp:40: Poco::Net::TCPServerConnection::start() @ 0x0000000015066458
+21. ./build_docker/./base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x0000000015066974
+22. ./build_docker/./base/poco/Foundation/src/ThreadPool.cpp:205: Poco::PooledThread::run() @ 0x000000001502aa7c
+23. ./base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000015028e50
+24. ? @ 0x000000000007d5c8
+25. ? @ 0x00000000000e5edc
+
+[c-server-f28jnuv-0] 2025.01.09 21:06:05.132711 [ 96 ] {4e899ffc-d996-4ae8-884e-6dcb7762e8a8} <Error> executeQuery: Code: 497. DB::Exception: Received from c-\\\\\FORMAT\\\\.ns.svc.cluster.local:9000. DB::Exception: user2: Not enough privileges. To execute this query, it's necessary to have the grant SELECT(s) ON db.test_table. Stack trace:
+
+0. ./contrib/llvm-project/libcxx/include/vector:727: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c412904
+1. DB::Exception::Exception(PreformattedMessage&&, int) @ 0x0000000007fd5a3c
+2. DB::Exception::Exception<String, String>(int, FormatStringHelperImpl<std::type_identity<String>::type, std::type_identity<String>::type>, String&&, String&&) @ 0x0000000007fd76fc
+3. ./build_docker/./src/Access/ContextAccess.cpp:613: auto bool DB::ContextAccess::checkAccessImplHelper<true, false, false, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::vector<String, std::allocator<String>>>(std::shared_ptr<DB::Context const> const&, DB::AccessFlags, std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&) const::'lambda'<typename ...$T>(int, FormatStringHelperImpl<String, std::type_identity<$T>::type...>, $T&&...)::operator()<String>(int, FormatStringHelperImpl<String, std::type_identity<$T>::type...>, $T&&...) const @ 0x000000000fa594a0
+4. ./build_docker/./src/Access/ContextAccess.cpp:673: auto bool DB::ContextAccess::checkAccessImplHelper<true, false, false, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::vector<String, std::allocator<String>>>(std::shared_ptr<DB::Context const> const&, DB::AccessFlags, std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&) const::'lambda'<typename ...$T>(DB::AccessFlags, $T&&...)::operator()<std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&>(DB::AccessFlags, $T&&...) const @ 0x000000000fa58660
+5. ./build_docker/./src/Access/ContextAccess.cpp:711: bool DB::ContextAccess::checkAccessImplHelper<true, false, false, std::basic_string_view<char, std::char_traits<char>>, std::basic_string_view<char, std::char_traits<char>>, std::vector<String, std::allocator<String>>>(std::shared_ptr<DB::Context const> const&, DB::AccessFlags, std::basic_string_view<char, std::char_traits<char>> const&, std::basic_string_view<char, std::char_traits<char>> const&, std::vector<String, std::allocator<String>> const&) const @ 0x000000000fa57b84
+6. ./src/Access/ContextAccess.cpp:781: void DB::Context::checkAccessImpl<DB::AccessFlags, String, String, std::vector<String, std::allocator<String>>>(DB::AccessFlags const&, String const&, String const&, std::vector<String, std::allocator<String>> const&) const @ 0x00000000104bdcb8
+7. ./build_docker/./src/Interpreters/Context.cpp:1769: DB::Context::checkAccess(DB::AccessFlags const&, DB::StorageID const&, std::vector<String, std::allocator<String>> const&) const @ 0x00000000104bdb38
+8. ./build_docker/./src/Planner/PlannerJoinTree.cpp:169: DB::buildJoinTreeQueryPlan(std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions&, std::unordered_set<String, std::hash<String>, std::equal_to<String>, std::allocator<String>> const&, std::shared_ptr<DB::PlannerContext>&) @ 0x0000000010adf9d4
+9. ./build_docker/./src/Planner/Planner.cpp:1546: DB::Planner::buildPlanForQueryNode() @ 0x0000000010acfda4
+10. ./build_docker/./src/Planner/Planner.cpp:1300: DB::Planner::buildQueryPlanIfNeeded() @ 0x0000000010acbcf4
+11. ./build_docker/./src/Planner/PlannerJoinTree.cpp:1187: DB::(anonymous namespace)::buildQueryPlanForTableExpression(std::shared_ptr<DB::IQueryTreeNode>, std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions const&, std::shared_ptr<DB::PlannerContext>&, bool, bool) @ 0x0000000010ae7d98
+12. ./build_docker/./src/Planner/PlannerJoinTree.cpp:2150: DB::buildJoinTreeQueryPlan(std::shared_ptr<DB::IQueryTreeNode> const&, DB::SelectQueryInfo const&, DB::SelectQueryOptions&, std::unordered_set<String, std::hash<String>, std::equal_to<String>, std::allocator<String>> const&, std::shared_ptr<DB::PlannerContext>&) @ 0x0000000010ae0988
+13. ./build_docker/./src/Planner/Planner.cpp:1546: DB::Planner::buildPlanForQueryNode() @ 0x0000000010acfda4
+14. ./build_docker/./src/Planner/Planner.cpp:1300: DB::Planner::buildQueryPlanIfNeeded() @ 0x0000000010acbcf4
+15. ./src/Interpreters/InterpreterSelectQueryAnalyzer.cpp:241: DB::executeQueryImpl(char const*, char const*, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum, DB::ReadBuffer*) @ 0x0000000010e6ad90
+16. ./build_docker/./src/Interpreters/executeQuery.cpp:1614: DB::executeQuery(String const&, std::shared_ptr<DB::Context>, DB::QueryFlags, DB::QueryProcessingStage::Enum) @ 0x0000000010e6776c
+17. ./build_docker/./src/Server/TCPHandler.cpp:658: DB::TCPHandler::runImpl() @ 0x0000000012197308
+18. ./build_docker/./src/Server/TCPHandler.cpp:2635: DB::TCPHandler::run() @ 0x00000000121b1fc8
+19. ./src/Server/TCPProtocolStackHandler.h:38: DB::TCPProtocolStackHandler::run() @ 0x000000000c6e76b4
+20. ./build_docker/./base/poco/Net/src/TCPServerConnection.cpp:40: Poco::Net::TCPServerConnection::start() @ 0x0000000015066458
+21. ./build_docker/./base/poco/Net/src/TCPServerDispatcher.cpp:115: Poco::Net::TCPServerDispatcher::run() @ 0x0000000015066974
+22. ./build_docker/./base/poco/Foundation/src/ThreadPool.cpp:205: Poco::PooledThread::run() @ 0x000000001502aa7c
+23. ./base/poco/Foundation/src/Thread_POSIX.cpp:335: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000015028e50
+24. ? @ 0x000000000007d5c8
+25. ? @ 0x00000000000e5edc
+: While executing Remote. (ACCESS_DENIED) (version 25.1.1.22156 (official build)) (from 77.166.55.71:54912) (in query: select count() from db.test_view), Stack trace (when copying this message, always include the lines below):
+
+0. ./contrib/llvm-project/libcxx/include/vector:727: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000000c412904
+1. ./src/Common/Exception.h:104: DB::readException(DB::ReadBuffer&, String const&, bool) @ 0x000000000c48966c
+2. ./build_docker/./src/Client/Connection.cpp:1431: DB::Connection::receiveException() const @ 0x0000000012032840
+3. ./build_docker/./src/Client/Connection.cpp:1260: DB::Connection::receivePacket() @ 0x000000001203aacc
+4. ./build_docker/./src/Client/MultiplexedConnections.cpp:350: DB::MultiplexedConnections::receivePacketUnlocked(std::function<void (int, Poco::Timespan, DB::AsyncEventTimeoutType, String const&, unsigned int)>) @ 0x00000000120734b8
+5. ./build_docker/./src/QueryPipeline/RemoteQueryExecutorReadContext.cpp:50: DB::RemoteQueryExecutorReadContext::Task::run(std::function<void (int, Poco::Timespan, DB::AsyncEventTimeoutType, String const&, unsigned int)>, std::function<void ()>) @ 0x000000000fee0028
+6. ./build_docker/./src/Common/AsyncTaskExecutor.cpp:88: void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, FiberStack&, Fiber::RoutineImpl<DB::AsyncTaskExecutor::Routine>>>(boost::context::detail::transfer_t) @ 0x000000000fedf408
+
+Received exception from server (version 25.1.1):
+Code: 497. DB::Exception: Received from c-\\\\\FORMAT\\\\.eu-west-1.aws.clickhouse-staging.com:9440. DB::Exception: Received from c-\\\\\FORMAT\\\\.ns.svc.cluster.local:9000. DB::Exception: user2: Not enough privileges. To execute this query, it's necessary to have the grant SELECT(s) ON db.test_table. (ACCESS_DENIED)
+(query: select count() from db.test_view)
+
+```
+
+25.1.1.22156

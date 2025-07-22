@@ -1,0 +1,25 @@
+ID: 1752
+Title: "Alter table" can alter some other table
+Description:
+A very interesting thing happened to me today.
+I needed to change the structure of an MV, so I detached the MV definition, renamed the .inner. table (`rename table db.".inner.event_shard" to db.event_shard_old`) and created a new MV which created a new .inner. table (`db..inner.event_shard`).
+Then I copied the data from the old MV into the new MV, and I dropped one partition from the old MV.
+I ran the drop query on one replica.
+Unfortunately CH somehow remembered that the old MV was renamed, and changed the query before sending it to the leader, so the partition got dropped from the new MV.
+Fortunately, only one shard had to send the query to the leader, the other four shards happened to be the leaders for this table, so they dropped data from the old MV.
+
+The log from a leader (it dropped a partition from db.event_shard_old):
+```
+2018.01.11 19:12:38.116475 [ 18191276 ] <Debug> executeQuery: (from [::1]:39848) alter table db.event_shard_old drop partition 201801
+2018.01.11 19:12:38.119972 [ 18191276 ] <Debug> db..inner.event_shard (StorageReplicatedMergeTree): Disabled merges covered by range 20180101_20180131_0_770687_999999999
+...
+```
+The log from the non-leader (it dropped a partition from db..inner.event_shard):
+```
+2018.01.11 19:12:41.156510 [ 18473526 ] <Debug> executeQuery: (from [::1]:44048) alter table dw.event_shard_old drop partition 201801
+2018.01.11 19:12:41.257265 [ 18473526 ] <Trace> Connection (ch1:9000, 10.253.21.2): Connecting. Database: db. User: default
+2018.01.11 19:12:41.280935 [ 18473526 ] <Trace> Connection (ch1:9000, 10.253.21.2): Connected to ClickHouse server version 1.1.54292.
+2018.01.11 19:12:41.357649 [ 18477514 ] <Trace> TCPHandlerFactory: TCP Request. Address: [::ffff:10.253.21.2]:35562
+2018.01.11 19:12:41.357751 [ 18477514 ] <Debug> TCPHandler: Connected ClickHouse ClickHouse replica version 1.1.54292, database: db, user: default.
+2018.01.11 19:12:41.369457 [ 18477514 ] <Debug> executeQuery: (from [::ffff:10.253.21.2]:35562) ALTER TABLE db.`.inner.event_shard` DROP PARTITION 201801
+```

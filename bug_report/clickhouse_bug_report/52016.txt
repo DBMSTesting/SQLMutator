@@ -1,0 +1,67 @@
+ID: 52016
+Title: The optimization for v23.6 leads to problems with using StorageJoin tables
+Description:
+> You have to provide the following information whenever possible.
+
+We use tables of the Join table engine, after the upgrade from clickhouse 23.4 to 23.6 we encounter the issue with deadlock.
+StorageJoin: cannot insert data because current query tries to read from this storage.
+
+> A clear and concise description of what works not as it is supposed to.
+
+actually this does not work anymore on v23.6
+```
+INSERT INTO {table1} 
+  SELECT * 
+  FROM {table2} 
+  WHERE col NOT IN (
+    SELECT col FROM {table1}
+  );
+```
+
+the exact example
+```
+CREATE TABLE test_join
+(
+    `source` UInt64,
+    `destination` String,
+)
+ENGINE = Join(ANY, LEFT, source);
+
+CREATE TABLE test
+(
+    `source` String,
+    `destination` String,
+)
+ENGINE = MergeTree()
+PARTITION BY xxHash32(source) % 5
+ORDER BY source
+SETTINGS index_granularity = 8192;
+
+INSERT INTO test (source, destination)
+  VALUES
+  ('aaa1', 'aaa1'), ('aaa2', 'aaa2'), ('aaa3', 'aaa3');
+
+INSERT INTO test_join
+  SELECT xxHash64(source), destination
+  FROM test
+  WHERE xxHash64(source) NOT IN (
+    SELECT source 
+    FROM test_join
+  );
+```
+
+the error is
+`
+Code: 473. DB::Exception: Received from localhost:9000. DB::Exception: StorageJoin: cannot insert data because current query tries to read from this storage. (DEADLOCK_AVOIDED)
+`
+
+> A link to reproducer in [https://fiddle.clickhouse.com/](https://fiddle.clickhouse.com/).
+
+https://fiddle.clickhouse.com/c6b1bcf7-c035-4bc6-9491-5a6d288d8495
+
+on 23.5 - works
+on 23.6 - does not work
+
+> A clear and concise description of what you expected to happen.
+
+it should just insert the data

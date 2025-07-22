@@ -1,0 +1,92 @@
+ID: 43816
+Title: Deadlock in ReplicatedMergeTreeQueue/MergeTreeBackgroundExecutor when waiting for concurrently executing entry
+Description:
+**Describe what's wrong**
+
+ClickHouse start part merge, but never finish it.
+
+```
+SELECT
+    database,
+    table,
+    elapsed,
+    progress,
+    thread_id
+FROM system.merges
+
+Query id: 6da25629-949b-4db4-ba12-0f629b6af437
+
+┌─database──┬─table───────┬────────elapsed─┬───────────progress─┬─thread_id─┐
+│ tableeeee │ tble        │ 1984.107271537 │ 0.1439376716042042 │        23 │
+│ system    │ part_log    │ 1982.920540095 │                  1 │        19 │
+│ tableeeee │ tble        │ 1971.388698535 │                  0 │        24 │
+│ tableeeee │ tble        │ 1960.049650104 │                  0 │        30 │
+│ tableeeee │ tble        │ 1952.297588147 │                  0 │        23 │
+│ tableeeee │ tble        │ 1921.063860018 │                  0 │        25 │
+└───────────┴─────────────┴────────────────┴────────────────────┴───────────┘
+
+SELECT
+    arrayStringConcat(arrayMap(x -> demangle(addressToSymbol(x)), trace), '\n') AS trace_functions,
+    count()
+FROM system.stack_trace
+WHERE thread_name LIKE '%Merge%'
+GROUP BY trace_functions
+
+Query id: 42a3c732-a820-41bb-9fd3-f43ce40b6bb7
+
+┌─trace_functions────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬─count()─┐
+│ pthread_cond_wait
+DB::ReplicatedMergeTreeQueue::CurrentlyExecuting::setActualPartName(DB::ReplicatedMergeTreeLogEntry&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ReplicatedMergeTreeQueue&, std::__1::unique_lock<std::__1::mutex>&, std::__1::vector<std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>, std::__1::allocator<std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry> > >&)
+DB::ReplicatedMergeTreeQueue::addFuturePartIfNotCoveredByThem(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ReplicatedMergeTreeLogEntry&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&)
+DB::StorageReplicatedMergeTree::findReplicaHavingCoveringPart(DB::ReplicatedMergeTreeLogEntry&, bool)
+DB::StorageReplicatedMergeTree::executeFetch(DB::ReplicatedMergeTreeLogEntry&, bool)
+DB::ReplicatedMergeMutateTaskBase::executeImpl()
+DB::ReplicatedMergeMutateTaskBase::executeStep()
+DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::routine(std::__1::shared_ptr<DB::TaskRuntimeData>)
+DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::threadFunction()
+ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>)
+void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*)
+ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>)
+
+
+__clone │      16 │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────┘
+```
+
+
+**Does it reproduce on recent release?**
+
+Yes, 22.8
+
+
+**Error message and/or stacktrace**
+
+```
+pthread_cond_wait
+DB::ReplicatedMergeTreeQueue::CurrentlyExecuting::setActualPartName(DB::ReplicatedMergeTreeLogEntry&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ReplicatedMergeTreeQueue&, std::__1::unique_lock<std::__1::mutex>&, std::__1::vector<std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry>, std::__1::allocator<std::__1::shared_ptr<DB::ReplicatedMergeTreeLogEntry> > >&)
+DB::ReplicatedMergeTreeQueue::addFuturePartIfNotCoveredByThem(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> > const&, DB::ReplicatedMergeTreeLogEntry&, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char> >&)
+DB::StorageReplicatedMergeTree::findReplicaHavingCoveringPart(DB::ReplicatedMergeTreeLogEntry&, bool)
+DB::StorageReplicatedMergeTree::executeFetch(DB::ReplicatedMergeTreeLogEntry&, bool)
+DB::ReplicatedMergeMutateTaskBase::executeImpl()
+DB::ReplicatedMergeMutateTaskBase::executeStep()
+DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::routine(std::__1::shared_ptr<DB::TaskRuntimeData>)
+DB::MergeTreeBackgroundExecutor<DB::MergeMutateRuntimeQueue>::threadFunction()
+ThreadPoolImpl<ThreadFromGlobalPool>::worker(std::__1::__list_iterator<ThreadFromGlobalPool, void*>)
+void std::__1::__function::__policy_invoker<void ()>::__call_impl<std::__1::__function::__default_alloc_func<ThreadFromGlobalPool::ThreadFromGlobalPool<void ThreadPoolImpl<ThreadFromGlobalPool>::scheduleImpl<void>(std::__1::function<void ()>, int, std::__1::optional<unsigned long>)::'lambda0'()>(void&&)::'lambda'(), void ()> >(std::__1::__function::__policy_storage const*)
+ThreadPoolImpl<std::__1::thread>::worker(std::__1::__list_iterator<std::__1::thread, void*>)
+
+
+__clone
+```
+
+**Additional context**
+
+Servers have pretty high load, and frequently hit fetch pool size limit, so merges wait for part fetches
+
+```
+Not executing log entry queue-0056313716 for part 202248_1103896_1103913_4 because it is not disjoint with part 202248_1103896_1103908_3 that is currently executing.
+```
+
+But part `202248_1103896_1103908_3` fetch was completed over hour ago.
+
+Probably related change in 22.7  https://github.com/ClickHouse/ClickHouse/commit/6ddfec47d2a71bc4d33c6a128f5dc254f972f95a

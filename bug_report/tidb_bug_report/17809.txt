@@ -1,0 +1,98 @@
+ID: 17809
+Title: P1-[4.0 bug hunting]-[SQL Plan Management]-Incorrect result for CAST to DATETIME
+Description:
+Bug Hunter issue tidb-challenge-program/bug-hunting-issue#13
+
+---
+
+Consider the following statements:
+```sql
+CREATE TABLE t0(c0 DOUBLE);
+INSERT INTO t0(c0) VALUES (0);
+SELECT CAST(t0.c0 AS DATETIME) FROM t0; -- expected: {0000-00-00 00:00:00}, actual: {NULL}
+```
+Unexpectedly, the `CAST` computes `NULL` and prints a warning:
+```
+Server version: 5.7.25-TiDB- TiDB Server (Apache License 2.0), MySQL 5.7 compatible
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> SELECT CAST(t0.c0 AS DATETIME) FROM t0; -- expected: {0000-00-00 00:00:00}, actual: {NULL}
++-------------------------+
+| CAST(t0.c0 AS DATETIME) |
++-------------------------+
+| NULL                    |
++-------------------------+
+1 row in set, 1 warning (0.00 sec)
+
+mysql> show warnings;
++---------+------+---------------------------+
+| Level   | Code | Message                   |
++---------+------+---------------------------+
+| Warning | 1292 | Incorrect time value: '0' |
++---------+------+---------------------------+
+1 row in set (0.00 sec)
+```
+This is unexpected, which can be also seen when directly using the constant, which computes the expected value:
+```sql
+SELECT CAST(0.0 AS DATETIME) FROM t0; -- {0000-00-00 00:00:00}
+```
+This is problematic, since it can can result in an incorrect result for queries, which is demonstrated by the following query, which I used to find this bug:
+```sql
+CREATE TABLE t0(c0 DOUBLE);
+CREATE TABLE t1(c0 INT);
+INSERT INTO t1(c0) VALUES (0);
+INSERT INTO t0(c0) VALUES (0);
+SELECT * FROM t1 LEFT JOIN t0 ON TRUE WHERE CAST(t0.c0 AS DATETIME) IS NULL; -- expected: {}, actual: {0|0}
+```
+I found this based on the 4.0 RC, and also found that this can be still reproduced on the latest master (7e71069ffa6052b497eaaaa2c3863bff4fe0ef3f):
+```
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| tidb_version()                                                                                                                                                                                                                |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Release Version: 
+Git Commit Hash: 
+Git Branch: 
+UTC Build Time: 2020-04-15 06:06:10
+GoVersion: go1.13.4
+Race Enabled: false
+TiKV Min Version: v3.0.0-60965b006877ca7234adaced7890d7b029ed1306
+Check Table Before Drop: false |
++-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+1 row in set (0.00 sec)
+```
+MySQL 8.0.19 computes the result I would expect:
+```sql
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 11
+Server version: 8.0.19 MySQL Community Server - GPL
+
+Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> CREATE TABLE t0(c0 DOUBLE);
+Query OK, 0 rows affected (0.03 sec)
+
+mysql> INSERT INTO t0(c0) VALUES (0);
+Query OK, 1 row affected (0.01 sec)
+
+mysql> SELECT CAST(t0.c0 AS DATETIME) FROM t0; -- expected: {0000-00-00 00:00:00}, actual: {NULL}
++-------------------------+
+| CAST(t0.c0 AS DATETIME) |
++-------------------------+
+| 0000-00-00 00:00:00     |
++-------------------------+
+1 row in set (0.00 sec)
+```
+Since this bug causes an incorrect result bug, your classification seems to classify this bug as `P0`.

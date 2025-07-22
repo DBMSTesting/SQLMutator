@@ -1,0 +1,86 @@
+ID: 65389
+Title: DB::Exception Not found column after upgrading from 23.8 to 24.5
+Description:
+**Describe what's wrong**
+
+After upgrading to version 24.5.x, the request start  failing with the following error:
+ 
+```
+SQL Error [10] [07000]: Code: 10. DB::Exception: Not found column toFloat64(argMax(__table2.close_price, __table2.open_time)) in block. There are only columns: toDateTime64(toStartOfInterval(__table2.open_time, _CAST(1_IntervalHour, 'IntervalHour'_String)), 3_UInt8), argMin(__table2.open_price, __table2.open_time), argMax(__table2.close_price, __table2.open_time), toFloat64(argMin(__table2.open_price, __table2.open_time)). (NOT_FOUND_COLUMN_IN_BLOCK) (version 24.5.3.5 (official build))
+```
+
+**Does it reproduce on the most recent release?**
+
+24.3 - 24.5.3.5
+
+**How to reproduce**
+
+```sql
+CREATE TABLE foo_klines (
+     open_time DateTime64(3),
+     close_time DateTime64(3),
+     open_price Decimal64(8),
+     close_price Decimal64(8),
+     high_price Decimal64(8),
+     low_price Decimal64(8)
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(open_time)
+ORDER BY open_time;
+
+
+CREATE TABLE bar_klines (
+    `time` DateTime64(0),
+    open_price Decimal64(8),
+    close_price Decimal64(8),
+    high_price Decimal64(8),
+    low_price Decimal64(8)
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(time)
+ORDER BY time;
+
+
+SELECT
+    toUnixTimestamp64Milli(q0.open_time) as open_time,
+    q0.open * q1.close as open
+FROM (
+	SELECT
+	    toDateTime64(group_time, 3) as open_time,
+	    toFloat64(argMin(open_price, t0.open_time)) as open,
+	    toFloat64(argMax(close_price, t0.open_time)) as close
+	FROM
+	    foo_klines  as t0
+	GROUP BY 
+	    toStartOfInterval(t0.open_time, INTERVAL 1 HOUR) as group_time
+	ORDER BY open_time ASC WITH FILL STEP INTERVAL 1 HOUR INTERPOLATE (
+	    open, close
+	)
+) q0 INNER JOIN (
+	SELECT
+	    toDateTime64(group_time, 3) as open_time,
+	    toFloat64(argMax(close_price, t1.time)) as close
+	FROM
+	    bar_klines as t1
+	GROUP BY 
+	    toStartOfInterval(t1.time, INTERVAL 1 HOUR) as group_time
+	ORDER BY open_time ASC WITH FILL STEP INTERVAL 1 HOUR INTERPOLATE (
+	    close
+	)
+) q1 ON q0.open_time = q1.open_time
+ORDER BY open_time ASC;
+```
+
+**Expected behavior**
+
+The result will be returned without any exceptions, just as in version 23.8
+
+**Error message and/or stacktrace**
+
+```
+SQL Error [10] [07000]: Code: 10. DB::Exception: Not found column toFloat64(argMax(__table2.close_price, __table2.open_time)) in block. There are only columns: toDateTime64(toStartOfInterval(__table2.open_time, _CAST(1_IntervalHour, 'IntervalHour'_String)), 3_UInt8), argMin(__table2.open_price, __table2.open_time), argMax(__table2.close_price, __table2.open_time), toFloat64(argMin(__table2.open_price, __table2.open_time)). (NOT_FOUND_COLUMN_IN_BLOCK) (version 24.5.3.5 (official build))
+```
+
+**Additional context**
+
+The same query work  like a charm in versions 23.8 - 24.2

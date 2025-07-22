@@ -1,0 +1,157 @@
+ID: 45126
+Title: data race in Processinfo with index scan
+Description:
+## Bug Report
+
+Please answer these questions before submitting your issue. Thanks!
+
+### 1. Minimal reproduce step (Required)
+
+In GenLogFields function, need to read info.StmtCtx.IndexNames, which may be modified in executor building phase.
+GenLogFields:
+https://github.com/pingcap/tidb/blob/6f7979436e2f2ed90b4193999b45364401f4fc72/util/util.go#L161
+Build phase:
+https://github.com/pingcap/tidb/blob/6f7979436e2f2ed90b4193999b45364401f4fc72/executor/builder.go#L3814
+
+
+This will cause a data race.
+
+Test code:
+```
+func TestProcessInfoRaceWithIndexScan(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t1;")
+	tk.MustExec("create table t1(c1 int, c2 int, c3 int, c4 int, c5 int, key(c1), key(c2), key(c3), key(c4),key(c5));")
+	insertStr := "insert into t1 values(0, 0, 0, 0 , 0)"
+	for i := 1; i < 100; i++ {
+		insertStr += fmt.Sprintf(", (%d, %d, %d, %d, %d)", i, i, i, i, i)
+	}
+	tk.MustExec(insertStr)
+
+	tk.Session().SetSessionManager(&testkit.MockSessionManager{
+		PS: []*util.ProcessInfo{tk.Session().ShowProcess()},
+	})
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for true {
+			ps := tk.Session().ShowProcess()
+			util.GenLogFields(233, ps, true)
+		}
+	}()
+	for i := 0; i <= 1000000; i++ {
+		tk.MustQuery("select /*+ use_index(t1, c1) */ c1 from t1 where c1 = 0 union all select /*+ use_index(t1, c2) */ c2 from t1 where c2 = 0 union all select /*+ use_index(t1, c3) */ c3 from t1 where c3 = 0 ")
+	}
+	wg.Wait()
+}
+```
+
+
+<!-- a step by step guide for reproducing the bug. -->
+
+### 2. What did you expect to see? (Required)
+No error, no race.
+### 3. What did you see instead (Required)
+
+Without -race flag:
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x12 pc=0x1a0427c]
+
+goroutine 14836 [running]:
+fmt.(*buffer).writeString(...)
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:108
+fmt.(*fmt).padString(0xc01c072020?, {0x12, 0x1})
+        /home/wshwsh12/sdk/go1.20/src/fmt/format.go:110 +0x245
+fmt.(*fmt).fmtS(0xc0051df3a0?, {0x12?, 0x4d570e0?})
+        /home/wshwsh12/sdk/go1.20/src/fmt/format.go:359 +0x3f
+fmt.(*pp).fmtString(0xc012e235f0?, {0x12?, 0x19f4280?}, 0x51df3b8?)
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:494 +0x86
+fmt.(*pp).printValue(0xc012e235f0, {0x4d570e0?, 0xc01702f490?, 0x10?}, 0x76, 0x1)
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:804 +0xfc5
+fmt.(*pp).printValue(0xc012e235f0, {0x4cf4be0?, 0xc017481080?, 0xc0051df7f8?}, 0x76, 0x0)
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:912 +0x15b3
+fmt.(*pp).printArg(0xc012e235f0, {0x4cf4be0?, 0xc017481080}, 0x76)
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:759 +0x756
+fmt.(*pp).doPrintf(0xc012e235f0, {0x54c57a2, 0x2}, {0xc0051dfba0?, 0x1, 0x1})
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:1077 +0x387
+fmt.Sprintf({0x54c57a2, 0x2}, {0xc0051dfba0, 0x1, 0x1})
+        /home/wshwsh12/sdk/go1.20/src/fmt/print.go:239 +0x59
+github.com/pingcap/tidb/util.GenLogFields(0xe9, 0xc01703c580, 0x1)
+        /home/wshwsh12/project/tidb/util/util.go:161 +0xb08
+```
+With -race flag:
+```
+==================
+WARNING: DATA RACE
+Write at 0x00c005259b30 by goroutine 75:
+  github.com/pingcap/tidb/executor.(*executorBuilder).buildIndexReader()
+      /home/wshwsh12/project/tidb/executor/builder.go:3768 +0x584
+  github.com/pingcap/tidb/executor.(*executorBuilder).build()
+      /home/wshwsh12/project/tidb/executor/builder.go:281 +0x17f9
+  github.com/pingcap/tidb/executor.(*executorBuilder).buildUnionAll()
+      /home/wshwsh12/project/tidb/executor/builder.go:2311 +0x15c
+  github.com/pingcap/tidb/executor.(*executorBuilder).build()
+      /home/wshwsh12/project/tidb/executor/builder.go:243 +0x119b
+  github.com/pingcap/tidb/executor.(*ExecStmt).buildExecutor()
+      /home/wshwsh12/project/tidb/executor/adapter.go:1174 +0x393
+  github.com/pingcap/tidb/executor.(*ExecStmt).Exec()
+      /home/wshwsh12/project/tidb/executor/adapter.go:523 +0x7f1
+  github.com/pingcap/tidb/session.runStmt()
+      /home/wshwsh12/project/tidb/session/session.go:2400 +0x4f8
+  github.com/pingcap/tidb/session.(*session).ExecuteStmt()
+      /home/wshwsh12/project/tidb/session/session.go:2250 +0x133c
+  github.com/pingcap/tidb/testkit.(*TestKit).ExecWithContext()
+      /home/wshwsh12/project/tidb/testkit/testkit.go:324 +0x8ae
+  github.com/pingcap/tidb/testkit.(*TestKit).MustQueryWithContext()
+      /home/wshwsh12/project/tidb/testkit/testkit.go:155 +0x154
+  github.com/pingcap/tidb/testkit.(*TestKit).MustQuery()
+      /home/wshwsh12/project/tidb/testkit/testkit.go:149 +0x107
+  github.com/pingcap/tidb/executor/test/indexmergereadtest.TestProcessInfoRaceWithIndexScan()
+      /home/wshwsh12/project/tidb/executor/test/indexmergereadtest/index_merge_reader_test.go:1163 +0x4b4
+  github.com/pingcap/tidb/domain.(*Domain).LoadSysVarCacheLoop()
+      /home/wshwsh12/project/tidb/domain/domain.go:1775 +0xa8
+  github.com/pingcap/tidb/session.bootstrapSessionImpl()
+      /home/wshwsh12/project/tidb/session/session.go:3357 +0x6e4
+  github.com/pingcap/tidb/domain.(*Domain).GetSessionCache()
+      /home/wshwsh12/project/tidb/domain/sysvar_cache.go:62 +0x5c
+  github.com/pingcap/tidb/session.(*session).loadCommonGlobalVariablesIfNeeded()
+      /home/wshwsh12/project/tidb/session/session.go:3721 +0x104
+  github.com/pingcap/tidb/session.(*session).ExecuteStmt()
+      /home/wshwsh12/project/tidb/session/session.go:2130 +0x145
+  github.com/pingcap/tidb/session.(*session).ExecuteInternal()
+      /home/wshwsh12/project/tidb/session/session.go:1666 +0x31b
+  github.com/pingcap/tidb/domain.(*Domain).LoadPrivilegeLoop()
+      /home/wshwsh12/project/tidb/domain/domain.go:1718 +0x130
+  github.com/pingcap/tidb/session.bootstrapSessionImpl()
+      /home/wshwsh12/project/tidb/session/session.go:3350 +0x687
+  github.com/pingcap/tidb/session.BootstrapSession()
+      /home/wshwsh12/project/tidb/session/session.go:3271 +0xb4
+  github.com/pingcap/tidb/testkit.bootstrap()
+      /home/wshwsh12/project/tidb/testkit/mockstore.go:218 +0x9b
+  github.com/pingcap/tidb/testkit.CreateMockStoreAndDomain()
+      /home/wshwsh12/project/tidb/testkit/mockstore.go:191 +0xe9
+  github.com/pingcap/tidb/testkit.CreateMockStore()
+      /home/wshwsh12/project/tidb/testkit/mockstore.go:66 +0x3b7
+  github.com/pingcap/tidb/executor/test/indexmergereadtest.TestProcessInfoRaceWithIndexScan()
+      /home/wshwsh12/project/tidb/executor/test/indexmergereadtest/index_merge_reader_test.go:1138 +0x58
+  testing.tRunner()
+      /home/wshwsh12/sdk/go1.20/src/testing/testing.go:1576 +0x216
+  testing.(*T).Run.func1()
+      /home/wshwsh12/sdk/go1.20/src/testing/testing.go:1629 +0x47
+
+Previous read at 0x00c005259b30 by goroutine 16158:
+  github.com/pingcap/tidb/util.GenLogFields()
+      /home/wshwsh12/project/tidb/util/util.go:160 +0xf44
+  github.com/pingcap/tidb/executor/test/indexmergereadtest.TestProcessInfoRaceWithIndexScan.func1()
+      /home/wshwsh12/project/tidb/executor/test/indexmergereadtest/index_merge_reader_test.go:1159 +0xd4
+```
+
+### 4. What is your TiDB version? (Required)
+master
+<!-- Paste the output of SELECT tidb_version() -->
+
